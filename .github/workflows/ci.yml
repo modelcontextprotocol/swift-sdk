@@ -10,8 +10,16 @@ jobs:
   build:
     runs-on: macos-latest
 
+    strategy:
+      matrix:
+        swift-version:
+          - ^6
+
     steps:
     - uses: actions/checkout@v4
+    - uses: swift-actions/setup-swift@v2
+      with:
+        swift-version: ${{ matrix.swift-version }}
     - name: Build
       run: swift build -v
     - name: Run tests
