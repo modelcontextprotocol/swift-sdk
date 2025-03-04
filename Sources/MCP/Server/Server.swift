@@ -211,13 +211,11 @@ public actor Server {
                     } catch {
                         await logger?.error(
                             "Error processing message", metadata: ["error": "\(error)"])
-                        // Only send error responses for requests
-                        if let requestID = requestID {
-                            let mcpError =
-                                error as? Error ?? Error.internalError(error.localizedDescription)
-                            let response = AnyMethod.response(id: requestID, error: mcpError)
-                            try? await send(response)
-                        }
+                        let response = AnyMethod.response(
+                            id: requestID ?? .random,
+                            error: error as? Error ?? Error.internalError(error.localizedDescription)
+                        )
+                        try? await send(response)
                     }
                 }
             } catch {
