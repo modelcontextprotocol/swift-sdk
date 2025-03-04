@@ -8,6 +8,25 @@ import class Foundation.JSONEncoder
 
 /// Model Context Protocol server
 public actor Server {
+    /// The server configuration
+    public struct Configuration: Hashable, Codable, Sendable {
+        /// The default configuration.
+        public static let `default` = Configuration(strict: false)
+
+        /// The strict configuration.
+        public static let strict = Configuration(strict: true)
+
+        /// When strict mode is enabled, the server:
+        /// - Requires clients to send an initialize request before any other requests
+        /// - Rejects all requests from uninitialized clients with a protocol error
+        ///
+        /// While the MCP specification requires clients to initialize the connection
+        /// before sending other requests, some implementations may not follow this.
+        /// Disabling strict mode allows the server to be more lenient with non-compliant
+        /// clients, though this may lead to undefined behavior.
+        public var strict: Bool
+    }
+
     /// Implementation information
     public struct Info: Hashable, Codable, Sendable {
         /// The server name
@@ -110,7 +129,9 @@ public actor Server {
     /// The server version
     public nonisolated var version: String { serverInfo.version }
     /// The server capabilities
-    public var capabilities = Capabilities()
+    public var capabilities: Capabilities
+    /// The server configuration
+    public var configuration: Configuration
 
     /// Request handlers
     private var methodHandlers: [String: RequestHandlerBox] = [:]
@@ -133,10 +154,12 @@ public actor Server {
     public init(
         name: String,
         version: String,
-        capabilities: Server.Capabilities = .init()
+        capabilities: Server.Capabilities = .init(),
+        configuration: Configuration = .default
     ) {
         self.serverInfo = Server.Info(name: name, version: version)
         self.capabilities = capabilities
+        self.configuration = configuration
     }
 
     /// Start the server
@@ -274,13 +297,15 @@ public actor Server {
                 "id": "\(request.id)",
             ])
 
-        // The client SHOULD NOT send requests other than pings
-        // before the server has responded to the initialize request.
-        switch request.method {
-        case Initialize.name, Ping.name:
-            break
-        default:
-            try checkInitialized()
+        if configuration.strict {
+            // The client SHOULD NOT send requests other than pings
+            // before the server has responded to the initialize request.
+            switch request.method {
+            case Initialize.name, Ping.name:
+                break
+            default:
+                try checkInitialized()
+            }
         }
 
         // Find handler for method name
@@ -308,9 +333,11 @@ public actor Server {
             "Processing notification",
             metadata: ["method": "\(message.method)"])
 
-        // Check initialization state unless this is an initialized notification
-        if message.method != InitializedNotification.name {
-            try checkInitialized()
+        if configuration.strict {
+            // Check initialization state unless this is an initialized notification
+            if message.method != InitializedNotification.name {
+                try checkInitialized()
+            }
         }
 
         // Find notification handlers for this method
