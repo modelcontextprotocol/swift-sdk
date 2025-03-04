@@ -180,8 +180,8 @@ public actor StdioTransport: Transport {
         public nonisolated let logger: Logger
 
         private var isConnected = false
-        private let messageStream: AsyncStream<String>
-        private let messageContinuation: AsyncStream<String>.Continuation
+        private let messageStream: AsyncThrowingStream<String, Swift.Error>
+        private let messageContinuation: AsyncThrowingStream<String, Swift.Error>.Continuation
 
         // Track connection state for continuations
         private var connectionContinuationResumed = false
@@ -196,8 +196,8 @@ public actor StdioTransport: Transport {
                 )
 
             // Create message stream
-            var continuation: AsyncStream<String>.Continuation!
-            self.messageStream = AsyncStream { continuation = $0 }
+            var continuation: AsyncThrowingStream<String, Swift.Error>.Continuation!
+            self.messageStream = AsyncThrowingStream { continuation = $0 }
             self.messageContinuation = continuation
         }
 
@@ -330,10 +330,14 @@ public actor StdioTransport: Transport {
         public func receive() -> AsyncThrowingStream<String, Swift.Error> {
             return AsyncThrowingStream { continuation in
                 Task {
-                    for await message in messageStream {
-                        continuation.yield(message)
+                    do {
+                        for try await message in messageStream {
+                            continuation.yield(message)
+                        }
+                        continuation.finish()
+                    } catch {
+                        continuation.finish(throwing: error)
                     }
-                    continuation.finish()
                 }
             }
         }
@@ -361,6 +365,7 @@ public actor StdioTransport: Transport {
                 } catch {
                     if !Task.isCancelled {
                         logger.error("Receive error: \(error)")
+                        messageContinuation.finish(throwing: error)
                     }
                     break
                 }
