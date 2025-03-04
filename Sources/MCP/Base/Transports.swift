@@ -362,6 +362,12 @@ public actor StdioTransport: Transport {
                             messageContinuation.yield(message)
                         }
                     }
+                } catch let error as NWError {
+                    if !Task.isCancelled {
+                        logger.error("Network error occurred", metadata: ["error": "\(error)"])
+                        messageContinuation.finish(throwing: MCP.Error.transportError(error))
+                    }
+                    break
                 } catch {
                     if !Task.isCancelled {
                         logger.error("Receive error: \(error)")
@@ -375,7 +381,6 @@ public actor StdioTransport: Transport {
         }
 
         private func receiveData() async throws -> Data {
-            // Use a local actor-isolated variable to track continuation state
             var receiveContinuationResumed = false
 
             return try await withCheckedThrowingContinuation {
@@ -391,7 +396,13 @@ public actor StdioTransport: Transport {
                         if !receiveContinuationResumed {
                             receiveContinuationResumed = true
                             if let error = error {
-                                continuation.resume(throwing: error)
+                                if let nwError = error as? NWError {
+                                    continuation.resume(throwing: MCP.Error.transportError(nwError))
+                                } else {
+                                    continuation.resume(
+                                        throwing: MCP.Error.internalError("Receive error: \(error)")
+                                    )
+                                }
                             } else if let content = content {
                                 continuation.resume(returning: content)
                             } else {
