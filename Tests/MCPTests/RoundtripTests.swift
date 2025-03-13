@@ -41,27 +41,27 @@ struct RoundtripTests {
         try await server.start(transport: serverTransport)
         try await client.connect(transport: clientTransport)
 
-        // let initTask = Task {
-        //     let result = try await client.initialize()
+        let initTask = Task {
+            let result = try await client.initialize()
 
-        //     #expect(result.serverInfo.name == "TestServer")
-        //     #expect(result.serverInfo.version == "1.0.0")
-        //     #expect(result.capabilities.prompts != nil)
-        //     #expect(result.capabilities.tools != nil)
-        //     #expect(result.protocolVersion == Version.latest)
-        // }
-        // try await withThrowingTaskGroup(of: Void.self) { group in
-        //     group.addTask {
-        //         try await Task.sleep(for: .seconds(1))
-        //         initTask.cancel()
-        //         throw CancellationError()
-        //     }
-        //     group.addTask {
-        //         try await initTask.value
-        //     }
-        //     try await group.next()
-        //     group.cancelAll()
-        // }
+            #expect(result.serverInfo.name == "TestServer")
+            #expect(result.serverInfo.version == "1.0.0")
+            #expect(result.capabilities.prompts != nil)
+            #expect(result.capabilities.tools != nil)
+            #expect(result.protocolVersion == Version.latest)
+        }
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                try await Task.sleep(for: .seconds(1))
+                initTask.cancel()
+                throw CancellationError()
+            }
+            group.addTask {
+                try await initTask.value
+            }
+            try await group.next()
+            group.cancelAll()
+        }
 
         await server.stop()
         await client.disconnect()
