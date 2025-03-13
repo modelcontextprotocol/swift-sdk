@@ -87,37 +87,37 @@ public actor Client {
     /// The task for the message handling loop
     private var task: Task<Void, Never>?
 
+    private struct TypeMismatchError: Swift.Error {}
 
-  private struct TypeMismatchError: Swift.Error {}
+    private struct AnyPendingRequest {
+        private let _resume: (Result<Any, Swift.Error>) -> Void
 
-  private struct AnyPendingRequest {
-    private let _resume: (Result<Any, Swift.Error>) -> Void
-      
-    init<T: Sendable & Decodable>(_ request: PendingRequest<T>) {
-          _resume = { result in
-              switch result {
-              case .success(let value):
-                if let typedValue = value as? T {
-                  request.continuation.resume(returning: typedValue)
-                } else if let value = value as? Value,
-                          let decoded = try? JSONDecoder().decode(T.self, from: value) {
-                  request.continuation.resume(returning: decoded)
-                } else {
-                  request.continuation.resume(throwing: TypeMismatchError())
+        init<T: Sendable & Decodable>(_ request: PendingRequest<T>) {
+            _resume = { result in
+                switch result {
+                case .success(let value):
+                    if let typedValue = value as? T {
+                        request.continuation.resume(returning: typedValue)
+                    } else if let value = value as? Value,
+                        let decoded = try? JSONDecoder().decode(T.self, from: value)
+                    {
+                        request.continuation.resume(returning: decoded)
+                    } else {
+                        request.continuation.resume(throwing: TypeMismatchError())
+                    }
+                case .failure(let error):
+                    request.continuation.resume(throwing: error)
                 }
-              case .failure(let error):
-                request.continuation.resume(throwing: error)
-              }
-          }
-      }
-    func resume(returning value: Any) {
-      _resume(.success(value))
+            }
+        }
+        func resume(returning value: Any) {
+            _resume(.success(value))
+        }
+
+        func resume(throwing error: Swift.Error) {
+            _resume(.failure(error))
+        }
     }
-    
-    func resume(throwing error: Swift.Error) {
-      _resume(.failure(error))
-    }
-  }
 
     /// A pending request with a continuation for the result
     private struct PendingRequest<T> {
@@ -161,7 +161,9 @@ public actor Client {
 
                         // Attempt to decode string data as AnyResponse or AnyMessage
                         let decoder = JSONDecoder()
-                      if let response = try? decoder.decode(AnyResponse.self, from: data), let request = pendingRequests[response.id] {
+                        if let response = try? decoder.decode(AnyResponse.self, from: data),
+                            let request = pendingRequests[response.id]
+                        {
                             await handleResponse(response, for: request)
                         } else if let message = try? decoder.decode(AnyMessage.self, from: data) {
                             await handleMessage(message)
@@ -248,7 +250,7 @@ public actor Client {
         }
     }
 
-  private func addPendingRequest<T: Sendable & Decodable>(
+    private func addPendingRequest<T: Sendable & Decodable>(
         id: ID,
         continuation: CheckedContinuation<T, Swift.Error>,
         type: T.Type
@@ -348,19 +350,20 @@ public actor Client {
 
     // MARK: -
 
-    private func handleResponse(_ response: Response<AnyMethod>, for request: AnyPendingRequest) async {
+    private func handleResponse(_ response: Response<AnyMethod>, for request: AnyPendingRequest)
+        async
+    {
         await logger?.debug(
             "Processing response",
             metadata: ["id": "\(response.id)"])
 
-        // We know this cast is safe because we only store PendingRequest values
-      
-      switch response.result {
-      case .success(let value):
-        request.resume(returning: value)
-      case .failure(let error):
-        request.resume(throwing: error)
-      }
+        switch response.result {
+        case .success(let value):
+            request.resume(returning: value)
+        case .failure(let error):
+            request.resume(throwing: error)
+        }
+
         removePendingRequest(id: response.id)
     }
 

@@ -401,15 +401,15 @@ extension String {
     }
 }
 
-
-
 // MARK: - Decode specific type from Value
 
-public extension JSONDecoder {
-  func decode<T: Decodable>(_ type: T.Type, from value: Value) throws -> T {
-    guard let data = try? JSONEncoder().encode(value) else {
-      throw DecodingError.dataCorrupted(DecodingError.Context(codingPath: [], debugDescription: "Failed to encode value"))
-    }    
-    return try self.decode(T.self, from: data)
-  }
+extension JSONDecoder {
+    public func decode<T: Decodable>(_ type: T.Type, from value: Value) throws -> T {
+        guard let data = try? JSONEncoder().encode(value) else {
+            throw DecodingError.dataCorrupted(
+                DecodingError.Context(codingPath: [], debugDescription: "Failed to encode value"))
+        }
+
+        return try self.decode(T.self, from: data)
+    }
 }
