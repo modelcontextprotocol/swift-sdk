@@ -87,8 +87,15 @@ public actor Client {
     /// The task for the message handling loop
     private var task: Task<Void, Never>?
 
+    /// An error indicating a type mismatch when decoding a pending request
     private struct TypeMismatchError: Swift.Error {}
 
+    /// A pending request with a continuation for the result
+    private struct PendingRequest<T> {
+        let continuation: CheckedContinuation<T, Swift.Error>
+    }
+
+    /// A type-erased pending request
     private struct AnyPendingRequest {
         private let _resume: (Result<Any, Swift.Error>) -> Void
 
@@ -119,10 +126,6 @@ public actor Client {
         }
     }
 
-    /// A pending request with a continuation for the result
-    private struct PendingRequest<T> {
-        let continuation: CheckedContinuation<T, Swift.Error>
-    }
     /// A dictionary of type-erased pending requests, keyed by request ID
     private var pendingRequests: [ID: AnyPendingRequest] = [:]
 
