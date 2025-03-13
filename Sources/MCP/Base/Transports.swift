@@ -396,13 +396,7 @@ public actor StdioTransport: Transport {
                         if !receiveContinuationResumed {
                             receiveContinuationResumed = true
                             if let error = error {
-                                if let nwError = error as? NWError {
-                                    continuation.resume(throwing: MCP.Error.transportError(nwError))
-                                } else {
-                                    continuation.resume(
-                                        throwing: MCP.Error.internalError("Receive error: \(error)")
-                                    )
-                                }
+                                continuation.resume(throwing: MCP.Error.transportError(error))
                             } else if let content = content {
                                 continuation.resume(returning: content)
                             } else {
