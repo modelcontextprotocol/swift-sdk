@@ -106,7 +106,8 @@ public actor Client {
                     if let typedValue = value as? T {
                         request.continuation.resume(returning: typedValue)
                     } else if let value = value as? Value,
-                        let decoded = try? JSONDecoder().decode(T.self, from: value)
+                        let data = try? JSONEncoder().encode(value),
+                        let decoded = try? JSONDecoder().decode(T.self, from: data)
                     {
                         request.continuation.resume(returning: decoded)
                     } else {
