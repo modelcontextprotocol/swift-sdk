@@ -190,11 +190,7 @@ public actor Client {
     public func disconnect() async {
         // Cancel all pending requests
         for (id, request) in pendingRequests {
-            // We know this cast is safe because we only store PendingRequest values
-            if let typedRequest = request as? PendingRequest<Any> {
-                typedRequest.continuation.resume(
-                    throwing: Error.internalError("Client disconnected"))
-            }
+            request.resume(throwing: Error.internalError("Client disconnected"))
             pendingRequests.removeValue(forKey: id)
         }
 
