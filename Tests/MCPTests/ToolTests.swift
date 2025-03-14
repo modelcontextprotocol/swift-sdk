@@ -139,21 +139,35 @@ struct ToolTests {
         #expect(params.arguments?["param2"] == .int(42))
     }
 
-    @Test("CallTool result validation")
+    @Test("CallTool success result validation")
     func testCallToolResult() throws {
         let content = [
             Tool.Content.text("Result 1"),
             Tool.Content.text("Result 2"),
         ]
 
-        let result = CallTool.Result(content: content, isError: false)
+        let result = CallTool.Result(content: content)
         #expect(result.content.count == 2)
-        #expect(result.isError == false)
+        #expect(result.isError == nil)
 
         if case .text(let text) = result.content[0] {
             #expect(text == "Result 1")
         } else {
             #expect(Bool(false), "Expected text content")
+        }
+    }
+
+    @Test("CallTool error result validation")
+    func testCallToolErrorResult() throws {
+        let errorContent = [Tool.Content.text("Error message")]
+        let errorResult = CallTool.Result(content: errorContent, isError: true)
+        #expect(errorResult.content.count == 1)
+        #expect(errorResult.isError == true)
+
+        if case .text(let text) = errorResult.content[0] {
+            #expect(text == "Error message")
+        } else {
+            #expect(Bool(false), "Expected error text content")
         }
     }
 

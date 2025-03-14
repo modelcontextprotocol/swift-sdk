@@ -52,13 +52,13 @@ struct RoundtripTests {
             }
 
             guard let a = request.arguments?["a"]?.intValue,
-                  let b = request.arguments?["b"]?.intValue
+                let b = request.arguments?["b"]?.intValue
             else {
                 return CallTool.Result(
                     content: [.text("Did not receive valid arguments")], isError: true)
             }
 
-            return CallTool.Result(content: [.text("\(a + b)")], isError: false)
+            return CallTool.Result(content: [.text("\(a + b)")])
         }
 
         let client = Client(name: "TestClient", version: "1.0")
@@ -96,7 +96,7 @@ struct RoundtripTests {
 
         let callToolTask = Task {
             let result = try await client.callTool(name: "add", arguments: ["a": 1, "b": 2])
-            #expect(result.isError == false)
+            #expect(result.isError == nil)
             #expect(result.content == [.text("3")])
         }
 

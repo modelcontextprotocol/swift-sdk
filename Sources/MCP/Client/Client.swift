@@ -344,7 +344,7 @@ public actor Client {
     }
 
     public func callTool(name: String, arguments: [String: Value]? = nil) async throws -> (
-        content: [Tool.Content], isError: Bool
+        content: [Tool.Content], isError: Bool?
     ) {
         _ = try checkCapability(\.tools, "Tools")
         let request = CallTool.request(.init(name: name, arguments: arguments))
