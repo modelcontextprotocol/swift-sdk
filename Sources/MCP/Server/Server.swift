@@ -221,6 +221,7 @@ public actor Server {
                 await logger?.error(
                     "Fatal error in message handling loop", metadata: ["error": "\(error)"])
             }
+            await logger?.info("Server finished", metadata: [:])
         }
     }
 
@@ -232,6 +233,10 @@ public actor Server {
             await connection.disconnect()
         }
         connection = nil
+    }
+
+    public func waitUntilComplete() async {
+        await task?.value
     }
 
     // MARK: - Registration
