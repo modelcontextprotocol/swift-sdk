@@ -118,7 +118,11 @@ public struct Tool: Hashable, Codable, Sendable {
 public enum ListTools: Method {
     public static let name = "tools/list"
 
-    public struct Parameters: Hashable, Codable, Sendable {
+    // Specification allows optional cursor parameter:
+    // https://spec.modelcontextprotocol.io/specification/2024-11-05/server/tools/
+    public typealias Parameters = Cursor?
+
+    public struct Cursor: Hashable, Codable, Sendable {
         public let cursor: String?
 
         public init(cursor: String? = nil) {

@@ -104,6 +104,12 @@ public struct Request<M: Method>: Hashable, Identifiable, Codable, Sendable {
                 // If params field is missing, use Empty
                 params = Empty() as! M.Parameters
             }
+        } else if M.Parameters.self == Value.self {
+            // allow missing parameter for Value parameters. This is important for AnyRequest to be able to
+            // decode a message that does have an `id` but does not have a `params` object. Otherwise the
+            // incoming message would fail to decode and would instead decode as an AnyNotification, despite
+            // the `id` parameter.
+            params = try container.decodeIfPresent(M.Parameters.self, forKey: .params) ?? (Value.null as! M.Parameters)
         } else {
             params = try container.decode(M.Parameters.self, forKey: .params)
         }

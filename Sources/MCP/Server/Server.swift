@@ -401,8 +401,11 @@ public actor Server {
             return result
         }
 
-        // Ping
-        withMethodHandler(Ping.self) { _ in return Empty() }
+        // Ping. Specification shows empty dictionary as the response:
+        // https://spec.modelcontextprotocol.io/specification/2024-11-05/basic/utilities/ping/
+        withMethodHandler(Ping.self) { params in
+            return .object([:])
+        }
     }
 
     private func setInitialState(
