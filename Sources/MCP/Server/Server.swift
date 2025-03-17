@@ -155,9 +155,15 @@ public actor Server {
     }
 
     /// Start the server
-    public func start(transport: any Transport) async throws {
+    /// - Parameters:
+    ///   - transport: The transport to use for the server
+    ///   - initializeHook: An optional hook that runs when the client sends an initialize request
+    public func start(
+        transport: any Transport,
+        initializeHook: (@Sendable (Client.Info, Client.Capabilities) async throws -> Void)? = nil
+    ) async throws {
         self.connection = transport
-        registerDefaultHandlers()
+        registerDefaultHandlers(initializeHook: initializeHook)
         try await transport.connect()
 
         await logger?.info(
@@ -205,7 +211,8 @@ public actor Server {
                             "Error processing message", metadata: ["error": "\(error)"])
                         let response = AnyMethod.response(
                             id: requestID ?? .random,
-                            error: error as? Error ?? Error.internalError(error.localizedDescription)
+                            error: error as? Error
+                                ?? Error.internalError(error.localizedDescription)
                         )
                         try? await send(response)
                     }
@@ -354,7 +361,9 @@ public actor Server {
         }
     }
 
-    private func registerDefaultHandlers() {
+    private func registerDefaultHandlers(
+        initializeHook: (@Sendable (Client.Info, Client.Capabilities) async throws -> Void)?
+    ) {
         // Initialize
         withMethodHandler(Initialize.self) { [weak self] params in
             guard let self = self else {
@@ -371,17 +380,16 @@ public actor Server {
                     "Unsupported protocol version: \(params.protocolVersion)")
             }
 
+            // Call initialization hook if registered
+            if let hook = initializeHook {
+                try await hook(params.clientInfo, params.capabilities)
+            }
+
+            // Set initial state
             await self.setInitialState(
                 clientInfo: params.clientInfo,
                 clientCapabilities: params.capabilities,
                 protocolVersion: params.protocolVersion
-            )
-
-            let result = Initialize.Result(
-                protocolVersion: Version.latest,
-                capabilities: await self.capabilities,
-                serverInfo: self.serverInfo,
-                instructions: nil
             )
 
             // Send initialized notification after a short delay
@@ -390,7 +398,12 @@ public actor Server {
                 try? await self.notify(InitializedNotification.message())
             }
 
-            return result
+            return Initialize.Result(
+                protocolVersion: Version.latest,
+                capabilities: await self.capabilities,
+                serverInfo: self.serverInfo,
+                instructions: nil
+            )
         }
 
         // Ping
