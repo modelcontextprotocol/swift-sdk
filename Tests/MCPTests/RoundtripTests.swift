@@ -118,6 +118,26 @@ struct RoundtripTests {
             group.cancelAll()
         }
 
+        // Test ping
+        let pingTask = Task {
+            try await client.ping()
+            // Ping doesn't return anything, so just getting here without throwing is success
+            #expect(true)  // Test passed if we reach this point
+        }
+
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                try await Task.sleep(for: .seconds(1))
+                pingTask.cancel()
+                throw CancellationError()
+            }
+            group.addTask {
+                try await pingTask.value
+            }
+            try await group.next()
+            group.cancelAll()
+        }
+
         let listToolsTask = Task {
             let result = try await client.listTools()
             #expect(result.count == 1)
