@@ -408,3 +408,17 @@ public actor Client {
         return value
     }
 }
+
+// MARK: - ExpressibleByBooleanLiteral
+
+extension Client.Capabilities.Roots: ExpressibleByBooleanLiteral {
+    public init(booleanLiteral value: Bool) {
+        self.init()
+    }
+}
+
+extension Client.Capabilities.Sampling: ExpressibleByBooleanLiteral {
+    public init(booleanLiteral value: Bool) {
+        self.init()
+    }
+}
