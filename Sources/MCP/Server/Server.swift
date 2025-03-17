@@ -44,23 +44,15 @@ public actor Server {
     public struct Capabilities: Hashable, Codable, Sendable {
         /// Resources capabilities
         public struct Resources: Hashable, Codable, Sendable {
-            /// Whether the list of resources has changed
-            public var list: Bool?
-            /// Whether the resource can be read
-            public var read: Bool?
             /// Whether the resource can be subscribed to
             public var subscribe: Bool?
             /// Whether the list of resources has changed
             public var listChanged: Bool?
 
             public init(
-                list: Bool? = nil,
-                read: Bool? = nil,
                 subscribe: Bool? = nil,
                 listChanged: Bool? = nil
             ) {
-                self.list = list
-                self.read = read
                 self.subscribe = subscribe
                 self.listChanged = listChanged
             }

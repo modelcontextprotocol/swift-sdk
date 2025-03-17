@@ -313,7 +313,7 @@ public actor Client {
     // MARK: - Resources
 
     public func readResource(uri: String) async throws -> [Resource.Content] {
-        _ = try checkCapability(\.resources?.read, "Resource reading")
+        _ = try checkCapability(\.resources, "Resources")
         let request = ReadResource.request(.init(uri: uri))
         let result = try await send(request)
         return result.contents
@@ -322,7 +322,7 @@ public actor Client {
     public func listResources(cursor: String? = nil) async throws -> (
         resources: [Resource], nextCursor: String?
     ) {
-        _ = try checkCapability(\.resources?.list, "Resource listing")
+        _ = try checkCapability(\.resources, "Resources")
         let request = ListResources.request(.init(cursor: cursor))
         let result = try await send(request)
         return (resources: result.resources, nextCursor: result.nextCursor)

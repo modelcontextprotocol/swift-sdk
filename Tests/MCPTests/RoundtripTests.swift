@@ -33,7 +33,11 @@ struct RoundtripTests {
         let server = Server(
             name: "TestServer",
             version: "1.0.0",
-            capabilities: .init(prompts: .init(), tools: .init())
+            capabilities: .init(
+                prompts: .init(),
+                resources: .init(),
+                tools: .init()
+            )
         )
         await server.withMethodHandler(ListTools.self) { _ in
             return ListTools.Result(tools: [
@@ -59,6 +63,32 @@ struct RoundtripTests {
             }
 
             return CallTool.Result(content: [.text("\(a + b)")])
+        }
+
+        // Add resource handlers to server
+        await server.withMethodHandler(ListResources.self) { _ in
+            return ListResources.Result(resources: [
+                Resource(
+                    name: "Example Text",
+                    uri: "test://example.txt",
+                    description: "A test resource",
+                    mimeType: "text/plain"
+                ),
+                Resource(
+                    name: "Test Data",
+                    uri: "test://data.json",
+                    description: "JSON test data",
+                    mimeType: "application/json"
+                ),
+            ])
+        }
+
+        await server.withMethodHandler(ReadResource.self) { request in
+            guard request.uri == "test://example.txt" else {
+                return ReadResource.Result(contents: [.text("Resource not found", uri: request.uri)]
+                )
+            }
+            return ReadResource.Result(contents: [.text("Hello, World!", uri: request.uri)])
         }
 
         let client = Client(name: "TestClient", version: "1.0")
@@ -104,10 +134,48 @@ struct RoundtripTests {
             group.addTask {
                 try await Task.sleep(for: .seconds(1))
                 listToolsTask.cancel()
+                callToolTask.cancel()
                 throw CancellationError()
             }
             group.addTask {
+                try await listToolsTask.value
+            }
+            group.addTask {
                 try await callToolTask.value
+            }
+            try await group.next()
+            group.cancelAll()
+        }
+
+        // Test listing resources
+        let listResourcesTask = Task {
+            let result = try await client.listResources()
+            #expect(result.resources.count == 2)
+            #expect(result.resources[0].uri == "test://example.txt")
+            #expect(result.resources[0].name == "Example Text")
+            #expect(result.resources[1].uri == "test://data.json")
+            #expect(result.resources[1].name == "Test Data")
+        }
+
+        // Test reading a resource
+        let readResourceTask = Task {
+            let result = try await client.readResource(uri: "test://example.txt")
+            #expect(result.count == 1)
+            #expect(result[0] == .text("Hello, World!", uri: "test://example.txt"))
+        }
+
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                try await Task.sleep(for: .seconds(1))
+                listResourcesTask.cancel()
+                readResourceTask.cancel()
+                throw CancellationError()
+            }
+            group.addTask {
+                try await listResourcesTask.value
+            }
+            group.addTask {
+                try await readResourceTask.value
             }
             try await group.next()
             group.cancelAll()
