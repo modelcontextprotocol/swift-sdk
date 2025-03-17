@@ -96,14 +96,7 @@ public struct Request<M: Method>: Hashable, Identifiable, Codable, Sendable {
         id = try container.decode(ID.self, forKey: .id)
         method = try container.decode(String.self, forKey: .method)
         if M.Parameters.self == Empty.self {
-            if (try? container.decodeNil(forKey: .params)) != nil {
-                params = Empty() as! M.Parameters
-            } else if (try? container.decode(Empty.self, forKey: .params)) != nil {
-                params = Empty() as! M.Parameters
-            } else {
-                // If params field is missing, use Empty
-                params = Empty() as! M.Parameters
-            }
+            params = (try container.decodeIfPresent(Empty.self, forKey: .params) ?? Empty()) as! M.Parameters
         } else {
             params = try container.decode(M.Parameters.self, forKey: .params)
         }
