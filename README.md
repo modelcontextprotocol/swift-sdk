@@ -51,11 +51,11 @@ let server = Server(
     name: "MyServer", 
     version: "1.0.0",
     capabilities: .init(
+        prompts: .init(),
         resources: .init(
-            list: true,
-            read: true,
             subscribe: true
-        )
+        ),
+        tools: .init()
     )
 )
 
