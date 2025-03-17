@@ -99,10 +99,14 @@ public struct Resource: Hashable, Codable, Sendable {
 public enum ListResources: Method {
     public static let name: String = "resources/list"
 
-    public struct Parameters: Hashable, Codable, Sendable {
+    public struct Parameters: NotRequired, Hashable, Codable, Sendable {
         public let cursor: String?
 
-        public init(cursor: String? = nil) {
+        public init() {
+            self.cursor = nil
+        }
+        
+        public init(cursor: String) {
             self.cursor = cursor
         }
     }

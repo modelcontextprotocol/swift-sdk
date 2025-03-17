@@ -305,7 +305,12 @@ public actor Client {
         -> (prompts: [Prompt], nextCursor: String?)
     {
         _ = try checkCapability(\.prompts, "Prompts")
-        let request = ListPrompts.request(.init(cursor: cursor))
+        let request: Request<ListPrompts>
+        if let cursor = cursor {
+            request = ListPrompts.request(.init(cursor: cursor))
+        } else {
+            request = ListPrompts.request(.init())
+        }
         let result = try await send(request)
         return (prompts: result.prompts, nextCursor: result.nextCursor)
     }
@@ -323,7 +328,12 @@ public actor Client {
         resources: [Resource], nextCursor: String?
     ) {
         _ = try checkCapability(\.resources, "Resources")
-        let request = ListResources.request(.init(cursor: cursor))
+        let request: Request<ListResources>
+        if let cursor = cursor {
+            request = ListResources.request(.init(cursor: cursor))
+        } else {
+            request = ListResources.request(.init())
+        }
         let result = try await send(request)
         return (resources: result.resources, nextCursor: result.nextCursor)
     }
@@ -338,7 +348,12 @@ public actor Client {
 
     public func listTools(cursor: String? = nil) async throws -> [Tool] {
         _ = try checkCapability(\.tools, "Tools")
-        let request = ListTools.request(.init(cursor: cursor))
+        let request: Request<ListTools>
+        if let cursor = cursor {
+            request = ListTools.request(.init(cursor: cursor))
+        } else {
+            request = ListTools.request(.init())
+        }
         let result = try await send(request)
         return result.tools
     }

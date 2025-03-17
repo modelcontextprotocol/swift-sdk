@@ -76,4 +76,49 @@ struct RequestTests {
         #expect(decoded.id == "test-id")
         #expect(decoded.method == EmptyMethod.name)
     }
+
+    @Test("NotRequired parameters request decoding - with params")
+    func testNotRequiredParametersRequestDecodingWithParams() throws {
+        // Test decoding when params field is present
+        let jsonString = """
+            {"jsonrpc":"2.0","id":"test-id","method":"ping","params":{}}
+            """
+        let data = jsonString.data(using: .utf8)!
+
+        let decoder = JSONDecoder()
+        let decoded = try decoder.decode(Request<Ping>.self, from: data)
+
+        #expect(decoded.id == "test-id")
+        #expect(decoded.method == Ping.name)
+    }
+
+    @Test("NotRequired parameters request decoding - without params")
+    func testNotRequiredParametersRequestDecodingWithoutParams() throws {
+        // Test decoding when params field is missing
+        let jsonString = """
+            {"jsonrpc":"2.0","id":"test-id","method":"ping"}
+            """
+        let data = jsonString.data(using: .utf8)!
+
+        let decoder = JSONDecoder()
+        let decoded = try decoder.decode(Request<Ping>.self, from: data)
+
+        #expect(decoded.id == "test-id")
+        #expect(decoded.method == Ping.name)
+    }
+
+    @Test("NotRequired parameters request decoding - with null params")
+    func testNotRequiredParametersRequestDecodingWithNullParams() throws {
+        // Test decoding when params field is null
+        let jsonString = """
+            {"jsonrpc":"2.0","id":"test-id","method":"ping","params":null}
+            """
+        let data = jsonString.data(using: .utf8)!
+
+        let decoder = JSONDecoder()
+        let decoded = try decoder.decode(Request<Ping>.self, from: data)
+
+        #expect(decoded.id == "test-id")
+        #expect(decoded.method == Ping.name)
+    }
 }

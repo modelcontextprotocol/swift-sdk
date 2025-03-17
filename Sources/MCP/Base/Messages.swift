@@ -2,7 +2,13 @@ import Foundation
 
 private let jsonrpc = "2.0"
 
-public struct Empty: Hashable, Codable, Sendable {}
+public protocol NotRequired {
+    init()
+}
+
+public struct Empty: NotRequired, Hashable, Codable, Sendable {
+    public init() {}
+}
 
 // MARK: -
 
@@ -78,14 +84,11 @@ public struct Request<M: Method>: Hashable, Identifiable, Codable, Sendable {
         try container.encode(jsonrpc, forKey: .jsonrpc)
         try container.encode(id, forKey: .id)
         try container.encode(method, forKey: .method)
-        if M.Parameters.self != Empty.self {
-            try container.encode(params, forKey: .params)
-        } else {
-            // Encode empty object for Empty parameters
-            try container.encode(Empty(), forKey: .params)
-        }
+        try container.encode(params, forKey: .params)
     }
+}
 
+extension Request {
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let version = try container.decode(String.self, forKey: .jsonrpc)
@@ -95,8 +98,11 @@ public struct Request<M: Method>: Hashable, Identifiable, Codable, Sendable {
         }
         id = try container.decode(ID.self, forKey: .id)
         method = try container.decode(String.self, forKey: .method)
-        if M.Parameters.self == Empty.self {
-            params = (try container.decodeIfPresent(Empty.self, forKey: .params) ?? Empty()) as! M.Parameters
+
+        if M.Parameters.self is NotRequired.Type {
+            params =
+                (try container.decodeIfPresent(M.Parameters.self, forKey: .params)
+                    ?? (M.Parameters.self as! NotRequired.Type).init() as! M.Parameters)
         } else {
             params = try container.decode(M.Parameters.self, forKey: .params)
         }

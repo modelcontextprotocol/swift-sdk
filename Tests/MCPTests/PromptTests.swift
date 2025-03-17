@@ -142,6 +142,36 @@ struct PromptTests {
         let emptyParams = ListPrompts.Parameters()
         #expect(emptyParams.cursor == nil)
     }
+    
+    @Test("ListPrompts request decoding with omitted params")
+    func testListPromptsRequestDecodingWithOmittedParams() throws {
+        // Test decoding when params field is omitted
+        let jsonString = """
+            {"jsonrpc":"2.0","id":"test-id","method":"prompts/list"}
+            """
+        let data = jsonString.data(using: .utf8)!
+
+        let decoder = JSONDecoder()
+        let decoded = try decoder.decode(Request<ListPrompts>.self, from: data)
+
+        #expect(decoded.id == "test-id")
+        #expect(decoded.method == ListPrompts.name)
+    }
+    
+    @Test("ListPrompts request decoding with null params")
+    func testListPromptsRequestDecodingWithNullParams() throws {
+        // Test decoding when params field is null
+        let jsonString = """
+            {"jsonrpc":"2.0","id":"test-id","method":"prompts/list","params":null}
+            """
+        let data = jsonString.data(using: .utf8)!
+
+        let decoder = JSONDecoder()
+        let decoded = try decoder.decode(Request<ListPrompts>.self, from: data)
+
+        #expect(decoded.id == "test-id")
+        #expect(decoded.method == ListPrompts.name)
+    }
 
     @Test("ListPrompts result validation")
     func testListPromptsResult() throws {

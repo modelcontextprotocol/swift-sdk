@@ -118,10 +118,14 @@ public struct Tool: Hashable, Codable, Sendable {
 public enum ListTools: Method {
     public static let name = "tools/list"
 
-    public struct Parameters: Hashable, Codable, Sendable {
+    public struct Parameters: NotRequired, Hashable, Codable, Sendable {
         public let cursor: String?
+        
+        public init() {
+            self.cursor = nil
+        }
 
-        public init(cursor: String? = nil) {
+        public init(cursor: String) {
             self.cursor = cursor
         }
     }

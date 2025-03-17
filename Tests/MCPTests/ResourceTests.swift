@@ -86,6 +86,36 @@ struct ResourceTests {
         let emptyParams = ListResources.Parameters()
         #expect(emptyParams.cursor == nil)
     }
+    
+    @Test("ListResources request decoding with omitted params")
+    func testListResourcesRequestDecodingWithOmittedParams() throws {
+        // Test decoding when params field is omitted
+        let jsonString = """
+            {"jsonrpc":"2.0","id":"test-id","method":"resources/list"}
+            """
+        let data = jsonString.data(using: .utf8)!
+
+        let decoder = JSONDecoder()
+        let decoded = try decoder.decode(Request<ListResources>.self, from: data)
+
+        #expect(decoded.id == "test-id")
+        #expect(decoded.method == ListResources.name)
+    }
+    
+    @Test("ListResources request decoding with null params")
+    func testListResourcesRequestDecodingWithNullParams() throws {
+        // Test decoding when params field is null
+        let jsonString = """
+            {"jsonrpc":"2.0","id":"test-id","method":"resources/list","params":null}
+            """
+        let data = jsonString.data(using: .utf8)!
+
+        let decoder = JSONDecoder()
+        let decoded = try decoder.decode(Request<ListResources>.self, from: data)
+
+        #expect(decoded.id == "test-id")
+        #expect(decoded.method == ListResources.name)
+    }
 
     @Test("ListResources result validation")
     func testListResourcesResult() throws {

@@ -111,6 +111,36 @@ struct ToolTests {
         let emptyParams = ListTools.Parameters()
         #expect(emptyParams.cursor == nil)
     }
+    
+    @Test("ListTools request decoding with omitted params")
+    func testListToolsRequestDecodingWithOmittedParams() throws {
+        // Test decoding when params field is omitted
+        let jsonString = """
+            {"jsonrpc":"2.0","id":"test-id","method":"tools/list"}
+            """
+        let data = jsonString.data(using: .utf8)!
+
+        let decoder = JSONDecoder()
+        let decoded = try decoder.decode(Request<ListTools>.self, from: data)
+
+        #expect(decoded.id == "test-id")
+        #expect(decoded.method == ListTools.name)
+    }
+    
+    @Test("ListTools request decoding with null params")
+    func testListToolsRequestDecodingWithNullParams() throws {
+        // Test decoding when params field is null
+        let jsonString = """
+            {"jsonrpc":"2.0","id":"test-id","method":"tools/list","params":null}
+            """
+        let data = jsonString.data(using: .utf8)!
+
+        let decoder = JSONDecoder()
+        let decoded = try decoder.decode(Request<ListTools>.self, from: data)
+
+        #expect(decoded.id == "test-id")
+        #expect(decoded.method == ListTools.name)
+    }
 
     @Test("ListTools result validation")
     func testListToolsResult() throws {

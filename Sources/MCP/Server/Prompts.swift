@@ -153,10 +153,14 @@ public struct Prompt: Hashable, Codable, Sendable {
 public enum ListPrompts: Method {
     public static let name: String = "prompts/list"
 
-    public struct Parameters: Hashable, Codable, Sendable {
+    public struct Parameters: NotRequired, Hashable, Codable, Sendable {
         public let cursor: String?
+        
+        public init() {
+            self.cursor = nil
+        }
 
-        public init(cursor: String? = nil) {
+        public init(cursor: String) {
             self.cursor = cursor
         }
     }
