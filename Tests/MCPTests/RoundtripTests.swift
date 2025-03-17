@@ -34,9 +34,9 @@ struct RoundtripTests {
             name: "TestServer",
             version: "1.0.0",
             capabilities: .init(
-                prompts: true,
-                resources: true,
-                tools: true
+                prompts: .init(),
+                resources: .init(),
+                tools: .init()
             )
         )
         await server.withMethodHandler(ListTools.self) { _ in

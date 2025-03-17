@@ -51,9 +51,11 @@ let server = Server(
     name: "MyServer", 
     version: "1.0.0",
     capabilities: .init(
-        prompts: true,
-        resources: true,
-        tools: true
+        prompts: .init(),
+        resources: .init(
+            subscribe: true
+        ),
+        tools: .init()
     )
 )
 

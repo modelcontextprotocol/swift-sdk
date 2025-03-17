@@ -408,29 +408,3 @@ public actor Server {
         self.isInitialized = true
     }
 }
-
-// MARK: - ExpressibleByBooleanLiteral
-
-extension Server.Capabilities.Logging: ExpressibleByBooleanLiteral {
-    public init(booleanLiteral value: Bool) {
-        self.init()
-    }
-}
-
-extension Server.Capabilities.Prompts: ExpressibleByBooleanLiteral {
-    public init(booleanLiteral value: Bool) {
-        self.init()
-    }
-}
-
-extension Server.Capabilities.Resources: ExpressibleByBooleanLiteral {
-    public init(booleanLiteral value: Bool) {
-        self.init()
-    }
-}
-
-extension Server.Capabilities.Tools: ExpressibleByBooleanLiteral {
-    public init(booleanLiteral value: Bool) {
-        self.init()
-    }
-}
