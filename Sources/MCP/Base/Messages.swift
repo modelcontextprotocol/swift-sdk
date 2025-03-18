@@ -1,4 +1,5 @@
-import Foundation
+import class Foundation.JSONDecoder
+import class Foundation.JSONEncoder
 
 private let jsonrpc = "2.0"
 
@@ -131,9 +132,12 @@ final class TypedRequestHandler<M: Method>: RequestHandlerBox, @unchecked Sendab
 
     override func callAsFunction(_ request: Request<AnyMethod>) async throws -> Response<AnyMethod>
     {
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+
         // Create a concrete request from the type-erased one
-        let data = try JSONEncoder().encode(request.params)
-        let params = try JSONDecoder().decode(M.Parameters.self, from: data)
+        let data = try encoder.encode(request.params)
+        let params = try decoder.decode(M.Parameters.self, from: data)
         let typedRequest = Request<M>(id: request.id, method: M.name, params: params)
 
         // Handle with concrete type
@@ -142,8 +146,8 @@ final class TypedRequestHandler<M: Method>: RequestHandlerBox, @unchecked Sendab
         // Convert result to AnyMethod response
         switch response.result {
         case .success(let result):
-            let resultData = try JSONEncoder().encode(result)
-            let resultValue = try JSONDecoder().decode(Value.self, from: resultData)
+            let resultData = try encoder.encode(result)
+            let resultValue = try decoder.decode(Value.self, from: resultData)
             return Response(id: response.id, result: resultValue)
         case .failure(let error):
             return Response(id: response.id, error: error)

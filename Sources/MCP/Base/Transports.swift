@@ -3,9 +3,6 @@ import Logging
 import SystemPackage
 
 import struct Foundation.Data
-import struct Foundation.Date
-import class Foundation.JSONDecoder
-import class Foundation.JSONEncoder
 
 /// Protocol defining the transport layer for MCP communication
 public protocol Transport: Actor {
