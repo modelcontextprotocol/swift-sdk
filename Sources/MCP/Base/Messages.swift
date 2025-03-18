@@ -101,11 +101,31 @@ extension Request {
         method = try container.decode(String.self, forKey: .method)
 
         if M.Parameters.self is NotRequired.Type {
+            // For NotRequired parameters, use decodeIfPresent or init()
             params =
                 (try container.decodeIfPresent(M.Parameters.self, forKey: .params)
                     ?? (M.Parameters.self as! NotRequired.Type).init() as! M.Parameters)
+        } else if let value = try? container.decode(M.Parameters.self, forKey: .params) {
+            // If params exists and can be decoded, use it
+            params = value
+        } else if !container.contains(.params)
+            || (try? container.decodeNil(forKey: .params)) == true
+        {
+            // If params is missing or explicitly null, use Empty for Empty parameters
+            // or throw for non-Empty parameters
+            if M.Parameters.self == Empty.self {
+                params = Empty() as! M.Parameters
+            } else {
+                throw DecodingError.dataCorrupted(
+                    DecodingError.Context(
+                        codingPath: container.codingPath,
+                        debugDescription: "Missing required params field"))
+            }
         } else {
-            params = try container.decode(M.Parameters.self, forKey: .params)
+            throw DecodingError.dataCorrupted(
+                DecodingError.Context(
+                    codingPath: container.codingPath,
+                    debugDescription: "Invalid params field"))
         }
     }
 }
