@@ -290,4 +290,19 @@ struct RequestTests {
         #expect(decoded.id == 1)
         #expect(decoded.method == Ping.name)
     }
+    
+    @Test("AnyRequest parameters request decoding - with empty params")
+    func testAnyRequestParametersRequestDecodingWithEmptyParams() throws {
+        // Test decoding when params field is null
+        let jsonString = """
+            {"jsonrpc":"2.0","id":1,"method":"ping","params":{}}
+            """
+        let data = jsonString.data(using: .utf8)!
+
+        let decoder = JSONDecoder()
+        let decoded = try decoder.decode(Request<Ping>.self, from: data)
+
+        #expect(decoded.id == 1)
+        #expect(decoded.method == Ping.name)
+    }
 }
