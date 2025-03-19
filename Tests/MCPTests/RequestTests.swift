@@ -260,4 +260,34 @@ struct RequestTests {
             from: withCursor.data(using: .utf8)!)
         #expect(decodedWithCursor.params.cursor == "next-page")
     }
+
+    @Test("AnyRequest parameters request decoding - without params")
+    func testAnyRequestParametersRequestDecodingWithoutParams() throws {
+        // Test decoding when params field is missing
+        let jsonString = """
+            {"jsonrpc":"2.0","id":1,"method":"ping"}
+            """
+        let data = jsonString.data(using: .utf8)!
+
+        let decoder = JSONDecoder()
+        let decoded = try decoder.decode(AnyRequest.self, from: data)
+
+        #expect(decoded.id == 1)
+        #expect(decoded.method == Ping.name)
+    }
+
+    @Test("AnyRequest parameters request decoding - with null params")
+    func testAnyRequestParametersRequestDecodingWithNullParams() throws {
+        // Test decoding when params field is null
+        let jsonString = """
+            {"jsonrpc":"2.0","id":1,"method":"ping","params":null}
+            """
+        let data = jsonString.data(using: .utf8)!
+
+        let decoder = JSONDecoder()
+        let decoded = try decoder.decode(Request<Ping>.self, from: data)
+
+        #expect(decoded.id == 1)
+        #expect(decoded.method == Ping.name)
+    }
 }
