@@ -11,6 +11,12 @@ public struct Empty: NotRequired, Hashable, Codable, Sendable {
     public init() {}
 }
 
+extension Value: NotRequired {
+    public init() {
+        self = .null
+    }
+}
+
 // MARK: -
 
 /// A method that can be used to send requests and receive responses.
