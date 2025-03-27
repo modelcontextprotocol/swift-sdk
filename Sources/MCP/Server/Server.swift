@@ -235,7 +235,7 @@ public actor Server {
         connection = nil
     }
 
-    public func waitUntilComplete() async {
+    public func waitUntilCompleted() async {
         await task?.value
     }
 
