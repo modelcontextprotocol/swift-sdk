@@ -112,7 +112,7 @@ public actor StdioTransport: Transport {
                         messageContinuation.yield(message)
                     }
                 }
-            } catch let error as Errno where error == .resourceTemporarilyUnavailable {
+            } catch let error where Error.isResourceTemporarilyUnavailable(error) {
                 try? await Task.sleep(nanoseconds: 10_000_000)  // 10ms backoff
                 continue
             } catch {
@@ -152,7 +152,7 @@ public actor StdioTransport: Transport {
                 if written > 0 {
                     remaining = remaining.dropFirst(written)
                 }
-            } catch let error as Errno where error == .resourceTemporarilyUnavailable {
+            } catch let error where Error.isResourceTemporarilyUnavailable(error) {
                 try await Task.sleep(nanoseconds: 10_000_000)  // 10ms backoff
                 continue
             } catch {

@@ -5,12 +5,6 @@ import struct Foundation.Date
 import class Foundation.JSONDecoder
 import class Foundation.JSONEncoder
 
-#if canImport(System)
-    import System
-#else
-    @preconcurrency import SystemPackage
-#endif
-
 /// Model Context Protocol client
 public actor Client {
     /// Implementation information
@@ -185,7 +179,7 @@ public actor Client {
                                 "Unexpected message received by client", metadata: metadata)
                         }
                     }
-                } catch let error as Errno where error == .resourceTemporarilyUnavailable {
+                } catch let error where Error.isResourceTemporarilyUnavailable(error) {
                     try? await Task.sleep(nanoseconds: 10_000_000)  // 10ms
                     continue
                 } catch {

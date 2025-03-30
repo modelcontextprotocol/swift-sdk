@@ -1,5 +1,11 @@
 import Foundation
 
+#if canImport(System)
+    import System
+#else
+    @preconcurrency import SystemPackage
+#endif
+
 /// A model context protocol error.
 public enum Error: Sendable {
     // Standard JSON-RPC 2.0 errors (-32700 to -32603)
@@ -28,6 +34,20 @@ public enum Error: Sendable {
         case .connectionClosed: return -32000
         case .transportError: return -32001
         }
+    }
+
+    /// Check if an error represents a "resource temporarily unavailable" condition
+    public static func isResourceTemporarilyUnavailable(_ error: Swift.Error) -> Bool {
+        #if canImport(System)
+            if let errno = error as? System.Errno, errno == .resourceTemporarilyUnavailable {
+                return true
+            }
+        #else
+            if let errno = error as? SystemPackage.Errno, errno == .resourceTemporarilyUnavailable {
+                return true
+            }
+        #endif
+        return false
     }
 }
 

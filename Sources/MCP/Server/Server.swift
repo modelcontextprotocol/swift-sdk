@@ -5,12 +5,6 @@ import struct Foundation.Date
 import class Foundation.JSONDecoder
 import class Foundation.JSONEncoder
 
-#if canImport(System)
-    import System
-#else
-    @preconcurrency import SystemPackage
-#endif
-
 /// Model Context Protocol server
 public actor Server {
     /// The server configuration
@@ -207,7 +201,7 @@ public actor Server {
                             }
                             throw Error.parseError("Invalid message format")
                         }
-                    } catch let error as Errno where error == .resourceTemporarilyUnavailable {
+                    } catch let error where Error.isResourceTemporarilyUnavailable(error) {
                         // Resource temporarily unavailable, retry after a short delay
                         try? await Task.sleep(nanoseconds: 10_000_000)  // 10ms
                         continue
