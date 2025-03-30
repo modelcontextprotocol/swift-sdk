@@ -111,7 +111,7 @@ struct ToolTests {
         let emptyParams = ListTools.Parameters()
         #expect(emptyParams.cursor == nil)
     }
-    
+
     @Test("ListTools request decoding with omitted params")
     func testListToolsRequestDecodingWithOmittedParams() throws {
         // Test decoding when params field is omitted
@@ -126,7 +126,7 @@ struct ToolTests {
         #expect(decoded.id == "test-id")
         #expect(decoded.method == ListTools.name)
     }
-    
+
     @Test("ListTools request decoding with null params")
     func testListToolsRequestDecodingWithNullParams() throws {
         // Test decoding when params field is null
@@ -204,5 +204,38 @@ struct ToolTests {
     @Test("ToolListChanged notification name validation")
     func testToolListChangedNotification() throws {
         #expect(ToolListChangedNotification.name == "notifications/tools/list_changed")
+    }
+
+    @Test("ListTools handler invocation without params")
+    func testListToolsHandlerWithoutParams() async throws {
+        let jsonString = """
+            {"jsonrpc":"2.0","id":1,"method":"tools/list"}
+            """
+        let jsonData = jsonString.data(using: .utf8)!
+
+        let anyRequest = try JSONDecoder().decode(AnyRequest.self, from: jsonData)
+
+        let handler = TypedRequestHandler<ListTools> { request in
+            #expect(request.method == ListTools.name)
+            #expect(request.id == 1)
+            #expect(request.params.cursor == nil)
+
+            let testTool = Tool(name: "test_tool", description: "Test tool for verification")
+            return ListTools.response(id: request.id, result: ListTools.Result(tools: [testTool]))
+        }
+
+        let response = try await handler(anyRequest)
+
+        if case .success(let value) = response.result {
+            let encoder = JSONEncoder()
+            let decoder = JSONDecoder()
+            let data = try encoder.encode(value)
+            let result = try decoder.decode(ListTools.Result.self, from: data)
+
+            #expect(result.tools.count == 1)
+            #expect(result.tools[0].name == "test_tool")
+        } else {
+            #expect(Bool(false), "Expected success result")
+        }
     }
 }
