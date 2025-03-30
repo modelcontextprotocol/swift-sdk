@@ -1,10 +1,15 @@
 import Logging
-import SystemPackage
 
 import struct Foundation.Data
 import struct Foundation.Date
 import class Foundation.JSONDecoder
 import class Foundation.JSONEncoder
+
+#if canImport(System)
+    import System
+#else
+    @preconcurrency import SystemPackage
+#endif
 
 /// Model Context Protocol client
 public actor Client {

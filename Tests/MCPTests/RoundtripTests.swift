@@ -1,9 +1,14 @@
 import Foundation
 import Logging
-import SystemPackage
 import Testing
 
 @testable import MCP
+
+#if canImport(System)
+    import System
+#else
+    @preconcurrency import SystemPackage
+#endif
 
 @Suite("Roundtrip Tests")
 struct RoundtripTests {

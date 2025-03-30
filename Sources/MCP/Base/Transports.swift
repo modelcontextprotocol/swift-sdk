@@ -1,8 +1,13 @@
 import Darwin
 import Logging
-import SystemPackage
 
 import struct Foundation.Data
+
+#if canImport(System)
+    import System
+#else
+    @preconcurrency import SystemPackage
+#endif
 
 /// Protocol defining the transport layer for MCP communication
 public protocol Transport: Actor {

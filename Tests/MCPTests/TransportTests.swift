@@ -1,8 +1,13 @@
 import Foundation
-import SystemPackage
 import Testing
 
 @testable import MCP
+
+#if canImport(System)
+    import System
+#else
+    @preconcurrency import SystemPackage
+#endif
 
 @Suite("Stdio Transport Tests")
 struct StdioTransportTests {
