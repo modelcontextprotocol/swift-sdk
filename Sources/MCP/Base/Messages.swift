@@ -161,12 +161,11 @@ final class TypedRequestHandler<M: Method>: RequestHandlerBox, @unchecked Sendab
         let decoder = JSONDecoder()
 
         // Create a concrete request from the type-erased one
-        let data = try encoder.encode(request.params)
-        let params = try decoder.decode(M.Parameters.self, from: data)
-        let typedRequest = Request<M>(id: request.id, method: M.name, params: params)
+        let data = try encoder.encode(request)
+        let request = try decoder.decode(Request<M>.self, from: data)
 
         // Handle with concrete type
-        let response = try await _handle(typedRequest)
+        let response = try await _handle(request)
 
         // Convert result to AnyMethod response
         switch response.result {
