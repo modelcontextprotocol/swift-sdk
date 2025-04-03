@@ -38,9 +38,9 @@ struct ClientTests {
         try await Task.sleep(nanoseconds: 10_000_000)  // 10ms
 
         #expect(await transport.sentMessages.count == 1)
-        #expect(await transport.sentMessages[0].contains(Initialize.name))
-        #expect(await transport.sentMessages[0].contains(client.name))
-        #expect(await transport.sentMessages[0].contains(client.version))
+        #expect(await transport.sentMessages.first?.contains(Initialize.name) == true)
+        #expect(await transport.sentMessages.first?.contains(client.name) == true)
+        #expect(await transport.sentMessages.first?.contains(client.version) == true)
 
         // Cancel the initialize task
         initTask.cancel()
@@ -71,7 +71,7 @@ struct ClientTests {
         try await Task.sleep(nanoseconds: 10_000_000)  // 10ms
 
         #expect(await transport.sentMessages.count == 1)
-        #expect(await transport.sentMessages[0].contains(Ping.name))
+        #expect(await transport.sentMessages.first?.contains(Ping.name) == true)
 
         // Cancel the ping task
         pingTask.cancel()

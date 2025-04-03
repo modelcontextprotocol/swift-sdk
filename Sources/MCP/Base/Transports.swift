@@ -19,11 +19,11 @@ public protocol Transport: Actor {
     /// Disconnects from the transport
     func disconnect() async
 
-    /// Sends a message string
-    func send(_ message: String) async throws
+    /// Sends data
+    func send(_ data: Data) async throws
 
-    /// Receives message strings as an async sequence
-    func receive() -> AsyncThrowingStream<String, Swift.Error>
+    /// Receives data in an async sequence
+    func receive() -> AsyncThrowingStream<Data, Swift.Error>
 }
 
 /// Standard input/output transport implementation
@@ -33,8 +33,8 @@ public actor StdioTransport: Transport {
     public nonisolated let logger: Logger
 
     private var isConnected = false
-    private let messageStream: AsyncStream<String>
-    private let messageContinuation: AsyncStream<String>.Continuation
+    private let messageStream: AsyncStream<Data>
+    private let messageContinuation: AsyncStream<Data>.Continuation
 
     public init(
         input: FileDescriptor = FileDescriptor.standardInput,
@@ -50,7 +50,7 @@ public actor StdioTransport: Transport {
                 factory: { _ in SwiftLogNoOpLogHandler() })
 
         // Create message stream
-        var continuation: AsyncStream<String>.Continuation!
+        var continuation: AsyncStream<Data>.Continuation!
         self.messageStream = AsyncStream { continuation = $0 }
         self.messageContinuation = continuation
     }
@@ -105,11 +105,9 @@ public actor StdioTransport: Transport {
                     let messageData = pendingData[..<newlineIndex]
                     pendingData = pendingData[(newlineIndex + 1)...]
 
-                    if let message = String(data: messageData, encoding: .utf8),
-                        !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    {
-                        logger.debug("Message received", metadata: ["message": "\(message)"])
-                        messageContinuation.yield(message)
+                    if !messageData.isEmpty {
+                        logger.debug("Message received", metadata: ["size": "\(messageData.count)"])
+                        messageContinuation.yield(Data(messageData))
                     }
                 }
             } catch let error where Error.isResourceTemporarilyUnavailable(error) {
@@ -133,17 +131,16 @@ public actor StdioTransport: Transport {
         logger.info("Transport disconnected")
     }
 
-    public func send(_ message: String) async throws {
+    public func send(_ message: Data) async throws {
         guard isConnected else {
             throw Error.transportError(Errno.socketNotConnected)
         }
 
-        let message = message + "\n"
-        guard let data = message.data(using: .utf8) else {
-            throw Error.transportError(Errno.invalidArgument)
-        }
+        // Add newline as delimiter
+        var messageWithNewline = message
+        messageWithNewline.append(UInt8(ascii: "\n"))
 
-        var remaining = data
+        var remaining = messageWithNewline
         while !remaining.isEmpty {
             do {
                 let written = try remaining.withUnsafeBytes { buffer in
@@ -161,7 +158,7 @@ public actor StdioTransport: Transport {
         }
     }
 
-    public func receive() -> AsyncThrowingStream<String, Swift.Error> {
+    public func receive() -> AsyncThrowingStream<Data, Swift.Error> {
         return AsyncThrowingStream { continuation in
             Task {
                 for await message in messageStream {
@@ -182,8 +179,8 @@ public actor StdioTransport: Transport {
         public nonisolated let logger: Logger
 
         private var isConnected = false
-        private let messageStream: AsyncThrowingStream<String, Swift.Error>
-        private let messageContinuation: AsyncThrowingStream<String, Swift.Error>.Continuation
+        private let messageStream: AsyncThrowingStream<Data, Swift.Error>
+        private let messageContinuation: AsyncThrowingStream<Data, Swift.Error>.Continuation
 
         // Track connection state for continuations
         private var connectionContinuationResumed = false
@@ -198,7 +195,7 @@ public actor StdioTransport: Transport {
                 )
 
             // Create message stream
-            var continuation: AsyncThrowingStream<String, Swift.Error>.Continuation!
+            var continuation: AsyncThrowingStream<Data, Swift.Error>.Continuation!
             self.messageStream = AsyncThrowingStream { continuation = $0 }
             self.messageContinuation = continuation
         }
@@ -289,14 +286,14 @@ public actor StdioTransport: Transport {
             logger.info("Network transport disconnected")
         }
 
-        public func send(_ message: String) async throws {
+        public func send(_ message: Data) async throws {
             guard isConnected else {
                 throw MCP.Error.internalError("Transport not connected")
             }
 
-            guard let data = (message + "\n").data(using: .utf8) else {
-                throw MCP.Error.internalError("Failed to encode message")
-            }
+            // Add newline as delimiter
+            var messageWithNewline = message
+            messageWithNewline.append(UInt8(ascii: "\n"))
 
             // Use a local actor-isolated variable to track continuation state
             var sendContinuationResumed = false
@@ -309,7 +306,7 @@ public actor StdioTransport: Transport {
                 }
 
                 connection.send(
-                    content: data,
+                    content: messageWithNewline,
                     completion: .contentProcessed { [weak self] error in
                         guard let self = self else { return }
 
@@ -329,7 +326,7 @@ public actor StdioTransport: Transport {
             }
         }
 
-        public func receive() -> AsyncThrowingStream<String, Swift.Error> {
+        public func receive() -> AsyncThrowingStream<Data, Swift.Error> {
             return AsyncThrowingStream { continuation in
                 Task {
                     do {
@@ -357,11 +354,10 @@ public actor StdioTransport: Transport {
                         let messageData = buffer[..<newlineIndex]
                         buffer = buffer[(newlineIndex + 1)...]
 
-                        if let message = String(data: messageData, encoding: .utf8),
-                            !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        {
-                            logger.debug("Message received", metadata: ["message": "\(message)"])
-                            messageContinuation.yield(message)
+                        if !messageData.isEmpty {
+                            logger.debug(
+                                "Message received", metadata: ["size": "\(messageData.count)"])
+                            messageContinuation.yield(Data(messageData))
                         }
                     }
                 } catch let error as NWError {

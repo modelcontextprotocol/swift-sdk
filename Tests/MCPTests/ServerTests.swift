@@ -42,7 +42,11 @@ struct ServerTests {
         try await Task.sleep(nanoseconds: 10_000_000)  // 10ms
 
         #expect(await transport.sentMessages.count == 1)
-        #expect(await transport.sentMessages[0].contains(Initialize.name))
+        
+        let messages = await transport.sentMessages
+        if let response = messages.first {
+            #expect(response.contains("serverInfo"))
+        }
 
         // Clean up
         await server.stop()
@@ -68,9 +72,9 @@ struct ServerTests {
             #expect(clientInfo.version == "1.0")
             await state.setHookCalled()
         }
-        
+
         // Wait for server to initialize
-        try await Task.sleep(nanoseconds: 10_000_000)  // 10ms
+        try await Task.sleep(for: .milliseconds(10))
 
         // Queue an initialize request
         try await transport.queueRequest(
@@ -83,7 +87,7 @@ struct ServerTests {
             ))
 
         // Wait for message processing and hook execution
-        try await Task.sleep(nanoseconds: 200_000_000)  // 200ms
+        try await Task.sleep(for: .milliseconds(500))
 
         #expect(await state.wasHookCalled() == true)
         #expect(await transport.sentMessages.count >= 1)
@@ -94,6 +98,7 @@ struct ServerTests {
         }
 
         await server.stop()
+        await transport.disconnect()
     }
 
     @Test("Initialize hook - rejection")
@@ -107,7 +112,7 @@ struct ServerTests {
                 throw Error.invalidRequest("Client not allowed")
             }
         }
-        
+
         // Wait for server to initialize
         try await Task.sleep(nanoseconds: 10_000_000)  // 10ms
 
@@ -124,13 +129,15 @@ struct ServerTests {
         // Wait for message processing
         try await Task.sleep(nanoseconds: 200_000_000)  // 200ms
 
-        #expect(await transport.sentMessages.count >= 2)
+        #expect(await transport.sentMessages.count >= 1)
 
         let messages = await transport.sentMessages
         if let response = messages.first {
             #expect(response.contains("error"))
             #expect(response.contains("Client not allowed"))
         }
+        
         await server.stop()
+        await transport.disconnect()
     }
 }

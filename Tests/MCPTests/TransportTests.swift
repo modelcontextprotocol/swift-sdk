@@ -29,7 +29,7 @@ struct StdioTransportTests {
 
         // Test sending a simple message
         let message = #"{"key":"value"}"#
-        try await transport.send(message)
+        try await transport.send(message.data(using: .utf8)!)
 
         // Read and verify the output
         var buffer = [UInt8](repeating: 0, count: 1024)
@@ -57,12 +57,12 @@ struct StdioTransportTests {
         try writer.close()
 
         // Start receiving messages
-        let stream: AsyncThrowingStream<String, Swift.Error> = await transport.receive()
+        let stream: AsyncThrowingStream<Data, Swift.Error> = await transport.receive()
         var iterator = stream.makeAsyncIterator()
 
         // Get first message
         let received = try await iterator.next()
-        #expect(received == #"{"key":"value"}"#)
+        #expect(received == #"{"key":"value"}"#.data(using: .utf8)!)
 
         await transport.disconnect()
     }
@@ -79,7 +79,7 @@ struct StdioTransportTests {
         try writer.writeAll(invalidJSON.data(using: .utf8)!)
         try writer.close()
 
-        let stream: AsyncThrowingStream<String, Swift.Error> = await transport.receive()
+        let stream: AsyncThrowingStream<Data, Swift.Error> = await transport.receive()
         var iterator = stream.makeAsyncIterator()
 
         _ = try await iterator.next()
