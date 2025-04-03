@@ -1,4 +1,8 @@
-import Foundation
+import class Foundation.JSONEncoder
+import class Foundation.JSONDecoder
+import struct Foundation.Data
+import struct Foundation.POSIXError
+
 import Logging
 
 @testable import MCP
@@ -76,7 +80,7 @@ actor MockTransport: Transport {
         shouldFailSend = shouldFail
     }
 
-    func queue<M: MCP.Method>(request: Request<M>) throws {
+    func queue<M: Method>(request: Request<M>) throws {
         let data = try encoder.encode(request)
         if let continuation = dataStreamContinuation {
             continuation.yield(data)
@@ -85,12 +89,12 @@ actor MockTransport: Transport {
         }
     }
 
-    func queue<M: MCP.Method>(response: Response<M>) throws {
+    func queue<M: Method>(response: Response<M>) throws {
         let data = try encoder.encode(response)
         dataToReceive.append(data)
     }
 
-    func queue<N: MCP.Notification>(notification: Message<N>) throws {
+    func queue<N: Notification>(notification: Message<N>) throws {
         let data = try encoder.encode(notification)
         dataToReceive.append(data)
     }

@@ -6,6 +6,22 @@ import Foundation
     @preconcurrency import SystemPackage
 #endif
 
+/// Top-level namespace for backward compatibility
+///
+/// This is provided to allow existing code that uses `MCP.Error` to continue
+/// to work without modification.
+///
+/// The MCPError type is now the recommended way to handle errors in MCP.
+///
+/// @warning This namespace is deprecated and will be removed in a future version.
+public enum MCP {
+    /// Deprecated type alias for MCPError
+    @available(*, deprecated, renamed: "MCPError", message: "Use MCPError instead of MCP.Error")
+    public typealias Error = MCPError
+}
+
+// MARK: -
+
 /// A model context protocol error.
 public enum MCPError: Error, Sendable {
     // Standard JSON-RPC 2.0 errors (-32700 to -32603)
