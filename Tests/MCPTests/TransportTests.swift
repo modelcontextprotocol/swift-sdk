@@ -100,7 +100,7 @@ struct StdioTransportTests {
             try await transport.connect()
             #expect(Bool(false), "Expected connect to throw an error")
         } catch {
-            #expect(error is MCP.MCPError)
+            #expect(error is MCPError)
         }
 
         await transport.disconnect()
@@ -119,7 +119,7 @@ struct StdioTransportTests {
             try await transport.connect()
             #expect(Bool(false), "Expected connect to throw an error")
         } catch {
-            #expect(error is MCP.MCPError)
+            #expect(error is MCPError)
         }
 
         await transport.disconnect()

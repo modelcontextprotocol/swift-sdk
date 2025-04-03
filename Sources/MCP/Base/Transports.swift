@@ -211,7 +211,7 @@ public actor StdioTransport: Transport {
             try await withCheckedThrowingContinuation {
                 [weak self] (continuation: CheckedContinuation<Void, Error>) in
                 guard let self = self else {
-                    continuation.resume(throwing: MCP.MCPError.internalError("Transport deallocated"))
+                    continuation.resume(throwing: MCPError.internalError("Transport deallocated"))
                     return
                 }
 
@@ -274,7 +274,7 @@ public actor StdioTransport: Transport {
             if !connectionContinuationResumed {
                 connectionContinuationResumed = true
                 logger.warning("Connection cancelled")
-                continuation.resume(throwing: MCP.MCPError.internalError("Connection cancelled"))
+                continuation.resume(throwing: MCPError.internalError("Connection cancelled"))
             }
         }
 
@@ -288,7 +288,7 @@ public actor StdioTransport: Transport {
 
         public func send(_ message: Data) async throws {
             guard isConnected else {
-                throw MCP.MCPError.internalError("Transport not connected")
+                throw MCPError.internalError("Transport not connected")
             }
 
             // Add newline as delimiter
@@ -301,7 +301,7 @@ public actor StdioTransport: Transport {
             try await withCheckedThrowingContinuation {
                 [weak self] (continuation: CheckedContinuation<Void, Error>) in
                 guard let self = self else {
-                    continuation.resume(throwing: MCP.MCPError.internalError("Transport deallocated"))
+                    continuation.resume(throwing: MCPError.internalError("Transport deallocated"))
                     return
                 }
 
@@ -316,7 +316,7 @@ public actor StdioTransport: Transport {
                                 if let error = error {
                                     self.logger.error("Send error: \(error)")
                                     continuation.resume(
-                                        throwing: MCP.MCPError.internalError("Send error: \(error)"))
+                                        throwing: MCPError.internalError("Send error: \(error)"))
                                 } else {
                                     continuation.resume()
                                 }
@@ -363,7 +363,7 @@ public actor StdioTransport: Transport {
                 } catch let error as NWError {
                     if !Task.isCancelled {
                         logger.error("Network error occurred", metadata: ["error": "\(error)"])
-                        messageContinuation.finish(throwing: MCP.MCPError.transportError(error))
+                        messageContinuation.finish(throwing: MCPError.transportError(error))
                     }
                     break
                 } catch {
@@ -384,7 +384,7 @@ public actor StdioTransport: Transport {
             return try await withCheckedThrowingContinuation {
                 [weak self] (continuation: CheckedContinuation<Data, Error>) in
                 guard let self = self else {
-                    continuation.resume(throwing: MCP.MCPError.internalError("Transport deallocated"))
+                    continuation.resume(throwing: MCPError.internalError("Transport deallocated"))
                     return
                 }
 
@@ -394,12 +394,12 @@ public actor StdioTransport: Transport {
                         if !receiveContinuationResumed {
                             receiveContinuationResumed = true
                             if let error = error {
-                                continuation.resume(throwing: MCP.MCPError.transportError(error))
+                                continuation.resume(throwing: MCPError.transportError(error))
                             } else if let content = content {
                                 continuation.resume(returning: content)
                             } else {
                                 continuation.resume(
-                                    throwing: MCP.MCPError.internalError("No data received"))
+                                    throwing: MCPError.internalError("No data received"))
                             }
                         }
                     }
