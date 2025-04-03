@@ -263,7 +263,7 @@ public actor Server {
     // MARK: - Sending
 
     /// Send a response to a request
-    private func send<M: Method>(_ response: Response<M>) async throws {
+    public func send<M: Method>(_ response: Response<M>) async throws {
         guard let connection = connection else {
             throw Error.internalError("Server connection not initialized")
         }
