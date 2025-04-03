@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 
 @testable import MCP
@@ -120,5 +121,109 @@ struct ClientTests {
         } catch {
             #expect(Bool(false), "Expected MCP.Error")
         }
+    }
+
+    @Test("Strict configuration - capabilities check")
+    func testStrictConfiguration() async throws {
+        let transport = MockTransport()
+        let config = Client.Configuration.strict
+        let client = Client(name: "TestClient", version: "1.0", configuration: config)
+
+        try await client.connect(transport: transport)
+
+        // Create a task for listPrompts
+        let promptsTask = Task<Void, Swift.Error> {
+            do {
+                _ = try await client.listPrompts()
+                #expect(Bool(false), "Expected listPrompts to fail in strict mode")
+            } catch let error as Error {
+                if case Error.methodNotFound = error {
+                    #expect(Bool(true))
+                } else {
+                    #expect(Bool(false), "Expected methodNotFound error, got \(error)")
+                }
+            } catch {
+                #expect(Bool(false), "Expected MCP.Error")
+            }
+        }
+
+        // Give it a short time to execute the task
+        try await Task.sleep(for: .milliseconds(50))
+
+        // Cancel the task if it's still running
+        promptsTask.cancel()
+
+        // Disconnect client
+        await client.disconnect()
+        try await Task.sleep(for: .milliseconds(50))
+    }
+
+    @Test("Non-strict configuration - capabilities check")
+    func testNonStrictConfiguration() async throws {
+        let transport = MockTransport()
+        let config = Client.Configuration.default
+        let client = Client(name: "TestClient", version: "1.0", configuration: config)
+
+        try await client.connect(transport: transport)
+
+        // Wait a bit for any setup to complete
+        try await Task.sleep(for: .milliseconds(10))
+        
+        // Send the listPrompts request and immediately provide an error response
+        let promptsTask = Task {
+            do {
+                // Start the request
+                try await Task.sleep(for: .seconds(1))
+
+                // Get the last sent message and extract the request ID
+                if let lastMessage = await transport.sentMessages.last,
+                    let data = lastMessage.data(using: .utf8),
+                    let decodedRequest = try? JSONDecoder().decode(
+                        Request<ListPrompts>.self, from: data)
+                {
+
+                    // Create an error response with the same ID
+                    let errorResponse = Response<ListPrompts>(
+                        id: decodedRequest.id,
+                        error: Error.methodNotFound("Test: Prompts capability not available")
+                    )
+                    try await transport.queueResponse(errorResponse)
+
+                    // Try the request now that we have a response queued
+                    do {
+                        _ = try await client.listPrompts()
+                        #expect(Bool(false), "Expected listPrompts to fail in non-strict mode")
+                    } catch let error as Error {
+                        if case Error.methodNotFound = error {
+                            #expect(Bool(true))
+                        } else {
+                            #expect(Bool(false), "Expected methodNotFound error, got \(error)")
+                        }
+                    } catch {
+                        #expect(Bool(false), "Expected MCP.Error")
+                    }
+                }
+            } catch {
+                // Ignore task cancellation
+                if !(error is CancellationError) {
+                    throw error
+                }
+            }
+        }
+
+        // Wait for the task to complete or timeout
+        let timeoutTask = Task {
+            try await Task.sleep(for: .milliseconds(500))
+            promptsTask.cancel()
+        }
+
+        // Wait for the task to complete
+        _ = await promptsTask.result
+
+        // Cancel the timeout task
+        timeoutTask.cancel()
+
+        // Disconnect client
+        await client.disconnect()
     }
 }

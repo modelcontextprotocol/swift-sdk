@@ -7,6 +7,29 @@ import class Foundation.JSONEncoder
 
 /// Model Context Protocol client
 public actor Client {
+    /// The client configuration
+    public struct Configuration: Hashable, Codable, Sendable {
+        /// The default configuration.
+        public static let `default` = Configuration(strict: false)
+
+        /// The strict configuration.
+        public static let strict = Configuration(strict: true)
+
+        /// When strict mode is enabled, the client:
+        /// - Requires server capabilities to be initialized before making requests
+        /// - Rejects all requests that require capabilities before initialization
+        ///
+        /// While the MCP specification requires servers to respond to initialize requests
+        /// with their capabilities, some implementations may not follow this.
+        /// Disabling strict mode allows the client to be more lenient with non-compliant
+        /// servers, though this may lead to undefined behavior.
+        public var strict: Bool
+
+        public init(strict: Bool = false) {
+            self.strict = strict
+        }
+    }
+
     /// Implementation information
     public struct Info: Hashable, Codable, Sendable {
         /// The client name
@@ -73,6 +96,8 @@ public actor Client {
 
     /// The client capabilities
     public var capabilities: Client.Capabilities
+    /// The client configuration
+    public var configuration: Configuration
 
     /// The server capabilities
     private var serverCapabilities: Server.Capabilities?
@@ -131,10 +156,12 @@ public actor Client {
 
     public init(
         name: String,
-        version: String
+        version: String,
+        configuration: Configuration = .default
     ) {
         self.clientInfo = Client.Info(name: name, version: version)
         self.capabilities = Capabilities()
+        self.configuration = configuration
     }
 
     /// Connect to the server using the given transport
@@ -294,7 +321,7 @@ public actor Client {
     public func getPrompt(name: String, arguments: [String: Value]? = nil) async throws
         -> (description: String?, messages: [Prompt.Message])
     {
-        _ = try checkCapability(\.prompts, "Prompts")
+        try checkCapability(\.prompts, "Prompts")
         let request = GetPrompt.request(.init(name: name, arguments: arguments))
         let result = try await send(request)
         return (description: result.description, messages: result.messages)
@@ -303,7 +330,7 @@ public actor Client {
     public func listPrompts(cursor: String? = nil) async throws
         -> (prompts: [Prompt], nextCursor: String?)
     {
-        _ = try checkCapability(\.prompts, "Prompts")
+        try checkCapability(\.prompts, "Prompts")
         let request: Request<ListPrompts>
         if let cursor = cursor {
             request = ListPrompts.request(.init(cursor: cursor))
@@ -317,7 +344,7 @@ public actor Client {
     // MARK: - Resources
 
     public func readResource(uri: String) async throws -> [Resource.Content] {
-        _ = try checkCapability(\.resources, "Resources")
+        try checkCapability(\.resources, "Resources")
         let request = ReadResource.request(.init(uri: uri))
         let result = try await send(request)
         return result.contents
@@ -326,7 +353,7 @@ public actor Client {
     public func listResources(cursor: String? = nil) async throws -> (
         resources: [Resource], nextCursor: String?
     ) {
-        _ = try checkCapability(\.resources, "Resources")
+        try checkCapability(\.resources, "Resources")
         let request: Request<ListResources>
         if let cursor = cursor {
             request = ListResources.request(.init(cursor: cursor))
@@ -338,7 +365,7 @@ public actor Client {
     }
 
     public func subscribeToResource(uri: String) async throws {
-        _ = try checkCapability(\.resources?.subscribe, "Resource subscription")
+        try checkCapability(\.resources?.subscribe, "Resource subscription")
         let request = ResourceSubscribe.request(.init(uri: uri))
         _ = try await send(request)
     }
@@ -346,7 +373,7 @@ public actor Client {
     // MARK: - Tools
 
     public func listTools(cursor: String? = nil) async throws -> [Tool] {
-        _ = try checkCapability(\.tools, "Tools")
+        try checkCapability(\.tools, "Tools")
         let request: Request<ListTools>
         if let cursor = cursor {
             request = ListTools.request(.init(cursor: cursor))
@@ -360,7 +387,7 @@ public actor Client {
     public func callTool(name: String, arguments: [String: Value]? = nil) async throws -> (
         content: [Tool.Content], isError: Bool?
     ) {
-        _ = try checkCapability(\.tools, "Tools")
+        try checkCapability(\.tools, "Tools")
         let request = CallTool.request(.init(name: name, arguments: arguments))
         let result = try await send(request)
         return (content: result.content, isError: result.isError)
@@ -411,14 +438,15 @@ public actor Client {
     // MARK: -
 
     private func checkCapability<T>(_ keyPath: KeyPath<Server.Capabilities, T?>, _ name: String)
-        throws -> T
+        throws
     {
-        guard let capabilities = serverCapabilities else {
-            throw Error.methodNotFound("Server capabilities not initialized")
+        if configuration.strict {
+            guard let capabilities = serverCapabilities else {
+                throw Error.methodNotFound("Server capabilities not initialized")
+            }
+            guard capabilities[keyPath: keyPath] != nil else {
+                throw Error.methodNotFound("\(name) is not supported by the server")
+            }
         }
-        guard let value = capabilities[keyPath: keyPath] else {
-            throw Error.methodNotFound("\(name) is not supported by the server")
-        }
-        return value
     }
 }
