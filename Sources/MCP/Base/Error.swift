@@ -13,7 +13,7 @@ import Foundation
 ///
 /// The MCPError type is now the recommended way to handle errors in MCP.
 ///
-/// @warning This namespace is deprecated and will be removed in a future version.
+/// - Warning: This namespace is deprecated and will be removed in a future version.
 public enum MCP {
     /// Deprecated type alias for MCPError
     @available(*, deprecated, renamed: "MCPError", message: "Use MCPError instead of MCP.Error")
