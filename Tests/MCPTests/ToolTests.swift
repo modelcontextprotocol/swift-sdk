@@ -20,6 +20,159 @@ struct ToolTests {
         #expect(tool.inputSchema != nil)
     }
 
+    @Test("Tool Annotations initialization and properties")
+    func testToolAnnotationsInitialization() throws {
+        // Empty annotations
+        let emptyAnnotations = Tool.Annotations()
+        #expect(emptyAnnotations.isEmpty)
+        #expect(emptyAnnotations.title == nil)
+        #expect(emptyAnnotations.readOnlyHint == nil)
+        #expect(emptyAnnotations.destructiveHint == nil)
+        #expect(emptyAnnotations.idempotentHint == nil)
+        #expect(emptyAnnotations.openWorldHint == nil)
+
+        // Full annotations
+        let fullAnnotations = Tool.Annotations(
+            title: "Test Tool",
+            readOnlyHint: true,
+            destructiveHint: false,
+            idempotentHint: true,
+            openWorldHint: false
+        )
+
+        #expect(!fullAnnotations.isEmpty)
+        #expect(fullAnnotations.title == "Test Tool")
+        #expect(fullAnnotations.readOnlyHint == true)
+        #expect(fullAnnotations.destructiveHint == false)
+        #expect(fullAnnotations.idempotentHint == true)
+        #expect(fullAnnotations.openWorldHint == false)
+
+        // Partial annotations - should not be empty
+        let partialAnnotations = Tool.Annotations(title: "Partial Test")
+        #expect(!partialAnnotations.isEmpty)
+        #expect(partialAnnotations.title == "Partial Test")
+
+        // Initialize with nil literal
+        let nilAnnotations: Tool.Annotations = nil
+        #expect(nilAnnotations.isEmpty)
+    }
+
+    @Test("Tool Annotations encoding and decoding")
+    func testToolAnnotationsEncodingDecoding() throws {
+        let annotations = Tool.Annotations(
+            title: "Test Tool",
+            readOnlyHint: true,
+            destructiveHint: false,
+            idempotentHint: true,
+            openWorldHint: false
+        )
+
+        #expect(!annotations.isEmpty)
+
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+
+        let data = try encoder.encode(annotations)
+        let decoded = try decoder.decode(Tool.Annotations.self, from: data)
+
+        #expect(decoded.title == annotations.title)
+        #expect(decoded.readOnlyHint == annotations.readOnlyHint)
+        #expect(decoded.destructiveHint == annotations.destructiveHint)
+        #expect(decoded.idempotentHint == annotations.idempotentHint)
+        #expect(decoded.openWorldHint == annotations.openWorldHint)
+
+        // Test that empty annotations are encoded as expected
+        let emptyAnnotations = Tool.Annotations()
+        let emptyData = try encoder.encode(emptyAnnotations)
+        let decodedEmpty = try decoder.decode(Tool.Annotations.self, from: emptyData)
+
+        #expect(decodedEmpty.isEmpty)
+    }
+
+    @Test("Tool with annotations encoding and decoding")
+    func testToolWithAnnotationsEncodingDecoding() throws {
+        let annotations = Tool.Annotations(
+            title: "Calculator",
+            destructiveHint: false
+        )
+
+        let tool = Tool(
+            name: "calculate",
+            description: "Performs calculations",
+            inputSchema: .object([
+                "expression": .string("Mathematical expression to evaluate")
+            ]),
+            annotations: annotations
+        )
+
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+
+        let data = try encoder.encode(tool)
+        let decoded = try decoder.decode(Tool.self, from: data)
+
+        #expect(decoded.name == tool.name)
+        #expect(decoded.description == tool.description)
+        #expect(decoded.annotations.title == annotations.title)
+        #expect(decoded.annotations.destructiveHint == annotations.destructiveHint)
+
+        // Verify that the annotations field is properly included in the JSON
+        let jsonString = String(data: data, encoding: .utf8)!
+        #expect(jsonString.contains("\"annotations\""))
+        #expect(jsonString.contains("\"title\":\"Calculator\""))
+    }
+
+    @Test("Tool with empty annotations")
+    func testToolWithEmptyAnnotations() throws {
+        var tool = Tool(
+            name: "test_tool",
+            description: "Test tool description"
+        )
+
+        do {
+            #expect(tool.annotations.isEmpty)
+            
+            let encoder = JSONEncoder()
+            let data = try encoder.encode(tool)
+            
+            // Verify that empty annotations are not included in the JSON
+            let jsonString = String(data: data, encoding: .utf8)!
+            #expect(!jsonString.contains("\"annotations\""))
+        }
+        
+        do {
+            tool.annotations.title = "Test"
+
+            #expect(!tool.annotations.isEmpty)
+            
+            let encoder = JSONEncoder()
+            let data = try encoder.encode(tool)
+            
+            // Verify that empty annotations are not included in the JSON
+            let jsonString = String(data: data, encoding: .utf8)!
+            #expect(jsonString.contains("\"annotations\""))
+        }
+    }
+
+    @Test("Tool with nil literal annotations")
+    func testToolWithNilLiteralAnnotations() throws {
+        let tool = Tool(
+            name: "test_tool",
+            description: "Test tool description",
+            inputSchema: nil,
+            annotations: nil
+        )
+
+        #expect(tool.annotations.isEmpty)
+
+        let encoder = JSONEncoder()
+        let data = try encoder.encode(tool)
+
+        // Verify that nil literal annotations are not included in the JSON
+        let jsonString = String(data: data, encoding: .utf8)!
+        #expect(!jsonString.contains("\"annotations\""))
+    }
+
     @Test("Tool encoding and decoding")
     func testToolEncodingDecoding() throws {
         let tool = Tool(
