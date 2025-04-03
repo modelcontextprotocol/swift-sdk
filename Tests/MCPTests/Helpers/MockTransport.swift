@@ -76,11 +76,7 @@ actor MockTransport: Transport {
         shouldFailSend = shouldFail
     }
 
-    func queueMessage(_ data: Data) {
-        dataToReceive.append(data)
-    }
-
-    func queueRequest<M: MCP.Method>(_ request: Request<M>) throws {
+    func queue<M: MCP.Method>(request: Request<M>) throws {
         let data = try encoder.encode(request)
         if let continuation = dataStreamContinuation {
             continuation.yield(data)
@@ -89,14 +85,14 @@ actor MockTransport: Transport {
         }
     }
 
-    func queueResponse<M: MCP.Method>(_ response: Response<M>) throws {
+    func queue<M: MCP.Method>(response: Response<M>) throws {
         let data = try encoder.encode(response)
-        queueMessage(data)
+        dataToReceive.append(data)
     }
 
-    func queueNotification<N: MCP.Notification>(_ notification: Message<N>) throws {
+    func queue<N: MCP.Notification>(notification: Message<N>) throws {
         let data = try encoder.encode(notification)
-        queueMessage(data)
+        dataToReceive.append(data)
     }
 
     func decodeLastSentMessage<T: Decodable>() -> T? {

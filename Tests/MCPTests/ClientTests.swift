@@ -168,7 +168,7 @@ struct ClientTests {
 
         // Wait a bit for any setup to complete
         try await Task.sleep(for: .milliseconds(10))
-        
+
         // Send the listPrompts request and immediately provide an error response
         let promptsTask = Task {
             do {
@@ -187,7 +187,7 @@ struct ClientTests {
                         id: decodedRequest.id,
                         error: Error.methodNotFound("Test: Prompts capability not available")
                     )
-                    try await transport.queueResponse(errorResponse)
+                    try await transport.queue(response: errorResponse)
 
                     // Try the request now that we have a response queued
                     do {

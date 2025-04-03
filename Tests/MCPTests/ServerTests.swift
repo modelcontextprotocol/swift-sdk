@@ -22,8 +22,8 @@ struct ServerTests {
         let transport = MockTransport()
 
         // Queue an initialize request
-        try await transport.queueRequest(
-            Initialize.request(
+        try await transport.queue(
+            request: Initialize.request(
                 .init(
                     protocolVersion: Version.latest,
                     capabilities: .init(),
@@ -77,8 +77,8 @@ struct ServerTests {
         try await Task.sleep(for: .milliseconds(10))
 
         // Queue an initialize request
-        try await transport.queueRequest(
-            Initialize.request(
+        try await transport.queue(
+            request: Initialize.request(
                 .init(
                     protocolVersion: Version.latest,
                     capabilities: .init(),
@@ -117,8 +117,8 @@ struct ServerTests {
         try await Task.sleep(nanoseconds: 10_000_000)  // 10ms
 
         // Queue an initialize request from blocked client
-        try await transport.queueRequest(
-            Initialize.request(
+        try await transport.queue(
+            request: Initialize.request(
                 .init(
                     protocolVersion: Version.latest,
                     capabilities: .init(),
