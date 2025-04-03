@@ -7,7 +7,7 @@ import Foundation
 #endif
 
 /// A model context protocol error.
-public enum MCPError: Sendable {
+public enum MCPError: Error, Sendable {
     // Standard JSON-RPC 2.0 errors (-32700 to -32603)
     case parseError(String?)  // -32700
     case invalidRequest(String?)  // -32600
