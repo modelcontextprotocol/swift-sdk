@@ -60,14 +60,13 @@ extension Data {
         }
 
         // Decode data
-        let decodedData: Data
-        if isBase64 {
-            guard let base64Data = Data(base64Encoded: String(encodedData)) else { return nil }
-            decodedData = base64Data
+        let decodedData: Data? = if isBase64 {
+            Data(base64Encoded: String(encodedData))
         } else {
-            guard let percentDecodedData = String(encodedData).removingPercentEncoding.map({ Data($0.utf8) }) else { return nil }
-            decodedData = percentDecodedData
+            String(encodedData).removingPercentEncoding.map({ Data($0.utf8) })
         }
+
+        guard let decodedData else { return nil }
 
         return (mimeType: mimeType, data: decodedData)
     }
