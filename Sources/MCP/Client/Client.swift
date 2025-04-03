@@ -261,7 +261,7 @@ public actor Client {
                     type: M.Result.self
                 )
 
-                // Send the request data directly
+                // Send the request data
                 do {
                     try await connection.send(requestData)
                 } catch {
