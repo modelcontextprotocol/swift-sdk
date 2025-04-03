@@ -136,6 +136,14 @@ let (description, messages) = try await client.getPrompt(
 )
 ```
 
+## Changelog
+
+This project follows [Semantic Versioning](https://semver.org/). 
+For pre-1.0 releases, minor version increments (0.X.0) may contain breaking changes.
+
+For details about changes in each release, 
+see the [GitHub Releases page](https://github.com/modelcontextprotocol/swift-sdk/releases).
+
 ## License
 
 This project is licensed under the MIT License.
