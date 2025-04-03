@@ -195,9 +195,9 @@ public actor Server {
                                     requestID = .number(intValue)
                                 }
                             }
-                            throw Error.parseError("Invalid message format")
+                            throw MCPError.parseError("Invalid message format")
                         }
-                    } catch let error where Error.isResourceTemporarilyUnavailable(error) {
+                    } catch let error where MCPError.isResourceTemporarilyUnavailable(error) {
                         // Resource temporarily unavailable, retry after a short delay
                         try? await Task.sleep(for: .milliseconds(10))
                         continue
@@ -206,8 +206,8 @@ public actor Server {
                             "Error processing message", metadata: ["error": "\(error)"])
                         let response = AnyMethod.response(
                             id: requestID ?? .random,
-                            error: error as? Error
-                                ?? Error.internalError(error.localizedDescription)
+                            error: error as? MCPError
+                                ?? MCPError.internalError(error.localizedDescription)
                         )
                         try? await send(response)
                     }
@@ -265,7 +265,7 @@ public actor Server {
     /// Send a response to a request
     public func send<M: Method>(_ response: Response<M>) async throws {
         guard let connection = connection else {
-            throw Error.internalError("Server connection not initialized")
+            throw MCPError.internalError("Server connection not initialized")
         }
 
         let encoder = JSONEncoder()
@@ -278,7 +278,7 @@ public actor Server {
     /// Send a notification to connected clients
     public func notify<N: Notification>(_ notification: Message<N>) async throws {
         guard let connection = connection else {
-            throw Error.internalError("Server connection not initialized")
+            throw MCPError.internalError("Server connection not initialized")
         }
 
         let encoder = JSONEncoder()
@@ -311,7 +311,7 @@ public actor Server {
 
         // Find handler for method name
         guard let handler = methodHandlers[request.method] else {
-            let error = Error.methodNotFound("Unknown method: \(request.method)")
+            let error = MCPError.methodNotFound("Unknown method: \(request.method)")
             let response = AnyMethod.response(id: request.id, error: error)
             try await send(response)
             throw error
@@ -322,7 +322,7 @@ public actor Server {
             let response = try await handler(request)
             try await send(response)
         } catch {
-            let mcpError = error as? Error ?? Error.internalError(error.localizedDescription)
+            let mcpError = error as? MCPError ?? MCPError.internalError(error.localizedDescription)
             let response = AnyMethod.response(id: request.id, error: mcpError)
             try await send(response)
             throw error
@@ -361,7 +361,7 @@ public actor Server {
 
     private func checkInitialized() throws {
         guard isInitialized else {
-            throw Error.invalidRequest("Server is not initialized")
+            throw MCPError.invalidRequest("Server is not initialized")
         }
     }
 
@@ -371,16 +371,16 @@ public actor Server {
         // Initialize
         withMethodHandler(Initialize.self) { [weak self] params in
             guard let self = self else {
-                throw Error.internalError("Server was deallocated")
+                throw MCPError.internalError("Server was deallocated")
             }
 
             guard await !self.isInitialized else {
-                throw Error.invalidRequest("Server is already initialized")
+                throw MCPError.invalidRequest("Server is already initialized")
             }
 
             // Validate protocol version
             guard Version.latest == params.protocolVersion else {
-                throw Error.invalidRequest(
+                throw MCPError.invalidRequest(
                     "Unsupported protocol version: \(params.protocolVersion)")
             }
 

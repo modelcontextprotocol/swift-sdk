@@ -109,7 +109,7 @@ struct ServerTests {
 
         try await server.start(transport: transport) { clientInfo, _ in
             if clientInfo.name == "BlockedClient" {
-                throw Error.invalidRequest("Client not allowed")
+                throw MCPError.invalidRequest("Client not allowed")
             }
         }
 

@@ -90,8 +90,8 @@ struct ClientTests {
         do {
             try await client.connect(transport: transport)
             #expect(Bool(false), "Expected connection to fail")
-        } catch let error as Error {
-            if case Error.transportError = error {
+        } catch let error as MCPError {
+            if case MCPError.transportError = error {
                 #expect(Bool(true))
             } else {
                 #expect(Bool(false), "Expected transport error")
@@ -112,8 +112,8 @@ struct ClientTests {
         do {
             try await client.ping()
             #expect(Bool(false), "Expected ping to fail")
-        } catch let error as Error {
-            if case Error.transportError = error {
+        } catch let error as MCPError {
+            if case MCPError.transportError = error {
                 #expect(Bool(true))
             } else {
                 #expect(Bool(false), "Expected transport error")
@@ -136,8 +136,8 @@ struct ClientTests {
             do {
                 _ = try await client.listPrompts()
                 #expect(Bool(false), "Expected listPrompts to fail in strict mode")
-            } catch let error as Error {
-                if case Error.methodNotFound = error {
+            } catch let error as MCPError {
+                if case MCPError.methodNotFound = error {
                     #expect(Bool(true))
                 } else {
                     #expect(Bool(false), "Expected methodNotFound error, got \(error)")
@@ -185,7 +185,7 @@ struct ClientTests {
                     // Create an error response with the same ID
                     let errorResponse = Response<ListPrompts>(
                         id: decodedRequest.id,
-                        error: Error.methodNotFound("Test: Prompts capability not available")
+                        error: MCPError.methodNotFound("Test: Prompts capability not available")
                     )
                     try await transport.queue(response: errorResponse)
 
@@ -193,8 +193,8 @@ struct ClientTests {
                     do {
                         _ = try await client.listPrompts()
                         #expect(Bool(false), "Expected listPrompts to fail in non-strict mode")
-                    } catch let error as Error {
-                        if case Error.methodNotFound = error {
+                    } catch let error as MCPError {
+                        if case MCPError.methodNotFound = error {
                             #expect(Bool(true))
                         } else {
                             #expect(Bool(false), "Expected methodNotFound error, got \(error)")

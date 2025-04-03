@@ -201,7 +201,7 @@ public actor Client {
                                 "Unexpected message received by client", metadata: metadata)
                         }
                     }
-                } catch let error where Error.isResourceTemporarilyUnavailable(error) {
+                } catch let error where MCPError.isResourceTemporarilyUnavailable(error) {
                     try? await Task.sleep(for: .milliseconds(10))
                     continue
                 } catch {
@@ -217,7 +217,7 @@ public actor Client {
     public func disconnect() async {
         // Cancel all pending requests
         for (id, request) in pendingRequests {
-            request.resume(throwing: Error.internalError("Client disconnected"))
+            request.resume(throwing: MCPError.internalError("Client disconnected"))
             pendingRequests.removeValue(forKey: id)
         }
 
@@ -247,7 +247,7 @@ public actor Client {
     /// Send a request and receive its response
     public func send<M: Method>(_ request: Request<M>) async throws -> M.Result {
         guard let connection = connection else {
-            throw Error.internalError("Client connection not initialized")
+            throw MCPError.internalError("Client connection not initialized")
         }
 
         let requestData = try JSONEncoder().encode(request)
@@ -439,10 +439,10 @@ public actor Client {
     {
         if configuration.strict {
             guard let capabilities = serverCapabilities else {
-                throw Error.methodNotFound("Server capabilities not initialized")
+                throw MCPError.methodNotFound("Server capabilities not initialized")
             }
             guard capabilities[keyPath: keyPath] != nil else {
-                throw Error.methodNotFound("\(name) is not supported by the server")
+                throw MCPError.methodNotFound("\(name) is not supported by the server")
             }
         }
     }

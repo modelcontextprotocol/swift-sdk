@@ -7,7 +7,7 @@ import Foundation
 #endif
 
 /// A model context protocol error.
-public enum Error: Sendable {
+public enum MCPError: Sendable {
     // Standard JSON-RPC 2.0 errors (-32700 to -32603)
     case parseError(String?)  // -32700
     case invalidRequest(String?)  // -32600
@@ -53,7 +53,7 @@ public enum Error: Sendable {
 
 // MARK: LocalizedError
 
-extension Error: LocalizedError {
+extension MCPError: LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .parseError(let detail):
@@ -116,7 +116,7 @@ extension Error: LocalizedError {
 
 // MARK: CustomDebugStringConvertible
 
-extension Error: CustomDebugStringConvertible {
+extension MCPError: CustomDebugStringConvertible {
     public var debugDescription: String {
         switch self {
         case .transportError(let error):
@@ -131,7 +131,7 @@ extension Error: CustomDebugStringConvertible {
 
 // MARK: Codable
 
-extension Error: Codable {
+extension MCPError: Codable {
     private enum CodingKeys: String, CodingKey {
         case code, message, data
     }
@@ -199,15 +199,15 @@ extension Error: Codable {
 
 // MARK: Equatable
 
-extension Error: Equatable {
-    public static func == (lhs: Error, rhs: Error) -> Bool {
+extension MCPError: Equatable {
+    public static func == (lhs: MCPError, rhs: MCPError) -> Bool {
         lhs.code == rhs.code
     }
 }
 
 // MARK: Hashable
 
-extension Error: Hashable {
+extension MCPError: Hashable {
     public func hash(into hasher: inout Hasher) {
         hasher.combine(code)
         switch self {

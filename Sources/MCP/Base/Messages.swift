@@ -60,7 +60,7 @@ extension Method {
     }
 
     /// Create a response with the given error.
-    public static func response(id: ID, error: Error) -> Response<Self> {
+    public static func response(id: ID, error: MCPError) -> Response<Self> {
         Response(id: id, error: error)
     }
 }
@@ -186,14 +186,14 @@ public struct Response<M: Method>: Hashable, Identifiable, Codable, Sendable {
     /// The response ID.
     public let id: ID
     /// The response result.
-    public let result: Swift.Result<M.Result, Error>
+    public let result: Swift.Result<M.Result, MCPError>
 
     public init(id: ID, result: M.Result) {
         self.id = id
         self.result = .success(result)
     }
 
-    public init(id: ID, error: Error) {
+    public init(id: ID, error: MCPError) {
         self.id = id
         self.result = .failure(error)
     }
@@ -224,7 +224,7 @@ public struct Response<M: Method>: Hashable, Identifiable, Codable, Sendable {
         id = try container.decode(ID.self, forKey: .id)
         if let result = try? container.decode(M.Result.self, forKey: .result) {
             self.result = .success(result)
-        } else if let error = try? container.decode(Error.self, forKey: .error) {
+        } else if let error = try? container.decode(MCPError.self, forKey: .error) {
             self.result = .failure(error)
         } else {
             throw DecodingError.dataCorrupted(
