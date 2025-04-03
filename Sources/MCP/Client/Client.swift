@@ -321,7 +321,7 @@ public actor Client {
     public func getPrompt(name: String, arguments: [String: Value]? = nil) async throws
         -> (description: String?, messages: [Prompt.Message])
     {
-        try checkCapability(\.prompts, "Prompts")
+        try validateServerCapability(\.prompts, "Prompts")
         let request = GetPrompt.request(.init(name: name, arguments: arguments))
         let result = try await send(request)
         return (description: result.description, messages: result.messages)
@@ -330,7 +330,7 @@ public actor Client {
     public func listPrompts(cursor: String? = nil) async throws
         -> (prompts: [Prompt], nextCursor: String?)
     {
-        try checkCapability(\.prompts, "Prompts")
+        try validateServerCapability(\.prompts, "Prompts")
         let request: Request<ListPrompts>
         if let cursor = cursor {
             request = ListPrompts.request(.init(cursor: cursor))
@@ -344,7 +344,7 @@ public actor Client {
     // MARK: - Resources
 
     public func readResource(uri: String) async throws -> [Resource.Content] {
-        try checkCapability(\.resources, "Resources")
+        try validateServerCapability(\.resources, "Resources")
         let request = ReadResource.request(.init(uri: uri))
         let result = try await send(request)
         return result.contents
@@ -353,7 +353,7 @@ public actor Client {
     public func listResources(cursor: String? = nil) async throws -> (
         resources: [Resource], nextCursor: String?
     ) {
-        try checkCapability(\.resources, "Resources")
+        try validateServerCapability(\.resources, "Resources")
         let request: Request<ListResources>
         if let cursor = cursor {
             request = ListResources.request(.init(cursor: cursor))
@@ -365,7 +365,7 @@ public actor Client {
     }
 
     public func subscribeToResource(uri: String) async throws {
-        try checkCapability(\.resources?.subscribe, "Resource subscription")
+        try validateServerCapability(\.resources?.subscribe, "Resource subscription")
         let request = ResourceSubscribe.request(.init(uri: uri))
         _ = try await send(request)
     }
@@ -373,7 +373,7 @@ public actor Client {
     // MARK: - Tools
 
     public func listTools(cursor: String? = nil) async throws -> [Tool] {
-        try checkCapability(\.tools, "Tools")
+        try validateServerCapability(\.tools, "Tools")
         let request: Request<ListTools>
         if let cursor = cursor {
             request = ListTools.request(.init(cursor: cursor))
@@ -387,7 +387,7 @@ public actor Client {
     public func callTool(name: String, arguments: [String: Value]? = nil) async throws -> (
         content: [Tool.Content], isError: Bool?
     ) {
-        try checkCapability(\.tools, "Tools")
+        try validateServerCapability(\.tools, "Tools")
         let request = CallTool.request(.init(name: name, arguments: arguments))
         let result = try await send(request)
         return (content: result.content, isError: result.isError)
@@ -437,7 +437,12 @@ public actor Client {
 
     // MARK: -
 
-    private func checkCapability<T>(_ keyPath: KeyPath<Server.Capabilities, T?>, _ name: String)
+    /// Validate the server capabilities.
+    /// Throws an error if the client is configured to be strict and the capability is not supported.
+    private func validateServerCapability<T>(
+        _ keyPath: KeyPath<Server.Capabilities, T?>,
+        _ name: String
+    )
         throws
     {
         if configuration.strict {
