@@ -138,6 +138,6 @@ let (description, messages) = try await client.getPrompt(
 
 ## License
 
-This project is licensed under the Apache License, Version 2.0.
+This project is licensed under the MIT License.
 
 [mcp]: https://modelcontextprotocol.io
