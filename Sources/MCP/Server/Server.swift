@@ -199,7 +199,7 @@ public actor Server {
                         }
                     } catch let error where Error.isResourceTemporarilyUnavailable(error) {
                         // Resource temporarily unavailable, retry after a short delay
-                        try? await Task.sleep(nanoseconds: 10_000_000)  // 10ms
+                        try? await Task.sleep(for: .milliseconds(10))
                         continue
                     } catch {
                         await logger?.error(
@@ -398,7 +398,7 @@ public actor Server {
 
             // Send initialized notification after a short delay
             Task {
-                try? await Task.sleep(nanoseconds: 100_000_000)  // 100ms
+                try? await Task.sleep(for: .milliseconds(10))
                 try? await self.notify(InitializedNotification.message())
             }
 

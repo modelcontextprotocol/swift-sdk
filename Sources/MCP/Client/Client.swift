@@ -202,7 +202,7 @@ public actor Client {
                         }
                     }
                 } catch let error where Error.isResourceTemporarilyUnavailable(error) {
-                    try? await Task.sleep(nanoseconds: 10_000_000)  // 10ms
+                    try? await Task.sleep(for: .milliseconds(10))
                     continue
                 } catch {
                     await logger?.error(

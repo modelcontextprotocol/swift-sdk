@@ -111,7 +111,7 @@ public actor StdioTransport: Transport {
                     }
                 }
             } catch let error where Error.isResourceTemporarilyUnavailable(error) {
-                try? await Task.sleep(nanoseconds: 10_000_000)  // 10ms backoff
+                try? await Task.sleep(for: .milliseconds(10))
                 continue
             } catch {
                 if !Task.isCancelled {
@@ -150,7 +150,7 @@ public actor StdioTransport: Transport {
                     remaining = remaining.dropFirst(written)
                 }
             } catch let error where Error.isResourceTemporarilyUnavailable(error) {
-                try await Task.sleep(nanoseconds: 10_000_000)  // 10ms backoff
+                try await Task.sleep(for: .milliseconds(10))
                 continue
             } catch {
                 throw Error.transportError(error)

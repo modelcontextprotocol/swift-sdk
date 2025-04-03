@@ -27,7 +27,7 @@ struct ClientTests {
 
         try await client.connect(transport: transport)
         // Small delay to ensure message loop is started
-        try await Task.sleep(nanoseconds: 10_000_000)  // 10ms
+        try await Task.sleep(for: .milliseconds(10))
 
         // Create a task for initialize that we'll cancel
         let initTask = Task {
@@ -35,7 +35,7 @@ struct ClientTests {
         }
 
         // Give it a moment to send the request
-        try await Task.sleep(nanoseconds: 10_000_000)  // 10ms
+        try await Task.sleep(for: .milliseconds(10))
 
         #expect(await transport.sentMessages.count == 1)
         #expect(await transport.sentMessages.first?.contains(Initialize.name) == true)
@@ -47,7 +47,7 @@ struct ClientTests {
 
         // Disconnect client to clean up message loop and give time for continuation cleanup
         await client.disconnect()
-        try await Task.sleep(nanoseconds: 50_000_000)  // 50ms
+        try await Task.sleep(for: .milliseconds(50))
     }
 
     @Test(
@@ -60,7 +60,7 @@ struct ClientTests {
 
         try await client.connect(transport: transport)
         // Small delay to ensure message loop is started
-        try await Task.sleep(nanoseconds: 10_000_000)  // 10ms
+        try await Task.sleep(for: .milliseconds(10))
 
         // Create a task for the ping that we'll cancel
         let pingTask = Task {
@@ -68,7 +68,7 @@ struct ClientTests {
         }
 
         // Give it a moment to send the request
-        try await Task.sleep(nanoseconds: 10_000_000)  // 10ms
+        try await Task.sleep(for: .milliseconds(10))
 
         #expect(await transport.sentMessages.count == 1)
         #expect(await transport.sentMessages.first?.contains(Ping.name) == true)
@@ -78,7 +78,7 @@ struct ClientTests {
 
         // Disconnect client to clean up message loop and give time for continuation cleanup
         await client.disconnect()
-        try await Task.sleep(nanoseconds: 50_000_000)  // 50ms
+        try await Task.sleep(for: .milliseconds(50))
     }
 
     @Test("Connection failure handling")
