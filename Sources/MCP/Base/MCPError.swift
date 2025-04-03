@@ -20,7 +20,7 @@ public enum MCPError: Error, Sendable {
 
     // Transport specific errors
     case connectionClosed
-    case transportError(Swift.Error)
+    case transportError(Error)
 
     /// The JSON-RPC 2.0 error code
     public var code: Int {
@@ -37,7 +37,7 @@ public enum MCPError: Error, Sendable {
     }
 
     /// Check if an error represents a "resource temporarily unavailable" condition
-    public static func isResourceTemporarilyUnavailable(_ error: Swift.Error) -> Bool {
+    public static func isResourceTemporarilyUnavailable(_ error: Error) -> Bool {
         #if canImport(System)
             if let errno = error as? System.Errno, errno == .resourceTemporarilyUnavailable {
                 return true

@@ -132,7 +132,7 @@ struct ClientTests {
         try await client.connect(transport: transport)
 
         // Create a task for listPrompts
-        let promptsTask = Task<Void, Swift.Error> {
+        let promptsTask = Task<Void, Error> {
             do {
                 _ = try await client.listPrompts()
                 #expect(Bool(false), "Expected listPrompts to fail in strict mode")
