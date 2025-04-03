@@ -1,5 +1,6 @@
 import Testing
 
+import struct Foundation.Data
 import class Foundation.JSONDecoder
 import class Foundation.JSONEncoder
 
@@ -79,7 +80,7 @@ struct NotificationTests {
         let jsonString = """
             {"jsonrpc":"2.0","method":"notifications/initialized"}
             """
-        let data = jsonString.data(using: .utf8)!
+        let data = Data(jsonString.utf8)
 
         let decoder = JSONDecoder()
         let decoded = try decoder.decode(Message<InitializedNotification>.self, from: data)

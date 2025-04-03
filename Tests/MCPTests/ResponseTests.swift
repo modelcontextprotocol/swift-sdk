@@ -1,5 +1,6 @@
 import Testing
 
+import struct Foundation.Data
 import class Foundation.JSONDecoder
 import class Foundation.JSONEncoder
 
@@ -104,7 +105,7 @@ struct ResponseTests {
         let jsonString = """
             {"jsonrpc":"2.0","id":"test-id","result":{}}
             """
-        let data = jsonString.data(using: .utf8)!
+        let data = Data(jsonString.utf8)
 
         let decoder = JSONDecoder()
         let decoded = try decoder.decode(Response<EmptyMethod>.self, from: data)

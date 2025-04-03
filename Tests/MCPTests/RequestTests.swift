@@ -1,5 +1,6 @@
 import Testing
 
+import struct Foundation.Data
 import class Foundation.JSONDecoder
 import class Foundation.JSONEncoder
 
@@ -68,7 +69,7 @@ struct RequestTests {
         let jsonString = """
             {"jsonrpc":"2.0","id":1,"method":"empty.method"}
             """
-        let data = jsonString.data(using: .utf8)!
+        let data = Data(jsonString.utf8)
 
         let decoder = JSONDecoder()
         let decoded = try decoder.decode(Request<EmptyMethod>.self, from: data)
@@ -83,7 +84,7 @@ struct RequestTests {
         let jsonString = """
             {"jsonrpc":"2.0","id":1,"method":"ping","params":{}}
             """
-        let data = jsonString.data(using: .utf8)!
+        let data = Data(jsonString.utf8)
 
         let decoder = JSONDecoder()
         let decoded = try decoder.decode(Request<Ping>.self, from: data)
@@ -98,7 +99,7 @@ struct RequestTests {
         let jsonString = """
             {"jsonrpc":"2.0","id":1,"method":"ping"}
             """
-        let data = jsonString.data(using: .utf8)!
+        let data = Data(jsonString.utf8)
 
         let decoder = JSONDecoder()
         let decoded = try decoder.decode(Request<Ping>.self, from: data)
@@ -113,7 +114,7 @@ struct RequestTests {
         let jsonString = """
             {"jsonrpc":"2.0","id":1,"method":"ping","params":null}
             """
-        let data = jsonString.data(using: .utf8)!
+        let data = Data(jsonString.utf8)
 
         let decoder = JSONDecoder()
         let decoded = try decoder.decode(Request<Ping>.self, from: data)
@@ -127,7 +128,7 @@ struct RequestTests {
         let jsonString = """
             {"jsonrpc":"2.0","id":1,"method":"tools/call"}
             """
-        let data = jsonString.data(using: .utf8)!
+        let data = Data(jsonString.utf8)
 
         let decoder = JSONDecoder()
         #expect(throws: DecodingError.self) {
@@ -140,7 +141,7 @@ struct RequestTests {
         let jsonString = """
             {"jsonrpc":"2.0","id":1,"method":"tools/call","params":null}
             """
-        let data = jsonString.data(using: .utf8)!
+        let data = Data(jsonString.utf8)
 
         let decoder = JSONDecoder()
         #expect(throws: DecodingError.self) {
@@ -153,7 +154,7 @@ struct RequestTests {
         let jsonString = """
             {"jsonrpc":"2.0","id":1,"method":"empty.method","params":null}
             """
-        let data = jsonString.data(using: .utf8)!
+        let data = Data(jsonString.utf8)
 
         let decoder = JSONDecoder()
         let decoded = try decoder.decode(Request<EmptyMethod>.self, from: data)
@@ -167,7 +168,7 @@ struct RequestTests {
         let jsonString = """
             {"jsonrpc":"2.0","id":1,"method":"empty.method","params":{}}
             """
-        let data = jsonString.data(using: .utf8)!
+        let data = Data(jsonString.utf8)
 
         let decoder = JSONDecoder()
         let decoded = try decoder.decode(Request<EmptyMethod>.self, from: data)
@@ -185,7 +186,7 @@ struct RequestTests {
         let decoder = JSONDecoder()
         #expect(throws: DecodingError.self) {
             _ = try decoder.decode(
-                Request<Initialize>.self, from: missingParams.data(using: .utf8)!)
+                Request<Initialize>.self, from: Data(missingParams.utf8))
         }
 
         // Test null params
@@ -193,7 +194,7 @@ struct RequestTests {
             {"jsonrpc":"2.0","id":"test-id","method":"initialize","params":null}
             """
         #expect(throws: DecodingError.self) {
-            _ = try decoder.decode(Request<Initialize>.self, from: nullParams.data(using: .utf8)!)
+            _ = try decoder.decode(Request<Initialize>.self, from: Data(nullParams.utf8))
         }
 
         // Verify that empty object params works (since fields have defaults)
@@ -201,7 +202,9 @@ struct RequestTests {
             {"jsonrpc":"2.0","id":"test-id","method":"initialize","params":{}}
             """
         let decoded = try decoder.decode(
-            Request<Initialize>.self, from: emptyParams.data(using: .utf8)!)
+            Request<Initialize>.self,
+            from: Data(emptyParams.utf8)
+        )
         #expect(decoded.params.protocolVersion == Version.latest)
         #expect(decoded.params.clientInfo.name == "unknown")
     }
@@ -211,7 +214,7 @@ struct RequestTests {
         let jsonString = """
             {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"invalid":"value"}}
             """
-        let data = jsonString.data(using: .utf8)!
+        let data = Data(jsonString.utf8)
 
         let decoder = JSONDecoder()
         #expect(throws: DecodingError.self) {
@@ -228,7 +231,8 @@ struct RequestTests {
         let decoder = JSONDecoder()
         let decodedMissing = try decoder.decode(
             Request<ListTools>.self,
-            from: missingParams.data(using: .utf8)!)
+            from: Data(missingParams.utf8)
+        )
         #expect(decodedMissing.id == 1)
         #expect(decodedMissing.method == ListTools.name)
         #expect(decodedMissing.params.cursor == nil)
@@ -239,7 +243,8 @@ struct RequestTests {
             """
         let decodedNull = try decoder.decode(
             Request<ListTools>.self,
-            from: nullParams.data(using: .utf8)!)
+            from: Data(nullParams.utf8)
+        )
         #expect(decodedNull.params.cursor == nil)
 
         // Test with empty object params
@@ -248,7 +253,8 @@ struct RequestTests {
             """
         let decodedEmpty = try decoder.decode(
             Request<ListTools>.self,
-            from: emptyParams.data(using: .utf8)!)
+            from: Data(emptyParams.utf8)
+        )
         #expect(decodedEmpty.params.cursor == nil)
 
         // Test with provided cursor
@@ -257,7 +263,8 @@ struct RequestTests {
             """
         let decodedWithCursor = try decoder.decode(
             Request<ListTools>.self,
-            from: withCursor.data(using: .utf8)!)
+            from: Data(withCursor.utf8)
+        )
         #expect(decodedWithCursor.params.cursor == "next-page")
     }
 
@@ -267,7 +274,7 @@ struct RequestTests {
         let jsonString = """
             {"jsonrpc":"2.0","id":1,"method":"ping"}
             """
-        let data = jsonString.data(using: .utf8)!
+        let data = Data(jsonString.utf8)
 
         let decoder = JSONDecoder()
         let decoded = try decoder.decode(AnyRequest.self, from: data)
@@ -282,7 +289,7 @@ struct RequestTests {
         let jsonString = """
             {"jsonrpc":"2.0","id":1,"method":"ping","params":null}
             """
-        let data = jsonString.data(using: .utf8)!
+        let data = Data(jsonString.utf8)
 
         let decoder = JSONDecoder()
         let decoded = try decoder.decode(Request<Ping>.self, from: data)
@@ -297,7 +304,7 @@ struct RequestTests {
         let jsonString = """
             {"jsonrpc":"2.0","id":1,"method":"ping","params":{}}
             """
-        let data = jsonString.data(using: .utf8)!
+        let data = Data(jsonString.utf8)
 
         let decoder = JSONDecoder()
         let decoded = try decoder.decode(Request<Ping>.self, from: data)

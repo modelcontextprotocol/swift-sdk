@@ -29,7 +29,7 @@ struct StdioTransportTests {
 
         // Test sending a simple message
         let message = #"{"key":"value"}"#
-        try await transport.send(message.data(using: .utf8)!)
+        try await transport.send(Data(message.utf8))
 
         // Read and verify the output
         var buffer = [UInt8](repeating: 0, count: 1024)
@@ -37,7 +37,7 @@ struct StdioTransportTests {
             try reader.read(into: UnsafeMutableRawBufferPointer(pointer))
         }
         let data = Data(buffer[..<bytesRead])
-        let expectedOutput = message.data(using: .utf8)! + "\n".data(using: .utf8)!
+        let expectedOutput = Data(message.utf8) + Data("\n".utf8)
         #expect(data == expectedOutput)
 
         await transport.disconnect()
@@ -52,7 +52,7 @@ struct StdioTransportTests {
 
         // Write test message to input pipe
         let message = ["key": "value"]
-        let messageData = try JSONEncoder().encode(message) + "\n".data(using: .utf8)!
+        let messageData = try JSONEncoder().encode(message) + Data("\n".utf8)
         try writer.writeAll(messageData)
         try writer.close()
 
@@ -62,7 +62,7 @@ struct StdioTransportTests {
 
         // Get first message
         let received = try await iterator.next()
-        #expect(received == #"{"key":"value"}"#.data(using: .utf8)!)
+        #expect(received == Data(#"{"key":"value"}"#.utf8))
 
         await transport.disconnect()
     }
@@ -76,7 +76,7 @@ struct StdioTransportTests {
 
         // Write invalid JSON to input pipe
         let invalidJSON = #"{ invalid json }"#
-        try writer.writeAll(invalidJSON.data(using: .utf8)!)
+        try writer.writeAll(Data(invalidJSON.utf8))
         try writer.close()
 
         let stream: AsyncThrowingStream<Data, Error> = await transport.receive()

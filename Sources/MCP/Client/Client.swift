@@ -194,9 +194,8 @@ public actor Client {
                             await handleMessage(message)
                         } else {
                             var metadata: Logger.Metadata = [:]
-                            if let string = String(data: data, encoding: .utf8) {
-                                metadata["message"] = .string(string)
-                            }
+                            let string = String(decoding: data, as: UTF8.self)
+                            metadata["message"] = .string(string)
                             await logger?.warning(
                                 "Unexpected message received by client", metadata: metadata)
                         }

@@ -19,11 +19,7 @@ actor MockTransport: Transport {
     private(set) var sentData: [Data] = []
     var sentMessages: [String] {
         return sentData.compactMap { data in
-            guard let string = String(data: data, encoding: .utf8) else {
-                logger.error("Failed to decode sent data as UTF-8")
-                return nil
-            }
-            return string
+            return String(decoding: data, as: UTF8.self)
         }
     }
 
@@ -64,9 +60,8 @@ actor MockTransport: Transport {
             dataStreamContinuation = continuation
             for message in dataToReceive {
                 continuation.yield(message)
-                if let string = String(data: message, encoding: .utf8) {
-                    receivedMessages.append(string)
-                }
+                let string = String(decoding: message, as: UTF8.self)
+                receivedMessages.append(string)
             }
             dataToReceive.removeAll()
         }

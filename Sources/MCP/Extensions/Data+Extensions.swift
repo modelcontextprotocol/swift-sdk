@@ -65,10 +65,7 @@ extension Data {
             guard let base64Data = Data(base64Encoded: String(encodedData)) else { return nil }
             decodedData = base64Data
         } else {
-            guard
-                let percentDecodedData = String(encodedData).removingPercentEncoding?.data(
-                    using: .utf8)
-            else { return nil }
+            guard let percentDecodedData = String(encodedData).removingPercentEncoding.map({ Data($0.utf8) }) else { return nil }
             decodedData = percentDecodedData
         }
 

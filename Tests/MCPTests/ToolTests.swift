@@ -118,7 +118,7 @@ struct ToolTests {
         let jsonString = """
             {"jsonrpc":"2.0","id":"test-id","method":"tools/list"}
             """
-        let data = jsonString.data(using: .utf8)!
+        let data = Data(jsonString.utf8)
 
         let decoder = JSONDecoder()
         let decoded = try decoder.decode(Request<ListTools>.self, from: data)
@@ -133,7 +133,7 @@ struct ToolTests {
         let jsonString = """
             {"jsonrpc":"2.0","id":"test-id","method":"tools/list","params":null}
             """
-        let data = jsonString.data(using: .utf8)!
+        let data = Data(jsonString.utf8)
 
         let decoder = JSONDecoder()
         let decoded = try decoder.decode(Request<ListTools>.self, from: data)
@@ -211,7 +211,7 @@ struct ToolTests {
         let jsonString = """
             {"jsonrpc":"2.0","id":1,"method":"tools/list"}
             """
-        let jsonData = jsonString.data(using: .utf8)!
+        let jsonData = Data(jsonString.utf8)
 
         let anyRequest = try JSONDecoder().decode(AnyRequest.self, from: jsonData)
 

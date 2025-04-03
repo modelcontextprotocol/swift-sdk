@@ -63,7 +63,7 @@ struct ResourceTests {
 
     @Test("Resource.Content binary initialization and encoding")
     func testResourceContentBinaryEncoding() throws {
-        let binaryData = "Test binary data".data(using: .utf8)!
+        let binaryData = Data("Test binary data".utf8)
         let content = Resource.Content.binary(
             binaryData, uri: "file://test.bin", mimeType: "application/octet-stream")
         let encoder = JSONEncoder()
@@ -93,7 +93,7 @@ struct ResourceTests {
         let jsonString = """
             {"jsonrpc":"2.0","id":"test-id","method":"resources/list"}
             """
-        let data = jsonString.data(using: .utf8)!
+        let data = Data(jsonString.utf8)
 
         let decoder = JSONDecoder()
         let decoded = try decoder.decode(Request<ListResources>.self, from: data)
@@ -108,7 +108,7 @@ struct ResourceTests {
         let jsonString = """
             {"jsonrpc":"2.0","id":"test-id","method":"resources/list","params":null}
             """
-        let data = jsonString.data(using: .utf8)!
+        let data = Data(jsonString.utf8)
 
         let decoder = JSONDecoder()
         let decoded = try decoder.decode(Request<ListResources>.self, from: data)

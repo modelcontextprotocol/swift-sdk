@@ -177,11 +177,10 @@ struct ClientTests {
 
                 // Get the last sent message and extract the request ID
                 if let lastMessage = await transport.sentMessages.last,
-                    let data = lastMessage.data(using: .utf8),
                     let decodedRequest = try? JSONDecoder().decode(
-                        Request<ListPrompts>.self, from: data)
-                {
-
+                        Request<ListPrompts>.self,
+                        from: Data(lastMessage.utf8)
+                    ) {
                     // Create an error response with the same ID
                     let errorResponse = Response<ListPrompts>(
                         id: decodedRequest.id,
