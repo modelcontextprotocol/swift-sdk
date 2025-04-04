@@ -144,9 +144,9 @@ struct RoundtripTests {
         }
 
         let listToolsTask = Task {
-            let result = try await client.listTools()
-            #expect(result.count == 1)
-            #expect(result[0].name == "add")
+            let (tools, _) = try await client.listTools()
+            #expect(tools.count == 1)
+            #expect(tools[0].name == "add")
         }
 
         let callToolTask = Task {
