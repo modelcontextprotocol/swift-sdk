@@ -112,16 +112,16 @@ public actor Client {
     private var task: Task<Void, Never>?
 
     /// An error indicating a type mismatch when decoding a pending request
-    private struct TypeMismatchError: Error {}
+    private struct TypeMismatchError: Swift.Error {}
 
     /// A pending request with a continuation for the result
     private struct PendingRequest<T> {
-        let continuation: CheckedContinuation<T, Error>
+        let continuation: CheckedContinuation<T, Swift.Error>
     }
 
     /// A type-erased pending request
     private struct AnyPendingRequest {
-        private let _resume: (Result<Any, Error>) -> Void
+        private let _resume: (Result<Any, Swift.Error>) -> Void
 
         init<T: Sendable & Decodable>(_ request: PendingRequest<T>) {
             _resume = { result in
@@ -146,7 +146,7 @@ public actor Client {
             _resume(.success(value))
         }
 
-        func resume(throwing error: Error) {
+        func resume(throwing error: Swift.Error) {
             _resume(.failure(error))
         }
     }
@@ -274,7 +274,7 @@ public actor Client {
 
     private func addPendingRequest<T: Sendable & Decodable>(
         id: ID,
-        continuation: CheckedContinuation<T, Error>,
+        continuation: CheckedContinuation<T, Swift.Error>,
         type: T.Type
     ) {
         pendingRequests[id] = AnyPendingRequest(PendingRequest(continuation: continuation))

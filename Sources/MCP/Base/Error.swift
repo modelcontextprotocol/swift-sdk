@@ -6,24 +6,8 @@ import Foundation
     @preconcurrency import SystemPackage
 #endif
 
-/// Top-level namespace for backward compatibility
-///
-/// This is provided to allow existing code that uses `MCP.Error` to continue
-/// to work without modification.
-///
-/// The MCPError type is now the recommended way to handle errors in MCP.
-///
-/// - Warning: This namespace is deprecated and will be removed in a future version.
-public enum MCP {
-    /// Deprecated type alias for MCPError
-    @available(*, deprecated, renamed: "MCPError", message: "Use MCPError instead of MCP.Error")
-    public typealias Error = MCPError
-}
-
-// MARK: -
-
 /// A model context protocol error.
-public enum MCPError: Error, Sendable {
+public enum MCPError: Swift.Error, Sendable {
     // Standard JSON-RPC 2.0 errors (-32700 to -32603)
     case parseError(String?)  // -32700
     case invalidRequest(String?)  // -32600
@@ -36,7 +20,7 @@ public enum MCPError: Error, Sendable {
 
     // Transport specific errors
     case connectionClosed
-    case transportError(Error)
+    case transportError(Swift.Error)
 
     /// The JSON-RPC 2.0 error code
     public var code: Int {
@@ -53,7 +37,7 @@ public enum MCPError: Error, Sendable {
     }
 
     /// Check if an error represents a "resource temporarily unavailable" condition
-    public static func isResourceTemporarilyUnavailable(_ error: Error) -> Bool {
+    public static func isResourceTemporarilyUnavailable(_ error: Swift.Error) -> Bool {
         #if canImport(System)
             if let errno = error as? System.Errno, errno == .resourceTemporarilyUnavailable {
                 return true
@@ -246,3 +230,12 @@ extension MCPError: Hashable {
         }
     }
 }
+
+// MARK: -
+
+/// This is provided to allow existing code that uses `MCP.Error` to continue
+/// to work without modification.
+///
+/// The MCPError type is now the recommended way to handle errors in MCP.
+@available(*, deprecated, renamed: "MCPError", message: "Use MCPError instead of MCP.Error")
+public typealias Error = MCPError

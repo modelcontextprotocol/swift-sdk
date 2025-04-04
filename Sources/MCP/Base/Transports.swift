@@ -23,7 +23,7 @@ public protocol Transport: Actor {
     func send(_ data: Data) async throws
 
     /// Receives data in an async sequence
-    func receive() -> AsyncThrowingStream<Data, Error>
+    func receive() -> AsyncThrowingStream<Data, Swift.Error>
 }
 
 /// Standard input/output transport implementation
@@ -158,7 +158,7 @@ public actor StdioTransport: Transport {
         }
     }
 
-    public func receive() -> AsyncThrowingStream<Data, Error> {
+    public func receive() -> AsyncThrowingStream<Data, Swift.Error> {
         return AsyncThrowingStream { continuation in
             Task {
                 for await message in messageStream {
@@ -179,8 +179,8 @@ public actor StdioTransport: Transport {
         public nonisolated let logger: Logger
 
         private var isConnected = false
-        private let messageStream: AsyncThrowingStream<Data, Error>
-        private let messageContinuation: AsyncThrowingStream<Data, Error>.Continuation
+        private let messageStream: AsyncThrowingStream<Data, Swift.Error>
+        private let messageContinuation: AsyncThrowingStream<Data, Swift.Error>.Continuation
 
         // Track connection state for continuations
         private var connectionContinuationResumed = false
@@ -195,7 +195,7 @@ public actor StdioTransport: Transport {
                 )
 
             // Create message stream
-            var continuation: AsyncThrowingStream<Data, Error>.Continuation!
+            var continuation: AsyncThrowingStream<Data, Swift.Error>.Continuation!
             self.messageStream = AsyncThrowingStream { continuation = $0 }
             self.messageContinuation = continuation
         }
@@ -209,7 +209,7 @@ public actor StdioTransport: Transport {
 
             // Wait for connection to be ready
             try await withCheckedThrowingContinuation {
-                [weak self] (continuation: CheckedContinuation<Void, Error>) in
+                [weak self] (continuation: CheckedContinuation<Void, Swift.Error>) in
                 guard let self = self else {
                     continuation.resume(throwing: MCPError.internalError("Transport deallocated"))
                     return
@@ -245,7 +245,7 @@ public actor StdioTransport: Transport {
             }
         }
 
-        private func handleConnectionReady(continuation: CheckedContinuation<Void, Error>)
+        private func handleConnectionReady(continuation: CheckedContinuation<Void, Swift.Error>)
             async
         {
             if !connectionContinuationResumed {
@@ -259,7 +259,7 @@ public actor StdioTransport: Transport {
         }
 
         private func handleConnectionFailed(
-            error: Error, continuation: CheckedContinuation<Void, Error>
+            error: Swift.Error, continuation: CheckedContinuation<Void, Swift.Error>
         ) async {
             if !connectionContinuationResumed {
                 connectionContinuationResumed = true
@@ -268,7 +268,7 @@ public actor StdioTransport: Transport {
             }
         }
 
-        private func handleConnectionCancelled(continuation: CheckedContinuation<Void, Error>)
+        private func handleConnectionCancelled(continuation: CheckedContinuation<Void, Swift.Error>)
             async
         {
             if !connectionContinuationResumed {
@@ -299,7 +299,7 @@ public actor StdioTransport: Transport {
             var sendContinuationResumed = false
 
             try await withCheckedThrowingContinuation {
-                [weak self] (continuation: CheckedContinuation<Void, Error>) in
+                [weak self] (continuation: CheckedContinuation<Void, Swift.Error>) in
                 guard let self = self else {
                     continuation.resume(throwing: MCPError.internalError("Transport deallocated"))
                     return
@@ -326,7 +326,7 @@ public actor StdioTransport: Transport {
             }
         }
 
-        public func receive() -> AsyncThrowingStream<Data, Error> {
+        public func receive() -> AsyncThrowingStream<Data, Swift.Error> {
             return AsyncThrowingStream { continuation in
                 Task {
                     do {
@@ -382,7 +382,7 @@ public actor StdioTransport: Transport {
             var receiveContinuationResumed = false
 
             return try await withCheckedThrowingContinuation {
-                [weak self] (continuation: CheckedContinuation<Data, Error>) in
+                [weak self] (continuation: CheckedContinuation<Data, Swift.Error>) in
                 guard let self = self else {
                     continuation.resume(throwing: MCPError.internalError("Transport deallocated"))
                     return
