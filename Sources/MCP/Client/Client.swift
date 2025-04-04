@@ -364,7 +364,7 @@ public actor Client {
 
     // MARK: - Tools
 
-    public func listTools(cursor: String? = nil) async throws -> [Tool] {
+    public func listTools(cursor: String? = nil) async throws -> (tools: [Tool], nextCursor: String?) {
         try validateServerCapability(\.tools, "Tools")
         let request: Request<ListTools>
         if let cursor = cursor {
@@ -373,7 +373,7 @@ public actor Client {
             request = ListTools.request(.init())
         }
         let result = try await send(request)
-        return result.tools
+        return (tools: result.tools, nextCursor: result.nextCursor)
     }
 
     public func callTool(name: String, arguments: [String: Value]? = nil) async throws -> (
