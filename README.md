@@ -157,7 +157,7 @@ Located in the `Example` directory, this simple server demonstrates:
     ```
 2.  Build the server:
     ```bash
-    swift build -c release # Use release for better performance
+    swift build -c release 
     ```
     This will create the executable at `.build/release/EchoServer`. Note the full path to this executable.
 
@@ -171,7 +171,7 @@ Located in the `Example` directory, this simple server demonstrates:
         "mcpServers": {
             // ... other servers maybe ...
             "swift_echo_example": {
-                "command": "/PATH/TO/YOUR/SERVER/Example/.build/release/EchoServer"
+                "command": "/PATH/TO/YOUR/SERVER/Example/.build/release/dummy-mcp-server"
             }
             // ... other servers maybe ...
         }
