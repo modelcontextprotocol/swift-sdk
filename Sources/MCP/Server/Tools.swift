@@ -16,10 +16,83 @@ public struct Tool: Hashable, Codable, Sendable {
     /// The tool input schema
     public let inputSchema: Value?
 
-    public init(name: String, description: String, inputSchema: Value? = nil) {
+    /// Annotations that provide display-facing and operational information for a Tool.
+    ///
+    /// - Note: All properties in `ToolAnnotations` are **hints**.
+    ///         They are not guaranteed to provide a faithful description of
+    ///         tool behavior (including descriptive properties like `title`).
+    ///
+    ///         Clients should never make tool use decisions based on `ToolAnnotations`
+    ///         received from untrusted servers.
+    public struct Annotations: Hashable, Codable, Sendable, ExpressibleByNilLiteral {
+        /// A human-readable title for the tool
+        public var title: String?
+
+        /// If true, the tool may perform destructive updates to its environment.
+        /// If false, the tool performs only additive updates.
+        /// (This property is meaningful only when `readOnlyHint == false`)
+        ///
+        /// When unspecified, the implicit default is `true`.
+        public var destructiveHint: Bool?
+
+        /// If true, calling the tool repeatedly with the same arguments
+        /// will have no additional effect on its environment.
+        /// (This property is meaningful only when `readOnlyHint == false`)
+        ///
+        /// When unspecified, the implicit default is `false`.
+        public var idempotentHint: Bool?
+
+        /// If true, this tool may interact with an "open world" of external
+        /// entities. If false, the tool's domain of interaction is closed.
+        /// For example, the world of a web search tool is open, whereas that
+        /// of a memory tool is not.
+        ///
+        /// When unspecified, the implicit default is `true`.
+        public var openWorldHint: Bool?
+
+        /// If true, the tool does not modify its environment.
+        ///
+        /// When unspecified, the implicit default is `false`.
+        public var readOnlyHint: Bool?
+
+        /// Returns true if all properties are nil
+        public var isEmpty: Bool {
+            title == nil && readOnlyHint == nil && destructiveHint == nil && idempotentHint == nil
+                && openWorldHint == nil
+        }
+
+        public init(
+            title: String? = nil,
+            readOnlyHint: Bool? = nil,
+            destructiveHint: Bool? = nil,
+            idempotentHint: Bool? = nil,
+            openWorldHint: Bool? = nil
+        ) {
+            self.title = title
+            self.readOnlyHint = readOnlyHint
+            self.destructiveHint = destructiveHint
+            self.idempotentHint = idempotentHint
+            self.openWorldHint = openWorldHint
+        }
+
+        /// Initialize an empty annotations object
+        public init(nilLiteral: ()) {}
+    }
+
+    /// Annotations that provide display-facing and operational information
+    public var annotations: Annotations
+
+    /// Initialize a tool with a name, description, input schema, and annotations
+    public init(
+        name: String,
+        description: String,
+        inputSchema: Value? = nil,
+        annotations: Annotations = nil
+    ) {
         self.name = name
         self.description = description
         self.inputSchema = inputSchema
+        self.annotations = annotations
     }
 
     /// Content types that can be returned by a tool
@@ -92,6 +165,7 @@ public struct Tool: Hashable, Codable, Sendable {
         case name
         case description
         case inputSchema
+        case annotations
     }
 
     public init(from decoder: Decoder) throws {
@@ -99,6 +173,8 @@ public struct Tool: Hashable, Codable, Sendable {
         name = try container.decode(String.self, forKey: .name)
         description = try container.decode(String.self, forKey: .description)
         inputSchema = try container.decodeIfPresent(Value.self, forKey: .inputSchema)
+        annotations =
+            try container.decodeIfPresent(Tool.Annotations.self, forKey: .annotations) ?? .init()
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -107,6 +183,9 @@ public struct Tool: Hashable, Codable, Sendable {
         try container.encode(description, forKey: .description)
         if let schema = inputSchema {
             try container.encode(schema, forKey: .inputSchema)
+        }
+        if !annotations.isEmpty {
+            try container.encode(annotations, forKey: .annotations)
         }
     }
 }
@@ -120,7 +199,7 @@ public enum ListTools: Method {
 
     public struct Parameters: NotRequired, Hashable, Codable, Sendable {
         public let cursor: String?
-        
+
         public init() {
             self.cursor = nil
         }
