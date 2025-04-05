@@ -4,7 +4,7 @@ This is a basic example demonstrating how to create a simple server that communi
 
 ## Getting Started
 
-https://github.com/modelcontextprotocol/swift-sdk/pull/55#issuecomment-2781042026
+https://github.com/user-attachments/assets/8e790235-a34c-4358-981d-4d4b5e91488f
 
 Located in the `Example` directory, this simple server demonstrates:
 *   Setting up a basic MCP server.
