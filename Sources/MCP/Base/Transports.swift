@@ -1,5 +1,5 @@
+import libmcp
 import Logging
-
 import struct Foundation.Data
 
 #if canImport(System)
@@ -71,11 +71,11 @@ public actor StdioTransport: Transport {
     }
 
     private func setNonBlocking(fileDescriptor: FileDescriptor) throws {
-        let flags = fcntl(fileDescriptor.rawValue, F_GETFL)
+        let flags = fcntl_int(fileDescriptor.rawValue, F_GETFL)
         guard flags >= 0 else {
             throw MCPError.transportError(Errno.badFileDescriptor)
         }
-        let result = fcntl(fileDescriptor.rawValue, F_SETFL, flags | O_NONBLOCK)
+        let result = fcntl_int_long(fileDescriptor.rawValue, F_SETFL, Int(flags | O_NONBLOCK))
         guard result >= 0 else {
             throw MCPError.transportError(Errno.badFileDescriptor)
         }

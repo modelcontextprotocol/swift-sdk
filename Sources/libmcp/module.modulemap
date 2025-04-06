@@ -1,0 +1,5 @@
+module libmcp [system] {
+    header "/usr/local/include/shims.h"
+    link "libmcp"
+    export *
+}
