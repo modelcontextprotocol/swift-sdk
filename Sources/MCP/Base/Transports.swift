@@ -1,4 +1,3 @@
-import Darwin
 import Logging
 
 import struct Foundation.Data
