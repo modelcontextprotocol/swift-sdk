@@ -6,7 +6,9 @@ import RegexBuilder
 extension Data {
     // macOS 13+ implementation using RegexBuilder.
     @available(macOS 13, *)
-    private static var dataURLRegex: Regex<(Substring, Substring, Substring?, Substring)> {
+    @inline(__always) private static var dataURLRegex:
+        Regex<(Substring, Substring, Substring?, Substring)>
+    {
         Regex {
             "data:"
             Capture {
@@ -98,7 +100,7 @@ extension Data {
         
         let decodedData: Data
         if isBase64 {
-            guard let base64Data = Data(base64Encoded: encodedData) else { return nil }
+            guard let base64Data = Data(base64Encoded: String(encodedData)) else { return nil }
             decodedData = base64Data
         } else {
             guard let percentDecodedData = encodedData.removingPercentEncoding?
