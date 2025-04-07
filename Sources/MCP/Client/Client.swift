@@ -202,7 +202,7 @@ public actor Client {
                         }
                     }
                 } catch let error where MCPError.isResourceTemporarilyUnavailable(error) {
-                    try? await Task.sleep(for: .milliseconds(10))
+                    try? await Task.sleep(nanoseconds: 10 * 1_000_000)
                     continue
                 } catch {
                     await logger?.error(
