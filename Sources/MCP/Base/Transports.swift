@@ -1,4 +1,3 @@
-import Darwin
 import Logging
 
 import struct Foundation.Data
@@ -7,6 +6,13 @@ import struct Foundation.Data
     import System
 #else
     @preconcurrency import SystemPackage
+#endif
+
+// Import for specific low-level operations not yet in Swift System
+#if os(macOS) || os(iOS) || os(tvOS) || os(watchOS)
+    import Darwin.POSIX
+#elseif os(Linux)
+    import Glibc
 #endif
 
 /// Protocol defining the transport layer for MCP communication
@@ -72,14 +78,22 @@ public actor StdioTransport: Transport {
     }
 
     private func setNonBlocking(fileDescriptor: FileDescriptor) throws {
-        let flags = fcntl(fileDescriptor.rawValue, F_GETFL)
-        guard flags >= 0 else {
-            throw MCPError.transportError(Errno.badFileDescriptor)
-        }
-        let result = fcntl(fileDescriptor.rawValue, F_SETFL, flags | O_NONBLOCK)
-        guard result >= 0 else {
-            throw MCPError.transportError(Errno.badFileDescriptor)
-        }
+        #if os(macOS) || os(iOS) || os(tvOS) || os(watchOS) || os(Linux)
+            // Get current flags
+            let flags = fcntl(fileDescriptor.rawValue, F_GETFL)
+            guard flags >= 0 else {
+                throw MCPError.transportError(Errno(rawValue: CInt(errno)))
+            }
+
+            // Set non-blocking flag
+            let result = fcntl(fileDescriptor.rawValue, F_SETFL, flags | O_NONBLOCK)
+            guard result >= 0 else {
+                throw MCPError.transportError(Errno(rawValue: CInt(errno)))
+            }
+        #else
+            // For platforms where non-blocking operations aren't supported
+            throw MCPError.internalError("Setting non-blocking mode not supported on this platform")
+        #endif
     }
 
     private func readLoop() async {
@@ -133,7 +147,11 @@ public actor StdioTransport: Transport {
 
     public func send(_ message: Data) async throws {
         guard isConnected else {
-            throw MCPError.transportError(Errno.socketNotConnected)
+            #if os(macOS) || os(iOS) || os(tvOS) || os(watchOS) || os(Linux)
+                throw MCPError.transportError(Errno(rawValue: ENOTCONN))
+            #else
+                throw MCPError.internalError("Transport not connected")
+            #endif
         }
 
         // Add newline as delimiter
