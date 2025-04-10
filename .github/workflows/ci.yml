@@ -12,6 +12,7 @@ permissions:
 
 jobs:
   setup:
+    name: Setup
     runs-on: ubuntu-latest
     outputs:
       swift-versions: ${{ steps.set-matrix.outputs.swift-versions }}
@@ -27,13 +28,13 @@ jobs:
           echo "swift-versions=$VERSIONS" >> $GITHUB_OUTPUT
 
   test-macos:
+    name: Test (macOS, Swift ${{ matrix.swift-version }})
     needs: setup
     strategy:
       matrix:
         swift-version: ${{ fromJson(needs.setup.outputs.swift-versions) }}
     runs-on: macos-latest
     timeout-minutes: 5
-    name: Test (macOS, Swift ${{ matrix.swift-version }})
     steps:
       - uses: actions/checkout@v4
 
@@ -49,13 +50,13 @@ jobs:
         run: swift test -v
 
   test-ubuntu:
+    name: Test (Ubuntu, Swift ${{ matrix.swift-version }})
     needs: setup
     strategy:
       matrix:
         swift-version: ${{ fromJson(needs.setup.outputs.swift-versions) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    name: Test (Ubuntu, Swift ${{ matrix.swift-version }})
     steps:
       - uses: actions/checkout@v4
 
@@ -71,6 +72,7 @@ jobs:
         run: swift test -v
 
   test-alpine:
+    name: Test (Alpine, Swift ${{ matrix.swift-version }})
     needs: setup
     strategy:
       matrix:
@@ -78,7 +80,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     container: alpine:latest
-    name: Test (Alpine, Swift ${{ matrix.swift-version }})
     steps:
       - uses: actions/checkout@v4
 
