@@ -78,10 +78,15 @@ jobs:
         swift-version: ${{ fromJson(needs.setup.outputs.swift-versions) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    container: swift:${{ matrix.swift-version }}-alpine
+    container: alpine:latest
     name: Test (Alpine, Swift ${{ matrix.swift-version }})
     steps:
       - uses: actions/checkout@v4
+
+      - name: Setup Swift
+        uses: vapor/swiftly-action@v0.2
+        with:
+          toolchain: ${{ matrix.swift-version }}
 
       - name: Build
         run: swift build -v
