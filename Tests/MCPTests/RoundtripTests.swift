@@ -127,7 +127,7 @@ struct RoundtripTests {
         let pingTask = Task {
             try await client.ping()
             // Ping doesn't return anything, so just getting here without throwing is success
-            #expect(true)  // Test passed if we reach this point
+            #expect(Bool(true))
         }
 
         try await withThrowingTaskGroup(of: Void.self) { group in
