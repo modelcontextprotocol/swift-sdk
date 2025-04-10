@@ -72,11 +72,8 @@ jobs:
         run: swift test -v
 
   build-for-alpine:
-    name: Build for Alpine (Ubuntu, Swift ${{ matrix.swift-version }})
+    name: Build for Alpine (Ubuntu, Swift 6.1)
     needs: setup
-    strategy:
-      matrix:
-        swift-version: ${{ fromJson(needs.setup.outputs.swift-versions) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -84,12 +81,13 @@ jobs:
       - name: Setup Swift
         uses: vapor/swiftly-action@v0.2
         with:
-          toolchain: ${{ matrix.swift-version }}
+          toolchain: 6.1.0
 
       - name: Install Static Linux SDK
         run: |
           # Install the static Linux SDK for musl target
-          swift sdk install --swift-version $SWIFT_VERSION static-linux
+          # https://www.swift.org/install/linux/debian/12/#versions
+          swift sdk install https://download.swift.org/swift-6.1-release/static-sdk/swift-6.1-RELEASE/swift-6.1-RELEASE_static-linux-0.0.1.artifactbundle.tar.gz --checksum 111c6f7d280a651208b8c74c0521dd99365d785c1976a6e23162f55f65379ac6
 
           # Verify installation
           swift sdk list
@@ -103,15 +101,12 @@ jobs:
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: alpine-binaries-${{ matrix.swift-version }}
+          name: alpine-binaries-6.1.0
           path: .build/x86_64-swift-linux-musl/debug
 
   test-alpine:
-    name: Test (Alpine, Swift ${{ matrix.swift-version }})
+    name: Test (Alpine, Swift 6.1)
     needs: [setup, build-for-alpine]
-    strategy:
-      matrix:
-        swift-version: ${{ fromJson(needs.setup.outputs.swift-versions) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     container: alpine:latest
@@ -121,7 +116,7 @@ jobs:
       - name: Download compiled binaries
         uses: actions/download-artifact@v4
         with:
-          name: alpine-binaries-${{ matrix.swift-version }}
+          name: alpine-binaries-6.1.0
           path: .build/debug
 
       - name: Set permissions
