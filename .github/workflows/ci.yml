@@ -83,6 +83,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install system dependencies
+        run: apk add --no-cache bash curl jq gnupg
+
       - name: Setup Swift
         uses: vapor/swiftly-action@v0.2
         with:
