@@ -11,27 +11,33 @@ permissions:
   pull-requests: write
 
 jobs:
-  test:
+  setup:
+    name: Setup
+    runs-on: ubuntu-latest
+    outputs:
+      swift-versions: ${{ steps.set-matrix.outputs.swift-versions }}
+    env:
+      SWIFT_VERSIONS: |
+        6.0.3
+        6.1.0
+    steps:
+      - id: set-matrix
+        run: |
+          # Convert multi-line string to JSON array (jq is pre-installed on GitHub runners)
+          VERSIONS=$(echo "$SWIFT_VERSIONS" | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          echo "swift-versions=$VERSIONS" >> $GITHUB_OUTPUT
+
+  test-macos:
+    name: Test (macOS, Swift ${{ matrix.swift-version }})
+    needs: setup
     strategy:
       matrix:
-        os: [macos-latest, ubuntu-latest]
-        swift-version:
-          - 6.0.3
-          - 6.1.0
-
-    runs-on: ${{ matrix.os }}
-    name: Test (${{ matrix.os }}, Swift ${{ matrix.swift-version }})
-
+        swift-version: ${{ fromJson(needs.setup.outputs.swift-versions) }}
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Swift on Linux
-        if: matrix.os == 'ubuntu-latest'
-        uses: vapor/swiftly-action@v0.2
-        with:
-          toolchain: ${{ matrix.swift-version }}
-      - name: Setup Swift on macOS
-        if: matrix.os == 'macos-latest'
+      - name: Setup Swift
         uses: swift-actions/setup-swift@v2
         with:
           swift-version: ${{ matrix.swift-version }}
@@ -41,3 +47,46 @@ jobs:
 
       - name: Run tests
         run: swift test -v
+
+  test-ubuntu:
+    name: Test (Ubuntu, Swift ${{ matrix.swift-version }})
+    needs: setup
+    strategy:
+      matrix:
+        swift-version: ${{ fromJson(needs.setup.outputs.swift-versions) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Swift
+        uses: vapor/swiftly-action@v0.2
+        with:
+          toolchain: ${{ matrix.swift-version }}
+
+      - name: Build
+        run: swift build -v
+
+      - name: Run tests
+        run: swift test -v
+
+  test-windows:
+    name: Test (Windows, Swift ${{ matrix.swift-version }})
+    needs: setup
+    strategy:
+      matrix:
+        swift-version: ${{ fromJson(needs.setup.outputs.swift-versions) }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Swift
+        uses: compnerd/gha-setup-swift@15100508ed98274c660b39a3d171f9b9b80926c5
+        with:
+          branch: swift-${{ matrix.swift-version }}-release
+          tag: ${{ matrix.swift-version }}-RELEASE
+
+      - name: Build
+        run: swift build -v -Xswiftc -Xfrontend -Xswiftc -disable-implicit-concurrency-module-import -Xswiftc -Xfrontend -Xswiftc -disable-implicit-string-processing-module-import
+
+      - name: Run tests
+        run: swift test -v -Xswiftc -Xfrontend -Xswiftc -disable-implicit-concurrency-module-import -Xswiftc -Xfrontend -Xswiftc -disable-implicit-string-processing-module-import
