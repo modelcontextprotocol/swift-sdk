@@ -13,9 +13,11 @@ import struct Foundation.Data
     import Darwin.POSIX
 #elseif canImport(Glibc)
     import Glibc
+#elseif canImport(Musl)
+    import Musl
 #endif
 
-#if canImport(Darwin) || canImport(Glibc)
+#if canImport(Darwin) || canImport(Glibc) || canImport(Musl)
     /// An implementation of the MCP stdio transport protocol.
     ///
     /// This transport implements the [stdio transport](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#stdio)
@@ -100,6 +102,8 @@ import struct Foundation.Data
             Task {
                 await readLoop()
             }
+
+            messageContinuation.finish()
         }
 
         /// Configures a file descriptor for non-blocking I/O
