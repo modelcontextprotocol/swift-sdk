@@ -16,7 +16,6 @@ jobs:
     outputs:
       swift-versions: ${{ steps.set-matrix.outputs.swift-versions }}
     env:
-      # Define Swift versions - add new versions here
       SWIFT_VERSIONS: |
         6.0.3
         6.1.0
