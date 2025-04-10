@@ -4,12 +4,20 @@ Swift implementation of the [Model Context Protocol][mcp] (MCP).
 
 ## Requirements
 
-- Swift 6.0+ / Xcode 16+
-- macOS 13.0+
-- iOS / Mac Catalyst 16.0+
-- watchOS 9.0+
-- tvOS 16.0+
-- visionOS 1.0+
+- Swift 6.0+ (Xcode 16+)
+
+### Supported Platforms
+
+| Platform | Minimum Version |
+|----------|----------------|
+| macOS | 13.0+ |
+| iOS / Mac Catalyst | 16.0+ |
+| watchOS | 9.0+ |
+| tvOS | 16.0+ |
+| visionOS | 1.0+ |
+| Linux | ✓ [^1] |
+
+[^1]: Linux support requires glibc-based distributions such as Ubuntu, Debian, Fedora, CentOS, or RHEL. Alpine Linux and other musl-based distributions are not supported.
 
 ## Installation
 
