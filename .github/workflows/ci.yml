@@ -20,7 +20,7 @@ jobs:
           - 6.1.0
 
     runs-on: ${{ matrix.os }}
-    name: Build and Test (${{ matrix.os }}, Swift ${{ matrix.swift-version }})
+    name: Test (${{ matrix.os }}, Swift ${{ matrix.swift-version }})
 
     steps:
       - uses: actions/checkout@v4
