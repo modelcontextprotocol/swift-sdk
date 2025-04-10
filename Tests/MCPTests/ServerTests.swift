@@ -39,13 +39,17 @@ struct ServerTests {
         try await server.start(transport: transport)
 
         // Wait for message processing and response
-        try await Task.sleep(nanoseconds: 10_000_000)  // 10ms
+        try await Task.sleep(nanoseconds: 100_000_000)  // 100ms
 
-        #expect(await transport.sentMessages.count == 1)
-        
+        #expect(await transport.sentMessages.count == 2)
+
         let messages = await transport.sentMessages
         if let response = messages.first {
             #expect(response.contains("serverInfo"))
+        }
+
+        if let noticiation = messages.last {
+            #expect(noticiation.contains("initialized"))
         }
 
         // Clean up
@@ -136,7 +140,7 @@ struct ServerTests {
             #expect(response.contains("error"))
             #expect(response.contains("Client not allowed"))
         }
-        
+
         await server.stop()
         await transport.disconnect()
     }
