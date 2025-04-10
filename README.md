@@ -17,7 +17,7 @@ Swift implementation of the [Model Context Protocol][mcp] (MCP).
 | visionOS | 1.0+ |
 | Linux | ✓ [^1] |
 
-[^1]: Linux support requires glibc-based distributions such as Ubuntu, Debian, Fedora, CentOS, or RHEL. Alpine Linux and other musl-based distributions are not supported.
+[^1]: Linux support includes glibc-based distributions (Ubuntu, Debian, Fedora, CentOS, RHEL) and musl-based distributions (Alpine Linux).
 
 ## Installation
 
