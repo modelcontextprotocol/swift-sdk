@@ -71,9 +71,44 @@ jobs:
       - name: Run tests
         run: swift test -v
 
+  build-for-alpine:
+    name: Build for Alpine (Ubuntu, Swift ${{ matrix.swift-version }})
+    needs: setup
+    strategy:
+      matrix:
+        swift-version: ${{ fromJson(needs.setup.outputs.swift-versions) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Swift
+        uses: vapor/swiftly-action@v0.2
+        with:
+          toolchain: ${{ matrix.swift-version }}
+
+      - name: Install Static Linux SDK
+        run: |
+          # Install the static Linux SDK for musl target
+          swift sdk install --swift-version $SWIFT_VERSION static-linux
+
+          # Verify installation
+          swift sdk list
+
+      - name: Build for x86_64-musl
+        run: swift build --swift-sdk x86_64-swift-linux-musl -v
+
+      - name: Run tests (host)
+        run: swift test -v
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: alpine-binaries-${{ matrix.swift-version }}
+          path: .build/x86_64-swift-linux-musl/debug
+
   test-alpine:
     name: Test (Alpine, Swift ${{ matrix.swift-version }})
-    needs: setup
+    needs: [setup, build-for-alpine]
     strategy:
       matrix:
         swift-version: ${{ fromJson(needs.setup.outputs.swift-versions) }}
@@ -83,16 +118,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install system dependencies
-        run: apk add --no-cache bash curl jq gnupg
-
-      - name: Setup Swift
-        uses: vapor/swiftly-action@v0.2
+      - name: Download compiled binaries
+        uses: actions/download-artifact@v3
         with:
-          toolchain: ${{ matrix.swift-version }}
+          name: alpine-binaries-${{ matrix.swift-version }}
+          path: .build/debug
 
-      - name: Build
-        run: swift build -v
+      - name: Set permissions
+        run: chmod +x .build/debug/*
 
       - name: Run tests
-        run: swift test -v
+        run: .build/debug/MCPTests
