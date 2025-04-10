@@ -17,6 +17,12 @@ import struct Foundation.Data
 
 #if canImport(Darwin) || canImport(Glibc)
     /// Standard input/output transport implementation
+    ///
+    /// This transport supports JSON-RPC 2.0 messages, including individual requests,
+    /// notifications, responses, and batches containing multiple requests/notifications.
+    ///
+    /// Messages are delimited by newlines and must not contain embedded newlines.
+    /// Each message must be a complete, valid JSON object or array (for batches).
     public actor StdioTransport: Transport {
         private let input: FileDescriptor
         private let output: FileDescriptor
@@ -131,6 +137,13 @@ import struct Foundation.Data
             logger.info("Transport disconnected")
         }
 
+        /// Sends a message over the transport.
+        ///
+        /// This method supports sending both individual JSON-RPC messages and JSON-RPC batches.
+        /// Batches should be encoded as a JSON array containing multiple request/notification objects
+        /// according to the JSON-RPC 2.0 specification.
+        ///
+        /// - Parameter message: The message data to send (without a trailing newline)
         public func send(_ message: Data) async throws {
             guard isConnected else {
                 throw MCPError.transportError(Errno(rawValue: ENOTCONN))
@@ -158,6 +171,11 @@ import struct Foundation.Data
             }
         }
 
+        /// Receives messages from the transport.
+        ///
+        /// Messages may be individual JSON-RPC requests, notifications, responses,
+        /// or batches containing multiple requests/notifications encoded as JSON arrays.
+        /// Each message is guaranteed to be a complete JSON object or array.
         public func receive() -> AsyncThrowingStream<Data, Swift.Error> {
             return AsyncThrowingStream { continuation in
                 Task {
