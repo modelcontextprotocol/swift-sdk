@@ -78,7 +78,7 @@ struct ResponseTests {
             #expect(decodedError.code == -32700)
             #expect(
                 decodedError.localizedDescription
-                    == "Parse error: Invalid JSON: Parse error: Invalid JSON: Invalid syntax")
+                    == "Parse error: Invalid JSON: Invalid syntax")
         } else {
             #expect(Bool(false), "Expected error result")
         }

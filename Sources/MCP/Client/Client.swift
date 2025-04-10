@@ -153,6 +153,9 @@ public actor Client {
 
     /// A dictionary of type-erased pending requests, keyed by request ID
     private var pendingRequests: [ID: AnyPendingRequest] = [:]
+    // Add reusable JSON encoder/decoder
+    private let encoder = JSONEncoder()
+    private let decoder = JSONDecoder()
 
     public init(
         name: String,
@@ -184,9 +187,11 @@ public actor Client {
                     for try await data in stream {
                         if Task.isCancelled { break }  // Check inside loop too
 
-                        // Attempt to decode data as AnyResponse or AnyMessage
-                        let decoder = JSONDecoder()
-                        if let response = try? decoder.decode(AnyResponse.self, from: data),
+                        // Attempt to decode data
+                        // Try decoding as a batch response first
+                        if let batchResponse = try? decoder.decode([AnyResponse].self, from: data) {
+                            await handleBatchResponse(batchResponse)
+                        } else if let response = try? decoder.decode(AnyResponse.self, from: data),
                             let request = pendingRequests[response.id]
                         {
                             await handleResponse(response, for: request)
@@ -198,7 +203,9 @@ public actor Client {
                                 metadata["message"] = .string(string)
                             }
                             await logger?.warning(
-                                "Unexpected message received by client", metadata: metadata)
+                                "Unexpected message received by client (not single/batch response or notification)",
+                                metadata: metadata
+                            )
                         }
                     }
                 } catch let error where MCPError.isResourceTemporarilyUnavailable(error) {
@@ -250,7 +257,8 @@ public actor Client {
             throw MCPError.internalError("Client connection not initialized")
         }
 
-        let requestData = try JSONEncoder().encode(request)
+        // Use the actor's encoder
+        let requestData = try encoder.encode(request)
 
         // Store the pending request first
         return try await withCheckedThrowingContinuation { continuation in
@@ -263,10 +271,12 @@ public actor Client {
 
                 // Send the request data
                 do {
+                    // Use the existing connection send
                     try await connection.send(requestData)
                 } catch {
+                    // If send fails immediately, resume continuation and remove pending request
                     continuation.resume(throwing: error)
-                    self.removePendingRequest(id: request.id)
+                    self.removePendingRequest(id: request.id)  // Ensure cleanup on send error
                 }
             }
         }
@@ -275,13 +285,157 @@ public actor Client {
     private func addPendingRequest<T: Sendable & Decodable>(
         id: ID,
         continuation: CheckedContinuation<T, Swift.Error>,
-        type: T.Type
+        type: T.Type  // Keep type for AnyPendingRequest internal logic
     ) {
         pendingRequests[id] = AnyPendingRequest(PendingRequest(continuation: continuation))
     }
 
     private func removePendingRequest(id: ID) {
         pendingRequests.removeValue(forKey: id)
+    }
+
+    // MARK: - Batching
+
+    /// A batch of requests.
+    ///
+    /// Objects of this type are passed as an argument to the closure
+    /// of the ``Client/withBatch(_:)`` method.
+    public actor Batch {
+        unowned let client: Client
+        var requests: [AnyRequest] = []
+
+        init(client: Client) {
+            self.client = client
+        }
+
+        /// Adds a request to the batch and prepares its expected response task.
+        /// The actual sending happens when the `withBatch` scope completes.
+        /// - Returns: A `Task` that will eventually produce the result or throw an error.
+        public func addRequest<M: Method>(_ request: Request<M>) async throws -> Task<
+            M.Result, Swift.Error
+        > {
+            requests.append(try AnyRequest(request))
+
+            // Return a Task that registers the pending request and awaits its result.
+            // The continuation is resumed when the response arrives.
+            return Task<M.Result, Swift.Error> {
+                try await withCheckedThrowingContinuation { continuation in
+                    // We are already inside a Task, but need another Task
+                    // to bridge to the client actor's context.
+                    Task {
+                        await client.addPendingRequest(
+                            id: request.id,
+                            continuation: continuation,
+                            type: M.Result.self
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    /// Executes multiple requests in a single batch.
+    ///
+    /// This method allows you to group multiple MCP requests together,
+    /// which are then sent to the server as a single JSON array.
+    /// The server processes these requests and sends back a corresponding
+    /// JSON array of responses.
+    ///
+    /// Within the `body` closure, use the provided `Batch` actor to add
+    /// requests using `batch.addRequest(_:)`. Each call to `addRequest`
+    /// returns a `Task` handle representing the asynchronous operation
+    /// for that specific request's result.
+    ///
+    /// It's recommended to collect these `Task` handles into an array
+    /// within the `body` closure`. After the `withBatch` method returns
+    /// (meaning the batch request has been sent), you can then process
+    /// the results by awaiting each `Task` in the collected array.
+    ///
+    /// Example 1: Batching multiple tool calls and collecting typed tasks:
+    /// ```swift
+    /// // Array to hold the task handles for each tool call
+    /// var toolTasks: [Task<CallTool.Result, Error>] = []
+    /// try await client.withBatch { batch in
+    ///     for i in 0..<10 {
+    ///         toolTasks.append(
+    ///             try await batch.addRequest(
+    ///                 CallTool.request(.init(name: "square", arguments: ["n": i]))
+    ///             )
+    ///         )
+    ///     }
+    /// }
+    ///
+    /// // Process results after the batch is sent
+    /// print("Processing \(toolTasks.count) tool results...")
+    /// for (index, task) in toolTasks.enumerated() {
+    ///     do {
+    ///         let result = try await task.value
+    ///         print("\(index): \(result.content)")
+    ///     } catch {
+    ///         print("\(index) failed: \(error)")
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// Example 2: Batching different request types and awaiting individual tasks:
+    /// ```swift
+    /// // Declare optional task variables beforehand
+    /// var pingTask: Task<Ping.Result, Error>?
+    /// var promptTask: Task<GetPrompt.Result, Error>?
+    ///
+    /// try await client.withBatch { batch in
+    ///     // Assign the tasks within the batch closure
+    ///     pingTask = try await batch.addRequest(Ping.request())
+    ///     promptTask = try await batch.addRequest(GetPrompt.request(.init(name: "greeting")))
+    /// }
+    ///
+    /// // Await the results after the batch is sent
+    /// do {
+    ///     if let pingTask = pingTask {
+    ///         try await pingTask.value // Await ping result (throws if ping failed)
+    ///         print("Ping successful")
+    ///     }
+    ///     if let promptTask = promptTask {
+    ///         let promptResult = try await promptTask.value // Await prompt result
+    ///         print("Prompt description: \(promptResult.description ?? "None")")
+    ///     }
+    /// } catch {
+    ///     print("Error processing batch results: \(error)")
+    /// }
+    /// ```
+    ///
+    /// - Parameter body: An asynchronous closure that takes a `Batch` object as input.
+    ///                   Use this object to add requests to the batch.
+    /// - Throws: `MCPError.internalError` if the client is not connected.
+    ///           Can also rethrow errors from the `body` closure or from sending the batch request.
+    public func withBatch(body: @escaping (Batch) async throws -> Void) async throws {
+        guard let connection = connection else {
+            throw MCPError.internalError("Client connection not initialized")
+        }
+
+        // Create Batch actor, passing self (Client)
+        let batch = Batch(client: self)
+
+        // Populate the batch actor by calling the user's closure.
+        try await body(batch)
+
+        // Get the collected requests from the batch actor
+        let requests = await batch.requests
+
+        // Check if there are any requests to send
+        guard !requests.isEmpty else {
+            await logger?.info("Batch requested but no requests were added.")
+            return  // Nothing to send
+        }
+
+        await logger?.debug(
+            "Sending batch request", metadata: ["count": "\(requests.count)"])
+
+        // Encode the array of AnyMethod requests into a single JSON payload
+        let data = try encoder.encode(requests)
+        try await connection.send(data)
+
+        // Responses will be handled asynchronously by the message loop and handleBatchResponse/handleResponse.
     }
 
     // MARK: - Lifecycle
@@ -364,7 +518,9 @@ public actor Client {
 
     // MARK: - Tools
 
-    public func listTools(cursor: String? = nil) async throws -> (tools: [Tool], nextCursor: String?) {
+    public func listTools(cursor: String? = nil) async throws -> (
+        tools: [Tool], nextCursor: String?
+    ) {
         try validateServerCapability(\.tools, "Tools")
         let request: Request<ListTools>
         if let cursor = cursor {
@@ -443,6 +599,24 @@ public actor Client {
             }
             guard capabilities[keyPath: keyPath] != nil else {
                 throw MCPError.methodNotFound("\(name) is not supported by the server")
+            }
+        }
+    }
+
+    // Add handler for batch responses
+    private func handleBatchResponse(_ responses: [AnyResponse]) async {
+        await logger?.debug("Processing batch response", metadata: ["count": "\(responses.count)"])
+        for response in responses {
+            // Look up the pending request for this specific ID within the batch
+            if let request = pendingRequests[response.id] {
+                // Reuse the existing single response handler logic
+                await handleResponse(response, for: request)
+            } else {
+                // Log if a response ID doesn't match any pending request
+                await logger?.warning(
+                    "Received response in batch for unknown request ID",
+                    metadata: ["id": "\(response.id)"]
+                )
             }
         }
     }
