@@ -6,7 +6,7 @@ Swift implementation of the [Model Context Protocol][mcp] (MCP).
 
 - Swift 6.0+ (Xcode 16+)
 
-### Supported Platforms
+## Platform Support
 
 | Platform | Minimum Version |
 |----------|----------------|
@@ -15,9 +15,19 @@ Swift implementation of the [Model Context Protocol][mcp] (MCP).
 | watchOS | 9.0+ |
 | tvOS | 16.0+ |
 | visionOS | 1.0+ |
-| Linux | ✓ [^1] |
+| Linux | ✓ |
+| Windows | ✓ |
 
-[^1]: Linux support requires glibc-based distributions such as Ubuntu, Debian, Fedora, CentOS, or RHEL. Alpine Linux and other musl-based distributions are not supported.
+> [!IMPORTANT]  
+> MCP's transport layer handles communication between clients and servers.
+> The Swift SDK supports multiple transport mechanisms,
+> with different platform availability:
+>
+> * `StdioTransport` is available on Apple platforms 
+>   and Linux distributions with glibc, such as
+>   Ubuntu, Debian, Fedora, CentOS, or RHEL. 
+>
+> * `NetworkTransport` is available only on Apple platforms.
 
 ## Installation
 
