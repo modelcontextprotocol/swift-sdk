@@ -30,7 +30,7 @@ jobs:
         uses: vapor/swiftly-action@v0.2
         with:
           toolchain: ${{ matrix.swift-version }}
-      - name: Setup Xcode on macOS
+      - name: Setup Swift on macOS
         if: matrix.os == 'macos-latest'
         uses: swift-actions/setup-swift@v2
         with:
