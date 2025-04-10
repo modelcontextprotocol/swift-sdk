@@ -93,10 +93,12 @@ jobs:
           swift sdk list
 
       - name: Build for x86_64-musl
-        run: swift build --swift-sdk x86_64-swift-linux-musl -v
-
-      - name: Run tests (host)
-        run: swift test -v
+        run: |
+          swift build --swift-sdk x86_64-swift-linux-musl -v
+          swift test --swift-sdk x86_64-swift-linux-musl -v
+          # List contents to verify test binary location
+          find .build/x86_64-swift-linux-musl -name "*Test*" -type f | sort
+          ls -la .build/x86_64-swift-linux-musl/debug
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -113,6 +115,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install system dependencies
+        run: apk add --no-cache bash
+
       - name: Download compiled binaries
         uses: actions/download-artifact@v4
         with:
@@ -120,7 +125,22 @@ jobs:
           path: .build/debug
 
       - name: Set permissions
-        run: chmod +x .build/debug/*
+        shell: bash
+        run: |
+          chmod +x .build/debug/*
+          ls -la .build/debug
 
       - name: Run tests
-        run: .build/debug/MCPTests
+        shell: bash
+        run: |
+          # Try to find and run the test executable
+          TEST_EXEC=$(find .build/debug -name "*Test*" -type f | head -1)
+          if [ -n "$TEST_EXEC" ]; then
+            echo "Running test executable: $TEST_EXEC"
+            chmod +x "$TEST_EXEC"
+            $TEST_EXEC
+          else
+            echo "Test executable not found!"
+            ls -la .build/debug
+            exit 1
+          fi
