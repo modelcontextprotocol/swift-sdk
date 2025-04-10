@@ -99,6 +99,15 @@ actor MockTransport: Transport {
         dataToReceive.append(data)
     }
 
+    func queue(batch requests: [AnyRequest]) throws {
+        let data = try encoder.encode(requests)
+        if let continuation = dataStreamContinuation {
+            continuation.yield(data)
+        } else {
+            dataToReceive.append(data)
+        }
+    }
+
     func decodeLastSentMessage<T: Decodable>() -> T? {
         guard let lastMessage = sentData.last else { return nil }
         do {

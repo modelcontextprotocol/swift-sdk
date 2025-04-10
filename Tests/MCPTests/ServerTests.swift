@@ -42,7 +42,7 @@ struct ServerTests {
         try await Task.sleep(nanoseconds: 10_000_000)  // 10ms
 
         #expect(await transport.sentMessages.count == 1)
-        
+
         let messages = await transport.sentMessages
         if let response = messages.first {
             #expect(response.contains("serverInfo"))
@@ -136,7 +136,65 @@ struct ServerTests {
             #expect(response.contains("error"))
             #expect(response.contains("Client not allowed"))
         }
-        
+
+        await server.stop()
+        await transport.disconnect()
+    }
+
+    @Test("JSON-RPC batch processing")
+    func testJSONRPCBatchProcessing() async throws {
+        let transport = MockTransport()
+        let server = Server(name: "TestServer", version: "1.0")
+
+        // Start the server
+        try await server.start(transport: transport)
+
+        // Initialize the server first
+        try await transport.queue(
+            request: Initialize.request(
+                .init(
+                    protocolVersion: Version.latest,
+                    capabilities: .init(),
+                    clientInfo: .init(name: "TestClient", version: "1.0")
+                )
+            )
+        )
+
+        // Wait for server to initialize and respond
+        try await Task.sleep(for: .milliseconds(100))
+
+        // Clear sent messages
+        await transport.clearMessages()
+
+        // Create a batch with multiple requests
+        let batchJSON = """
+            [
+                {"jsonrpc":"2.0","id":1,"method":"ping","params":{}},
+                {"jsonrpc":"2.0","id":2,"method":"ping","params":{}}
+            ]
+            """
+        let batch = try JSONDecoder().decode([AnyRequest].self, from: batchJSON.data(using: .utf8)!)
+
+        // Send the batch request
+        try await transport.queue(batch: batch)
+
+        // Wait for batch processing
+        try await Task.sleep(for: .milliseconds(100))
+
+        // Verify response
+        let sentMessages = await transport.sentMessages
+        #expect(sentMessages.count == 1)
+
+        if let batchResponse = sentMessages.first {
+            // Should be an array
+            #expect(batchResponse.hasPrefix("["))
+            #expect(batchResponse.hasSuffix("]"))
+
+            // Should contain both request IDs
+            #expect(batchResponse.contains("\"id\":1"))
+            #expect(batchResponse.contains("\"id\":2"))
+        }
+
         await server.stop()
         await transport.disconnect()
     }
