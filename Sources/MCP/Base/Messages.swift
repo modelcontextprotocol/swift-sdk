@@ -249,11 +249,19 @@ typealias AnyResponse = Response<AnyMethod>
 
 extension AnyResponse {
     init<T: Method>(_ response: Response<T>) throws {
-        let encoder = JSONEncoder()
-        let decoder = JSONDecoder()
-
-        let data = try encoder.encode(response)
-        self = try decoder.decode(AnyResponse.self, from: data)
+        // Instead of re-encoding/decoding which might double-wrap the error,
+        // directly transfer the properties
+        self.id = response.id
+        switch response.result {
+        case .success(let result):
+            // For success, we still need to convert the result to a Value
+            let data = try JSONEncoder().encode(result)
+            let resultValue = try JSONDecoder().decode(Value.self, from: data)
+            self.result = .success(resultValue)
+        case .failure(let error):
+            // Keep the original error without re-encoding/decoding
+            self.result = .failure(error)
+        }
     }
 }
 

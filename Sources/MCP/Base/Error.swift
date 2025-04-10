@@ -170,25 +170,38 @@ extension MCPError: Codable {
         let message = try container.decode(String.self, forKey: .message)
         let data = try container.decodeIfPresent([String: Value].self, forKey: .data)
 
+        // Helper to extract detail from data, falling back to message if needed
+        let unwrapDetail: (String?) -> String? = { fallback in
+            guard let detailValue = data?["detail"] else { return fallback }
+            if case .string(let str) = detailValue { return str }
+            return fallback
+        }
+
         switch code {
         case -32700:
-            self = .parseError(data?["detail"] as? String ?? message)
+            self = .parseError(unwrapDetail(message))
         case -32600:
-            self = .invalidRequest(data?["detail"] as? String ?? message)
+            self = .invalidRequest(unwrapDetail(message))
         case -32601:
-            self = .methodNotFound(data?["detail"] as? String ?? message)
+            self = .methodNotFound(unwrapDetail(message))
         case -32602:
-            self = .invalidParams(data?["detail"] as? String ?? message)
+            self = .invalidParams(unwrapDetail(message))
         case -32603:
-            self = .internalError(data?["detail"] as? String ?? message)
+            self = .internalError(unwrapDetail(nil))
         case -32000:
             self = .connectionClosed
         case -32001:
+            // Extract underlying error string if present
+            let underlyingErrorString =
+                data?["error"].flatMap { val -> String? in
+                    if case .string(let str) = val { return str }
+                    return nil
+                } ?? message
             self = .transportError(
                 NSError(
                     domain: "org.jsonrpc.error",
                     code: code,
-                    userInfo: [NSLocalizedDescriptionKey: message]
+                    userInfo: [NSLocalizedDescriptionKey: underlyingErrorString]
                 )
             )
         default:
