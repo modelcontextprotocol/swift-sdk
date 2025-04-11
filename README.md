@@ -154,6 +154,54 @@ let (description, messages) = try await client.getPrompt(
 )
 ```
 
+## Examples
+
+This repository includes an example server demonstrating how to use the Swift MCP SDK.
+
+### Echo Server
+
+Located in the `Example` directory, this simple server demonstrates:
+*   Setting up a basic MCP server.
+*   Defining and registering a custom tool (`swift_echo`).
+*   Handling `ListTools` and `CallTool` requests.
+*   Using `StdioTransport` for communication.
+*   Detailed logging to stderr.
+
+**Running the Echo Server:**
+
+1.  Navigate to the example directory:
+    ```bash
+    cd Example 
+    ```
+2.  Build the server:
+    ```bash
+    swift build -c release 
+    ```
+    This will create the executable at `.build/release/EchoServer`. Note the full path to this executable.
+
+3.  **Configure Claude Desktop:**
+    To make this server available as a tool provider in Claude Desktop, you need to add it to your Claude Desktop configuration file (`claude_desktop_config.json`). The location of this file varies by operating system.
+
+    Add an entry like the following to the `mcpServers` object in your `claude_desktop_config.json`, replacing `/PATH/TO/YOUR/SERVER/` with the actual absolute path to the `swift-sdk` directory on your system:
+
+    ```json
+    {
+        "mcpServers": {
+            // ... other servers maybe ...
+            "swift_echo_example": {
+                "command": "/PATH/TO/YOUR/SERVER/Example/.build/release/dummy-mcp-server"
+            }
+            // ... other servers maybe ...
+        }
+    }
+    ```
+    *   `swift_echo_example`: This is the name you'll refer to the server by within Claude Desktop (you can change this).
+    *   `command`: This **must** be the absolute path to the compiled `EchoServer` executable you built in the previous step.
+
+4.  **Restart Claude Desktop:** After saving the changes to `claude_desktop_config.json`, restart Claude Desktop for the new server configuration to be loaded. The `swift_echo` tool should then be available.
+
+The server will be started automatically by Claude Desktop when needed and will communicate over standard input/output, printing detailed logs to standard error (which might be captured by Claude Desktop's logs).
+
 ## Changelog
 
 This project follows [Semantic Versioning](https://semver.org/). 
