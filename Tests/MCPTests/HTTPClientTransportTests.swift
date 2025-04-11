@@ -377,39 +377,43 @@ import Testing
             }
         }
 
-        @Test("Receive Server-Sent Event (SSE)", .httpClientTransportSetup)
-        func testReceiveSSE() async throws {
-            let configuration = URLSessionConfiguration.ephemeral
-            configuration.protocolClasses = [MockURLProtocol.self]
+        // Skip SSE tests on platforms that don't support FoundationNetworking
+        #if !canImport(FoundationNetworking)
+            @Test("Receive Server-Sent Event (SSE)", .httpClientTransportSetup)
+            func testReceiveSSE() async throws {
+                let configuration = URLSessionConfiguration.ephemeral
+                configuration.protocolClasses = [MockURLProtocol.self]
 
-            let transport = HTTPClientTransport(
-                endpoint: testEndpoint, configuration: configuration, streaming: true, logger: nil)
+                let transport = HTTPClientTransport(
+                    endpoint: testEndpoint, configuration: configuration, streaming: true,
+                    logger: nil)
 
-            let eventString = "id: event1\ndata: {\"key\":\"value\"}\n\n"
-            let sseEventData = eventString.data(using: .utf8)!
+                let eventString = "id: event1\ndata: {\"key\":\"value\"}\n\n"
+                let sseEventData = eventString.data(using: .utf8)!
 
-            await MockURLProtocol.requestHandlerStorage.setHandler {
-                [testEndpoint] (request: URLRequest) in
-                #expect(request.url == testEndpoint)
-                #expect(request.httpMethod == "GET")
-                #expect(request.value(forHTTPHeaderField: "Accept") == "text/event-stream")
-                let response = HTTPURLResponse(
-                    url: testEndpoint, statusCode: 200, httpVersion: "HTTP/1.1",
-                    headerFields: ["Content-Type": "text/event-stream"])!
-                return (response, sseEventData)
+                await MockURLProtocol.requestHandlerStorage.setHandler {
+                    [testEndpoint] (request: URLRequest) in
+                    #expect(request.url == testEndpoint)
+                    #expect(request.httpMethod == "GET")
+                    #expect(request.value(forHTTPHeaderField: "Accept") == "text/event-stream")
+                    let response = HTTPURLResponse(
+                        url: testEndpoint, statusCode: 200, httpVersion: "HTTP/1.1",
+                        headerFields: ["Content-Type": "text/event-stream"])!
+                    return (response, sseEventData)
+                }
+
+                try await transport.connect()
+                try await Task.sleep(for: .milliseconds(100))
+
+                let stream = await transport.receive()
+                var iterator = stream.makeAsyncIterator()
+
+                let expectedData = #"{"key":"value"}"#.data(using: .utf8)!
+                let receivedData = try await iterator.next()
+
+                #expect(receivedData == expectedData)
             }
-
-            try await transport.connect()
-            try await Task.sleep(for: .milliseconds(100))
-
-            let stream = await transport.receive()
-            var iterator = stream.makeAsyncIterator()
-
-            let expectedData = #"{"key":"value"}"#.data(using: .utf8)!
-            let receivedData = try await iterator.next()
-
-            #expect(receivedData == expectedData)
-        }
+        #endif  // !canImport(FoundationNetworking)
     }
 
 #endif  // swift(>=6.1)
