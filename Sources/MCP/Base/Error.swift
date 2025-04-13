@@ -21,6 +21,7 @@ public enum MCPError: Swift.Error, Sendable {
     // Transport specific errors
     case connectionClosed
     case transportError(Swift.Error)
+    case requestTimedOut(String?)
 
     /// The JSON-RPC 2.0 error code
     public var code: Int {
@@ -33,6 +34,7 @@ public enum MCPError: Swift.Error, Sendable {
         case .serverError(let code, _): return code
         case .connectionClosed: return -32000
         case .transportError: return -32001
+        case .requestTimedOut: return -32002
         }
     }
 
@@ -72,6 +74,8 @@ extension MCPError: LocalizedError {
             return "Connection closed"
         case .transportError(let error):
             return "Transport error: \(error.localizedDescription)"
+        case .requestTimedOut(let detail):
+            return "Request timed out" + (detail.map { ": \($0)" } ?? "")
         }
     }
 
@@ -93,6 +97,8 @@ extension MCPError: LocalizedError {
             return "The connection to the server was closed"
         case .transportError(let error):
             return (error as? LocalizedError)?.failureReason ?? error.localizedDescription
+        case .requestTimedOut:
+            return "Request exceeded the client-side timeout duration, default time is 10 seconds"
         }
     }
 
@@ -108,6 +114,8 @@ extension MCPError: LocalizedError {
             return "Verify the parameters match the method's expected parameters"
         case .connectionClosed:
             return "Try reconnecting to the server"
+        case .requestTimedOut:
+            return "Try sending the request again, or increase the timeout if necessary"
         default:
             return nil
         }
@@ -147,7 +155,8 @@ extension MCPError: Codable {
             .invalidRequest(let detail),
             .methodNotFound(let detail),
             .invalidParams(let detail),
-            .internalError(let detail):
+            .internalError(let detail),
+            .requestTimedOut(let detail):
             if let detail = detail {
                 try container.encode(["detail": detail], forKey: .data)
             }
@@ -204,6 +213,8 @@ extension MCPError: Codable {
                     userInfo: [NSLocalizedDescriptionKey: underlyingErrorString]
                 )
             )
+        case -32002:
+            self = .requestTimedOut(unwrapDetail(message))
         default:
             self = .serverError(code: code, message: message)
         }
@@ -240,6 +251,8 @@ extension MCPError: Hashable {
             break
         case .transportError(let error):
             hasher.combine(error.localizedDescription)
+        case .requestTimedOut(let detail):
+            hasher.combine(detail)
         }
     }
 }
