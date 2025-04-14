@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
 
 permissions:
   contents: read
@@ -12,21 +12,32 @@ permissions:
 
 jobs:
   test:
-    runs-on: macos-latest
-
     strategy:
       matrix:
+        os: [macos-latest, ubuntu-latest]
         swift-version:
-          - ^6
+          - 6.0.3
+          - 6.1.0
 
-    name: Build and Test (Swift ${{ matrix.swift-version }})
+    runs-on: ${{ matrix.os }}
+    name: Test (${{ matrix.os }}, Swift ${{ matrix.swift-version }})
 
     steps:
-    - uses: actions/checkout@v4
-    - uses: swift-actions/setup-swift@v2
-      with:
-        swift-version: ${{ matrix.swift-version }}
-    - name: Build
-      run: swift build -v
-    - name: Run tests
-      run: swift test -v
+      - uses: actions/checkout@v4
+
+      - name: Setup Swift on Linux
+        if: matrix.os == 'ubuntu-latest'
+        uses: vapor/swiftly-action@v0.2
+        with:
+          toolchain: ${{ matrix.swift-version }}
+      - name: Setup Swift on macOS
+        if: matrix.os == 'macos-latest'
+        uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: ${{ matrix.swift-version }}
+
+      - name: Build
+        run: swift build -v
+
+      - name: Run tests
+        run: swift test -v

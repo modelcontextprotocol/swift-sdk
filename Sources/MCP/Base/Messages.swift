@@ -30,7 +30,7 @@ public protocol Method {
 }
 
 /// Type-erased method for request/response handling
-struct AnyMethod: Method {
+struct AnyMethod: Method, Sendable {
     static var name: String { "" }
     typealias Parameters = Value
     typealias Result = Value
@@ -139,9 +139,19 @@ extension Request {
 /// A type-erased request for request/response handling
 typealias AnyRequest = Request<AnyMethod>
 
+extension AnyRequest {
+    init<T: Method>(_ request: Request<T>) throws {
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+
+        let data = try encoder.encode(request)
+        self = try decoder.decode(AnyRequest.self, from: data)
+    }
+}
+
 /// A box for request handlers that can be type-erased
 class RequestHandlerBox: @unchecked Sendable {
-    func callAsFunction(_ request: Request<AnyMethod>) async throws -> Response<AnyMethod> {
+    func callAsFunction(_ request: AnyRequest) async throws -> AnyResponse {
         fatalError("Must override")
     }
 }
@@ -155,8 +165,7 @@ final class TypedRequestHandler<M: Method>: RequestHandlerBox, @unchecked Sendab
         super.init()
     }
 
-    override func callAsFunction(_ request: Request<AnyMethod>) async throws -> Response<AnyMethod>
-    {
+    override func callAsFunction(_ request: AnyRequest) async throws -> AnyResponse {
         let encoder = JSONEncoder()
         let decoder = JSONDecoder()
 
@@ -238,10 +247,28 @@ public struct Response<M: Method>: Hashable, Identifiable, Codable, Sendable {
 /// A type-erased response for request/response handling
 typealias AnyResponse = Response<AnyMethod>
 
+extension AnyResponse {
+    init<T: Method>(_ response: Response<T>) throws {
+        // Instead of re-encoding/decoding which might double-wrap the error,
+        // directly transfer the properties
+        self.id = response.id
+        switch response.result {
+        case .success(let result):
+            // For success, we still need to convert the result to a Value
+            let data = try JSONEncoder().encode(result)
+            let resultValue = try JSONDecoder().decode(Value.self, from: data)
+            self.result = .success(resultValue)
+        case .failure(let error):
+            // Keep the original error without re-encoding/decoding
+            self.result = .failure(error)
+        }
+    }
+}
+
 // MARK: -
 
 /// A notification message.
-public protocol Notification {
+public protocol Notification: Hashable, Codable, Sendable {
     /// The parameters of the notification.
     associatedtype Parameters: Hashable, Codable, Sendable = Empty
     /// The name of the notification.
@@ -249,9 +276,19 @@ public protocol Notification {
 }
 
 /// A type-erased notification for message handling
-struct AnyNotification: Notification {
+struct AnyNotification: Notification, Sendable {
     static var name: String { "" }
     typealias Parameters = Empty
+}
+
+extension AnyNotification {
+    init(_ notification: some Notification) throws {
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+
+        let data = try encoder.encode(notification)
+        self = try decoder.decode(AnyNotification.self, from: data)
+    }
 }
 
 /// A message that can be used to send notifications.

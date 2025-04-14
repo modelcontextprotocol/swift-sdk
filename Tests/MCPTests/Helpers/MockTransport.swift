@@ -80,8 +80,7 @@ actor MockTransport: Transport {
         shouldFailSend = shouldFail
     }
 
-    func queue<M: Method>(request: Request<M>) throws {
-        let data = try encoder.encode(request)
+    func queue(data: Data) {
         if let continuation = dataStreamContinuation {
             continuation.yield(data)
         } else {
@@ -89,14 +88,24 @@ actor MockTransport: Transport {
         }
     }
 
+    func queue<M: Method>(request: Request<M>) throws {
+        queue(data: try encoder.encode(request))
+    }
+
     func queue<M: Method>(response: Response<M>) throws {
-        let data = try encoder.encode(response)
-        dataToReceive.append(data)
+        queue(data: try encoder.encode(response))
     }
 
     func queue<N: Notification>(notification: Message<N>) throws {
-        let data = try encoder.encode(notification)
-        dataToReceive.append(data)
+        queue(data: try encoder.encode(notification))
+    }
+
+    func queue(batch requests: [AnyRequest]) throws {
+        queue(data: try encoder.encode(requests))
+    }
+
+    func queue(batch responses: [AnyResponse]) throws {
+        queue(data: try encoder.encode(responses))
     }
 
     func decodeLastSentMessage<T: Decodable>() -> T? {
