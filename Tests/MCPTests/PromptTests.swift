@@ -63,6 +63,18 @@ struct PromptTests {
             #expect(Bool(false), "Expected text content")
         }
 
+        // Test audio content
+        let audioContent = Prompt.Message.Content.audio(
+            data: "base64audiodata", mimeType: "audio/wav")
+        let audioData = try encoder.encode(audioContent)
+        let decodedAudio = try decoder.decode(Prompt.Message.Content.self, from: audioData)
+        if case .audio(let data, let mimeType) = decodedAudio {
+            #expect(data == "base64audiodata")
+            #expect(mimeType == "audio/wav")
+        } else {
+            #expect(Bool(false), "Expected audio content")
+        }
+
         // Test image content
         let imageContent = Prompt.Message.Content.image(data: "base64data", mimeType: "image/png")
         let imageData = try encoder.encode(imageContent)
@@ -142,7 +154,7 @@ struct PromptTests {
         let emptyParams = ListPrompts.Parameters()
         #expect(emptyParams.cursor == nil)
     }
-    
+
     @Test("ListPrompts request decoding with omitted params")
     func testListPromptsRequestDecodingWithOmittedParams() throws {
         // Test decoding when params field is omitted
@@ -157,7 +169,7 @@ struct PromptTests {
         #expect(decoded.id == "test-id")
         #expect(decoded.method == ListPrompts.name)
     }
-    
+
     @Test("ListPrompts request decoding with null params")
     func testListPromptsRequestDecodingWithNullParams() throws {
         // Test decoding when params field is null

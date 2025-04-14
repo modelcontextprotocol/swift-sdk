@@ -103,6 +103,26 @@ struct ToolTests {
         }
     }
 
+    @Test("Audio content encoding and decoding")
+    func testToolContentAudioEncoding() throws {
+        let content = Tool.Content.audio(
+            data: "base64audiodata",
+            mimeType: "audio/wav"
+        )
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+
+        let data = try encoder.encode(content)
+        let decoded = try decoder.decode(Tool.Content.self, from: data)
+
+        if case .audio(let data, let mimeType) = decoded {
+            #expect(data == "base64audiodata")
+            #expect(mimeType == "audio/wav")
+        } else {
+            #expect(Bool(false), "Expected audio content")
+        }
+    }
+
     @Test("ListTools parameters validation")
     func testListToolsParameters() throws {
         let params = ListTools.Parameters(cursor: "next_page")

@@ -28,6 +28,8 @@ public struct Tool: Hashable, Codable, Sendable {
         case text(String)
         /// Image content
         case image(data: String, mimeType: String, metadata: [String: String]?)
+        /// Audio content
+        case audio(data: String, mimeType: String)
         /// Embedded resource content
         case resource(uri: String, mimeType: String, text: String?)
 
@@ -36,6 +38,7 @@ public struct Tool: Hashable, Codable, Sendable {
             case text
             case image
             case resource
+            case audio
             case uri
             case mimeType
             case data
@@ -56,6 +59,10 @@ public struct Tool: Hashable, Codable, Sendable {
                 let metadata = try container.decodeIfPresent(
                     [String: String].self, forKey: .metadata)
                 self = .image(data: data, mimeType: mimeType, metadata: metadata)
+            case "audio":
+                let data = try container.decode(String.self, forKey: .data)
+                let mimeType = try container.decode(String.self, forKey: .mimeType)
+                self = .audio(data: data, mimeType: mimeType)
             case "resource":
                 let uri = try container.decode(String.self, forKey: .uri)
                 let mimeType = try container.decode(String.self, forKey: .mimeType)
@@ -79,6 +86,10 @@ public struct Tool: Hashable, Codable, Sendable {
                 try container.encode(data, forKey: .data)
                 try container.encode(mimeType, forKey: .mimeType)
                 try container.encodeIfPresent(metadata, forKey: .metadata)
+            case .audio(let data, let mimeType):
+                try container.encode("audio", forKey: .type)
+                try container.encode(data, forKey: .data)
+                try container.encode(mimeType, forKey: .mimeType)
             case .resource(let uri, let mimeType, let text):
                 try container.encode("resource", forKey: .type)
                 try container.encode(uri, forKey: .uri)
@@ -120,7 +131,7 @@ public enum ListTools: Method {
 
     public struct Parameters: NotRequired, Hashable, Codable, Sendable {
         public let cursor: String?
-        
+
         public init() {
             self.cursor = nil
         }
