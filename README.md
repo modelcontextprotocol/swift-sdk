@@ -6,6 +6,9 @@ Swift implementation of the [Model Context Protocol][mcp] (MCP).
 
 - Swift 6.0+ (Xcode 16+)
 
+See the [Platform Availability](#platform-availability) section below 
+for more information about platform requirements.
+
 ## Installation
 
 ### Swift Package Manager
