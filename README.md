@@ -34,7 +34,7 @@ The Swift SDK provides multiple built-in transports:
 While the core library works on any platform supporting Swift 6 
 (including Linux and Windows), 
 running a client or server requires a compatible transport. 
-You can implement a custom transport for platforms without built-in support.
+You can implement a custom transport for platforms without built-in support. [^1]
 
 For custom transport implementation details, 
 see the [`Transport` protocol](/Sources/MCP/Base/Transport.swift).
@@ -177,3 +177,5 @@ see the [GitHub Releases page](https://github.com/modelcontextprotocol/swift-sdk
 This project is licensed under the MIT License.
 
 [mcp]: https://modelcontextprotocol.io
+
+[^1]: We're working to add stdio transport support for [Alpine Linux](https://github.com/modelcontextprotocol/swift-sdk/pull/64) and [Windows](https://github.com/modelcontextprotocol/swift-sdk/pull/64). If you're interested in either of those platforms, please take a look at their respective PRs and leave a comment! 
