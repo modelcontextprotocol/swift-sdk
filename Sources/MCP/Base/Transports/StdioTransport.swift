@@ -29,8 +29,8 @@ import struct Foundation.Data
         public nonisolated let logger: Logger
 
         private var isConnected = false
-        private let messageStream: AsyncStream<Data>
-        private let messageContinuation: AsyncStream<Data>.Continuation
+        private let messageStream: AsyncThrowingStream<Data, Swift.Error>
+        private let messageContinuation: AsyncThrowingStream<Data, Swift.Error>.Continuation
 
         public init(
             input: FileDescriptor = FileDescriptor.standardInput,
@@ -46,8 +46,8 @@ import struct Foundation.Data
                     factory: { _ in SwiftLogNoOpLogHandler() })
 
             // Create message stream
-            var continuation: AsyncStream<Data>.Continuation!
-            self.messageStream = AsyncStream { continuation = $0 }
+            var continuation: AsyncThrowingStream<Data, Swift.Error>.Continuation!
+            self.messageStream = AsyncThrowingStream { continuation = $0 }
             self.messageContinuation = continuation
         }
 
@@ -177,14 +177,7 @@ import struct Foundation.Data
         /// or batches containing multiple requests/notifications encoded as JSON arrays.
         /// Each message is guaranteed to be a complete JSON object or array.
         public func receive() -> AsyncThrowingStream<Data, Swift.Error> {
-            return AsyncThrowingStream { continuation in
-                Task {
-                    for await message in messageStream {
-                        continuation.yield(message)
-                    }
-                    continuation.finish()
-                }
-            }
+            return messageStream
         }
     }
 #endif

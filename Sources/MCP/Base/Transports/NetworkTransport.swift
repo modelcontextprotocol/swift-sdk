@@ -159,18 +159,7 @@ import struct Foundation.Data
         }
 
         public func receive() -> AsyncThrowingStream<Data, Swift.Error> {
-            return AsyncThrowingStream { continuation in
-                Task {
-                    do {
-                        for try await message in messageStream {
-                            continuation.yield(message)
-                        }
-                        continuation.finish()
-                    } catch {
-                        continuation.finish(throwing: error)
-                    }
-                }
-            }
+            return messageStream
         }
 
         private func receiveLoop() async {

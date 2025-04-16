@@ -148,14 +148,7 @@ public actor HTTPClientTransport: Actor, Transport {
 
     /// Receives data in an async sequence
     public func receive() -> AsyncThrowingStream<Data, Swift.Error> {
-        return AsyncThrowingStream { continuation in
-            Task {
-                for try await message in messageStream {
-                    continuation.yield(message)
-                }
-                continuation.finish()
-            }
-        }
+        return messageStream
     }
 
     // MARK: - SSE
