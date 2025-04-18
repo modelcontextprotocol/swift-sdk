@@ -363,4 +363,107 @@ struct ClientTests {
 
         await client.disconnect()
     }
+
+    @Test("Request timeout - request should time out if server does not respond")
+    func testRequestTimesOut() async throws {
+        let transport = MockTransport()
+        let client = Client(name: "TestClient", version: "1.0")
+
+        try await client.connect(transport: transport)
+        do {
+            // Do not queue any response on the transport
+            // so the client never receives a response
+            try await client.ping(timeout: .milliseconds(100))
+            #expect(Bool(false), "Expected request to time out, but it succeeded")
+
+        } catch let error as MCPError {
+            switch error {
+            case .requestTimedOut(let detail):
+                // This is the expected error
+                #expect(Bool(true), "Got requestTimedOut as expected: \(detail ?? "")")
+            default:
+                // If it is a different MCPError, fail
+                #expect(Bool(false), "Expected requestTimedOut, got \(error)")
+            }
+        } catch {
+            #expect(Bool(false), "Expected an MCPError, but got \(error)")
+        }
+
+        await client.disconnect()
+    }
+
+    @Test("Request timeout - request should time out if server responds too late")
+    func testRequestTimesOutIfResponseIsLate() async throws {
+        let transport = MockTransport()
+        let client = Client(name: "TestClient", version: "1.0")
+
+        try await client.connect(transport: transport)
+
+        // Prepare a ping which will be sent with a short 100ms timeout
+        let request = Ping.request()
+
+        // Prepare a task to queue a response after 200ms
+        // which is beyond the 100ms timeout
+        Task {
+            try? await Task.sleep(for: .milliseconds(200))
+            let response = Response<Ping>(id: request.id, result: .init())
+            let anyResponse = try? AnyResponse(response)
+            if let anyResponse {
+                try? await transport.queue(response: anyResponse)
+            } else {
+                #expect(Bool(false), "Failed to produce any response")
+            }
+        }
+
+        do {
+            try await _ = client.send(request, timeout: .milliseconds(100))
+            #expect(Bool(false), "Expected request to time out, but it succeeded")
+        } catch let error as MCPError {
+            switch error {
+            case .requestTimedOut(let detail):
+                // This is the expected error
+                #expect(Bool(true), "Got requestTimedOut as expected: \(detail ?? "")")
+            default:
+                // If it is a different MCPError, fail
+                #expect(Bool(false), "Expected requestTimedOut, got \(error)")
+            }
+        } catch {
+            #expect(Bool(false), "Expected an MCPError, but got \(error)")
+        }
+
+        await client.disconnect()
+    }
+
+    @Test("Request timeout - request should succeed if server responds before timeout")
+    func testRequestDoesNotTimeOutIfResponseIsFast() async throws {
+        let transport = MockTransport()
+        let client = Client(name: "TestClient", version: "1.0")
+
+        try await client.connect(transport: transport)
+
+        // Prepare a ping which will be sent with a short 200ms timeout
+        let request = Ping.request()
+
+        // Prepare a task to queue a response after 100ms
+        // which is less than the specified timeout (200ms)
+        Task {
+            try? await Task.sleep(for: .milliseconds(100))
+            let response = Response<Ping>(id: request.id, result: .init())
+            let anyResponse = try? AnyResponse(response)
+            if let anyResponse {
+                try? await transport.queue(response: anyResponse)
+            } else {
+                #expect(Bool(false), "Failed to produce any response")
+            }
+        }
+
+        do {
+            _ = try await client.send(request, timeout: .milliseconds(200))
+            #expect(Bool(true), "Request succeeded before timeout")
+        } catch let error {
+            #expect(Bool(false), "Did not expect an error here, but got \(error)")
+        }
+
+        await client.disconnect()
+    }
 }

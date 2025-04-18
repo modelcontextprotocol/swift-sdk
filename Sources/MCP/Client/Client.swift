@@ -252,7 +252,9 @@ public actor Client {
     // MARK: - Requests
 
     /// Send a request and receive its response
-    public func send<M: Method>(_ request: Request<M>) async throws -> M.Result {
+    public func send<M: Method>(_ request: Request<M>, timeout: Duration = .seconds(10.0))
+        async throws -> M.Result
+    {
         guard let connection = connection else {
             throw MCPError.internalError("Client connection not initialized")
         }
@@ -262,21 +264,46 @@ public actor Client {
 
         // Store the pending request first
         return try await withCheckedThrowingContinuation { continuation in
-            Task {
-                self.addPendingRequest(
-                    id: request.id,
-                    continuation: continuation,
-                    type: M.Result.self
-                )
+            self.addPendingRequest(
+                id: request.id,
+                continuation: continuation,
+                type: M.Result.self
+            )
 
-                // Send the request data
+            // Send the request data
+            var sendRequestTask: Task<Void, Never>? = nil
+
+            // A timeout task is created to remove a request if it is still pending after time out duration
+            var timeoutTask: Task<Void, Never>? = nil
+
+            sendRequestTask = Task {
                 do {
                     // Use the existing connection send
                     try await connection.send(requestData)
                 } catch {
-                    // If send fails immediately, resume continuation and remove pending request
-                    continuation.resume(throwing: error)
+                    // If send fails immediately, remove pending request and cancel timeout task
                     self.removePendingRequest(id: request.id)  // Ensure cleanup on send error
+                    timeoutTask?.cancel()
+                    continuation.resume(throwing: error)
+                }
+            }
+
+            timeoutTask = Task {
+                do {
+                    try await Task.sleep(until: .now + timeout)
+
+                    // If timed out, remove pending request and cancel send request task
+                    if self.pendingRequests.keys.contains(request.id) {
+                        self.removePendingRequest(id: request.id)  // Ensure cleanup on send error
+                        sendRequestTask?.cancel()
+                        continuation.resume(
+                            throwing: MCPError.requestTimedOut(
+                                "Request timed out after \(timeout)"
+                            )
+                        )
+                    }
+                } catch {
+                    // Do nothing here if the task is cancaled
                 }
             }
         }
@@ -457,9 +484,13 @@ public actor Client {
         return result
     }
 
-    public func ping() async throws {
+    public func ping(timeout: Duration? = nil) async throws {
         let request = Ping.request()
-        _ = try await send(request)
+        if let timeout {
+            _ = try await send(request, timeout: timeout)
+        } else {
+            _ = try await send(request)
+        }
     }
 
     // MARK: - Prompts
