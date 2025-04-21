@@ -363,4 +363,120 @@ struct ClientTests {
 
         await client.disconnect()
     }
+
+    @Test("Notify method sends notifications")
+    func testClientNotify() async throws {
+        let transport = MockTransport()
+        let client = Client(name: "TestClient", version: "1.0")
+
+        try await client.connect(transport: transport)
+        try await Task.sleep(for: .milliseconds(10))
+
+        // Create a test notification
+        let notification = InitializedNotification.message()
+        try await client.notify(notification)
+
+        // Verify notification was sent
+        #expect(await transport.sentMessages.count == 1)
+
+        if let sentMessage = await transport.sentMessages.first,
+            let data = sentMessage.data(using: .utf8)
+        {
+
+            // Decode as Message<InitializedNotification>
+            let decoder = JSONDecoder()
+            do {
+                let decodedNotification = try decoder.decode(
+                    Message<InitializedNotification>.self, from: data)
+                #expect(decodedNotification.method == InitializedNotification.name)
+            } catch {
+                #expect(Bool(false), "Failed to decode notification: \(error)")
+            }
+        } else {
+            #expect(Bool(false), "No message was sent")
+        }
+
+        await client.disconnect()
+    }
+
+    @Test("Initialize sends initialized notification")
+    func testClientInitializeNotification() async throws {
+        let transport = MockTransport()
+        let client = Client(name: "TestClient", version: "1.0")
+
+        try await client.connect(transport: transport)
+        try await Task.sleep(for: .milliseconds(10))
+
+        // Create a task for initialize
+        let initTask = Task {
+            // Queue a response for the initialize request
+            try await Task.sleep(for: .milliseconds(10))  // Wait for request to be sent
+
+            if let lastMessage = await transport.sentMessages.last,
+                let data = lastMessage.data(using: .utf8),
+                let request = try? JSONDecoder().decode(Request<Initialize>.self, from: data)
+            {
+
+                // Create a valid initialize response
+                let response = Initialize.response(
+                    id: request.id,
+                    result: .init(
+                        protocolVersion: Version.latest,
+                        capabilities: .init(),
+                        serverInfo: .init(name: "TestServer", version: "1.0"),
+                        instructions: nil
+                    )
+                )
+
+                try await transport.queue(response: response)
+
+                // Now complete the initialize call
+                _ = try await client.initialize()
+
+                // Verify that two messages were sent: initialize request and initialized notification
+                #expect(await transport.sentMessages.count == 2)
+
+                // Check that the second message is the initialized notification
+                let notifications = await transport.sentMessages
+                if notifications.count >= 2 {
+                    let notificationJson = notifications[1]
+                    if let notificationData = notificationJson.data(using: .utf8) {
+                        do {
+                            let decoder = JSONDecoder()
+                            let decodedNotification = try decoder.decode(
+                                Message<InitializedNotification>.self, from: notificationData)
+                            #expect(decodedNotification.method == InitializedNotification.name)
+                        } catch {
+                            #expect(Bool(false), "Failed to decode notification: \(error)")
+                        }
+                    } else {
+                        #expect(Bool(false), "Could not convert notification to data")
+                    }
+                } else {
+                    #expect(
+                        Bool(false), "Expected both initialize request and initialized notification"
+                    )
+                }
+            }
+        }
+
+        // Wait with timeout
+        let timeoutTask = Task {
+            try await Task.sleep(for: .seconds(1))
+            initTask.cancel()
+        }
+
+        // Wait for the task to complete
+        do {
+            _ = try await initTask.value
+        } catch is CancellationError {
+            #expect(Bool(false), "Test timed out")
+        } catch {
+            #expect(Bool(false), "Unexpected error: \(error)")
+        }
+
+        timeoutTask.cancel()
+
+        await client.disconnect()
+    }
 }
