@@ -64,6 +64,8 @@ public struct Prompt: Hashable, Codable, Sendable {
             case text(text: String)
             /// Image content
             case image(data: String, mimeType: String)
+            /// Audio content
+            case audio(data: String, mimeType: String)
             /// Embedded resource content
             case resource(uri: String, mimeType: String, text: String?, blob: String?)
 
@@ -80,6 +82,10 @@ public struct Prompt: Hashable, Codable, Sendable {
                     try container.encode(text, forKey: .text)
                 case .image(let data, let mimeType):
                     try container.encode("image", forKey: .type)
+                    try container.encode(data, forKey: .data)
+                    try container.encode(mimeType, forKey: .mimeType)
+                case .audio(let data, let mimeType):
+                    try container.encode("audio", forKey: .type)
                     try container.encode(data, forKey: .data)
                     try container.encode(mimeType, forKey: .mimeType)
                 case .resource(let uri, let mimeType, let text, let blob):
@@ -103,6 +109,10 @@ public struct Prompt: Hashable, Codable, Sendable {
                     let data = try container.decode(String.self, forKey: .data)
                     let mimeType = try container.decode(String.self, forKey: .mimeType)
                     self = .image(data: data, mimeType: mimeType)
+                case "audio":
+                    let data = try container.decode(String.self, forKey: .data)
+                    let mimeType = try container.decode(String.self, forKey: .mimeType)
+                    self = .audio(data: data, mimeType: mimeType)
                 case "resource":
                     let uri = try container.decode(String.self, forKey: .uri)
                     let mimeType = try container.decode(String.self, forKey: .mimeType)
@@ -155,7 +165,7 @@ public enum ListPrompts: Method {
 
     public struct Parameters: NotRequired, Hashable, Codable, Sendable {
         public let cursor: String?
-        
+
         public init() {
             self.cursor = nil
         }

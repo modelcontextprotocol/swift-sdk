@@ -249,6 +249,16 @@ public actor Client {
         return self
     }
 
+    /// Send a notification to the server
+    public func notify<N: Notification>(_ notification: Message<N>) async throws {
+        guard let connection = connection else {
+            throw MCPError.internalError("Client connection not initialized")
+        }
+
+        let notificationData = try encoder.encode(notification)
+        try await connection.send(notificationData)
+    }
+
     // MARK: - Requests
 
     /// Send a request and receive its response
@@ -453,6 +463,8 @@ public actor Client {
         self.serverCapabilities = result.capabilities
         self.serverVersion = result.protocolVersion
         self.instructions = result.instructions
+
+        try await notify(InitializedNotification.message())
 
         return result
     }

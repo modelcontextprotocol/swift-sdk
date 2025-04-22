@@ -496,12 +496,6 @@ public actor Server {
                 protocolVersion: params.protocolVersion
             )
 
-            // Send initialized notification after a short delay
-            Task {
-                try? await Task.sleep(nanoseconds: 10 * 1_000_000)
-                try? await self.notify(InitializedNotification.message())
-            }
-
             return Initialize.Result(
                 protocolVersion: Version.latest,
                 capabilities: await self.capabilities,

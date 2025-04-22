@@ -6,28 +6,8 @@ Swift implementation of the [Model Context Protocol][mcp] (MCP).
 
 - Swift 6.0+ (Xcode 16+)
 
-## Platform Support
-
-| Platform | Minimum Version |
-|----------|----------------|
-| macOS | 13.0+ |
-| iOS / Mac Catalyst | 16.0+ |
-| watchOS | 9.0+ |
-| tvOS | 16.0+ |
-| visionOS | 1.0+ |
-| Linux | ✓ |
-| Windows | ✓ |
-
-> [!IMPORTANT]  
-> MCP's transport layer handles communication between clients and servers.
-> The Swift SDK supports multiple transport mechanisms,
-> with different platform availability:
->
-> * `StdioTransport` is available on Apple platforms 
->   and Linux distributions with glibc, such as
->   Ubuntu, Debian, Fedora, CentOS, or RHEL. 
->
-> * `NetworkTransport` is available only on Apple platforms.
+See the [Platform Availability](#platform-availability) section below 
+for more information about platform requirements.
 
 ## Installation
 
@@ -153,6 +133,44 @@ let (description, messages) = try await client.getPrompt(
     arguments: ["key": "value"]
 )
 ```
+
+## Platform Availability
+
+The Swift SDK has the following Apple platform requirements:
+
+| Platform | Minimum Version |
+|----------|----------------|
+| macOS | 13.0+ |
+| iOS / Mac Catalyst | 16.0+ |
+| watchOS | 9.0+ |
+| tvOS | 16.0+ |
+| visionOS | 1.0+ |
+
+While the core library works on any platform supporting Swift 6 
+(including Linux and Windows), 
+running a client or server requires a compatible transport. 
+
+MCP's transport layer handles communication between clients and servers. 
+The Swift SDK provides multiple built-in transports:
+
+- [`StdioTransport`](/Sources/MCP/Base/Transports/StdioTransport.swift):
+  Implements [stdio](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#stdio) transport.
+  Available on Apple platforms 
+  and Linux distributions with glibc (Ubuntu, Debian, Fedora, CentOS, RHEL).
+- [`HTTPClientTransport`](/Sources/MCP/Base/Transports/HTTPClientTransport.swift):
+  Implements [Streamable HTTP transport](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#streamable-http)
+  using Foundation [URL Loading System](https://developer.apple.com/documentation/foundation/url-loading-system) 
+- [`NetworkTransport`](/Sources/MCP/Base/Transports/NetworkTransport.swift):
+  Implements custom transport over TCP and UDP
+  using Apple's [Networking framework](https://developer.apple.com/documentation/network).
+  Available exclusively on Apple platforms.
+
+You can implement a custom transport for platforms without built-in support. [^1]
+
+For custom transport implementation details, 
+see the [`Transport` protocol](/Sources/MCP/Base/Transport.swift).
+
+[^1]: We're working to add stdio transport support for [Alpine Linux](https://github.com/modelcontextprotocol/swift-sdk/pull/64) and [Windows](https://github.com/modelcontextprotocol/swift-sdk/pull/64). If you're interested in either of those platforms, please take a look at their respective PRs and leave a comment! 
 
 ## Changelog
 

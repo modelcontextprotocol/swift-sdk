@@ -41,15 +41,11 @@ struct ServerTests {
         // Wait for message processing and response
         try await Task.sleep(nanoseconds: 100_000_000)  // 100ms
 
-        #expect(await transport.sentMessages.count == 2)
+        #expect(await transport.sentMessages.count == 1)
 
         let messages = await transport.sentMessages
         if let response = messages.first {
             #expect(response.contains("serverInfo"))
-        }
-
-        if let noticiation = messages.last {
-            #expect(noticiation.contains("initialized"))
         }
 
         // Clean up
