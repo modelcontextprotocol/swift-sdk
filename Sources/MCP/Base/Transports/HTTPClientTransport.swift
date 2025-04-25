@@ -205,6 +205,12 @@ public actor HTTPClientTransport: Actor, Transport {
 
             // Check response status
             guard httpResponse.statusCode == 200 else {
+                // For servers that don't support streaming from this endpoint
+                // they should return a 405 NOT ALLOWED. So lets cancel the task
+                // instead of retrying
+                if httpResponse.statusCode == 405 {
+                    self.streamingTask?.cancel()
+                }
                 throw MCPError.internalError("HTTP error: \(httpResponse.statusCode)")
             }
 
