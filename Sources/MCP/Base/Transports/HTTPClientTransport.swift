@@ -179,107 +179,125 @@ public actor HTTPClientTransport: Actor, Transport {
         /// Establishes an SSE connection to the server
         private func connectToEventStream() async throws {
             guard isConnected else { return }
-            
+
             var request = URLRequest(url: endpoint)
             request.httpMethod = "GET"
             request.addValue("text/event-stream", forHTTPHeaderField: "Accept")
-            
+
             // Add session ID if available
             if let sessionID = sessionID {
                 request.addValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
             }
-            
+
             // Add Last-Event-ID header for resumability if available
             if let lastEventID = lastEventID {
                 request.addValue(lastEventID, forHTTPHeaderField: "Last-Event-ID")
             }
-            
+
             logger.debug("Starting SSE connection")
-            
+
             // Create URLSession task for SSE
             let (stream, response) = try await session.bytes(for: request)
-            
+
             guard let httpResponse = response as? HTTPURLResponse else {
                 throw MCPError.internalError("Invalid HTTP response")
             }
-            
+
             // Check response status
             guard httpResponse.statusCode == 200 else {
                 throw MCPError.internalError("HTTP error: \(httpResponse.statusCode)")
             }
-            
+
             // Extract session ID if present
             if let newSessionID = httpResponse.value(forHTTPHeaderField: "Mcp-Session-Id") {
                 self.sessionID = newSessionID
             }
-            
+
             // Process the SSE stream
+            var buffer = ""
             var eventType = ""
             var eventID: String?
             var eventData = ""
-            
-            for try await line in stream.lines {
+
+            for try await byte in stream {
                 if Task.isCancelled { break }
-                
-                // Empty line marks the end of an event
-                if line.isEmpty {
-                    if !eventData.isEmpty {
-                        // Process the event
-                        if eventType == "id" {
-                            lastEventID = eventID
-                        } else {
-                            // Default event type is "message" if not specified
-                            if let data = eventData.data(using: .utf8) {
-                                logger.debug(
-                                    "SSE event received",
-                                    metadata: [
-                                        "type": "\(eventType.isEmpty ? "message" : eventType)",
-                                        "id": "\(eventID ?? "none")",
-                                    ])
-                                messageContinuation.yield(data)
-                            }
-                        }
-                        
-                        // Reset for next event
-                        eventType = ""
-                        eventData = ""
+
+                guard let char = String(bytes: [byte], encoding: .utf8) else { continue }
+                buffer.append(char)
+
+                // Process complete lines
+                while let newlineIndex = buffer.utf8.firstIndex(where: { $0 == 10 }) {
+                    var line = buffer[..<newlineIndex]
+                    if line.hasSuffix("\r") {
+                        line = line.dropLast()
                     }
-                    continue
-                }
-                
-                // Lines starting with ":" are comments
-                if line.hasPrefix(":") { continue }
-                
-                // Parse field: value format
-                if let colonIndex = line.firstIndex(of: ":") {
-                    let field = String(line[..<colonIndex])
-                    var value = String(line[line.index(after: colonIndex)...])
-                    
-                    // Trim leading space
-                    if value.hasPrefix(" ") {
-                        value = String(value.dropFirst())
-                    }
-                    
-                    // Process based on field
-                    switch field {
-                    case "event":
-                        eventType = value
-                    case "data":
+
+                    buffer = String(buffer[buffer.index(after: newlineIndex)...])
+
+                    // Empty line marks the end of an event
+                    if line.isEmpty {
                         if !eventData.isEmpty {
-                            eventData.append("\n")
+                            // Process the event
+                            if eventType == "id" {
+                                lastEventID = eventID
+                            } else {
+                                // Default event type is "message" if not specified
+                                if let data = eventData.data(using: .utf8) {
+                                    logger.debug(
+                                        "SSE event received",
+                                        metadata: [
+                                            "type": "\(eventType.isEmpty ? "message" : eventType)",
+                                            "id": "\(eventID ?? "none")",
+                                        ])
+                                    messageContinuation.yield(data)
+                                }
+                            }
+
+                            // Reset for next event
+                            eventType = ""
+                            eventData = ""
                         }
-                        eventData.append(value)
-                    case "id":
-                        if !value.contains("\0") {  // ID must not contain NULL
-                            eventID = value
-                            lastEventID = value
+                        continue
+                    }
+
+                    if line.hasSuffix("\r") {
+                        line = line.dropLast()
+                    }
+                    
+                    // Lines starting with ":" are comments
+                    if line.hasPrefix(":") { continue }
+
+                    // Parse field: value format
+                    if let colonIndex = line.firstIndex(of: ":") {
+                        let field = String(line[..<colonIndex])
+                        var value = String(line[line.index(after: colonIndex)...])
+
+                        // Trim leading space
+                        if value.hasPrefix(" ") {
+                            value = String(value.dropFirst())
                         }
-                    case "retry":
-                        // Retry timing not implemented
-                        break
-                    default:
-                        // Unknown fields are ignored per SSE spec
-                        break
+
+                        // Process based on field
+                        switch field {
+                        case "event":
+                            eventType = value
+                        case "data":
+                            if !eventData.isEmpty {
+                                eventData.append("\n")
+                            }
+                            eventData.append(value)
+                        case "id":
+                            if !value.contains("\0") {  // ID must not contain NULL
+                                eventID = value
+                                lastEventID = value
+                            }
+                        case "retry":
+                            // Retry timing not implemented
+                            break
+                        default:
+                            // Unknown fields are ignored per SSE spec
+                            break
+                        }
                     }
                 }
             }
