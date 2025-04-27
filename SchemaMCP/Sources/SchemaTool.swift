@@ -23,7 +23,7 @@ public extension Server {
                 }
             }
 
-            return .init(content: [.text("Tool \(call.name) not found")], isError: true)
+            return .init(content: [.text("Tool `\(call.name)` not found")], isError: true)
         }
     }
 }
@@ -84,13 +84,10 @@ public struct SchemaTool<Schema: Schemable>: Identifiable, Sendable {
         _ arguments: [String: Value]?
     ) async throws -> CallTool.Result {
         do {
-            let output = try inputSchema.parse(arguments)
-            guard let schema = output as? Schema else {
-                throw MCPError.parseError("Schema.Schema.Output != Schema")
-            }
+            let schema = try parse(arguments)
             return try await handlerClosure(schema)
-        } catch {
-            return .init(content: [.text("Failed to parse arguments: \(error)")], isError: true)
+        } catch let error as MCPError {
+            return .init(content: [.text("Invalid arguments: \(error)")], isError: true)
         }
     }
 
@@ -134,7 +131,7 @@ public extension Value {
             let data = try JSONEncoder().encode(schema.definition())
             self = try JSONDecoder().decode(Value.self, from: data)
         } catch {
-            throw MCPError.parseError("Invalid schema: \(error)")
+            throw MCPError.parseError("\(error)")
         }
     }
 }
@@ -150,7 +147,7 @@ public extension JSONSchemaComponent {
             let string = String(data: data, encoding: .utf8) ?? ""
             return try parseAndValidate(instance: string)
         } catch {
-            throw MCPError.invalidParams("Failed to parse arguments: \(error)")
+            throw MCPError.invalidParams("\(error)")
         }
     }
 }
