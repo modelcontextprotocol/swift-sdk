@@ -39,6 +39,29 @@ try await client.connect(transport: transport)
 let result = try await client.initialize()
 ```
 
+### Streaming HTTP Transport
+
+The HTTP transport supports streaming mode for real-time communication using Server-Sent Events (SSE):
+
+```swift
+import MCP
+
+// Create a streaming HTTP transport
+let transport = HTTPClientTransport(
+    endpoint: URL(string: "http://localhost:8080")!,
+)
+
+// Initialize the client with streaming transport
+let client = Client(name: "MyApp", version: "1.0.0")
+try await client.connect(transport: transport)
+
+// Initialize the connection
+let result = try await client.initialize()
+
+// The transport will automatically handle SSE events
+// and deliver them through the client's notification handlers
+```
+
 ### Basic Server Setup
 
 ```swift
