@@ -139,7 +139,11 @@ import Testing
             configuration.protocolClasses = [MockURLProtocol.self]
 
             let transport = HTTPClientTransport(
-                endpoint: testEndpoint, configuration: configuration, streaming: false, logger: nil)
+                endpoint: testEndpoint,
+                configuration: configuration,
+                streaming: false,
+                logger: nil
+            )
 
             try await transport.connect()
             await transport.disconnect()
@@ -151,7 +155,11 @@ import Testing
             configuration.protocolClasses = [MockURLProtocol.self]
 
             let transport = HTTPClientTransport(
-                endpoint: testEndpoint, configuration: configuration, streaming: false, logger: nil)
+                endpoint: testEndpoint,
+                configuration: configuration,
+                streaming: false,
+                logger: nil
+            )
             try await transport.connect()
 
             let messageData = #"{"jsonrpc":"2.0","method":"initialize","id":1}"#.data(using: .utf8)!
@@ -189,7 +197,11 @@ import Testing
             configuration.protocolClasses = [MockURLProtocol.self]
 
             let transport = HTTPClientTransport(
-                endpoint: testEndpoint, configuration: configuration, streaming: false, logger: nil)
+                endpoint: testEndpoint,
+                configuration: configuration,
+                streaming: false,
+                logger: nil
+            )
             try await transport.connect()
 
             let messageData = #"{"jsonrpc":"2.0","method":"initialize","id":1}"#.data(using: .utf8)!
@@ -219,7 +231,11 @@ import Testing
             configuration.protocolClasses = [MockURLProtocol.self]
 
             let transport = HTTPClientTransport(
-                endpoint: testEndpoint, configuration: configuration, streaming: false, logger: nil)
+                endpoint: testEndpoint,
+                configuration: configuration,
+                streaming: false,
+                logger: nil
+            )
             try await transport.connect()
 
             let initialSessionID = "existing-session-abc"
@@ -264,7 +280,11 @@ import Testing
             configuration.protocolClasses = [MockURLProtocol.self]
 
             let transport = HTTPClientTransport(
-                endpoint: testEndpoint, configuration: configuration)
+                endpoint: testEndpoint,
+                configuration: configuration,
+                streaming: false,
+                logger: nil
+            )
             try await transport.connect()
 
             let messageData = #"{"jsonrpc":"2.0","method":"test","id":3}"#.data(using: .utf8)!
@@ -297,7 +317,11 @@ import Testing
             configuration.protocolClasses = [MockURLProtocol.self]
 
             let transport = HTTPClientTransport(
-                endpoint: testEndpoint, configuration: configuration)
+                endpoint: testEndpoint,
+                configuration: configuration,
+                streaming: false,
+                logger: nil
+            )
             try await transport.connect()
 
             let messageData = #"{"jsonrpc":"2.0","method":"test","id":4}"#.data(using: .utf8)!
@@ -330,7 +354,11 @@ import Testing
             configuration.protocolClasses = [MockURLProtocol.self]
 
             let transport = HTTPClientTransport(
-                endpoint: testEndpoint, configuration: configuration)
+                endpoint: testEndpoint,
+                configuration: configuration,
+                streaming: false,
+                logger: nil
+            )
             try await transport.connect()
 
             let initialSessionID = "expired-session-xyz"
@@ -384,8 +412,11 @@ import Testing
                 configuration.protocolClasses = [MockURLProtocol.self]
 
                 let transport = HTTPClientTransport(
-                    endpoint: testEndpoint, configuration: configuration, streaming: true,
-                    logger: nil)
+                    endpoint: testEndpoint,
+                    configuration: configuration,
+                    streaming: true,
+                    logger: nil
+                )
 
                 let eventString = "id: event1\ndata: {\"key\":\"value\"}\n\n"
                 let sseEventData = eventString.data(using: .utf8)!
@@ -418,8 +449,11 @@ import Testing
                 configuration.protocolClasses = [MockURLProtocol.self]
 
                 let transport = HTTPClientTransport(
-                    endpoint: testEndpoint, configuration: configuration, streaming: true,
-                    logger: nil)
+                    endpoint: testEndpoint,
+                    configuration: configuration,
+                    streaming: true,
+                    logger: nil
+                )
 
                 let eventString = "id: event1\r\ndata: {\"key\":\"value\"}\r\n\n"
                 let sseEventData = eventString.data(using: .utf8)!
