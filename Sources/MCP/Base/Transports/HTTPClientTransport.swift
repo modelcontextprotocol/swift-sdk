@@ -205,9 +205,9 @@ public actor HTTPClientTransport: Actor, Transport {
 
             // Check response status
             guard httpResponse.statusCode == 200 else {
-                // For servers that don't support streaming from this endpoint
-                // they should return a 405 NOT ALLOWED. So lets cancel the task
-                // instead of retrying
+                // If the server returns 405 Method Not Allowed,
+                // it indicates that the server doesn't support SSE streaming.
+                // We should cancel the task instead of retrying the connection.
                 if httpResponse.statusCode == 405 {
                     self.streamingTask?.cancel()
                 }
