@@ -168,6 +168,11 @@ import struct Foundation.Data
             while isConnected && !Task.isCancelled {
                 do {
                     let newData = try await receiveData()
+                    // Check for EOF (empty data)
+                    if newData.isEmpty {
+                        logger.info("Connection closed by peer (EOF).")
+                        break  // Exit loop gracefully
+                    }
                     buffer.append(newData)
 
                     // Process complete messages
@@ -219,8 +224,8 @@ import struct Foundation.Data
                             } else if let content = content {
                                 continuation.resume(returning: content)
                             } else {
-                                continuation.resume(
-                                    throwing: MCPError.internalError("No data received"))
+                                // EOF: Resume with empty data instead of throwing an error
+                                continuation.resume(returning: Data())
                             }
                         }
                     }
