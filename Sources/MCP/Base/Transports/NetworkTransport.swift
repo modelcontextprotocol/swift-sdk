@@ -5,9 +5,40 @@ import struct Foundation.Data
 #if canImport(Network)
     import Network
 
-    /// Network connection based transport implementation
+    /// An implementation of a custom MCP transport using Apple's Network framework.
+    ///
+    /// This transport allows MCP clients and servers to communicate over TCP/UDP connections
+    /// using Apple's Network framework.
+    ///
+    /// - Important: This transport is available exclusively on Apple platforms
+    ///   (macOS, iOS, watchOS, tvOS, visionOS) as it depends on the Network framework.
+    ///
+    /// ## Example Usage
+    ///
+    /// ```swift
+    /// import MCP
+    /// import Network
+    ///
+    /// // Create a TCP connection to a server
+    /// let connection = NWConnection(
+    ///     host: NWEndpoint.Host("localhost"),
+    ///     port: NWEndpoint.Port(8080)!,
+    ///     using: .tcp
+    /// )
+    ///
+    /// // Initialize the transport with the connection
+    /// let transport = NetworkTransport(connection: connection)
+    ///
+    /// // Use the transport with an MCP client
+    /// let client = Client(name: "MyApp", version: "1.0.0")
+    /// try await client.connect(transport: transport)
+    ///
+    /// // Initialize the connection
+    /// let result = try await client.initialize()
+    /// ```
     public actor NetworkTransport: Transport {
         private let connection: NWConnection
+        /// Logger instance for transport-related events
         public nonisolated let logger: Logger
 
         private var isConnected = false
@@ -17,6 +48,11 @@ import struct Foundation.Data
         // Track connection state for continuations
         private var connectionContinuationResumed = false
 
+        /// Creates a new NetworkTransport with the specified NWConnection
+        ///
+        /// - Parameters:
+        ///   - connection: The NWConnection to use for communication
+        ///   - logger: Optional logger instance for transport events
         public init(connection: NWConnection, logger: Logger? = nil) {
             self.connection = connection
             self.logger =
@@ -32,7 +68,12 @@ import struct Foundation.Data
             self.messageContinuation = continuation
         }
 
-        /// Connects to the network transport
+        /// Establishes connection with the transport
+        ///
+        /// This initiates the NWConnection and waits for it to become ready.
+        /// Once the connection is established, it starts the message receiving loop.
+        ///
+        /// - Throws: Error if the connection fails to establish
         public func connect() async throws {
             guard !isConnected else { return }
 
@@ -77,6 +118,9 @@ import struct Foundation.Data
             }
         }
 
+        /// Handles when the connection reaches the ready state
+        ///
+        /// - Parameter continuation: The continuation to resume when connection is ready
         private func handleConnectionReady(continuation: CheckedContinuation<Void, Swift.Error>)
             async
         {
@@ -90,6 +134,11 @@ import struct Foundation.Data
             }
         }
 
+        /// Handles connection failure
+        ///
+        /// - Parameters:
+        ///   - error: The error that caused the connection to fail
+        ///   - continuation: The continuation to resume with the error
         private func handleConnectionFailed(
             error: Swift.Error, continuation: CheckedContinuation<Void, Swift.Error>
         ) async {
@@ -100,6 +149,9 @@ import struct Foundation.Data
             }
         }
 
+        /// Handles connection cancellation
+        ///
+        /// - Parameter continuation: The continuation to resume with cancellation error
         private func handleConnectionCancelled(continuation: CheckedContinuation<Void, Swift.Error>)
             async
         {
@@ -110,6 +162,10 @@ import struct Foundation.Data
             }
         }
 
+        /// Disconnects from the transport
+        ///
+        /// This cancels the NWConnection, finalizes the message stream,
+        /// and releases associated resources.
         public func disconnect() async {
             guard isConnected else { return }
             isConnected = false
@@ -118,6 +174,13 @@ import struct Foundation.Data
             logger.info("Network transport disconnected")
         }
 
+        /// Sends data through the network connection
+        ///
+        /// This sends a JSON-RPC message through the NWConnection, adding a newline
+        /// delimiter to mark the end of the message.
+        ///
+        /// - Parameter message: The JSON-RPC message to send
+        /// - Throws: MCPError for transport failures or connection issues
         public func send(_ message: Data) async throws {
             guard isConnected else {
                 throw MCPError.internalError("Transport not connected")
@@ -158,10 +221,21 @@ import struct Foundation.Data
             }
         }
 
+        /// Receives data in an async sequence
+        ///
+        /// This returns an AsyncThrowingStream that emits Data objects representing
+        /// each JSON-RPC message received from the network connection.
+        ///
+        /// - Returns: An AsyncThrowingStream of Data objects
         public func receive() -> AsyncThrowingStream<Data, Swift.Error> {
             return messageStream
         }
 
+        /// Continuous loop to receive and process incoming messages
+        ///
+        /// This method runs continuously while the connection is active,
+        /// receiving data and yielding complete messages to the message stream.
+        /// Messages are delimited by newline characters.
         private func receiveLoop() async {
             var buffer = Data()
 
@@ -204,6 +278,10 @@ import struct Foundation.Data
             messageContinuation.finish()
         }
 
+        /// Receives a chunk of data from the network connection
+        ///
+        /// - Returns: The received data chunk
+        /// - Throws: Network errors or transport failures
         private func receiveData() async throws -> Data {
             var receiveContinuationResumed = false
 
