@@ -26,6 +26,27 @@ import Logging
 /// - Streaming HTTP with SSE (`streaming=true`): Enables server-to-client push messages
 ///
 /// - Important: Server-Sent Events (SSE) functionality is not supported on Linux platforms.
+///
+/// ## Example Usage
+///
+/// ```swift
+/// import MCP
+///
+/// // Create a streaming HTTP transport
+/// let transport = HTTPClientTransport(
+///     endpoint: URL(string: "http://localhost:8080")!,
+/// )
+///
+/// // Initialize the client with streaming transport
+/// let client = Client(name: "MyApp", version: "1.0.0")
+/// try await client.connect(transport: transport)
+///
+/// // Initialize the connection
+/// let result = try await client.initialize()
+///
+/// // The transport will automatically handle SSE events
+/// // and deliver them through the client's notification handlers
+/// ```
 public actor HTTPClientTransport: Transport {
     /// The server endpoint URL to connect to
     public let endpoint: URL
