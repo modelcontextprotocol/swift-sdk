@@ -103,56 +103,107 @@ public actor HTTPClientTransport: Actor, Transport {
             request.addValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
         }
 
-        let (responseStream, response) = try await session.bytes(for: request)
+        #if canImport(FoundationNetworking)
+            // Linux implementation using data(for:) instead of bytes(for:)
+            let (responseData, response) = try await session.data(for: request)
 
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw MCPError.internalError("Invalid HTTP response")
-        }
-
-        // Process the response based on content type and status code
-        let contentType = httpResponse.value(forHTTPHeaderField: "Content-Type") ?? ""
-
-        // Extract session ID if present
-        if let newSessionID = httpResponse.value(forHTTPHeaderField: "Mcp-Session-Id") {
-            self.sessionID = newSessionID
-            logger.debug("Session ID received", metadata: ["sessionID": "\(newSessionID)"])
-        }
-
-        // Handle different response types
-        switch httpResponse.statusCode {
-        case 200..<300 where contentType.contains("text/event-stream"):
-            // For SSE, the processing happens in the streaming task
-            logger.debug("Received SSE response, processing in streaming task")
-            try await self.processSSE(responseStream)
-
-        case 200..<300 where contentType.contains("application/json"):
-            // For JSON responses, deliver the data directly
-            var buffer = Data()
-            for try await byte in responseStream {
-                buffer.append(byte)
+            guard let httpResponse = response as? HTTPURLResponse else {
+                throw MCPError.internalError("Invalid HTTP response")
             }
-            logger.debug("Received JSON response", metadata: ["size": "\(buffer.count)"])
-            messageContinuation.yield(buffer)
 
-        case 404:
-            // If we get a 404 with a session ID, it means our session is invalid
-            if sessionID != nil {
-                logger.warning("Session has expired")
-                sessionID = nil
-                throw MCPError.internalError("Session expired")
+            // Process the response based on content type and status code
+            let contentType = httpResponse.value(forHTTPHeaderField: "Content-Type") ?? ""
+
+            // Extract session ID if present
+            if let newSessionID = httpResponse.value(forHTTPHeaderField: "Mcp-Session-Id") {
+                self.sessionID = newSessionID
+                logger.debug("Session ID received", metadata: ["sessionID": "\(newSessionID)"])
             }
-            throw MCPError.internalError("Endpoint not found")
 
-        case 405:
-            // If we get a 405, it means the server does not support streaming,
-            // so we should cancel the streaming task.
-            self.streamingTask?.cancel()
-            throw MCPError.internalError("Server does not support streaming")
+            // Handle different response types
+            switch httpResponse.statusCode {
+            case 200..<300 where contentType.contains("text/event-stream"):
+                // For SSE, we can't process streaming on this platform
+                logger.warning("SSE responses aren't fully supported on this platform")
+                messageContinuation.yield(responseData)
 
-        default:
-            throw MCPError.internalError(
-                "Unexpected HTTP response: \(httpResponse.statusCode) \(contentType)")
-        }
+            case 200..<300 where contentType.contains("application/json"):
+                // For JSON responses, deliver the data directly
+                logger.debug("Received JSON response", metadata: ["size": "\(responseData.count)"])
+                messageContinuation.yield(responseData)
+
+            case 404:
+                // If we get a 404 with a session ID, it means our session is invalid
+                if sessionID != nil {
+                    logger.warning("Session has expired")
+                    sessionID = nil
+                    throw MCPError.internalError("Session expired")
+                }
+                throw MCPError.internalError("Endpoint not found")
+
+            case 405:
+                // If we get a 405, it means the server does not support streaming,
+                // so we should cancel the streaming task.
+                self.streamingTask?.cancel()
+                throw MCPError.internalError("Server does not support streaming")
+
+            default:
+                throw MCPError.internalError(
+                    "Unexpected HTTP response: \(httpResponse.statusCode) \(contentType)")
+            }
+        #else
+            // macOS and other platforms with bytes(for:) support
+            let (responseStream, response) = try await session.bytes(for: request)
+
+            guard let httpResponse = response as? HTTPURLResponse else {
+                throw MCPError.internalError("Invalid HTTP response")
+            }
+
+            // Process the response based on content type and status code
+            let contentType = httpResponse.value(forHTTPHeaderField: "Content-Type") ?? ""
+
+            // Extract session ID if present
+            if let newSessionID = httpResponse.value(forHTTPHeaderField: "Mcp-Session-Id") {
+                self.sessionID = newSessionID
+                logger.debug("Session ID received", metadata: ["sessionID": "\(newSessionID)"])
+            }
+
+            // Handle different response types
+            switch httpResponse.statusCode {
+            case 200..<300 where contentType.contains("text/event-stream"):
+                // For SSE, the processing happens in the streaming task
+                logger.debug("Received SSE response, processing in streaming task")
+                try await self.processSSE(responseStream)
+
+            case 200..<300 where contentType.contains("application/json"):
+                // For JSON responses, deliver the data directly
+                var buffer = Data()
+                for try await byte in responseStream {
+                    buffer.append(byte)
+                }
+                logger.debug("Received JSON response", metadata: ["size": "\(buffer.count)"])
+                messageContinuation.yield(buffer)
+
+            case 404:
+                // If we get a 404 with a session ID, it means our session is invalid
+                if sessionID != nil {
+                    logger.warning("Session has expired")
+                    sessionID = nil
+                    throw MCPError.internalError("Session expired")
+                }
+                throw MCPError.internalError("Endpoint not found")
+
+            case 405:
+                // If we get a 405, it means the server does not support streaming,
+                // so we should cancel the streaming task.
+                self.streamingTask?.cancel()
+                throw MCPError.internalError("Server does not support streaming")
+
+            default:
+                throw MCPError.internalError(
+                    "Unexpected HTTP response: \(httpResponse.statusCode) \(contentType)")
+            }
+        #endif
     }
 
     /// Receives data in an async sequence
