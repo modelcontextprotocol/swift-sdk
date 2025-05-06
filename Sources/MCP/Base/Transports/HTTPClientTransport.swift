@@ -9,7 +9,7 @@ import Logging
     import FoundationNetworking
 #endif
 
-public actor HTTPClientTransport: Actor, Transport {
+public actor HTTPClientTransport: Transport {
     public let endpoint: URL
     private let session: URLSession
     public private(set) var sessionID: String?
