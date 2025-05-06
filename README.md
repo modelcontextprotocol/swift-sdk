@@ -242,7 +242,7 @@ do {
 }
 ```
 
-#### Batch Requests
+#### Request Batching
 
 Improve performance by sending multiple requests in a single batch:
 
