@@ -16,22 +16,54 @@ import struct Foundation.Data
 #endif
 
 #if canImport(Darwin) || canImport(Glibc)
-    /// Standard input/output transport implementation
+    /// An implementation of the MCP stdio transport protocol.
     ///
-    /// This transport supports JSON-RPC 2.0 messages, including individual requests,
-    /// notifications, responses, and batches containing multiple requests/notifications.
+    /// This transport implements the [stdio transport](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#stdio)
+    /// specification from the Model Context Protocol.
     ///
-    /// Messages are delimited by newlines and must not contain embedded newlines.
-    /// Each message must be a complete, valid JSON object or array (for batches).
+    /// The stdio transport works by:
+    /// - Reading JSON-RPC messages from standard input
+    /// - Writing JSON-RPC messages to standard output
+    /// - Using newline characters as message delimiters
+    /// - Supporting non-blocking I/O operations
+    ///
+    /// This transport is the recommended option for most MCP applications due to its
+    /// simplicity and broad platform support.
+    ///
+    /// - Important: This transport is available on Apple platforms and Linux distributions with glibc
+    ///   (Ubuntu, Debian, Fedora, CentOS, RHEL).
+    ///
+    /// ## Example Usage
+    ///
+    /// ```swift
+    /// import MCP
+    ///
+    /// // Initialize the client
+    /// let client = Client(name: "MyApp", version: "1.0.0")
+    ///
+    /// // Create a transport and connect
+    /// let transport = StdioTransport()
+    /// try await client.connect(transport: transport)
+    ///
+    /// // Initialize the connection
+    /// let result = try await client.initialize()
+    /// ```
     public actor StdioTransport: Transport {
         private let input: FileDescriptor
         private let output: FileDescriptor
+        /// Logger instance for transport-related events
         public nonisolated let logger: Logger
 
         private var isConnected = false
         private let messageStream: AsyncThrowingStream<Data, Swift.Error>
         private let messageContinuation: AsyncThrowingStream<Data, Swift.Error>.Continuation
 
+        /// Creates a new stdio transport with the specified file descriptors
+        ///
+        /// - Parameters:
+        ///   - input: File descriptor for reading (defaults to standard input)
+        ///   - output: File descriptor for writing (defaults to standard output)
+        ///   - logger: Optional logger instance for transport events
         public init(
             input: FileDescriptor = FileDescriptor.standardInput,
             output: FileDescriptor = FileDescriptor.standardOutput,
@@ -51,6 +83,12 @@ import struct Foundation.Data
             self.messageContinuation = continuation
         }
 
+        /// Establishes connection with the transport
+        ///
+        /// This method configures the file descriptors for non-blocking I/O
+        /// and starts the background message reading loop.
+        ///
+        /// - Throws: Error if the file descriptors cannot be configured
         public func connect() async throws {
             guard !isConnected else { return }
 
@@ -67,6 +105,10 @@ import struct Foundation.Data
             }
         }
 
+        /// Configures a file descriptor for non-blocking I/O
+        ///
+        /// - Parameter fileDescriptor: The file descriptor to configure
+        /// - Throws: Error if the operation fails
         private func setNonBlocking(fileDescriptor: FileDescriptor) throws {
             #if canImport(Darwin) || canImport(Glibc)
                 // Get current flags
@@ -87,6 +129,11 @@ import struct Foundation.Data
             #endif
         }
 
+        /// Continuous loop that reads and processes incoming messages
+        ///
+        /// This method runs in the background while the transport is connected,
+        /// parsing complete messages delimited by newlines and yielding them
+        /// to the message stream.
         private func readLoop() async {
             let bufferSize = 4096
             var buffer = [UInt8](repeating: 0, count: bufferSize)
@@ -130,6 +177,9 @@ import struct Foundation.Data
             messageContinuation.finish()
         }
 
+        /// Disconnects from the transport
+        ///
+        /// This stops the message reading loop and releases associated resources.
         public func disconnect() async {
             guard isConnected else { return }
             isConnected = false
@@ -144,6 +194,7 @@ import struct Foundation.Data
         /// according to the JSON-RPC 2.0 specification.
         ///
         /// - Parameter message: The message data to send (without a trailing newline)
+        /// - Throws: Error if the message cannot be sent
         public func send(_ message: Data) async throws {
             guard isConnected else {
                 throw MCPError.transportError(Errno(rawValue: ENOTCONN))
@@ -176,6 +227,8 @@ import struct Foundation.Data
         /// Messages may be individual JSON-RPC requests, notifications, responses,
         /// or batches containing multiple requests/notifications encoded as JSON arrays.
         /// Each message is guaranteed to be a complete JSON object or array.
+        ///
+        /// - Returns: An AsyncThrowingStream of Data objects representing JSON-RPC messages
         public func receive() -> AsyncThrowingStream<Data, Swift.Error> {
             return messageStream
         }
