@@ -16,6 +16,7 @@ public actor HTTPClientTransport: Actor, Transport {
     private let streaming: Bool
     private var streamingTask: Task<Void, Never>?
     public nonisolated let logger: Logger
+    public let sessionIDWaitTimeout: TimeInterval
 
     private var isConnected = false
     private let messageStream: AsyncThrowingStream<Data, Swift.Error>
@@ -29,12 +30,14 @@ public actor HTTPClientTransport: Actor, Transport {
         endpoint: URL,
         configuration: URLSessionConfiguration = .default,
         streaming: Bool = true,
+        sessionIDWaitTimeout: TimeInterval = 10,
         logger: Logger? = nil
     ) {
         self.init(
             endpoint: endpoint,
             session: URLSession(configuration: configuration),
             streaming: streaming,
+            sessionIDWaitTimeout: sessionIDWaitTimeout,
             logger: logger
         )
     }
@@ -43,11 +46,13 @@ public actor HTTPClientTransport: Actor, Transport {
         endpoint: URL,
         session: URLSession,
         streaming: Bool = false,
+        sessionIDWaitTimeout: TimeInterval = 10,
         logger: Logger? = nil
     ) {
         self.endpoint = endpoint
         self.session = session
         self.streaming = streaming
+        self.sessionIDWaitTimeout = sessionIDWaitTimeout
 
         // Create message stream
         var continuation: AsyncThrowingStream<Data, Swift.Error>.Continuation!
@@ -306,8 +311,8 @@ public actor HTTPClientTransport: Actor, Transport {
 
                 // Race the signalTask against a timeout
                 let timeoutTask = Task {
-                    try? await Task.sleep(for: .seconds(10))  // 10-second timeout
-                    return false  // Indicates timeout
+                    try? await Task.sleep(for: .seconds(self.sessionIDWaitTimeout))
+                    return false
                 }
 
                 let signalCompletionTask = Task {
