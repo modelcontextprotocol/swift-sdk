@@ -6,7 +6,9 @@ Official Swift SDK for the [Model Context Protocol][mcp] (MCP).
 
 The Model Context Protocol (MCP) defines a standardized way
 for applications to communicate with AI and ML models.
-This Swift SDK provides a robust implementation of both client and server components.
+This Swift SDK implements both client and server components
+according to the [2025-03-26][mcp-spec-2025-03-26] (latest) version 
+of the MCP specification.
 
 ## Requirements
 
@@ -754,3 +756,4 @@ see the [GitHub Releases page](https://github.com/modelcontextprotocol/swift-sdk
 This project is licensed under the MIT License.
 
 [mcp]: https://modelcontextprotocol.io
+[mcp-spec-2025-03-26]: https://modelcontextprotocol.io/specification/2025-03-26
