@@ -21,6 +21,10 @@ public actor HTTPClientTransport: Actor, Transport {
     private let messageStream: AsyncThrowingStream<Data, Swift.Error>
     private let messageContinuation: AsyncThrowingStream<Data, Swift.Error>.Continuation
 
+    // Signal mechanism for initial session ID
+    private var initialSessionIDSignalTask: Task<Void, Never>?
+    private var initialSessionIDContinuation: CheckedContinuation<Void, Never>?
+
     public init(
         endpoint: URL,
         configuration: URLSessionConfiguration = .default,
@@ -58,10 +62,32 @@ public actor HTTPClientTransport: Actor, Transport {
             )
     }
 
+    // Setup the initial session ID signal
+    private func setupInitialSessionIDSignal() {
+        self.initialSessionIDSignalTask = Task {
+            await withCheckedContinuation { continuation in
+                self.initialSessionIDContinuation = continuation
+                // This task will suspend here until continuation.resume() is called
+            }
+        }
+    }
+
+    // Trigger the initial session ID signal when a session ID is established
+    private func triggerInitialSessionIDSignal() {
+        if let continuation = self.initialSessionIDContinuation {
+            continuation.resume()
+            self.initialSessionIDContinuation = nil  // Consume the continuation
+            logger.debug("Initial session ID signal triggered for SSE task.")
+        }
+    }
+
     /// Establishes connection with the transport
     public func connect() async throws {
         guard !isConnected else { return }
         isConnected = true
+
+        // Setup initial session ID signal
+        setupInitialSessionIDSignal()
 
         if streaming {
             // Start listening to server events
@@ -85,6 +111,13 @@ public actor HTTPClientTransport: Actor, Transport {
 
         // Clean up message stream
         messageContinuation.finish()
+
+        // Cancel the initial session ID signal task if active
+        initialSessionIDSignalTask?.cancel()
+        initialSessionIDSignalTask = nil
+        // Resume the continuation if it's still pending to avoid leaks
+        initialSessionIDContinuation?.resume()
+        initialSessionIDContinuation = nil
 
         logger.info("HTTP clienttransport disconnected")
     }
@@ -129,7 +162,12 @@ public actor HTTPClientTransport: Actor, Transport {
 
             // Extract session ID if present
             if let newSessionID = httpResponse.value(forHTTPHeaderField: "Mcp-Session-Id") {
+                let wasSessionIDNil = (self.sessionID == nil)
                 self.sessionID = newSessionID
+                if wasSessionIDNil {
+                    // Trigger signal on first session ID
+                    triggerInitialSessionIDSignal()
+                }
                 logger.debug("Session ID received", metadata: ["sessionID": "\(newSessionID)"])
             }
 
@@ -161,7 +199,12 @@ public actor HTTPClientTransport: Actor, Transport {
 
             // Extract session ID if present
             if let newSessionID = httpResponse.value(forHTTPHeaderField: "Mcp-Session-Id") {
+                let wasSessionIDNil = (self.sessionID == nil)
                 self.sessionID = newSessionID
+                if wasSessionIDNil {
+                    // Trigger signal on first session ID
+                    triggerInitialSessionIDSignal()
+                }
                 logger.debug("Session ID received", metadata: ["sessionID": "\(newSessionID)"])
             }
 
@@ -257,6 +300,63 @@ public actor HTTPClientTransport: Actor, Transport {
             // This is the original code for platforms that support SSE
             guard isConnected else { return }
 
+            // Wait for the initial session ID signal, but only if sessionID isn't already set
+            if self.sessionID == nil, let signalTask = self.initialSessionIDSignalTask {
+                logger.debug("SSE streaming task waiting for initial sessionID signal...")
+
+                // Race the signalTask against a timeout
+                let timeoutTask = Task {
+                    try? await Task.sleep(for: .seconds(10))  // 10-second timeout
+                    return false  // Indicates timeout
+                }
+
+                let signalCompletionTask = Task {
+                    await signalTask.value
+                    return true  // Indicates signal received
+                }
+
+                // Use TaskGroup to race the two tasks
+                var signalReceived = false
+                do {
+                    signalReceived = try await withThrowingTaskGroup(of: Bool.self) { group in
+                        group.addTask {
+                            await signalCompletionTask.value
+                        }
+                        group.addTask {
+                            await timeoutTask.value
+                        }
+
+                        // Take the first result and cancel the other task
+                        if let firstResult = try await group.next() {
+                            group.cancelAll()
+                            return firstResult
+                        }
+                        return false
+                    }
+                } catch {
+                    logger.error("Error while waiting for session ID signal: \(error)")
+                }
+
+                // Clean up tasks
+                timeoutTask.cancel()
+
+                if signalReceived {
+                    logger.debug("SSE streaming task proceeding after initial sessionID signal.")
+                } else {
+                    logger.warning(
+                        "Timeout waiting for initial sessionID signal. SSE stream will proceed (sessionID might be nil)."
+                    )
+                }
+            } else if self.sessionID != nil {
+                logger.debug(
+                    "Initial sessionID already available. Proceeding with SSE streaming task immediately."
+                )
+            } else {
+                logger.info(
+                    "Proceeding with SSE connection attempt; sessionID is nil. This might be expected for stateless servers or if initialize hasn't provided one yet."
+                )
+            }
+
             // Retry loop for connection drops
             while isConnected && !Task.isCancelled {
                 do {
@@ -309,7 +409,13 @@ public actor HTTPClientTransport: Actor, Transport {
 
             // Extract session ID if present
             if let newSessionID = httpResponse.value(forHTTPHeaderField: "Mcp-Session-Id") {
+                let wasSessionIDNil = (self.sessionID == nil)
                 self.sessionID = newSessionID
+                if wasSessionIDNil {
+                    // Trigger signal on first session ID, though this is unlikely to happen here
+                    // as GET usually follows a POST that would have already set the session ID
+                    triggerInitialSessionIDSignal()
+                }
                 logger.debug("Session ID received", metadata: ["sessionID": "\(newSessionID)"])
             }
 
