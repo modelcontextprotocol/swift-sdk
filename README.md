@@ -52,12 +52,9 @@ import MCP
 // Initialize the client
 let client = Client(name: "MyApp", version: "1.0.0")
 
-// Create a transport and connect
+// Create a transport and connect - initialization happens automatically
 let transport = StdioTransport()
-try await client.connect(transport: transport)
-
-// Initialize the connection
-let result = try await client.initialize()
+let result = try await client.connect(transport: transport)
 
 // Check server capabilities
 if result.capabilities.tools != nil {
@@ -74,7 +71,7 @@ For local subprocess communication:
 ```swift
 // Create a stdio transport (simplest option)
 let transport = StdioTransport()
-try await client.connect(transport: transport)
+let result = try await client.connect(transport: transport)
 ```
 
 #### HTTP Transport
@@ -87,7 +84,7 @@ let transport = HTTPClientTransport(
     endpoint: URL(string: "http://localhost:8080")!,
     streaming: true  // Enable Server-Sent Events for real-time updates
 )
-try await client.connect(transport: transport)
+let result = try await client.connect(transport: transport)
 ```
 
 ### Tools

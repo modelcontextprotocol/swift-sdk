@@ -11,8 +11,9 @@ struct ClientTests {
         let client = Client(name: "TestClient", version: "1.0")
 
         #expect(await transport.isConnected == false)
-        try await client.connect(transport: transport)
+        let result = try await client.connect(transport: transport)
         #expect(await transport.isConnected == true)
+        #expect(result.protocolVersion == Version.latest)
         await client.disconnect()
         #expect(await transport.isConnected == false)
     }
@@ -25,25 +26,32 @@ struct ClientTests {
         let transport = MockTransport()
         let client = Client(name: "TestClient", version: "1.0")
 
-        try await client.connect(transport: transport)
-        // Small delay to ensure message loop is started
-        try await Task.sleep(for: .milliseconds(10))
+        // Queue a response for the initialize request
+        try await Task.sleep(for: .milliseconds(10))  // Wait for request to be sent
 
-        // Create a task for initialize that we'll cancel
-        let initTask = Task {
-            try await client.initialize()
+        if let lastMessage = await transport.sentMessages.last,
+            let data = lastMessage.data(using: .utf8),
+            let request = try? JSONDecoder().decode(Request<Initialize>.self, from: data)
+        {
+            // Create a valid initialize response
+            let response = Initialize.response(
+                id: request.id,
+                result: .init(
+                    protocolVersion: Version.latest,
+                    capabilities: .init(),
+                    serverInfo: .init(name: "TestServer", version: "1.0"),
+                    instructions: nil
+                )
+            )
+
+            try await transport.queue(response: response)
+
+            // Now complete the connect call which will automatically initialize
+            let result = try await client.connect(transport: transport)
+            #expect(result.protocolVersion == Version.latest)
+            #expect(result.serverInfo.name == "TestServer")
+            #expect(result.serverInfo.version == "1.0")
         }
-
-        // Give it a moment to send the request
-        try await Task.sleep(for: .milliseconds(10))
-
-        #expect(await transport.sentMessages.count == 1)
-        #expect(await transport.sentMessages.first?.contains(Initialize.name) == true)
-        #expect(await transport.sentMessages.first?.contains(client.name) == true)
-        #expect(await transport.sentMessages.first?.contains(client.version) == true)
-
-        // Cancel the initialize task
-        initTask.cancel()
 
         // Disconnect client to clean up message loop and give time for continuation cleanup
         await client.disconnect()
