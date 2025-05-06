@@ -106,55 +106,17 @@ public actor HTTPClientTransport: Actor, Transport {
         #if canImport(FoundationNetworking)
             // Linux implementation using data(for:) instead of bytes(for:)
             let (responseData, response) = try await session.data(for: request)
-
-            guard let httpResponse = response as? HTTPURLResponse else {
-                throw MCPError.internalError("Invalid HTTP response")
-            }
-
-            // Process the response based on content type and status code
-            let contentType = httpResponse.value(forHTTPHeaderField: "Content-Type") ?? ""
-
-            // Extract session ID if present
-            if let newSessionID = httpResponse.value(forHTTPHeaderField: "Mcp-Session-Id") {
-                self.sessionID = newSessionID
-                logger.debug("Session ID received", metadata: ["sessionID": "\(newSessionID)"])
-            }
-
-            // Handle different response types
-            switch httpResponse.statusCode {
-            case 200..<300 where contentType.contains("text/event-stream"):
-                // For SSE, we can't process streaming on this platform
-                logger.warning("SSE responses aren't fully supported on this platform")
-                messageContinuation.yield(responseData)
-
-            case 200..<300 where contentType.contains("application/json"):
-                // For JSON responses, deliver the data directly
-                logger.debug("Received JSON response", metadata: ["size": "\(responseData.count)"])
-                messageContinuation.yield(responseData)
-
-            case 404:
-                // If we get a 404 with a session ID, it means our session is invalid
-                if sessionID != nil {
-                    logger.warning("Session has expired")
-                    sessionID = nil
-                    throw MCPError.internalError("Session expired")
-                }
-                throw MCPError.internalError("Endpoint not found")
-
-            case 405:
-                // If we get a 405, it means the server does not support streaming,
-                // so we should cancel the streaming task.
-                self.streamingTask?.cancel()
-                throw MCPError.internalError("Server does not support streaming")
-
-            default:
-                throw MCPError.internalError(
-                    "Unexpected HTTP response: \(httpResponse.statusCode) \(contentType)")
-            }
+            try await processResponse(response: response, data: responseData)
         #else
             // macOS and other platforms with bytes(for:) support
             let (responseStream, response) = try await session.bytes(for: request)
+            try await processResponse(response: response, stream: responseStream)
+        #endif
+    }
 
+    #if canImport(FoundationNetworking)
+        // Process response with data payload (Linux)
+        private func processResponse(response: URLResponse, data: Data) async throws {
             guard let httpResponse = response as? HTTPURLResponse else {
                 throw MCPError.internalError("Invalid HTTP response")
             }
@@ -168,42 +130,108 @@ public actor HTTPClientTransport: Actor, Transport {
                 logger.debug("Session ID received", metadata: ["sessionID": "\(newSessionID)"])
             }
 
-            // Handle different response types
-            switch httpResponse.statusCode {
-            case 200..<300 where contentType.contains("text/event-stream"):
-                // For SSE, the processing happens in the streaming task
-                logger.debug("Received SSE response, processing in streaming task")
-                try await self.processSSE(responseStream)
+            try processHTTPResponse(httpResponse, contentType: contentType)
+            guard case 200..<300 = httpResponse.statusCode else { return }
 
-            case 200..<300 where contentType.contains("application/json"):
-                // For JSON responses, deliver the data directly
+            // For SSE or JSON responses, yield the data
+            if contentType.contains("text/event-stream") {
+                logger.warning("SSE responses aren't fully supported on this platform")
+            } else if contentType.contains("application/json") {
+                logger.debug("Received JSON response", metadata: ["size": "\(data.count)"])
+                messageContinuation.yield(data)
+            } else {
+                logger.warning("Unexpected content type: \(contentType)")
+            }
+        }
+    #else
+        // Process response with byte stream (macOS, iOS, etc.)
+        private func processResponse(response: URLResponse, stream: URLSession.AsyncBytes)
+            async throws
+        {
+            guard let httpResponse = response as? HTTPURLResponse else {
+                throw MCPError.internalError("Invalid HTTP response")
+            }
+
+            // Process the response based on content type and status code
+            let contentType = httpResponse.value(forHTTPHeaderField: "Content-Type") ?? ""
+
+            // Extract session ID if present
+            if let newSessionID = httpResponse.value(forHTTPHeaderField: "Mcp-Session-Id") {
+                self.sessionID = newSessionID
+                logger.debug("Session ID received", metadata: ["sessionID": "\(newSessionID)"])
+            }
+
+            try processHTTPResponse(httpResponse, contentType: contentType)
+            guard case 200..<300 = httpResponse.statusCode else { return }
+
+            // Handle different response types based on content and status
+            if contentType.contains("text/event-stream") {
+                // For SSE, processing happens via the stream
+                logger.debug("Received SSE response, processing in streaming task")
+                try await self.processSSE(stream)
+            } else if contentType.contains("application/json") {
+                // For JSON responses, collect and deliver the data
                 var buffer = Data()
-                for try await byte in responseStream {
+                for try await byte in stream {
                     buffer.append(byte)
                 }
                 logger.debug("Received JSON response", metadata: ["size": "\(buffer.count)"])
                 messageContinuation.yield(buffer)
+            } else {
+                logger.warning("Unexpected content type: \(contentType)")
+            }
+        }
+    #endif
 
-            case 404:
-                // If we get a 404 with a session ID, it means our session is invalid
-                if sessionID != nil {
-                    logger.warning("Session has expired")
-                    sessionID = nil
-                    throw MCPError.internalError("Session expired")
-                }
-                throw MCPError.internalError("Endpoint not found")
+    // Common HTTP response handling for all platforms
+    private func processHTTPResponse(_ response: HTTPURLResponse, contentType: String) throws {
+        // Handle status codes according to HTTP semantics
+        switch response.statusCode {
+        case 200..<300:
+            // Success range - these are handled by the platform-specific code
+            return
 
-            case 405:
-                // If we get a 405, it means the server does not support streaming,
-                // so we should cancel the streaming task.
+        case 400:
+            throw MCPError.internalError("Bad request")
+
+        case 401:
+            throw MCPError.internalError("Authentication required")
+
+        case 403:
+            throw MCPError.internalError("Access forbidden")
+
+        case 404:
+            // If we get a 404 with a session ID, it means our session is invalid
+            if sessionID != nil {
+                logger.warning("Session has expired")
+                sessionID = nil
+                throw MCPError.internalError("Session expired")
+            }
+            throw MCPError.internalError("Endpoint not found")
+
+        case 405:
+            // If we get a 405, it means the server does not support the requested method
+            // If streaming was requested, we should cancel the streaming task
+            if streaming {
                 self.streamingTask?.cancel()
                 throw MCPError.internalError("Server does not support streaming")
-
-            default:
-                throw MCPError.internalError(
-                    "Unexpected HTTP response: \(httpResponse.statusCode) \(contentType)")
             }
-        #endif
+            throw MCPError.internalError("Method not allowed")
+
+        case 408:
+            throw MCPError.internalError("Request timeout")
+
+        case 429:
+            throw MCPError.internalError("Too many requests")
+
+        case 500..<600:
+            // Server error range
+            throw MCPError.internalError("Server error: \(response.statusCode)")
+
+        default:
+            throw MCPError.internalError(
+                "Unexpected HTTP response: \(response.statusCode) (\(contentType))")
+        }
     }
 
     /// Receives data in an async sequence
@@ -215,31 +243,36 @@ public actor HTTPClientTransport: Actor, Transport {
 
     /// Starts listening for server events using SSE
     private func startListeningForServerEvents() async {
-        guard isConnected else { return }
+        #if canImport(FoundationNetworking)
+            // SSE is not supported on this platform due to issues with EventSource dependency or URLSession.bytes.
+            // The `streaming` flag would have initiated this, but we cannot proceed.
+            if streaming {  // Check self.streaming to be explicit about why we're logging
+                logger.warning(
+                    "SSE streaming was requested but is not supported on this platform. SSE connection will not be attempted."
+                )
+            }
+        // streamingTask will complete without looping.
+        #else
+            // This is the original code for platforms that support SSE
+            guard isConnected else { return }
 
-        // Retry loop for connection drops
-        while isConnected && !Task.isCancelled {
-            do {
-                try await connectToEventStream()
-            } catch {
-                if !Task.isCancelled {
-                    logger.error("SSE connection error: \(error)")
-                    // Wait before retrying
-                    try? await Task.sleep(nanoseconds: 1_000_000_000)  // 1 second
+            // Retry loop for connection drops
+            while isConnected && !Task.isCancelled {
+                do {
+                    // This will call the non-Linux version of connectToEventStream
+                    try await connectToEventStream()
+                } catch {
+                    if !Task.isCancelled {
+                        logger.error("SSE connection error: \(error)")
+                        // Wait before retrying
+                        try? await Task.sleep(for: .seconds(1))
+                    }
                 }
             }
-        }
+        #endif
     }
 
-    #if canImport(FoundationNetworking)
-        private func connectToEventStream() async throws {
-            logger.warning("SSE is not supported on this platform")
-        }
-
-        private func processSSE(_ stream: URLSession.AsyncBytes) async throws {
-            logger.warning("SSE is not supported on this platform")
-        }
-    #else
+    #if !canImport(FoundationNetworking)
         /// Establishes an SSE connection to the server
         private func connectToEventStream() async throws {
             guard isConnected else { return }

@@ -341,7 +341,7 @@ import Testing
                     Issue.record("Expected MCPError.internalError, got \(error)")
                     throw error
                 }
-                #expect(message?.contains("Unexpected HTTP response: 500") ?? false)
+                #expect(message?.contains("Server error: 500") ?? false)
             } catch {
                 Issue.record("Expected MCPError, got \(error)")
                 throw error
