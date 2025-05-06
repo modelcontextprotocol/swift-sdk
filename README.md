@@ -280,7 +280,7 @@ Handle common client errors:
 
 ```swift
 do {
-    try await client.connect()
+    try await client.connect(transport: transport)
     // Success
 } catch let error as MCPError {
     print("MCP Error: \(error.localizedDescription)")
