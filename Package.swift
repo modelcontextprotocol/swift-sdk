@@ -22,6 +22,7 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/apple/swift-system.git", from: "1.0.0"),
         .package(url: "https://github.com/apple/swift-log.git", from: "1.5.0"),
+        .package(url: "https://github.com/loopwork-ai/eventsource.git", from: "1.1.0"),
     ],
     targets: [
         // Targets are the basic building blocks of a package, defining a module or a test suite.
@@ -31,6 +32,7 @@ let package = Package(
             dependencies: [
                 .product(name: "SystemPackage", package: "swift-system"),
                 .product(name: "Logging", package: "swift-log"),
+                .product(name: "EventSource", package: "eventsource"),
             ]),
         .testTarget(
             name: "MCPTests",
@@ -38,6 +40,7 @@ let package = Package(
                 "MCP",
                 .product(name: "SystemPackage", package: "swift-system"),
                 .product(name: "Logging", package: "swift-log"),
+                .product(name: "EventSource", package: "eventsource"),
             ]),
     ]
 )
