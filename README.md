@@ -4,15 +4,15 @@ Official Swift SDK for the [Model Context Protocol][mcp] (MCP).
 
 ## Overview
 
-The Model Context Protocol (MCP) defines a standardized way 
-for applications to communicate with AI and ML models. 
+The Model Context Protocol (MCP) defines a standardized way
+for applications to communicate with AI and ML models.
 This Swift SDK provides a robust implementation of both client and server components.
 
 ## Requirements
 
 - Swift 6.0+ (Xcode 16+)
 
-See the [Platform Availability](#platform-availability) section below 
+See the [Platform Availability](#platform-availability) section below
 for platform-specific requirements.
 
 ## Installation
@@ -99,7 +99,7 @@ print("Available tools: \(tools.map { $0.name }.joined(separator: ", "))")
 
 // Call a tool with arguments
 let (content, isError) = try await client.callTool(
-    name: "image-generator", 
+    name: "image-generator",
     arguments: [
         "prompt": "A serene mountain landscape at sunset",
         "style": "photorealistic",
@@ -146,12 +146,12 @@ print("Resource content: \(contents)")
 // Subscribe to resource updates if supported
 if result.capabilities.resources.subscribe {
     try await client.subscribeToResource(uri: "resource://example")
-    
+
     // Register notification handler
     await client.onNotification(ResourceUpdatedNotification.self) { message in
         let uri = message.params.uri
         print("Resource \(uri) updated with new content")
-        
+
         // Fetch the updated resource content
         let updatedContents = try await client.readResource(uri: uri)
         print("Updated resource content received")
@@ -211,12 +211,12 @@ Configure client behavior for capability checking:
 ```swift
 // Strict configuration - fail fast if a capability is missing
 let strictClient = Client(
-    name: "StrictClient", 
+    name: "StrictClient",
     version: "1.0.0",
     configuration: .strict
 )
 
-// With strict configuration, calling a method for an unsupported capability 
+// With strict configuration, calling a method for an unsupported capability
 // will throw an error immediately without sending a request
 do {
     // This will throw an error if resources.list capability is not available
@@ -227,7 +227,7 @@ do {
 
 // Default (non-strict) configuration - attempt the request anyway
 let client = Client(
-    name: "FlexibleClient", 
+    name: "FlexibleClient",
     version: "1.0.0",
     configuration: .default
 )
@@ -319,7 +319,7 @@ import MCP
 
 // Initialize the server with capabilities
 let server = Server(
-    name: "MyModelServer", 
+    name: "MyModelServer",
     version: "1.0.0",
     capabilities: .init(
         prompts: .init(listChanged: true),
@@ -344,7 +344,7 @@ Register tool handlers to respond to client tool calls:
 server.withMethodHandler(ListTools.self) { _ in
     let tools = [
         Tool(
-            name: "weather", 
+            name: "weather",
             description: "Get current weather for a location",
             inputSchema: .object([
                 "location": .string("City name or coordinates"),
@@ -373,7 +373,7 @@ server.withMethodHandler(CallTool.self) { params in
             content: [.text("Weather for \(location): \(weatherData.temperature)°, \(weatherData.conditions)")],
             isError: false
         )
-        
+
     case "calculator":
         if let expression = params.arguments?["expression"]?.stringValue {
             let result = evaluateExpression(expression) // Your implementation
@@ -381,7 +381,7 @@ server.withMethodHandler(CallTool.self) { params in
         } else {
             return .init(content: [.text("Missing expression parameter")], isError: true)
         }
-        
+
     default:
         return .init(content: [.text("Unknown tool")], isError: true)
     }
@@ -397,12 +397,12 @@ Implement resource handlers for data access:
 server.withMethodHandler(ListResources.self) { params in
     let resources = [
         Resource(
-            uri: "resource://knowledge-base/articles", 
+            uri: "resource://knowledge-base/articles",
             name: "Knowledge Base Articles",
             description: "Collection of support articles and documentation"
         ),
         Resource(
-            uri: "resource://system/status", 
+            uri: "resource://system/status",
             name: "System Status",
             description: "Current system operational status"
         )
@@ -415,7 +415,7 @@ server.withMethodHandler(ReadResource.self) { params in
     switch params.uri {
     case "resource://knowledge-base/articles":
         return .init(contents: [Resource.Content.text("# Knowledge Base\n\nThis is the content of the knowledge base...", uri: params.uri)])
-        
+
     case "resource://system/status":
         let status = getCurrentSystemStatus() // Your implementation
         let statusJson = """
@@ -430,7 +430,7 @@ server.withMethodHandler(ReadResource.self) { params in
             }
             """
         return .init(contents: [Resource.Content.text(statusJson, uri: params.uri, mimeType: "application/json")])
-        
+
     default:
         throw MCPError.invalidParams("Unknown resource URI: \(params.uri)")
     }
@@ -456,7 +456,7 @@ Implement prompt handlers:
 server.withMethodHandler(ListPrompts.self) { params in
     let prompts = [
         Prompt(
-            name: "interview", 
+            name: "interview",
             description: "Job interview conversation starter",
             arguments: [
                 .init(name: "position", description: "Job position", required: true),
@@ -483,19 +483,19 @@ server.withMethodHandler(GetPrompt.self) { params in
         let position = params.arguments?["position"]?.stringValue ?? "Software Engineer"
         let company = params.arguments?["company"]?.stringValue ?? "Acme Corp"
         let interviewee = params.arguments?["interviewee"]?.stringValue ?? "Candidate"
-        
+
         let description = "Job interview for \(position) position at \(company)"
         let messages: [Prompt.Message] = [
             .init(role: .user, content: .text(text: "You are an interviewer for the \(position) position at \(company).")),
             .init(role: .user, content: .text(text: "Hello, I'm \(interviewee) and I'm here for the \(position) interview.")),
             .init(role: .assistant, content: .text(text: "Hi \(interviewee), welcome to \(company)! I'd like to start by asking about your background and experience."))
         ]
-        
+
         return .init(description: description, messages: messages)
-        
+
     case "customer-support":
         // Similar implementation for customer support prompt
-        
+
     default:
         throw MCPError.invalidParams("Unknown prompt name: \(params.name)")
     }
@@ -513,15 +513,15 @@ try await server.start(transport: transport) { clientInfo, clientCapabilities in
     guard clientInfo.name != "BlockedClient" else {
         throw MCPError.invalidRequest("This client is not allowed")
     }
-    
+
     // You can also inspect client capabilities
     if clientCapabilities.tools == nil {
         print("Client does not support tools")
     }
-    
+
     // Perform any server-side setup based on client info
     print("Client \(clientInfo.name) v\(clientInfo.version) connected")
-    
+
     // If the hook completes without throwing, initialization succeeds
 }
 ```
@@ -548,20 +548,20 @@ import Logging
 struct MCPService: Service {
     let server: Server
     let transport: Transport
-    
+
     init(server: Server, transport: Transport) {
         self.server = server
         self.transport = transport
     }
-    
+
     func run() async throws {
         // Start the server
         try await server.start(transport: transport)
-        
+
         // Keep running until external cancellation
         try await Task.sleep(for: .days(365 * 100))  // Effectively forever
     }
-    
+
     func shutdown() async throws {
         // Gracefully shutdown the server
         await server.stop()
@@ -581,9 +581,9 @@ let logger = Logger(label: "com.example.mcp-server")
 // Create the MCP server
 let server = Server(
     name: "MyModelServer",
-    version: "1.0.0", 
+    version: "1.0.0",
     capabilities: .init(
-        prompts: .init(listChanged: true), 
+        prompts: .init(listChanged: true),
         resources: .init(subscribe: true, listChanged: true),
         tools: .init(listChanged: true)
     ),
@@ -623,20 +623,20 @@ try await serviceGroup.run()
 
 This approach has several benefits:
 
-- **Signal handling**: 
+- **Signal handling**:
   Automatically traps SIGINT, SIGTERM and triggers graceful shutdown
-- **Graceful shutdown**: 
+- **Graceful shutdown**:
   Properly shuts down your MCP server and other services
-- **Timeout-based shutdown**: 
+- **Timeout-based shutdown**:
   Configurable shutdown timeouts to prevent hanging processes
 - **Advanced service management**:
-  [`ServiceLifecycle`](https://swiftpackageindex.com/swift-server/swift-service-lifecycle/documentation/servicelifecycle) 
-  also supports service dependencies, conditional services, 
+  [`ServiceLifecycle`](https://swiftpackageindex.com/swift-server/swift-service-lifecycle/documentation/servicelifecycle)
+  also supports service dependencies, conditional services,
   and other useful features.
 
 ## Transports
 
-MCP's transport layer handles communication between clients and servers. 
+MCP's transport layer handles communication between clients and servers.
 The Swift SDK provides multiple built-in transports:
 
 | Transport | Description | Platforms | Best for |
@@ -658,30 +658,30 @@ public actor MyCustomTransport: Transport {
     private var isConnected = false
     private let messageStream: AsyncThrowingStream<Data, Error>
     private let messageContinuation: AsyncThrowingStream<Data, Error>.Continuation
-    
+
     public init(logger: Logger? = nil) {
         self.logger = logger ?? Logger(label: "my.custom.transport")
-        
+
         var continuation: AsyncThrowingStream<Data, Error>.Continuation!
         self.messageStream = AsyncThrowingStream { continuation = $0 }
         self.messageContinuation = continuation
     }
-    
+
     public func connect() async throws {
         // Implement your connection logic
         isConnected = true
     }
-    
+
     public func disconnect() async {
         // Implement your disconnection logic
         isConnected = false
         messageContinuation.finish()
     }
-    
+
     public func send(_ data: Data) async throws {
         // Implement your message sending logic
     }
-    
+
     public func receive() -> AsyncThrowingStream<Data, Error> {
         return messageStream
     }
@@ -701,9 +701,9 @@ The Swift SDK has the following platform requirements:
 | visionOS | 1.0+ |
 | Linux | Distributions with `glibc` |
 
-While the core library works on any platform supporting Swift 6 
-(including Linux and Windows), 
-running a client or server requires a compatible transport. 
+While the core library works on any platform supporting Swift 6
+(including Linux and Windows),
+running a client or server requires a compatible transport.
 
 We're actively working to expand platform support:
 - [Alpine Linux support](https://github.com/modelcontextprotocol/swift-sdk/pull/64)
@@ -742,11 +742,11 @@ let transport = StdioTransport(logger: logger)
 
 ## Changelog
 
-This project follows [Semantic Versioning](https://semver.org/). 
-For pre-1.0 releases, 
+This project follows [Semantic Versioning](https://semver.org/).
+For pre-1.0 releases,
 minor version increments (0.X.0) may contain breaking changes.
 
-For details about changes in each release, 
+For details about changes in each release,
 see the [GitHub Releases page](https://github.com/modelcontextprotocol/swift-sdk/releases).
 
 ## License
