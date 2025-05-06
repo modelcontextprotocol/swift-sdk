@@ -3,6 +3,25 @@
 
 import PackageDescription
 
+// Base dependencies needed on all platforms
+var dependencies: [Package.Dependency] = [
+    .package(url: "https://github.com/apple/swift-system.git", from: "1.0.0"),
+    .package(url: "https://github.com/apple/swift-log.git", from: "1.5.0"),
+]
+
+// Target dependencies needed on all platforms
+var targetDependencies: [Target.Dependency] = [
+    .product(name: "SystemPackage", package: "swift-system"),
+    .product(name: "Logging", package: "swift-log"),
+]
+
+// Add EventSource only on Apple platforms (non-Linux)
+#if !os(Linux)
+    dependencies.append(
+        .package(url: "https://github.com/loopwork-ai/eventsource.git", from: "1.1.0"))
+    targetDependencies.append(.product(name: "EventSource", package: "eventsource"))
+#endif
+
 let package = Package(
     name: "mcp-swift-sdk",
     platforms: [
@@ -19,28 +38,15 @@ let package = Package(
             name: "MCP",
             targets: ["MCP"])
     ],
-    dependencies: [
-        .package(url: "https://github.com/apple/swift-system.git", from: "1.0.0"),
-        .package(url: "https://github.com/apple/swift-log.git", from: "1.5.0"),
-        .package(url: "https://github.com/loopwork-ai/eventsource.git", from: "1.1.0"),
-    ],
+    dependencies: dependencies,
     targets: [
         // Targets are the basic building blocks of a package, defining a module or a test suite.
         // Targets can depend on other targets in this package and products from dependencies.
         .target(
             name: "MCP",
-            dependencies: [
-                .product(name: "SystemPackage", package: "swift-system"),
-                .product(name: "Logging", package: "swift-log"),
-                .product(name: "EventSource", package: "eventsource"),
-            ]),
+            dependencies: targetDependencies),
         .testTarget(
             name: "MCPTests",
-            dependencies: [
-                "MCP",
-                .product(name: "SystemPackage", package: "swift-system"),
-                .product(name: "Logging", package: "swift-log"),
-                .product(name: "EventSource", package: "eventsource"),
-            ]),
+            dependencies: ["MCP"] + targetDependencies),
     ]
 )

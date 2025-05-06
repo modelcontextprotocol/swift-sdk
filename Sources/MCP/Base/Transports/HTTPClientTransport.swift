@@ -1,6 +1,9 @@
-import EventSource
 import Foundation
 import Logging
+
+#if !os(Linux)
+    import EventSource
+#endif
 
 #if canImport(FoundationNetworking)
     import FoundationNetworking
@@ -103,7 +106,7 @@ public actor HTTPClientTransport: Actor, Transport {
             request.addValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
         }
 
-        #if canImport(FoundationNetworking)
+        #if os(Linux)
             // Linux implementation using data(for:) instead of bytes(for:)
             let (responseData, response) = try await session.data(for: request)
             try await processResponse(response: response, data: responseData)
@@ -114,7 +117,7 @@ public actor HTTPClientTransport: Actor, Transport {
         #endif
     }
 
-    #if canImport(FoundationNetworking)
+    #if os(Linux)
         // Process response with data payload (Linux)
         private func processResponse(response: URLResponse, data: Data) async throws {
             guard let httpResponse = response as? HTTPURLResponse else {
@@ -133,9 +136,10 @@ public actor HTTPClientTransport: Actor, Transport {
             try processHTTPResponse(httpResponse, contentType: contentType)
             guard case 200..<300 = httpResponse.statusCode else { return }
 
-            // For SSE or JSON responses, yield the data
+            // For JSON responses, yield the data
             if contentType.contains("text/event-stream") {
-                logger.warning("SSE responses aren't fully supported on this platform")
+                logger.warning("SSE responses aren't fully supported on Linux")
+                messageContinuation.yield(data)
             } else if contentType.contains("application/json") {
                 logger.debug("Received JSON response", metadata: ["size": "\(data.count)"])
                 messageContinuation.yield(data)
@@ -164,7 +168,6 @@ public actor HTTPClientTransport: Actor, Transport {
             try processHTTPResponse(httpResponse, contentType: contentType)
             guard case 200..<300 = httpResponse.statusCode else { return }
 
-            // Handle different response types based on content and status
             if contentType.contains("text/event-stream") {
                 // For SSE, processing happens via the stream
                 logger.debug("Received SSE response, processing in streaming task")
@@ -243,15 +246,13 @@ public actor HTTPClientTransport: Actor, Transport {
 
     /// Starts listening for server events using SSE
     private func startListeningForServerEvents() async {
-        #if canImport(FoundationNetworking)
-            // SSE is not supported on this platform due to issues with EventSource dependency or URLSession.bytes.
-            // The `streaming` flag would have initiated this, but we cannot proceed.
-            if streaming {  // Check self.streaming to be explicit about why we're logging
+        #if os(Linux)
+            // SSE is not fully supported on Linux
+            if streaming {
                 logger.warning(
-                    "SSE streaming was requested but is not supported on this platform. SSE connection will not be attempted."
+                    "SSE streaming was requested but is not fully supported on Linux. SSE connection will not be attempted."
                 )
             }
-        // streamingTask will complete without looping.
         #else
             // This is the original code for platforms that support SSE
             guard isConnected else { return }
@@ -259,7 +260,6 @@ public actor HTTPClientTransport: Actor, Transport {
             // Retry loop for connection drops
             while isConnected && !Task.isCancelled {
                 do {
-                    // This will call the non-Linux version of connectToEventStream
                     try await connectToEventStream()
                 } catch {
                     if !Task.isCancelled {
@@ -272,7 +272,7 @@ public actor HTTPClientTransport: Actor, Transport {
         #endif
     }
 
-    #if !canImport(FoundationNetworking)
+    #if !os(Linux)
         /// Establishes an SSE connection to the server
         private func connectToEventStream() async throws {
             guard isConnected else { return }
