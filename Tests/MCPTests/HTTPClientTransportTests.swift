@@ -415,7 +415,7 @@ import Testing
                     endpoint: testEndpoint,
                     configuration: configuration,
                     streaming: true,
-                    sessionIDWaitTimeout: 1,
+                    sseInitializationTimeout: 1,
                     logger: nil
                 )
 
@@ -476,8 +476,7 @@ import Testing
                     endpoint: testEndpoint,
                     configuration: configuration,
                     streaming: true,
-                    sessionIDWaitTimeout: 1,
-
+                    sseInitializationTimeout: 1,
                     logger: nil
                 )
 
