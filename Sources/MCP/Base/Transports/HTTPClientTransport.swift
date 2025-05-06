@@ -1,3 +1,4 @@
+import EventSource
 import Foundation
 import Logging
 
@@ -11,7 +12,6 @@ public actor HTTPClientTransport: Actor, Transport {
     public private(set) var sessionID: String?
     private let streaming: Bool
     private var streamingTask: Task<Void, Never>?
-    private var lastEventID: String?
     public nonisolated let logger: Logger
 
     private var isConnected = false
@@ -183,15 +183,11 @@ public actor HTTPClientTransport: Actor, Transport {
             var request = URLRequest(url: endpoint)
             request.httpMethod = "GET"
             request.addValue("text/event-stream", forHTTPHeaderField: "Accept")
+            request.addValue("no-cache", forHTTPHeaderField: "Cache-Control")
 
             // Add session ID if available
             if let sessionID = sessionID {
                 request.addValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
-            }
-
-            // Add Last-Event-ID header for resumability if available
-            if let lastEventID = lastEventID {
-                request.addValue(lastEventID, forHTTPHeaderField: "Last-Event-ID")
             }
 
             logger.debug("Starting SSE connection")
@@ -217,95 +213,31 @@ public actor HTTPClientTransport: Actor, Transport {
             // Extract session ID if present
             if let newSessionID = httpResponse.value(forHTTPHeaderField: "Mcp-Session-Id") {
                 self.sessionID = newSessionID
+                logger.debug("Session ID received", metadata: ["sessionID": "\(newSessionID)"])
             }
 
             // Process the SSE stream
-            var buffer = ""
-            var eventType = ""
-            var eventID: String?
-            var eventData = ""
+            do {
+                for try await event in stream.events {
+                    // Check if task has been cancelled
+                    if Task.isCancelled { break }
 
-            for try await byte in stream {
-                if Task.isCancelled { break }
+                    logger.debug(
+                        "SSE event received",
+                        metadata: [
+                            "type": "\(event.event ?? "message")",
+                            "id": "\(event.id ?? "none")",
+                        ]
+                    )
 
-                guard let char = String(bytes: [byte], encoding: .utf8) else { continue }
-                buffer.append(char)
-
-                // Process complete lines
-                while let newlineIndex = buffer.utf8.firstIndex(where: { $0 == 10 }) {
-                    var line = buffer[..<newlineIndex]
-                    if line.hasSuffix("\r") {
-                        line = line.dropLast()
-                    }
-
-                    buffer = String(buffer[buffer.index(after: newlineIndex)...])
-
-                    // Empty line marks the end of an event
-                    if line.isEmpty {
-                        if !eventData.isEmpty {
-                            // Process the event
-                            if eventType == "id" {
-                                lastEventID = eventID
-                            } else {
-                                // Default event type is "message" if not specified
-                                if let data = eventData.data(using: .utf8) {
-                                    logger.debug(
-                                        "SSE event received",
-                                        metadata: [
-                                            "type": "\(eventType.isEmpty ? "message" : eventType)",
-                                            "id": "\(eventID ?? "none")",
-                                        ])
-                                    messageContinuation.yield(data)
-                                }
-                            }
-
-                            // Reset for next event
-                            eventType = ""
-                            eventData = ""
-                        }
-                        continue
-                    }
-
-                    if line.hasSuffix("\r") {
-                        line = line.dropLast()
-                    }
-
-                    // Lines starting with ":" are comments
-                    if line.hasPrefix(":") { continue }
-
-                    // Parse field: value format
-                    if let colonIndex = line.firstIndex(of: ":") {
-                        let field = String(line[..<colonIndex])
-                        var value = String(line[line.index(after: colonIndex)...])
-
-                        // Trim leading space
-                        if value.hasPrefix(" ") {
-                            value = String(value.dropFirst())
-                        }
-
-                        // Process based on field
-                        switch field {
-                        case "event":
-                            eventType = value
-                        case "data":
-                            if !eventData.isEmpty {
-                                eventData.append("\n")
-                            }
-                            eventData.append(value)
-                        case "id":
-                            if !value.contains("\0") {  // ID must not contain NULL
-                                eventID = value
-                                lastEventID = value
-                            }
-                        case "retry":
-                            // Retry timing not implemented
-                            break
-                        default:
-                            // Unknown fields are ignored per SSE spec
-                            break
-                        }
+                    // Convert the event data to Data and yield it to the message stream
+                    if !event.data.isEmpty, let data = event.data.data(using: .utf8) {
+                        messageContinuation.yield(data)
                     }
                 }
+            } catch {
+                logger.error("Error processing SSE events: \(error)")
+                throw error
             }
         }
     #endif
