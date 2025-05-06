@@ -103,7 +103,7 @@ public actor HTTPClientTransport: Actor, Transport {
             request.addValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
         }
 
-        let (responseData, response) = try await session.data(for: request)
+        let (responseStream, response) = try await session.bytes(for: request)
 
         guard let httpResponse = response as? HTTPURLResponse else {
             throw MCPError.internalError("Invalid HTTP response")
@@ -120,19 +120,20 @@ public actor HTTPClientTransport: Actor, Transport {
 
         // Handle different response types
         switch httpResponse.statusCode {
-        case 200, 201, 202:
+        case 200..<300 where contentType.contains("text/event-stream"):
             // For SSE, the processing happens in the streaming task
-            if contentType.contains("text/event-stream") {
-                logger.debug("Received SSE response, processing in streaming task")
-                // The streaming is handled by the SSE task if active
-                return
-            }
+            logger.debug("Received SSE response, processing in streaming task")
+            try await self.processSSE(responseStream)
 
+        case 200..<300 where contentType.contains("application/json"):
             // For JSON responses, deliver the data directly
-            if contentType.contains("application/json") && !responseData.isEmpty {
-                logger.debug("Received JSON response", metadata: ["size": "\(responseData.count)"])
-                messageContinuation.yield(responseData)
+            var buffer = Data()
+            for try await byte in responseStream {
+                buffer.append(byte)
             }
+            logger.debug("Received JSON response", metadata: ["size": "\(buffer.count)"])
+            messageContinuation.yield(buffer)
+
         case 404:
             // If we get a 404 with a session ID, it means our session is invalid
             if sessionID != nil {
@@ -141,8 +142,16 @@ public actor HTTPClientTransport: Actor, Transport {
                 throw MCPError.internalError("Session expired")
             }
             throw MCPError.internalError("Endpoint not found")
+
+        case 405:
+            // If we get a 405, it means the server does not support streaming,
+            // so we should cancel the streaming task.
+            self.streamingTask?.cancel()
+            throw MCPError.internalError("Server does not support streaming")
+
         default:
-            throw MCPError.internalError("HTTP error: \(httpResponse.statusCode)")
+            throw MCPError.internalError(
+                "Unexpected HTTP response: \(httpResponse.statusCode) \(contentType)")
         }
     }
 
@@ -173,6 +182,10 @@ public actor HTTPClientTransport: Actor, Transport {
 
     #if canImport(FoundationNetworking)
         private func connectToEventStream() async throws {
+            logger.warning("SSE is not supported on this platform")
+        }
+
+        private func processSSE(_ stream: URLSession.AsyncBytes) async throws {
             logger.warning("SSE is not supported on this platform")
         }
     #else
@@ -216,7 +229,10 @@ public actor HTTPClientTransport: Actor, Transport {
                 logger.debug("Session ID received", metadata: ["sessionID": "\(newSessionID)"])
             }
 
-            // Process the SSE stream
+            try await self.processSSE(stream)
+        }
+
+        private func processSSE(_ stream: URLSession.AsyncBytes) async throws {
             do {
                 for try await event in stream.events {
                     // Check if task has been cancelled
