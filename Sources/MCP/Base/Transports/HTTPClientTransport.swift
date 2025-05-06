@@ -41,9 +41,6 @@ import Logging
 /// let client = Client(name: "MyApp", version: "1.0.0")
 /// try await client.connect(transport: transport)
 ///
-/// // Initialize the connection
-/// let result = try await client.initialize()
-///
 /// // The transport will automatically handle SSE events
 /// // and deliver them through the client's notification handlers
 /// ```

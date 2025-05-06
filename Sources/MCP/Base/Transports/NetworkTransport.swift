@@ -51,9 +51,6 @@ import Logging
     /// // Use the transport with an MCP client
     /// let client = Client(name: "MyApp", version: "1.0.0")
     /// try await client.connect(transport: transport)
-    ///
-    /// // Initialize the connection
-    /// let result = try await client.initialize()
     /// ```
     public actor NetworkTransport: Transport {
         /// Represents a heartbeat message for connection health monitoring.
