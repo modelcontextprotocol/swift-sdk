@@ -421,18 +421,38 @@ import Testing
                 let eventString = "id: event1\ndata: {\"key\":\"value\"}\n\n"
                 let sseEventData = eventString.data(using: .utf8)!
 
+                // First, set up a handler for the initial POST that will provide a session ID
                 await MockURLProtocol.requestHandlerStorage.setHandler {
                     [testEndpoint] (request: URLRequest) in
+                    let response = HTTPURLResponse(
+                        url: testEndpoint, statusCode: 200, httpVersion: "HTTP/1.1",
+                        headerFields: [
+                            "Content-Type": "text/plain",
+                            "Mcp-Session-Id": "test-session-123",
+                        ])!
+                    return (response, Data())
+                }
+
+                // Connect and send a dummy message to get the session ID
+                try await transport.connect()
+                try await transport.send(Data())
+
+                // Now set up the handler for the SSE GET request
+                await MockURLProtocol.requestHandlerStorage.setHandler {
+                    [testEndpoint, sseEventData] (request: URLRequest) in  // sseEventData is now empty Data()
                     #expect(request.url == testEndpoint)
                     #expect(request.httpMethod == "GET")
                     #expect(request.value(forHTTPHeaderField: "Accept") == "text/event-stream")
+                    #expect(
+                        request.value(forHTTPHeaderField: "Mcp-Session-Id") == "test-session-123")
+
                     let response = HTTPURLResponse(
                         url: testEndpoint, statusCode: 200, httpVersion: "HTTP/1.1",
                         headerFields: ["Content-Type": "text/event-stream"])!
-                    return (response, sseEventData)
+
+                    return (response, sseEventData)  // Will return empty Data for SSE
                 }
 
-                try await transport.connect()
                 try await Task.sleep(for: .milliseconds(100))
 
                 let stream = await transport.receive()
@@ -442,7 +462,10 @@ import Testing
                 let receivedData = try await iterator.next()
 
                 #expect(receivedData == expectedData)
+
+                await transport.disconnect()
             }
+
             @Test("Receive Server-Sent Event (SSE) (CR-NL)", .httpClientTransportSetup)
             func testReceiveSSE_CRNL() async throws {
                 let configuration = URLSessionConfiguration.ephemeral
@@ -458,18 +481,39 @@ import Testing
                 let eventString = "id: event1\r\ndata: {\"key\":\"value\"}\r\n\n"
                 let sseEventData = eventString.data(using: .utf8)!
 
+                // First, set up a handler for the initial POST that will provide a session ID
+                // Use text/plain to prevent its (empty) body from being yielded to messageStream
                 await MockURLProtocol.requestHandlerStorage.setHandler {
                     [testEndpoint] (request: URLRequest) in
+                    let response = HTTPURLResponse(
+                        url: testEndpoint, statusCode: 200, httpVersion: "HTTP/1.1",
+                        headerFields: [
+                            "Content-Type": "text/plain",
+                            "Mcp-Session-Id": "test-session-123",
+                        ])!
+                    return (response, Data())
+                }
+
+                // Connect and send a dummy message to get the session ID
+                try await transport.connect()
+                try await transport.send(Data())
+
+                // Now set up the handler for the SSE GET request
+                await MockURLProtocol.requestHandlerStorage.setHandler {
+                    [testEndpoint, sseEventData] (request: URLRequest) in
                     #expect(request.url == testEndpoint)
                     #expect(request.httpMethod == "GET")
                     #expect(request.value(forHTTPHeaderField: "Accept") == "text/event-stream")
+                    #expect(
+                        request.value(forHTTPHeaderField: "Mcp-Session-Id") == "test-session-123")
+
                     let response = HTTPURLResponse(
                         url: testEndpoint, statusCode: 200, httpVersion: "HTTP/1.1",
                         headerFields: ["Content-Type": "text/event-stream"])!
+
                     return (response, sseEventData)
                 }
 
-                try await transport.connect()
                 try await Task.sleep(for: .milliseconds(100))
 
                 let stream = await transport.receive()
@@ -479,6 +523,8 @@ import Testing
                 let receivedData = try await iterator.next()
 
                 #expect(receivedData == expectedData)
+
+                await transport.disconnect()
             }
         #endif  // !canImport(FoundationNetworking)
 
