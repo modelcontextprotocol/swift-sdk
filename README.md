@@ -62,6 +62,11 @@ if result.capabilities.tools != nil {
 }
 ```
 
+> [!NOTE]
+> The `Client.connect(transport:)` method returns the initialization result.
+> This return value is discardable, 
+> so you can ignore it if you don't need to check server capabilities.
+
 ### Transport Options for Clients
 
 #### Stdio Transport
@@ -71,7 +76,7 @@ For local subprocess communication:
 ```swift
 // Create a stdio transport (simplest option)
 let transport = StdioTransport()
-let result = try await client.connect(transport: transport)
+try await client.connect(transport: transport)
 ```
 
 #### HTTP Transport
@@ -84,7 +89,7 @@ let transport = HTTPClientTransport(
     endpoint: URL(string: "http://localhost:8080")!,
     streaming: true  // Enable Server-Sent Events for real-time updates
 )
-let result = try await client.connect(transport: transport)
+try await client.connect(transport: transport)
 ```
 
 ### Tools
@@ -275,7 +280,7 @@ Handle common client errors:
 
 ```swift
 do {
-    let result = try await client.initialize()
+    try await client.connect()
     // Success
 } catch let error as MCPError {
     print("MCP Error: \(error.localizedDescription)")

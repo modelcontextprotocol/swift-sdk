@@ -168,6 +168,7 @@ public actor Client {
     }
 
     /// Connect to the server using the given transport
+    @discardableResult
     public func connect(transport: any Transport) async throws -> Initialize.Result {
         self.connection = transport
         try await self.connection?.connect()
