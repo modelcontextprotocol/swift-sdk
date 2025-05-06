@@ -202,6 +202,46 @@ do {
 }
 ```
 
+### Advanced Client Features
+
+#### Strict vs Non-Strict Configuration
+
+Configure client behavior for capability checking:
+
+```swift
+// Strict configuration - fail fast if a capability is missing
+let strictClient = Client(
+    name: "StrictClient", 
+    version: "1.0.0",
+    configuration: .strict
+)
+
+// With strict configuration, calling a method for an unsupported capability 
+// will throw an error immediately without sending a request
+do {
+    // This will throw an error if resources.list capability is not available
+    let resources = try await strictClient.listResources()
+} catch let error as MCPError {
+    print("Capability not available: \(error.localizedDescription)")
+}
+
+// Default (non-strict) configuration - attempt the request anyway
+let client = Client(
+    name: "FlexibleClient", 
+    version: "1.0.0",
+    configuration: .default
+)
+
+// With default configuration, the client will attempt the request
+// even if the capability wasn't advertised by the server
+do {
+    let resources = try await client.listResources()
+} catch let error as MCPError {
+    // Still handle the error if the server rejects the request
+    print("Server rejected request: \(error.localizedDescription)")
+}
+```
+
 ## Server Usage
 
 The server component allows your application to host model capabilities and respond to client requests.
@@ -393,6 +433,30 @@ server.withMethodHandler(GetPrompt.self) { params in
     default:
         throw MCPError.invalidParams("Unknown prompt name: \(params.name)")
     }
+}
+```
+
+#### Initialize Hook
+
+Control client connections with an initialize hook:
+
+```swift
+// Start the server with an initialize hook
+try await server.start(transport: transport) { clientInfo, clientCapabilities in
+    // Validate client info
+    guard clientInfo.name != "BlockedClient" else {
+        throw MCPError.invalidRequest("This client is not allowed")
+    }
+    
+    // You can also inspect client capabilities
+    if clientCapabilities.tools == nil {
+        print("Client does not support tools")
+    }
+    
+    // Perform any server-side setup based on client info
+    print("Client \(clientInfo.name) v\(clientInfo.version) connected")
+    
+    // If the hook completes without throwing, initialization succeeds
 }
 ```
 
