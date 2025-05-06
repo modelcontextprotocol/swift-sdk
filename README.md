@@ -242,6 +242,72 @@ do {
 }
 ```
 
+#### Batch Requests
+
+Improve performance by sending multiple requests in a single batch:
+
+```swift
+// Array to hold tool call tasks
+var toolTasks: [Task<CallTool.Result, Error>] = []
+
+// Send a batch of requests
+try await client.withBatch { batch in
+    // Add multiple tool calls to the batch
+    for i in 0..<10 {
+        toolTasks.append(
+            try await batch.addRequest(
+                CallTool.request(.init(name: "square", arguments: ["n": i]))
+            )
+        )
+    }
+}
+
+// Process results after the batch is sent
+print("Processing \(toolTasks.count) tool results...")
+for (index, task) in toolTasks.enumerated() {
+    do {
+        let result = try await task.value
+        print("\(index): \(result.content)")
+    } catch {
+        print("\(index) failed: \(error)")
+    }
+}
+```
+
+You can also batch different types of requests:
+
+```swift
+// Declare task variables
+var pingTask: Task<Ping.Result, Error>?
+var promptTask: Task<GetPrompt.Result, Error>?
+
+// Send a batch with different request types
+try await client.withBatch { batch in
+    pingTask = try await batch.addRequest(Ping.request())
+    promptTask = try await batch.addRequest(
+        GetPrompt.request(.init(name: "greeting"))
+    )
+}
+
+// Process individual results
+do {
+    if let pingTask = pingTask {
+        try await pingTask.value
+        print("Ping successful")
+    }
+
+    if let promptTask = promptTask {
+        let promptResult = try await promptTask.value
+        print("Prompt: \(promptResult.description ?? "None")")
+    }
+} catch {
+    print("Error processing batch results: \(error)")
+}
+```
+
+> [!NOTE]
+> `Server` automatically handles batch requests from MCP clients.
+
 ## Server Usage
 
 The server component allows your application to host model capabilities and respond to client requests.
