@@ -39,7 +39,7 @@ struct ServerTests {
         try await server.start(transport: transport)
 
         // Wait for message processing and response
-        try await Task.sleep(nanoseconds: 100_000_000)  // 100ms
+        try await Task.sleep(for: .milliseconds(100))
 
         #expect(await transport.sentMessages.count == 1)
 
@@ -114,7 +114,7 @@ struct ServerTests {
         }
 
         // Wait for server to initialize
-        try await Task.sleep(nanoseconds: 10_000_000)  // 10ms
+        try await Task.sleep(for: .milliseconds(10))
 
         // Queue an initialize request from blocked client
         try await transport.queue(
@@ -127,7 +127,7 @@ struct ServerTests {
             ))
 
         // Wait for message processing
-        try await Task.sleep(nanoseconds: 200_000_000)  // 200ms
+        try await Task.sleep(for: .milliseconds(200))
 
         #expect(await transport.sentMessages.count >= 1)
 
