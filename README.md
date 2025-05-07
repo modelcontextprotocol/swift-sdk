@@ -83,11 +83,27 @@ For remote server communication:
 
 ```swift
 // Create a streaming HTTP transport
+// This uses Server-Sent Events (SSE) for real-time updates when streaming is enabled.
+// It aligns with the "Streamable HTTP transport" from the 2025-03-26 MCP specification.
 let transport = HTTPClientTransport(
     endpoint: URL(string: "http://localhost:8080")!,
-    streaming: true  // Enable Server-Sent Events for real-time updates
+    streaming: true
 )
 try await client.connect(transport: transport)
+```
+
+#### SSE Transport (Legacy)
+
+For direct SSE communication, particularly with servers expecting the older HTTP with SSE transport mechanism:
+
+```swift
+// Create an SSE client transport
+// This implements the "HTTP with SSE" transport, an earlier specification.
+// For new implementations, prefer HTTPClientTransport with streaming: true.
+let sseTransport = SSEClientTransport(
+    endpoint: URL(string: "http://localhost:8080/sse")! // Ensure endpoint is SSE-specific if needed
+)
+try await client.connect(transport: sseTransport)
 ```
 
 ### Tools
@@ -644,7 +660,8 @@ The Swift SDK provides multiple built-in transports:
 | Transport | Description | Platforms | Best for |
 |-----------|-------------|-----------|----------|
 | [`StdioTransport`](/Sources/MCP/Base/Transports/StdioTransport.swift) | Implements [stdio transport](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#stdio) using standard input/output streams | Apple platforms, Linux with glibc | Local subprocesses, CLI tools |
-| [`HTTPClientTransport`](/Sources/MCP/Base/Transports/HTTPClientTransport.swift) | Implements [Streamable HTTP transport](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#streamable-http) using Foundation's URL Loading System | All platforms with Foundation | Remote servers, web applications |
+| [`HTTPClientTransport`](/Sources/MCP/Base/Transports/HTTPClientTransport.swift) | Implements [Streamable HTTP transport](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#streamable-http) using Foundation's URL Loading System. Can use Server-Sent Events (SSE) when `streaming` is enabled. | All platforms with Foundation | Remote servers, web applications |
+| [`SSEClientTransport`](/Sources/MCP/Base/Transports/SSEClientTransport.swift) | Implements the [HTTP with SSE transport](https://modelcontextprotocol.io/specification/2024-11-05/basic/transports#http-with-sse) (an earlier specified mechanism). The current [Streamable HTTP transport](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#streamable-http) (implemented by `HTTPClientTransport` with `streaming: true`) is now preferred. | All platforms with Foundation | Legacy systems or direct SSE communication with servers designed for the older SSE-specific mechanism. |
 | [`NetworkTransport`](/Sources/MCP/Base/Transports/NetworkTransport.swift) | Custom transport using Apple's Network framework for TCP/UDP connections | Apple platforms only | Low-level networking, custom protocols |
 
 ### Custom Transport Implementation
