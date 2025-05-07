@@ -167,7 +167,7 @@ import Testing
         }
     }
 
-    @Suite("Network Transport Tests")
+    @Suite("Network Transport Tests", .serialized)
     struct NetworkTransportTests {
         @Test("Heartbeat Creation And Parsing")
         func testHeartbeatCreationAndParsing() {
