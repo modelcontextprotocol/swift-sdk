@@ -243,3 +243,12 @@ extension MCPError: Hashable {
         }
     }
 }
+
+// MARK: -
+
+/// This is provided to allow existing code that uses `MCP.Error` to continue
+/// to work without modification.
+///
+/// The MCPError type is now the recommended way to handle errors in MCP.
+@available(*, deprecated, renamed: "MCPError", message: "Use MCPError instead of MCP.Error")
+public typealias Error = MCPError
