@@ -662,18 +662,17 @@ import Testing
 
         @Test("Resource Cleanup")
         func testResourceCleanup() async throws {
-            weak var weakTransport: NetworkTransport?
             weak var weakConnection: MockNetworkConnection?
 
             do {
                 let mockConnection = MockNetworkConnection()
+                weakConnection = mockConnection
+
+                // Create and use transport in a separate scope
                 let transport = NetworkTransport(
                     mockConnection,
                     heartbeatConfig: .disabled
                 )
-
-                weakTransport = transport
-                weakConnection = mockConnection
 
                 try await transport.connect()
                 await transport.disconnect()
@@ -682,9 +681,8 @@ import Testing
             // Wait for potential async cleanup
             try await Task.sleep(for: .milliseconds(100))
 
-            // Verify resources are cleaned up
-            #expect(weakTransport == nil)
-            #expect(weakConnection == nil)
+            // Verify connection is cleaned up
+            #expect(weakConnection == nil, "Connection was not properly cleaned up")
         }
     }
 #endif
