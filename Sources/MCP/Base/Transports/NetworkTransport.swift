@@ -323,14 +323,7 @@ import Logging
                     }
                 }
 
-                // Start the connection if it's not already started
-                if connection.state != .ready {
-                    connection.start(queue: .main)
-                } else {
-                    Task { @MainActor in
-                        await self.handleConnectionReady(continuation: continuation)
-                    }
-                }
+                connection.start(queue: .main)
             }
         }
 
