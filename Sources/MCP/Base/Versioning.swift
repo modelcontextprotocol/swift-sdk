@@ -7,7 +7,7 @@ import Foundation
 /// - SeeAlso: https://spec.modelcontextprotocol.io/specification/2025-03-26/
 public enum Version {
     /// All protocol versions supported by this implementation, ordered from newest to oldest.
-    public static let supported: Set<String> = [
+    static let supported: Set<String> = [
         "2025-03-26",
         "2024-11-05",
     ]
@@ -19,7 +19,7 @@ public enum Version {
     /// - Parameter clientRequestedVersion: The protocol version requested by the client.
     /// - Returns: The negotiated protocol version. If the client's requested version is supported,
     ///            that version is returned. Otherwise, the server's latest supported version is returned.
-    public static func negotiate(clientRequestedVersion: String) -> String {
+    static func negotiate(clientRequestedVersion: String) -> String {
         if supported.contains(clientRequestedVersion) {
             return clientRequestedVersion
         }
