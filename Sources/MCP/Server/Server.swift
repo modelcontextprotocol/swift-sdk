@@ -486,15 +486,20 @@ public actor Server {
                 try await hook(params.clientInfo, params.capabilities)
             }
 
-            // Set initial state
+            // Perform version negotiation
+            let clientRequestedVersion = params.protocolVersion
+            let negotiatedProtocolVersion = Version.negotiate(
+                clientRequestedVersion: clientRequestedVersion)
+
+            // Set initial state with the negotiated protocol version
             await self.setInitialState(
                 clientInfo: params.clientInfo,
                 clientCapabilities: params.capabilities,
-                protocolVersion: params.protocolVersion
+                protocolVersion: negotiatedProtocolVersion
             )
 
             return Initialize.Result(
-                protocolVersion: Version.latest,
+                protocolVersion: negotiatedProtocolVersion,
                 capabilities: await self.capabilities,
                 serverInfo: self.serverInfo,
                 instructions: nil
