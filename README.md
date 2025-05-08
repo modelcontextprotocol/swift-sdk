@@ -52,18 +52,20 @@ import MCP
 // Initialize the client
 let client = Client(name: "MyApp", version: "1.0.0")
 
-// Create a transport and connect
+// Create a transport and connect - initialization happens automatically
 let transport = StdioTransport()
-try await client.connect(transport: transport)
-
-// Initialize the connection
-let result = try await client.initialize()
+let result = try await client.connect(transport: transport)
 
 // Check server capabilities
 if result.capabilities.tools != nil {
     // Server supports tools (implicitly including tool calling if the 'tools' capability object is present)
 }
 ```
+
+> [!NOTE]
+> The `Client.connect(transport:)` method returns the initialization result.
+> This return value is discardable, 
+> so you can ignore it if you don't need to check server capabilities.
 
 ### Transport Options for Clients
 
@@ -195,7 +197,7 @@ Handle common client errors:
 
 ```swift
 do {
-    let result = try await client.initialize()
+    try await client.connect(transport: transport)
     // Success
 } catch let error as MCPError {
     print("MCP Error: \(error.localizedDescription)")

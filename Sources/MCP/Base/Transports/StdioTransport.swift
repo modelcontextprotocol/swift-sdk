@@ -44,9 +44,6 @@ import struct Foundation.Data
     /// // Create a transport and connect
     /// let transport = StdioTransport()
     /// try await client.connect(transport: transport)
-    ///
-    /// // Initialize the connection
-    /// let result = try await client.initialize()
     /// ```
     public actor StdioTransport: Transport {
         private let input: FileDescriptor

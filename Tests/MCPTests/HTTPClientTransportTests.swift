@@ -653,11 +653,8 @@ import Testing
                 }
             }
 
-            // Execute the complete flow
-            try await client.connect(transport: transport)
-
             // Step 1: Initialize client
-            let initResult = try await client.initialize()
+            let initResult = try await client.connect(transport: transport)
             #expect(initResult.protocolVersion == Version.latest)
             #expect(initResult.capabilities.tools != nil)
 
