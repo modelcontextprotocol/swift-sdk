@@ -164,7 +164,7 @@ import struct Foundation.Data
                         }
                     }
                 } catch let error where MCPError.isResourceTemporarilyUnavailable(error) {
-                    try? await Task.sleep(for: .milliseconds(10))
+                    try? await Task.sleep(nanoseconds: 10 * 1_000_000)
                     continue
                 } catch {
                     if !Task.isCancelled {
@@ -214,7 +214,7 @@ import struct Foundation.Data
                         remaining = remaining.dropFirst(written)
                     }
                 } catch let error where MCPError.isResourceTemporarilyUnavailable(error) {
-                    try await Task.sleep(for: .milliseconds(10))
+                    try? await Task.sleep(nanoseconds: 10 * 1_000_000)
                     continue
                 } catch {
                     throw MCPError.transportError(error)
