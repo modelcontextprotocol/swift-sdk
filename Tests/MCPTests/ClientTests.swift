@@ -479,4 +479,108 @@ struct ClientTests {
 
         await client.disconnect()
     }
+
+    @Test("Race condition between send error and response")
+    func testSendErrorResponseRace() async throws {
+        let transport = MockTransport()
+        let client = Client(name: "TestClient", version: "1.0")
+
+        try await client.connect(transport: transport)
+        try await Task.sleep(for: .milliseconds(10))
+
+        // Create a ping request
+        let request = Ping.request()
+
+        // Create a task that will send the request
+        let sendTask = Task {
+            try await client.ping()
+        }
+
+        // Give it a moment to send the request
+        try await Task.sleep(for: .milliseconds(10))
+
+        // Verify the request was sent
+        #expect(await transport.sentMessages.count == 1)
+
+        // Simulate a network error during send
+        await transport.setFailSend(true)
+
+        // Create a response for the request
+        let response = Response<Ping>(id: request.id, result: .init())
+        let anyResponse = try AnyResponse(response)
+
+        // Queue the response
+        try await transport.queue(response: anyResponse)
+
+        // Wait for the send task to complete
+        do {
+            _ = try await sendTask.value
+            #expect(Bool(false), "Expected send to fail")
+        } catch let error as MCPError {
+            if case .transportError = error {
+                #expect(Bool(true))
+            } else {
+                #expect(Bool(false), "Expected transport error, got \(error)")
+            }
+        } catch {
+            #expect(Bool(false), "Expected MCPError, got \(error)")
+        }
+
+        // Verify no continuation misuse occurred
+        // (If it did, the test would have crashed)
+
+//        await client.disconnect()
+    }
+
+    @Test("Race condition between response and send error")
+    func testResponseSendErrorRace() async throws {
+        let transport = MockTransport()
+        let client = Client(name: "TestClient", version: "1.0")
+
+        try await client.connect(transport: transport)
+        try await Task.sleep(for: .milliseconds(10))
+
+        // Create a ping request
+        let request = Ping.request()
+
+        // Create a response for the request
+        let response = Response<Ping>(id: request.id, result: .init())
+        let anyResponse = try AnyResponse(response)
+
+        // Queue the response before sending the request
+        try await transport.queue(response: anyResponse)
+
+        // Create a task that will send the request
+        let sendTask = Task {
+            try await client.ping()
+        }
+
+        // Give it a moment to send the request
+        try await Task.sleep(for: .milliseconds(10))
+
+        // Verify the request was sent
+        #expect(await transport.sentMessages.count == 1)
+
+        // Simulate a network error during send
+        await transport.setFailSend(true)
+
+        // Wait for the send task to complete
+        do {
+            _ = try await sendTask.value
+            #expect(Bool(false), "Expected send to fail")
+        } catch let error as MCPError {
+            if case .transportError = error {
+                #expect(Bool(true))
+            } else {
+                #expect(Bool(false), "Expected transport error, got \(error)")
+            }
+        } catch {
+            #expect(Bool(false), "Expected MCPError, got \(error)")
+        }
+
+        // Verify no continuation misuse occurred
+        // (If it did, the test would have crashed)
+
+        await client.disconnect()
+    }
 }

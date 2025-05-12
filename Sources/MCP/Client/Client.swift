@@ -191,10 +191,8 @@ public actor Client {
                         // Try decoding as a batch response first
                         if let batchResponse = try? decoder.decode([AnyResponse].self, from: data) {
                             await handleBatchResponse(batchResponse)
-                        } else if let response = try? decoder.decode(AnyResponse.self, from: data),
-                            let request = pendingRequests[response.id]
-                        {
-                            await handleResponse(response, for: request)
+                        } else if let response = try? decoder.decode(AnyResponse.self, from: data) {
+                            await handleResponse(response)
                         } else if let message = try? decoder.decode(AnyMessage.self, from: data) {
                             await handleMessage(message)
                         } else {
@@ -217,23 +215,49 @@ public actor Client {
                     break
                 }
             } while true
+            await self.logger?.info("Client message handling loop task is terminating.")
         }
     }
 
     /// Disconnect the client and cancel all pending requests
     public func disconnect() async {
-        // Cancel all pending requests
-        for (id, request) in pendingRequests {
+        await logger?.info("Initiating client disconnect...")
+
+        // Part 1: Inside actor - Grab state and clear internal references
+        let taskToCancel = self.task
+        let connectionToDisconnect = self.connection
+        let pendingRequestsToCancel = self.pendingRequests
+
+        self.task = nil
+        self.connection = nil
+        self.pendingRequests = [:]  // Use empty dictionary literal
+
+        // Part 2: Outside actor - Resume continuations, disconnect transport, await task
+
+        // Resume continuations first
+        for (_, request) in pendingRequestsToCancel {
             request.resume(throwing: MCPError.internalError("Client disconnected"))
-            pendingRequests.removeValue(forKey: id)
+        }
+        await logger?.info("Pending requests cancelled.")
+
+        // Cancel the task
+        taskToCancel?.cancel()
+        await logger?.info("Message loop task cancellation requested.")
+
+        // Disconnect the transport *before* awaiting the task
+        // This should ensure the transport stream is finished, unblocking the loop.
+        if let conn = connectionToDisconnect {
+            await conn.disconnect()
+            await logger?.info("Transport disconnected.")
+        } else {
+            await logger?.info("No active transport connection to disconnect.")
         }
 
-        task?.cancel()
-        task = nil
-        if let connection = connection {
-            await connection.disconnect()
-        }
-        connection = nil
+        // Await the task completion *after* transport disconnect
+        _ = await taskToCancel?.value
+        await logger?.info("Client message loop task finished.")
+
+        await logger?.info("Client disconnect complete.")
     }
 
     // MARK: - Registration
@@ -267,12 +291,12 @@ public actor Client {
             throw MCPError.internalError("Client connection not initialized")
         }
 
-        // Use the actor's encoder
         let requestData = try encoder.encode(request)
 
         // Store the pending request first
         return try await withCheckedThrowingContinuation { continuation in
             Task {
+                // Add the pending request before attempting to send
                 self.addPendingRequest(
                     id: request.id,
                     continuation: continuation,
@@ -284,9 +308,15 @@ public actor Client {
                     // Use the existing connection send
                     try await connection.send(requestData)
                 } catch {
-                    // If send fails immediately, resume continuation and remove pending request
-                    continuation.resume(throwing: error)
-                    self.removePendingRequest(id: request.id)  // Ensure cleanup on send error
+                    // If send fails, try to remove the pending request.
+                    // Resume with the send error only if we successfully removed the request,
+                    // indicating the response handler hasn't processed it yet.
+                    if self.removePendingRequest(id: request.id) != nil {
+                        continuation.resume(throwing: error)
+                    }
+                    // Otherwise, the request was already removed by the response handler
+                    // or by disconnect, so the continuation was already resumed.
+                    // Do nothing here.
                 }
             }
         }
@@ -300,8 +330,8 @@ public actor Client {
         pendingRequests[id] = AnyPendingRequest(PendingRequest(continuation: continuation))
     }
 
-    private func removePendingRequest(id: ID) {
-        pendingRequests.removeValue(forKey: id)
+    private func removePendingRequest(id: ID) -> AnyPendingRequest? {
+        return pendingRequests.removeValue(forKey: id)
     }
 
     // MARK: - Batching
@@ -555,21 +585,29 @@ public actor Client {
 
     // MARK: -
 
-    private func handleResponse(_ response: Response<AnyMethod>, for request: AnyPendingRequest)
-        async
-    {
+    private func handleResponse(_ response: Response<AnyMethod>) async {
         await logger?.debug(
             "Processing response",
             metadata: ["id": "\(response.id)"])
 
-        switch response.result {
-        case .success(let value):
-            request.resume(returning: value)
-        case .failure(let error):
-            request.resume(throwing: error)
+        // Attempt to remove the pending request using the response ID.
+        // Resume with the response only if it hadn't yet been removed.
+        if let removedRequest = self.removePendingRequest(id: response.id) {
+            // If we successfully removed it, resume its continuation.
+            switch response.result {
+            case .success(let value):
+                removedRequest.resume(returning: value)
+            case .failure(let error):
+                removedRequest.resume(throwing: error)
+            }
+        } else {
+            // Request was already removed (e.g., by send error handler or disconnect).
+            // Log this, but it's not an error in race condition scenarios.
+            await logger?.warning(
+                "Attempted to handle response for already removed request",
+                metadata: ["id": "\(response.id)"]
+            )
         }
-
-        removePendingRequest(id: response.id)
     }
 
     private func handleMessage(_ message: Message<AnyNotification>) async {
@@ -619,14 +657,21 @@ public actor Client {
     private func handleBatchResponse(_ responses: [AnyResponse]) async {
         await logger?.debug("Processing batch response", metadata: ["count": "\(responses.count)"])
         for response in responses {
-            // Look up the pending request for this specific ID within the batch
-            if let request = pendingRequests[response.id] {
-                // Reuse the existing single response handler logic
-                await handleResponse(response, for: request)
+            // Attempt to remove the pending request.
+            // If successful, pendingRequest contains the request.
+            if let pendingRequest = self.removePendingRequest(id: response.id) {
+                // If we successfully removed it, handle the response using the pending request.
+                switch response.result {
+                case .success(let value):
+                    pendingRequest.resume(returning: value)
+                case .failure(let error):
+                    pendingRequest.resume(throwing: error)
+                }
             } else {
-                // Log if a response ID doesn't match any pending request
+                // If removal failed, it means the request ID was not found (or already handled).
+                // Log a warning.
                 await logger?.warning(
-                    "Received response in batch for unknown request ID",
+                    "Received response in batch for unknown or already handled request ID",
                     metadata: ["id": "\(response.id)"]
                 )
             }
