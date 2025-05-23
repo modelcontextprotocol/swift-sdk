@@ -272,8 +272,7 @@ public actor Client {
         _ type: N.Type,
         handler: @escaping @Sendable (Message<N>) async throws -> Void
     ) async -> Self {
-        let handlers = notificationHandlers[N.name, default: []]
-        notificationHandlers[N.name] = handlers + [TypedNotificationHandler(handler)]
+        notificationHandlers[N.name, default: []].append(TypedNotificationHandler(handler))
         return self
     }
 
