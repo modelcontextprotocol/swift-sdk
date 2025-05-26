@@ -571,9 +571,9 @@ server.withMethodHandler(GetPrompt.self) { params in
 
         let description = "Job interview for \(position) position at \(company)"
         let messages: [Prompt.Message] = [
-            .init(role: .user, content: .text(text: "You are an interviewer for the \(position) position at \(company).")),
-            .init(role: .user, content: .text(text: "Hello, I'm \(interviewee) and I'm here for the \(position) interview.")),
-            .init(role: .assistant, content: .text(text: "Hi \(interviewee), welcome to \(company)! I'd like to start by asking about your background and experience."))
+            .user("You are an interviewer for the \(position) position at \(company)."),
+            .user("Hello, I'm \(interviewee) and I'm here for the \(position) interview."),
+            .assistant("Hi \(interviewee), welcome to \(company)! I'd like to start by asking about your background and experience.")
         ]
 
         return .init(description: description, messages: messages)
@@ -609,7 +609,7 @@ let server = Server(
 do {
     let result = try await server.requestSampling(
         messages: [
-            Sampling.Message(role: .user, content: .text("Analyze this data and suggest next steps"))
+            .user("Analyze this data and suggest next steps")
         ],
         systemPrompt: "You are a helpful data analyst",
         maxTokens: 150,

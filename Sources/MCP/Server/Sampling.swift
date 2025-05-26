@@ -21,54 +21,27 @@ public enum Sampling {
         /// The message content
         public let content: Content
 
-        public init(role: Role, content: Content) {
+        init(role: Role, content: Content) {
             self.role = role
             self.content = content
         }
 
+        /// Creates a user message with the specified content
+        public static func user(_ content: Content) -> Message {
+            return Message(role: .user, content: content)
+        }
+
+        /// Creates an assistant message with the specified content
+        public static func assistant(_ content: Content) -> Message {
+            return Message(role: .assistant, content: content)
+        }
+
         /// Content types for sampling messages
-        public enum Content: Hashable, Codable, Sendable {
+        public enum Content: Hashable, Sendable {
             /// Text content
             case text(String)
             /// Image content
             case image(data: String, mimeType: String)
-
-            private enum CodingKeys: String, CodingKey {
-                case type, text, data, mimeType
-            }
-
-            public init(from decoder: Decoder) throws {
-                let container = try decoder.container(keyedBy: CodingKeys.self)
-                let type = try container.decode(String.self, forKey: .type)
-
-                switch type {
-                case "text":
-                    let text = try container.decode(String.self, forKey: .text)
-                    self = .text(text)
-                case "image":
-                    let data = try container.decode(String.self, forKey: .data)
-                    let mimeType = try container.decode(String.self, forKey: .mimeType)
-                    self = .image(data: data, mimeType: mimeType)
-                default:
-                    throw DecodingError.dataCorruptedError(
-                        forKey: .type, in: container,
-                        debugDescription: "Unknown sampling message content type")
-                }
-            }
-
-            public func encode(to encoder: Encoder) throws {
-                var container = encoder.container(keyedBy: CodingKeys.self)
-
-                switch self {
-                case .text(let text):
-                    try container.encode("text", forKey: .type)
-                    try container.encode(text, forKey: .text)
-                case .image(let data, let mimeType):
-                    try container.encode("image", forKey: .type)
-                    try container.encode(data, forKey: .data)
-                    try container.encode(mimeType, forKey: .mimeType)
-                }
-            }
         }
     }
 
@@ -126,6 +99,65 @@ public enum Sampling {
         case maxTokens
     }
 }
+
+// MARK: - Codable
+
+extension Sampling.Message.Content: Codable {
+    private enum CodingKeys: String, CodingKey {
+        case type, text, data, mimeType
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let type = try container.decode(String.self, forKey: .type)
+
+        switch type {
+        case "text":
+            let text = try container.decode(String.self, forKey: .text)
+            self = .text(text)
+        case "image":
+            let data = try container.decode(String.self, forKey: .data)
+            let mimeType = try container.decode(String.self, forKey: .mimeType)
+            self = .image(data: data, mimeType: mimeType)
+        default:
+            throw DecodingError.dataCorruptedError(
+                forKey: .type, in: container,
+                debugDescription: "Unknown sampling message content type")
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+
+        switch self {
+        case .text(let text):
+            try container.encode("text", forKey: .type)
+            try container.encode(text, forKey: .text)
+        case .image(let data, let mimeType):
+            try container.encode("image", forKey: .type)
+            try container.encode(data, forKey: .data)
+            try container.encode(mimeType, forKey: .mimeType)
+        }
+    }
+}
+
+// MARK: - ExpressibleByStringLiteral
+
+extension Sampling.Message.Content: ExpressibleByStringLiteral {
+    public init(stringLiteral value: String) {
+        self = .text(value)
+    }
+}
+
+// MARK: - ExpressibleByStringInterpolation
+
+extension Sampling.Message.Content: ExpressibleByStringInterpolation {
+    public init(stringInterpolation: DefaultStringInterpolation) {
+        self = .text(String(stringInterpolation: stringInterpolation))
+    }
+}
+
+// MARK: -
 
 /// To request sampling from a client, servers send a `sampling/createMessage` request.
 /// - SeeAlso: https://modelcontextprotocol.io/docs/concepts/sampling#how-sampling-works

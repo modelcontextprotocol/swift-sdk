@@ -20,10 +20,7 @@ struct SamplingTests {
         let decoder = JSONDecoder()
 
         // Test text content
-        let textMessage = Sampling.Message(
-            role: .user,
-            content: .text("Hello, world!")
-        )
+        let textMessage: Sampling.Message = .user("Hello, world!")
 
         let textData = try encoder.encode(textMessage)
         let decodedTextMessage = try decoder.decode(Sampling.Message.self, from: textData)
@@ -36,10 +33,8 @@ struct SamplingTests {
         }
 
         // Test image content
-        let imageMessage = Sampling.Message(
-            role: .assistant,
-            content: .image(data: "base64imagedata", mimeType: "image/png")
-        )
+        let imageMessage: Sampling.Message = .assistant(
+            .image(data: "base64imagedata", mimeType: "image/png"))
 
         let imageData = try encoder.encode(imageMessage)
         let decodedImageMessage = try decoder.decode(Sampling.Message.self, from: imageData)
@@ -112,10 +107,9 @@ struct SamplingTests {
         let encoder = JSONEncoder()
         let decoder = JSONDecoder()
 
-        let messages = [
-            Sampling.Message(role: .user, content: .text("What is the weather like?")),
-            Sampling.Message(
-                role: .assistant, content: .text("I need to check the weather for you.")),
+        let messages: [Sampling.Message] = [
+            .user("What is the weather like?"),
+            .assistant("I need to check the weather for you."),
         ]
 
         let modelPreferences = Sampling.ModelPreferences(
@@ -179,8 +173,8 @@ struct SamplingTests {
 
     @Test("CreateMessage request creation")
     func testCreateMessageRequest() throws {
-        let messages = [
-            Sampling.Message(role: .user, content: .text("Hello"))
+        let messages: [Sampling.Message] = [
+            .user("Hello")
         ]
 
         let request = CreateSamplingMessage.request(
@@ -260,8 +254,8 @@ struct SamplingTests {
         try await server.start(transport: transport)
 
         // Test that server can attempt to request sampling
-        let messages = [
-            Sampling.Message(role: .user, content: .text("Test message"))
+        let messages: [Sampling.Message] = [
+            .user("Test message")
         ]
 
         do {
@@ -293,7 +287,7 @@ struct SamplingTests {
         encoder.outputFormatting = [.sortedKeys]
 
         // Test text content JSON format
-        let textContent = Sampling.Message.Content.text("Hello")
+        let textContent: Sampling.Message.Content = .text("Hello")
         let textData = try encoder.encode(textContent)
         let textJSON = String(data: textData, encoding: .utf8)!
 
@@ -301,7 +295,8 @@ struct SamplingTests {
         #expect(textJSON.contains("\"text\":\"Hello\""))
 
         // Test image content JSON format
-        let imageContent = Sampling.Message.Content.image(data: "base64data", mimeType: "image/png")
+        let imageContent: Sampling.Message.Content = .image(
+            data: "base64data", mimeType: "image/png")
         let imageData = try encoder.encode(imageContent)
         let imageJSON = String(data: imageData, encoding: .utf8)!
 
@@ -333,6 +328,218 @@ struct SamplingTests {
         #expect(decoded.costPriority?.doubleValue == 0.5)
         #expect(decoded.speedPriority?.doubleValue == 1.0)
         #expect(decoded.intelligencePriority?.doubleValue == 0.0)
+    }
+
+    @Test("Message factory methods")
+    func testMessageFactoryMethods() throws {
+        // Test user message factory method
+        let userMessage: Sampling.Message = .user("Hello, world!")
+        #expect(userMessage.role == .user)
+        if case .text(let text) = userMessage.content {
+            #expect(text == "Hello, world!")
+        } else {
+            #expect(Bool(false), "Expected text content")
+        }
+
+        // Test assistant message factory method
+        let assistantMessage: Sampling.Message = .assistant("Hi there!")
+        #expect(assistantMessage.role == .assistant)
+        if case .text(let text) = assistantMessage.content {
+            #expect(text == "Hi there!")
+        } else {
+            #expect(Bool(false), "Expected text content")
+        }
+
+        // Test with image content
+        let imageMessage: Sampling.Message = .user(
+            .image(data: "base64data", mimeType: "image/png"))
+        #expect(imageMessage.role == .user)
+        if case .image(let data, let mimeType) = imageMessage.content {
+            #expect(data == "base64data")
+            #expect(mimeType == "image/png")
+        } else {
+            #expect(Bool(false), "Expected image content")
+        }
+    }
+
+    @Test("Content ExpressibleByStringLiteral")
+    func testContentExpressibleByStringLiteral() throws {
+        // Test string literal assignment
+        let content: Sampling.Message.Content = "Hello from string literal"
+
+        if case .text(let text) = content {
+            #expect(text == "Hello from string literal")
+        } else {
+            #expect(Bool(false), "Expected text content")
+        }
+
+        // Test in message creation
+        let message: Sampling.Message = .user("Direct string literal")
+        if case .text(let text) = message.content {
+            #expect(text == "Direct string literal")
+        } else {
+            #expect(Bool(false), "Expected text content")
+        }
+
+        // Test in array context
+        let messages: [Sampling.Message] = [
+            .user("First message"),
+            .assistant("Second message"),
+            .user("Third message"),
+        ]
+
+        #expect(messages.count == 3)
+        #expect(messages[0].role == .user)
+        #expect(messages[1].role == .assistant)
+        #expect(messages[2].role == .user)
+    }
+
+    @Test("Content ExpressibleByStringInterpolation")
+    func testContentExpressibleByStringInterpolation() throws {
+        let userName = "Alice"
+        let temperature = 72
+        let location = "San Francisco"
+
+        // Test string interpolation
+        let content: Sampling.Message.Content =
+            "Hello \(userName), the temperature in \(location) is \(temperature)°F"
+
+        if case .text(let text) = content {
+            #expect(text == "Hello Alice, the temperature in San Francisco is 72°F")
+        } else {
+            #expect(Bool(false), "Expected text content")
+        }
+
+        // Test in message creation with interpolation
+        let message = Sampling.Message.user(
+            "Welcome \(userName)! Today's weather in \(location) is \(temperature)°F")
+        if case .text(let text) = message.content {
+            #expect(text == "Welcome Alice! Today's weather in San Francisco is 72°F")
+        } else {
+            #expect(Bool(false), "Expected text content")
+        }
+
+        // Test complex interpolation
+        let items = ["apples", "bananas", "oranges"]
+        let count = items.count
+        let listMessage: Sampling.Message = .assistant(
+            "You have \(count) items: \(items.joined(separator: ", "))")
+
+        if case .text(let text) = listMessage.content {
+            #expect(text == "You have 3 items: apples, bananas, oranges")
+        } else {
+            #expect(Bool(false), "Expected text content")
+        }
+    }
+
+    @Test("Message factory methods with string interpolation")
+    func testMessageFactoryMethodsWithStringInterpolation() throws {
+        let customerName = "Bob"
+        let orderNumber = "ORD-12345"
+        let issueType = "delivery delay"
+
+        // Test user message with interpolation
+        let userMessage: Sampling.Message = .user(
+            "Hi, I'm \(customerName) and I have an issue with order \(orderNumber)")
+        #expect(userMessage.role == .user)
+        if case .text(let text) = userMessage.content {
+            #expect(text == "Hi, I'm Bob and I have an issue with order ORD-12345")
+        } else {
+            #expect(Bool(false), "Expected text content")
+        }
+
+        // Test assistant message with interpolation
+        let assistantMessage: Sampling.Message = .assistant(
+            "Hello \(customerName), I can help you with your \(issueType) issue for order \(orderNumber)"
+        )
+        #expect(assistantMessage.role == .assistant)
+        if case .text(let text) = assistantMessage.content {
+            #expect(
+                text
+                    == "Hello Bob, I can help you with your delivery delay issue for order ORD-12345"
+            )
+        } else {
+            #expect(Bool(false), "Expected text content")
+        }
+
+        // Test in conversation array
+        let conversation: [Sampling.Message] = [
+            .user("Hello, I'm \(customerName)"),
+            .assistant("Hi \(customerName), how can I help you today?"),
+            .user("I have an issue with order \(orderNumber) - it's a \(issueType)"),
+            .assistant(
+                "I understand you're experiencing a \(issueType) with order \(orderNumber). Let me look into that for you."
+            ),
+        ]
+
+        #expect(conversation.count == 4)
+
+        // Verify interpolated content
+        if case .text(let text) = conversation[2].content {
+            #expect(text == "I have an issue with order ORD-12345 - it's a delivery delay")
+        } else {
+            #expect(Bool(false), "Expected text content")
+        }
+    }
+
+    @Test("Ergonomic API usage patterns")
+    func testErgonomicAPIUsagePatterns() throws {
+        // Test various ergonomic usage patterns enabled by the new API
+
+        // Pattern 1: Simple conversation
+        let simpleConversation: [Sampling.Message] = [
+            .user("What's the weather like?"),
+            .assistant("I'd be happy to help you check the weather!"),
+            .user("Thanks!"),
+        ]
+        #expect(simpleConversation.count == 3)
+
+        // Pattern 2: Dynamic content with interpolation
+        let productName = "Smart Thermostat"
+        let price = 199.99
+        let discount = 20
+
+        let salesConversation: [Sampling.Message] = [
+            .user("Tell me about the \(productName)"),
+            .assistant("The \(productName) is priced at $\(String(format: "%.2f", price))"),
+            .user("Do you have any discounts?"),
+            .assistant(
+                "Yes! We currently have a \(discount)% discount, bringing the price to $\(String(format: "%.2f", price * (1.0 - Double(discount)/100.0)))"
+            ),
+        ]
+        #expect(salesConversation.count == 4)
+
+        // Pattern 3: Mixed content types
+        let mixedContent: [Sampling.Message] = [
+            .user("Can you analyze this image?"),
+            .assistant(.image(data: "analysis_chart_data", mimeType: "image/png")),
+            .user("What does it show?"),
+            .assistant("The chart shows a clear upward trend in sales."),
+        ]
+        #expect(mixedContent.count == 4)
+
+        // Verify content types
+        if case .text = mixedContent[0].content,
+            case .image = mixedContent[1].content,
+            case .text = mixedContent[2].content,
+            case .text = mixedContent[3].content
+        {
+            // All content types are correct
+        } else {
+            #expect(Bool(false), "Content types don't match expected pattern")
+        }
+
+        // Pattern 4: Encoding/decoding still works
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+
+        let data = try encoder.encode(simpleConversation)
+        let decoded = try decoder.decode([Sampling.Message].self, from: data)
+
+        #expect(decoded.count == 3)
+        #expect(decoded[0].role == .user)
+        #expect(decoded[1].role == .assistant)
+        #expect(decoded[2].role == .user)
     }
 }
 
@@ -454,15 +661,10 @@ struct SamplingIntegrationTests {
         try await server.start(transport: transport)
 
         // Test sampling request with comprehensive parameters
-        let messages = [
-            Sampling.Message(
-                role: .user,
-                content: .text("Analyze the following data and provide insights:")
-            ),
-            Sampling.Message(
-                role: .user,
-                content: .text("Sales data: Q1: $100k, Q2: $150k, Q3: $200k, Q4: $180k")
-            ),
+        let messages: [Sampling.Message] = [
+            .user("Analyze the following data and provide insights:"),
+            .user("Sales data: Q1: $100k, Q2: $150k, Q3: $200k, Q4: $180k"),
+            .user("Marketing data: Q1: $50k, Q2: $75k, Q3: $100k, Q4: $90k"),
         ]
 
         let modelPreferences = Sampling.ModelPreferences(
@@ -514,19 +716,14 @@ struct SamplingIntegrationTests {
     )
     func testSamplingMessageTypes() async throws {
         // Test comprehensive message content types
-        let textMessage = Sampling.Message(
-            role: .user,
-            content: .text("What do you see in this data?")
-        )
+        let textMessage: Sampling.Message = .user("What do you see in this data?")
 
-        let imageMessage = Sampling.Message(
-            role: .user,
-            content: .image(
+        let imageMessage: Sampling.Message = .user(
+            .image(
                 data:
                     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==",
                 mimeType: "image/png"
-            )
-        )
+            ))
 
         // Test encoding/decoding of different message types
         let encoder = JSONEncoder()
@@ -625,8 +822,8 @@ struct SamplingIntegrationTests {
         try await server.start(transport: transport)
 
         // Test sampling request on server without sampling capability
-        let messages = [
-            Sampling.Message(role: .user, content: .text("Test message"))
+        let messages: [Sampling.Message] = [
+            .user("Test message")
         ]
 
         do {
@@ -658,11 +855,11 @@ struct SamplingIntegrationTests {
     )
     func testSamplingParameterValidation() async throws {
         // Test parameter validation and edge cases
-        let validMessages = [
-            Sampling.Message(role: .user, content: .text("Valid message"))
+        let validMessages: [Sampling.Message] = [
+            .user("Valid message")
         ]
 
-        _ = [Sampling.Message]()  // Test empty messages array
+        _ = [Sampling.Message]()  // Test empty messages array.
 
         // Test with valid parameters
         let validParams = CreateSamplingMessage.Parameters(
@@ -725,22 +922,16 @@ struct SamplingIntegrationTests {
         // Test realistic sampling workflow scenarios
 
         // Scenario 1: Data Analysis Request
-        let dataAnalysisMessages = [
-            Sampling.Message(
-                role: .user,
-                content: .text("Please analyze the following customer feedback data:")
-            ),
-            Sampling.Message(
-                role: .user,
-                content: .text(
-                    """
-                    Feedback Summary:
-                    - 85% positive sentiment
-                    - Top complaints: shipping delays (12%), product quality (8%)
-                    - Top praise: customer service (45%), product features (40%)
-                    - NPS Score: 72
-                    """)
-            ),
+        let dataAnalysisMessages: [Sampling.Message] = [
+            .user("Please analyze the following customer feedback data:"),
+            .user(
+                """
+                Feedback Summary:
+                - 85% positive sentiment
+                - Top complaints: shipping delays (12%), product quality (8%)
+                - Top praise: customer service (45%), product features (40%)
+                - NPS Score: 72
+                """),
         ]
 
         let dataAnalysisParams = CreateSamplingMessage.Parameters(
@@ -759,12 +950,9 @@ struct SamplingIntegrationTests {
         )
 
         // Scenario 2: Creative Content Generation
-        let creativeMessages = [
-            Sampling.Message(
-                role: .user,
-                content: .text(
-                    "Write a compelling product description for a new smart home device.")
-            )
+        let creativeMessages: [Sampling.Message] = [
+            .user(
+                "Write a compelling product description for a new smart home device.")
         ]
 
         let creativeParams = CreateSamplingMessage.Parameters(
