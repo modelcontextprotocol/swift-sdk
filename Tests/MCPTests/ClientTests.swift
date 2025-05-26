@@ -654,8 +654,29 @@ struct ClientTests {
         let transport = MockTransport()
         let client = Client(name: "TestClient", version: "1.0")
 
+        // Set up a task to handle the initialize response
+        let initTask = Task {
+            try await Task.sleep(for: .milliseconds(10))
+            if let lastMessage = await transport.sentMessages.last,
+                let data = lastMessage.data(using: .utf8),
+                let request = try? JSONDecoder().decode(Request<Initialize>.self, from: data)
+            {
+                let response = Initialize.response(
+                    id: request.id,
+                    result: .init(
+                        protocolVersion: Version.latest,
+                        capabilities: .init(),
+                        serverInfo: .init(name: "TestServer", version: "1.0"),
+                        instructions: nil
+                    )
+                )
+                try await transport.queue(response: response)
+            }
+        }
+
         try await client.connect(transport: transport)
         try await Task.sleep(for: .milliseconds(10))
+        initTask.cancel()
 
         // Set up the transport to fail sends from the start
         await transport.setFailSend(true)
@@ -694,8 +715,29 @@ struct ClientTests {
         let transport = MockTransport()
         let client = Client(name: "TestClient", version: "1.0")
 
+        // Set up a task to handle the initialize response
+        let initTask = Task {
+            try await Task.sleep(for: .milliseconds(10))
+            if let lastMessage = await transport.sentMessages.last,
+                let data = lastMessage.data(using: .utf8),
+                let request = try? JSONDecoder().decode(Request<Initialize>.self, from: data)
+            {
+                let response = Initialize.response(
+                    id: request.id,
+                    result: .init(
+                        protocolVersion: Version.latest,
+                        capabilities: .init(),
+                        serverInfo: .init(name: "TestServer", version: "1.0"),
+                        instructions: nil
+                    )
+                )
+                try await transport.queue(response: response)
+            }
+        }
+
         try await client.connect(transport: transport)
         try await Task.sleep(for: .milliseconds(10))
+        initTask.cancel()
 
         // Create a ping request to get the ID
         let request = Ping.request()
