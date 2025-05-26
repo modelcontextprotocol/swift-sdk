@@ -52,7 +52,7 @@ import MCP
 // Initialize the client
 let client = Client(name: "MyApp", version: "1.0.0")
 
-// Create a transport and connect - initialization happens automatically
+// Create a transport and connect
 let transport = StdioTransport()
 let result = try await client.connect(transport: transport)
 
@@ -404,7 +404,7 @@ The server component allows your application to host model capabilities and resp
 ```swift
 import MCP
 
-// Initialize the server with capabilities
+// Create a server with given capabilities
 let server = Server(
     name: "MyModelServer",
     version: "1.0.0",
