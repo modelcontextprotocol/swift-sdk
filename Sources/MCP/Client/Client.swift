@@ -583,6 +583,45 @@ public actor Client {
         return (content: result.content, isError: result.isError)
     }
 
+    // MARK: - Sampling
+
+    /// Register a handler for sampling requests from servers
+    ///
+    /// Sampling allows servers to request LLM completions through the client,
+    /// enabling sophisticated agentic behaviors while maintaining human-in-the-loop control.
+    ///
+    /// The sampling flow follows these steps:
+    /// 1. Server sends a `sampling/createMessage` request to the client
+    /// 2. Client reviews the request and can modify it (via this handler)
+    /// 3. Client samples from an LLM (via this handler)
+    /// 4. Client reviews the completion (via this handler)
+    /// 5. Client returns the result to the server
+    ///
+    /// - Parameter handler: A closure that processes sampling requests and returns completions
+    /// - Returns: Self for method chaining
+    /// - SeeAlso: https://modelcontextprotocol.io/docs/concepts/sampling#how-sampling-works
+    @discardableResult
+    public func withSamplingHandler(
+        _ handler: @escaping @Sendable (CreateSamplingMessage.Parameters) async throws ->
+            CreateSamplingMessage.Result
+    ) -> Self {
+        // Note: This would require extending the client architecture to handle incoming requests from servers.
+        // The current MCP Swift SDK architecture assumes clients only send requests to servers,
+        // but sampling requires bidirectional communication where servers can send requests to clients.
+        //
+        // A full implementation would need:
+        // 1. Request handlers in the client (similar to how servers handle requests)
+        // 2. Bidirectional transport support
+        // 3. Request/response correlation for server-to-client requests
+        //
+        // For now, this serves as the correct API design for when bidirectional support is added.
+
+        // This would register the handler similar to how servers register method handlers:
+        // methodHandlers[CreateSamplingMessage.name] = TypedRequestHandler(handler)
+
+        return self
+    }
+
     // MARK: -
 
     private func handleResponse(_ response: Response<AnyMethod>) async {

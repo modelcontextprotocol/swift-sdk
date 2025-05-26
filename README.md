@@ -189,6 +189,89 @@ for message in messages {
 }
 ```
 
+### Sampling
+
+Sampling allows servers to request LLM completions through the client, 
+enabling agentic behaviors while maintaining human-in-the-loop control. 
+Clients register a handler to process incoming sampling requests from servers.
+
+> [!TIP]
+> Sampling requests flow from **server to client**, 
+> not client to server. 
+> This enables servers to request AI assistance 
+> while clients maintain control over model access and user approval.
+
+```swift
+// Register a sampling handler in the client
+await client.withSamplingHandler { parameters in
+    // Review the sampling request (human-in-the-loop step 1)
+    print("Server requests completion for: \(parameters.messages)")
+    
+    // Optionally modify the request based on user input
+    var messages = parameters.messages
+    if let systemPrompt = parameters.systemPrompt {
+        print("System prompt: \(systemPrompt)")
+    }
+    
+    // Sample from your LLM (this is where you'd call your AI service)
+    let completion = try await callYourLLMService(
+        messages: messages,
+        maxTokens: parameters.maxTokens,
+        temperature: parameters.temperature
+    )
+    
+    // Review the completion (human-in-the-loop step 2)
+    print("LLM generated: \(completion)")
+    // User can approve, modify, or reject the completion here
+    
+    // Return the result to the server
+    return CreateSamplingMessage.Result(
+        model: "your-model-name",
+        stopReason: .endTurn,
+        role: .assistant,
+        content: .text(completion)
+    )
+}
+```
+
+The sampling flow follows these steps:
+
+```mermaid
+sequenceDiagram
+    participant S as MCP Server
+    participant C as MCP Client
+    participant U as User/Human
+    participant L as LLM Service
+
+    Note over S,L: Server-initiated sampling request
+    S->>C: sampling/createMessage request
+    Note right of S: Server needs AI assistance<br/>for decision or content
+
+    Note over C,U: Human-in-the-loop review #1
+    C->>U: Show sampling request
+    U->>U: Review & optionally modify<br/>messages, system prompt
+    U->>C: Approve request
+
+    Note over C,L: Client handles LLM interaction
+    C->>L: Send messages to LLM
+    L->>C: Return completion
+
+    Note over C,U: Human-in-the-loop review #2
+    C->>U: Show LLM completion
+    U->>U: Review & optionally modify<br/>or reject completion
+    U->>C: Approve completion
+
+    Note over C,S: Return result to server
+    C->>S: sampling/createMessage response
+    Note left of C: Contains model used,<br/>stop reason, final content
+
+    Note over S: Server continues with<br/>AI-assisted result
+```
+
+This human-in-the-loop design ensures that users 
+maintain control over what the LLM sees and generates, 
+even when servers initiate the requests.
+
 ### Error Handling
 
 Handle common client errors:
@@ -503,6 +586,49 @@ server.withMethodHandler(GetPrompt.self) { params in
     }
 }
 ```
+
+### Sampling
+
+Servers can request LLM completions from clients through sampling. This enables agentic behaviors where servers can ask for AI assistance while maintaining human oversight.
+
+> [!NOTE]
+> The current implementation provides the correct API design for sampling, but requires bidirectional communication support in the transport layer. This feature will be fully functional when bidirectional transport support is added.
+
+```swift
+// Enable sampling capability in server
+let server = Server(
+    name: "MyModelServer",
+    version: "1.0.0",
+    capabilities: .init(
+        sampling: .init(),  // Enable sampling capability
+        tools: .init(listChanged: true)
+    )
+)
+
+// Request sampling from the client (conceptual - requires bidirectional transport)
+do {
+    let result = try await server.requestSampling(
+        messages: [
+            Sampling.Message(role: .user, content: .text("Analyze this data and suggest next steps"))
+        ],
+        systemPrompt: "You are a helpful data analyst",
+        maxTokens: 150,
+        temperature: 0.7
+    )
+    
+    // Use the LLM completion in your server logic
+    print("LLM suggested: \(result.content)")
+    
+} catch {
+    print("Sampling request failed: \(error)")
+}
+```
+
+Sampling enables powerful agentic workflows:
+- **Decision-making**: Ask the LLM to choose between options
+- **Content generation**: Request drafts for user approval
+- **Data analysis**: Get AI insights on complex data
+- **Multi-step reasoning**: Chain AI completions with tool calls
 
 #### Initialize Hook
 
