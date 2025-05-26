@@ -1,3 +1,4 @@
+import Logging
 import Testing
 
 import class Foundation.JSONDecoder
@@ -5,9 +6,14 @@ import class Foundation.JSONEncoder
 
 @testable import MCP
 
+#if canImport(System)
+    import System
+#else
+    @preconcurrency import SystemPackage
+#endif
+
 @Suite("Sampling Tests")
 struct SamplingTests {
-
     @Test("Sampling.Message encoding and decoding")
     func testSamplingMessageCoding() throws {
         let encoder = JSONEncoder()
@@ -54,8 +60,8 @@ struct SamplingTests {
 
         let preferences = Sampling.ModelPreferences(
             hints: [
-                Sampling.ModelPreferences.Hint(name: "claude-3"),
-                Sampling.ModelPreferences.Hint(name: "gpt-4"),
+                Sampling.ModelPreferences.Hint(name: "claude-4"),
+                Sampling.ModelPreferences.Hint(name: "gpt-4.1"),
             ],
             costPriority: 0.8,
             speedPriority: 0.3,
@@ -66,8 +72,8 @@ struct SamplingTests {
         let decoded = try decoder.decode(Sampling.ModelPreferences.self, from: data)
 
         #expect(decoded.hints?.count == 2)
-        #expect(decoded.hints?[0].name == "claude-3")
-        #expect(decoded.hints?[1].name == "gpt-4")
+        #expect(decoded.hints?[0].name == "claude-4")
+        #expect(decoded.hints?[1].name == "gpt-4.1")
         #expect(decoded.costPriority?.doubleValue == 0.8)
         #expect(decoded.speedPriority?.doubleValue == 0.3)
         #expect(decoded.intelligencePriority?.doubleValue == 0.9)
@@ -113,7 +119,7 @@ struct SamplingTests {
         ]
 
         let modelPreferences = Sampling.ModelPreferences(
-            hints: [Sampling.ModelPreferences.Hint(name: "claude-3-sonnet")],
+            hints: [Sampling.ModelPreferences.Hint(name: "claude-4-sonnet")],
             costPriority: 0.5,
             speedPriority: 0.7,
             intelligencePriority: 0.9
@@ -151,7 +157,7 @@ struct SamplingTests {
         let decoder = JSONDecoder()
 
         let result = CreateSamplingMessage.Result(
-            model: "claude-3-sonnet-20240229",
+            model: "claude-4-sonnet",
             stopReason: .endTurn,
             role: .assistant,
             content: .text("The weather is sunny and 75°F.")
@@ -160,7 +166,7 @@ struct SamplingTests {
         let data = try encoder.encode(result)
         let decoded = try decoder.decode(CreateSamplingMessage.Result.self, from: data)
 
-        #expect(decoded.model == "claude-3-sonnet-20240229")
+        #expect(decoded.model == "claude-4-sonnet")
         #expect(decoded.stopReason == .endTurn)
         #expect(decoded.role == .assistant)
 
@@ -327,5 +333,474 @@ struct SamplingTests {
         #expect(decoded.costPriority?.doubleValue == 0.5)
         #expect(decoded.speedPriority?.doubleValue == 1.0)
         #expect(decoded.intelligencePriority?.doubleValue == 0.0)
+    }
+}
+
+@Suite("Sampling Integration Tests")
+struct SamplingIntegrationTests {
+    @Test(
+        .timeLimit(.minutes(1))
+    )
+    func testSamplingCapabilitiesNegotiation() async throws {
+        let (clientToServerRead, clientToServerWrite) = try FileDescriptor.pipe()
+        let (serverToClientRead, serverToClientWrite) = try FileDescriptor.pipe()
+
+        var logger = Logger(
+            label: "mcp.test.sampling",
+            factory: { StreamLogHandler.standardError(label: $0) })
+        logger.logLevel = .debug
+
+        let serverTransport = StdioTransport(
+            input: clientToServerRead,
+            output: serverToClientWrite,
+            logger: logger
+        )
+        let clientTransport = StdioTransport(
+            input: serverToClientRead,
+            output: clientToServerWrite,
+            logger: logger
+        )
+
+        // Server with sampling capability
+        let server = Server(
+            name: "SamplingTestServer",
+            version: "1.0.0",
+            capabilities: .init(
+                sampling: .init(),  // Enable sampling
+                tools: .init()
+            )
+        )
+
+        // Client (capabilities will be set during initialization)
+        let client = Client(
+            name: "SamplingTestClient",
+            version: "1.0"
+        )
+
+        try await server.start(transport: serverTransport)
+        try await client.connect(transport: clientTransport)
+
+        // Test initialization and capability negotiation
+        let initTask = Task {
+            let result = try await client.initialize()
+
+            #expect(result.serverInfo.name == "SamplingTestServer")
+            #expect(result.serverInfo.version == "1.0.0")
+            #expect(
+                result.capabilities.sampling != nil, "Server should advertise sampling capability")
+            #expect(result.protocolVersion == Version.latest)
+        }
+
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                try await Task.sleep(for: .seconds(1))
+                initTask.cancel()
+                throw CancellationError()
+            }
+            group.addTask {
+                try await initTask.value
+            }
+            try await group.next()
+            group.cancelAll()
+        }
+
+        await server.stop()
+        await client.disconnect()
+        try? clientToServerRead.close()
+        try? clientToServerWrite.close()
+        try? serverToClientRead.close()
+        try? serverToClientWrite.close()
+    }
+
+    @Test(
+        .timeLimit(.minutes(1))
+    )
+    func testSamplingHandlerRegistration() async throws {
+        let client = Client(
+            name: "SamplingHandlerTestClient",
+            version: "1.0"
+        )
+
+        // Register sampling handler
+        let handlerClient = await client.withSamplingHandler { parameters in
+            // Mock LLM response
+            return CreateSamplingMessage.Result(
+                model: "test-model-v1",
+                stopReason: .endTurn,
+                role: .assistant,
+                content: .text("This is a test completion from the mock LLM.")
+            )
+        }
+
+        // Verify method chaining works
+        #expect(
+            handlerClient === client, "withSamplingHandler should return self for method chaining")
+
+        // Note: We can't test the actual handler invocation without bidirectional transport,
+        // but we can verify the handler registration doesn't crash and returns correctly
+    }
+
+    @Test(
+        .timeLimit(.minutes(1))
+    )
+    func testServerSamplingRequestAPI() async throws {
+        let transport = MockTransport()
+        let server = Server(
+            name: "SamplingRequestTestServer",
+            version: "1.0",
+            capabilities: .init(sampling: .init())
+        )
+
+        try await server.start(transport: transport)
+
+        // Test sampling request with comprehensive parameters
+        let messages = [
+            Sampling.Message(
+                role: .user,
+                content: .text("Analyze the following data and provide insights:")
+            ),
+            Sampling.Message(
+                role: .user,
+                content: .text("Sales data: Q1: $100k, Q2: $150k, Q3: $200k, Q4: $180k")
+            ),
+        ]
+
+        let modelPreferences = Sampling.ModelPreferences(
+            hints: [
+                Sampling.ModelPreferences.Hint(name: "claude-4-sonnet"),
+                Sampling.ModelPreferences.Hint(name: "gpt-4.1"),
+            ],
+            costPriority: 0.3,
+            speedPriority: 0.7,
+            intelligencePriority: 0.9
+        )
+
+        // Test that the API accepts all parameters correctly
+        do {
+            _ = try await server.requestSampling(
+                messages: messages,
+                modelPreferences: modelPreferences,
+                systemPrompt: "You are a business analyst expert.",
+                includeContext: .thisServer,
+                temperature: 0.7,
+                maxTokens: 500,
+                stopSequences: ["END_ANALYSIS", "\n\n---"],
+                metadata: [
+                    "requestId": "test-123",
+                    "priority": "high",
+                    "department": "analytics",
+                ]
+            )
+            #expect(Bool(false), "Should throw error for unimplemented bidirectional communication")
+        } catch let error as MCPError {
+            if case .internalError(let message) = error {
+                #expect(
+                    message?.contains("Bidirectional sampling requests not yet implemented")
+                        == true,
+                    "Should indicate bidirectional communication not implemented"
+                )
+            } else {
+                #expect(Bool(false), "Expected internalError, got \(error)")
+            }
+        } catch {
+            #expect(Bool(false), "Expected MCPError, got \(error)")
+        }
+
+        await server.stop()
+    }
+
+    @Test(
+        .timeLimit(.minutes(1))
+    )
+    func testSamplingMessageTypes() async throws {
+        // Test comprehensive message content types
+        let textMessage = Sampling.Message(
+            role: .user,
+            content: .text("What do you see in this data?")
+        )
+
+        let imageMessage = Sampling.Message(
+            role: .user,
+            content: .image(
+                data:
+                    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==",
+                mimeType: "image/png"
+            )
+        )
+
+        // Test encoding/decoding of different message types
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+
+        // Test text message
+        let textData = try encoder.encode(textMessage)
+        let decodedTextMessage = try decoder.decode(Sampling.Message.self, from: textData)
+        #expect(decodedTextMessage.role == .user)
+        if case .text(let text) = decodedTextMessage.content {
+            #expect(text == "What do you see in this data?")
+        } else {
+            #expect(Bool(false), "Expected text content")
+        }
+
+        // Test image message
+        let imageData = try encoder.encode(imageMessage)
+        let decodedImageMessage = try decoder.decode(Sampling.Message.self, from: imageData)
+        #expect(decodedImageMessage.role == .user)
+        if case .image(let data, let mimeType) = decodedImageMessage.content {
+            #expect(data.contains("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ"))
+            #expect(mimeType == "image/png")
+        } else {
+            #expect(Bool(false), "Expected image content")
+        }
+    }
+
+    @Test(
+        .timeLimit(.minutes(1))
+    )
+    func testSamplingResultTypes() async throws {
+        // Test different result content types and stop reasons
+        let textResult = CreateSamplingMessage.Result(
+            model: "claude-4-sonnet",
+            stopReason: .endTurn,
+            role: .assistant,
+            content: .text(
+                "Based on the sales data analysis, I can see a strong upward trend through Q3, with a slight decline in Q4. This suggests seasonal factors or market saturation."
+            )
+        )
+
+        let imageResult = CreateSamplingMessage.Result(
+            model: "dall-e-3",
+            stopReason: .maxTokens,
+            role: .assistant,
+            content: .image(
+                data: "generated_chart_base64_data_here",
+                mimeType: "image/png"
+            )
+        )
+
+        let stopSequenceResult = CreateSamplingMessage.Result(
+            model: "gpt-4.1",
+            stopReason: .stopSequence,
+            role: .assistant,
+            content: .text("Analysis complete.\nEND_ANALYSIS")
+        )
+
+        // Test encoding/decoding of different result types
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+
+        // Test text result
+        let textData = try encoder.encode(textResult)
+        let decodedTextResult = try decoder.decode(
+            CreateSamplingMessage.Result.self, from: textData)
+        #expect(decodedTextResult.model == "claude-4-sonnet")
+        #expect(decodedTextResult.stopReason == .endTurn)
+        #expect(decodedTextResult.role == .assistant)
+
+        // Test image result
+        let imageData = try encoder.encode(imageResult)
+        let decodedImageResult = try decoder.decode(
+            CreateSamplingMessage.Result.self, from: imageData)
+        #expect(decodedImageResult.model == "dall-e-3")
+        #expect(decodedImageResult.stopReason == .maxTokens)
+
+        // Test stop sequence result
+        let stopData = try encoder.encode(stopSequenceResult)
+        let decodedStopResult = try decoder.decode(
+            CreateSamplingMessage.Result.self, from: stopData)
+        #expect(decodedStopResult.stopReason == .stopSequence)
+    }
+
+    @Test(
+        .timeLimit(.minutes(1))
+    )
+    func testSamplingErrorHandling() async throws {
+        let transport = MockTransport()
+        let server = Server(
+            name: "ErrorTestServer",
+            version: "1.0",
+            capabilities: .init()  // No sampling capability
+        )
+
+        try await server.start(transport: transport)
+
+        // Test sampling request on server without sampling capability
+        let messages = [
+            Sampling.Message(role: .user, content: .text("Test message"))
+        ]
+
+        do {
+            _ = try await server.requestSampling(
+                messages: messages,
+                maxTokens: 100
+            )
+            #expect(Bool(false), "Should throw error for missing connection")
+        } catch let error as MCPError {
+            if case .internalError(let message) = error {
+                #expect(
+                    message?.contains("Server connection not initialized") == true
+                        || message?.contains("Bidirectional sampling requests not yet implemented")
+                            == true,
+                    "Should indicate connection or implementation issue"
+                )
+            } else {
+                #expect(Bool(false), "Expected internalError, got \(error)")
+            }
+        } catch {
+            #expect(Bool(false), "Expected MCPError, got \(error)")
+        }
+
+        await server.stop()
+    }
+
+    @Test(
+        .timeLimit(.minutes(1))
+    )
+    func testSamplingParameterValidation() async throws {
+        // Test parameter validation and edge cases
+        let validMessages = [
+            Sampling.Message(role: .user, content: .text("Valid message"))
+        ]
+
+        _ = [Sampling.Message]()  // Test empty messages array
+
+        // Test with valid parameters
+        let validParams = CreateSamplingMessage.Parameters(
+            messages: validMessages,
+            maxTokens: 100
+        )
+        #expect(validParams.messages.count == 1)
+        #expect(validParams.maxTokens == 100)
+
+        // Test with comprehensive parameters
+        let comprehensiveParams = CreateSamplingMessage.Parameters(
+            messages: validMessages,
+            modelPreferences: Sampling.ModelPreferences(
+                hints: [Sampling.ModelPreferences.Hint(name: "claude-4")],
+                costPriority: 0.5,
+                speedPriority: 0.8,
+                intelligencePriority: 0.9
+            ),
+            systemPrompt: "You are a helpful assistant.",
+            includeContext: .allServers,
+            temperature: 0.7,
+            maxTokens: 500,
+            stopSequences: ["STOP", "END"],
+            metadata: [
+                "sessionId": "test-session-123",
+                "userId": "user-456",
+            ]
+        )
+
+        #expect(comprehensiveParams.messages.count == 1)
+        #expect(comprehensiveParams.modelPreferences?.hints?.count == 1)
+        #expect(comprehensiveParams.systemPrompt == "You are a helpful assistant.")
+        #expect(comprehensiveParams.includeContext == .allServers)
+        #expect(comprehensiveParams.temperature == 0.7)
+        #expect(comprehensiveParams.maxTokens == 500)
+        #expect(comprehensiveParams.stopSequences?.count == 2)
+        #expect(comprehensiveParams.metadata?.count == 2)
+
+        // Test encoding/decoding of comprehensive parameters
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+
+        let data = try encoder.encode(comprehensiveParams)
+        let decoded = try decoder.decode(CreateSamplingMessage.Parameters.self, from: data)
+
+        #expect(decoded.messages.count == 1)
+        #expect(decoded.modelPreferences?.costPriority?.doubleValue == 0.5)
+        #expect(decoded.systemPrompt == "You are a helpful assistant.")
+        #expect(decoded.includeContext == .allServers)
+        #expect(decoded.temperature == 0.7)
+        #expect(decoded.maxTokens == 500)
+        #expect(decoded.stopSequences?[0] == "STOP")
+        #expect(decoded.metadata?["sessionId"]?.stringValue == "test-session-123")
+    }
+
+    @Test(
+        .timeLimit(.minutes(1))
+    )
+    func testSamplingWorkflowScenarios() async throws {
+        // Test realistic sampling workflow scenarios
+
+        // Scenario 1: Data Analysis Request
+        let dataAnalysisMessages = [
+            Sampling.Message(
+                role: .user,
+                content: .text("Please analyze the following customer feedback data:")
+            ),
+            Sampling.Message(
+                role: .user,
+                content: .text(
+                    """
+                    Feedback Summary:
+                    - 85% positive sentiment
+                    - Top complaints: shipping delays (12%), product quality (8%)
+                    - Top praise: customer service (45%), product features (40%)
+                    - NPS Score: 72
+                    """)
+            ),
+        ]
+
+        let dataAnalysisParams = CreateSamplingMessage.Parameters(
+            messages: dataAnalysisMessages,
+            modelPreferences: Sampling.ModelPreferences(
+                hints: [Sampling.ModelPreferences.Hint(name: "claude-4-sonnet")],
+                speedPriority: 0.3,
+                intelligencePriority: 0.9
+            ),
+            systemPrompt: "You are an expert business analyst. Provide actionable insights.",
+            includeContext: .thisServer,
+            temperature: 0.3,  // Lower temperature for analytical tasks
+            maxTokens: 400,
+            stopSequences: ["---END---"],
+            metadata: ["analysisType": "customer-feedback"]
+        )
+
+        // Scenario 2: Creative Content Generation
+        let creativeMessages = [
+            Sampling.Message(
+                role: .user,
+                content: .text(
+                    "Write a compelling product description for a new smart home device.")
+            )
+        ]
+
+        let creativeParams = CreateSamplingMessage.Parameters(
+            messages: creativeMessages,
+            modelPreferences: Sampling.ModelPreferences(
+                hints: [Sampling.ModelPreferences.Hint(name: "gpt-4.1")],
+                costPriority: 0.4,
+                speedPriority: 0.6,
+                intelligencePriority: 0.8
+            ),
+            systemPrompt: "You are a creative marketing copywriter.",
+            temperature: 0.8,  // Higher temperature for creativity
+            maxTokens: 200,
+            metadata: ["contentType": "marketing-copy"]
+        )
+
+        // Test parameter encoding for both scenarios
+        let encoder = JSONEncoder()
+
+        let analysisData = try encoder.encode(dataAnalysisParams)
+        let creativeData = try encoder.encode(creativeParams)
+
+        // Verify both encode successfully
+        #expect(analysisData.count > 0)
+        #expect(creativeData.count > 0)
+
+        // Test decoding
+        let decoder = JSONDecoder()
+        let decodedAnalysis = try decoder.decode(
+            CreateSamplingMessage.Parameters.self, from: analysisData)
+        let decodedCreative = try decoder.decode(
+            CreateSamplingMessage.Parameters.self, from: creativeData)
+
+        #expect(decodedAnalysis.temperature == 0.3)
+        #expect(decodedCreative.temperature == 0.8)
+        #expect(decodedAnalysis.modelPreferences?.intelligencePriority?.doubleValue == 0.9)
+        #expect(decodedCreative.modelPreferences?.costPriority?.doubleValue == 0.4)
     }
 }
