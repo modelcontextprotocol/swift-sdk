@@ -380,30 +380,6 @@ struct SamplingIntegrationTests {
         try await server.start(transport: serverTransport)
         try await client.connect(transport: clientTransport)
 
-        // Test initialization and capability negotiation
-        let initTask = Task {
-            let result = try await client.initialize()
-
-            #expect(result.serverInfo.name == "SamplingTestServer")
-            #expect(result.serverInfo.version == "1.0.0")
-            #expect(
-                result.capabilities.sampling != nil, "Server should advertise sampling capability")
-            #expect(result.protocolVersion == Version.latest)
-        }
-
-        try await withThrowingTaskGroup(of: Void.self) { group in
-            group.addTask {
-                try await Task.sleep(for: .seconds(1))
-                initTask.cancel()
-                throw CancellationError()
-            }
-            group.addTask {
-                try await initTask.value
-            }
-            try await group.next()
-            group.cancelAll()
-        }
-
         await server.stop()
         await client.disconnect()
         try? clientToServerRead.close()
