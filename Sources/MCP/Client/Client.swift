@@ -578,9 +578,16 @@ public actor Client {
         _ = try await send(request)
     }
 
-    public func listResourceTemplates() async throws -> [Resource.Template] {
+    public func listResourceTemplates(cursor: String? = nil) async throws ->(
+        resources: [Resource.Template], nextCursor: String?
+    ) {
         try validateServerCapability(\.resources, "Resources")
-        let request = ListResourceTemplates.request(.init())
+        let request: Request<ListResourceTemplates>
+        if let cursor = cursor {
+            request = ListResourceTemplates.request(.init(cursor: cursor))
+        } else {
+            request = ListResourceTemplates.request(.init())
+        }
         let result = try await send(request)
         return result.templates
     }
