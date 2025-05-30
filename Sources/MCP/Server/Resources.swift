@@ -149,17 +149,30 @@ public enum ReadResource: Method {
 public enum ListResourceTemplates: Method {
     public static let name: String = "resources/templates/list"
 
-    public typealias Parameters = Empty
+    public struct Parameters: NotRequired, Hashable, Codable, Sendable {
+        public let cursor: String?
+
+        public init() {
+            self.cursor = nil
+        }
+        
+        public init(cursor: String) {
+            self.cursor = cursor
+        }
+    }
 
     public struct Result: Hashable, Codable, Sendable {
         public let templates: [Resource.Template]
+        public let nextCursor: String?
 
-        public init(templates: [Resource.Template]) {
+        public init(templates: [Resource.Template], nextCursor: String? = nil) {
             self.templates = templates
+            self.nextCursor = nextCursor
         }
 
         private enum CodingKeys: String, CodingKey {
             case templates = "resourceTemplates"
+            case nextCursor
         }
     }
 }
