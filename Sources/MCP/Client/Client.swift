@@ -659,7 +659,7 @@ public actor Client {
     // MARK: -
 
     private func handleResponse(_ response: Response<AnyMethod>) async {
-        await logger?.debug(
+        await logger?.trace(
             "Processing response",
             metadata: ["id": "\(response.id)"])
 
@@ -684,7 +684,7 @@ public actor Client {
     }
 
     private func handleMessage(_ message: Message<AnyNotification>) async {
-        await logger?.debug(
+        await logger?.trace(
             "Processing notification",
             metadata: ["method": "\(message.method)"])
 
@@ -728,7 +728,7 @@ public actor Client {
 
     // Add handler for batch responses
     private func handleBatchResponse(_ responses: [AnyResponse]) async {
-        await logger?.debug("Processing batch response", metadata: ["count": "\(responses.count)"])
+        await logger?.trace("Processing batch response", metadata: ["count": "\(responses.count)"])
         for response in responses {
             // Attempt to remove the pending request.
             // If successful, pendingRequest contains the request.

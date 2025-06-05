@@ -155,7 +155,7 @@ import struct Foundation.Data
                         pendingData = pendingData[(newlineIndex + 1)...]
 
                         if !messageData.isEmpty {
-                            logger.debug(
+                            logger.trace(
                                 "Message received", metadata: ["size": "\(messageData.count)"])
                             messageContinuation.yield(Data(messageData))
                         }

@@ -131,7 +131,7 @@ public actor HTTPClientTransport: Transport {
         if let continuation = self.initialSessionIDContinuation {
             continuation.resume()
             self.initialSessionIDContinuation = nil  // Consume the continuation
-            logger.debug("Initial session ID signal triggered for SSE task.")
+            logger.trace("Initial session ID signal triggered for SSE task.")
         }
     }
 
@@ -251,7 +251,7 @@ public actor HTTPClientTransport: Transport {
                 logger.warning("SSE responses aren't fully supported on Linux")
                 messageContinuation.yield(data)
             } else if contentType.contains("application/json") {
-                logger.debug("Received JSON response", metadata: ["size": "\(data.count)"])
+                logger.trace("Received JSON response", metadata: ["size": "\(data.count)"])
                 messageContinuation.yield(data)
             } else {
                 logger.warning("Unexpected content type: \(contentType)")
@@ -285,7 +285,7 @@ public actor HTTPClientTransport: Transport {
 
             if contentType.contains("text/event-stream") {
                 // For SSE, processing happens via the stream
-                logger.debug("Received SSE response, processing in streaming task")
+                logger.trace("Received SSE response, processing in streaming task")
                 try await self.processSSE(stream)
             } else if contentType.contains("application/json") {
                 // For JSON responses, collect and deliver the data
@@ -293,7 +293,7 @@ public actor HTTPClientTransport: Transport {
                 for try await byte in stream {
                     buffer.append(byte)
                 }
-                logger.debug("Received JSON response", metadata: ["size": "\(buffer.count)"])
+                logger.trace("Received JSON response", metadata: ["size": "\(buffer.count)"])
                 messageContinuation.yield(buffer)
             } else {
                 logger.warning("Unexpected content type: \(contentType)")
@@ -390,7 +390,7 @@ public actor HTTPClientTransport: Transport {
 
             // Wait for the initial session ID signal, but only if sessionID isn't already set
             if self.sessionID == nil, let signalTask = self.initialSessionIDSignalTask {
-                logger.debug("SSE streaming task waiting for initial sessionID signal...")
+                logger.trace("SSE streaming task waiting for initial sessionID signal...")
 
                 // Race the signalTask against a timeout
                 let timeoutTask = Task {
@@ -429,14 +429,14 @@ public actor HTTPClientTransport: Transport {
                 timeoutTask.cancel()
 
                 if signalReceived {
-                    logger.debug("SSE streaming task proceeding after initial sessionID signal.")
+                    logger.trace("SSE streaming task proceeding after initial sessionID signal.")
                 } else {
                     logger.warning(
                         "Timeout waiting for initial sessionID signal. SSE stream will proceed (sessionID might be nil)."
                     )
                 }
             } else if self.sessionID != nil {
-                logger.debug(
+                logger.trace(
                     "Initial sessionID already available. Proceeding with SSE streaming task immediately."
                 )
             } else {
@@ -525,7 +525,7 @@ public actor HTTPClientTransport: Transport {
                     // Check if task has been cancelled
                     if Task.isCancelled { break }
 
-                    logger.debug(
+                    logger.trace(
                         "SSE event received",
                         metadata: [
                             "type": "\(event.event ?? "message")",

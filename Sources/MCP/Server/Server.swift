@@ -380,7 +380,7 @@ public actor Server {
 
     /// Process a batch of requests and/or notifications
     private func handleBatch(_ batch: Batch) async throws {
-        await logger?.debug("Processing batch request", metadata: ["size": "\(batch.items.count)"])
+        await logger?.trace("Processing batch request", metadata: ["size": "\(batch.items.count)"])
 
         if batch.items.isEmpty {
             // Empty batch is invalid according to JSON-RPC spec
@@ -450,7 +450,7 @@ public actor Server {
             )
         }
 
-        await logger?.debug(
+        await logger?.trace(
             "Processing request",
             metadata: [
                 "method": "\(request.method)",
@@ -505,7 +505,7 @@ public actor Server {
     }
 
     private func handleMessage(_ message: Message<AnyNotification>) async throws {
-        await logger?.debug(
+        await logger?.trace(
             "Processing notification",
             metadata: ["method": "\(message.method)"])
 

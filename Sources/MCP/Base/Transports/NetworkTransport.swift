@@ -408,7 +408,7 @@ import Logging
                     })
             }
 
-            logger.debug("Heartbeat sent")
+            logger.trace("Heartbeat sent")
         }
 
         /// Handles connection failure
@@ -638,11 +638,11 @@ import Logging
 
                     // Check if this is a heartbeat message
                     if Heartbeat.isHeartbeat(newData) {
-                        logger.debug("Received heartbeat from peer")
+                        logger.trace("Received heartbeat from peer")
 
                         // Extract timestamp if available
                         if let heartbeat = Heartbeat.from(data: newData) {
-                            logger.debug("Heartbeat timestamp: \(heartbeat.timestamp)")
+                            logger.trace("Heartbeat timestamp: \(heartbeat.timestamp)")
                         }
 
                         // Reset the counter since we got valid data
@@ -783,7 +783,7 @@ import Logging
                             } else if let content = content {
                                 continuation.resume(returning: content)
                             } else if isComplete {
-                                self.logger.debug("Connection completed by peer")
+                                self.logger.trace("Connection completed by peer")
                                 continuation.resume(throwing: MCPError.connectionClosed)
                             } else {
                                 // EOF: Resume with empty data instead of throwing an error
