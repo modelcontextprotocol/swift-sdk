@@ -336,7 +336,7 @@ import Logging
 
                 // Reset reconnect attempt counter on successful connection
                 reconnectAttempt = 0
-                logger.info("Network transport connected successfully")
+                logger.debug("Network transport connected successfully")
                 continuation.resume()
 
                 // Start the receive loop after connection is established
@@ -466,7 +466,7 @@ import Logging
             {
                 // Try to reconnect with exponential backoff
                 reconnectAttempt += 1
-                logger.info(
+                logger.debug(
                     "Attempting reconnection after \(context) (\(reconnectAttempt)/\(reconnectionConfig.maxAttempts))..."
                 )
 
@@ -509,7 +509,7 @@ import Logging
 
             connection.cancel()
             messageContinuation.finish()
-            logger.info("Network transport disconnected")
+            logger.debug("Network transport disconnected")
         }
 
         /// Sends data through the network connection
@@ -626,7 +626,7 @@ import Logging
 
                             // Check connection state
                             if connection.state != .ready {
-                                logger.info("Connection no longer ready, exiting receive loop")
+                                logger.warning("Connection no longer ready, exiting receive loop")
                                 break
                             }
                         }
@@ -676,7 +676,7 @@ import Logging
                                 && reconnectAttempt < reconnectionConfig.maxAttempts
                             {
                                 reconnectAttempt += 1
-                                logger.info(
+                                logger.warning(
                                     "Network connection lost, attempting reconnection (\(reconnectAttempt)/\(reconnectionConfig.maxAttempts))..."
                                 )
 
@@ -727,7 +727,7 @@ import Logging
                         {
                             // Similar reconnection logic for other errors
                             reconnectAttempt += 1
-                            logger.info(
+                            logger.warning(
                                 "Error during receive, attempting reconnection (\(reconnectAttempt)/\(reconnectionConfig.maxAttempts))..."
                             )
 

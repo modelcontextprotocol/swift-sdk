@@ -152,7 +152,7 @@ public actor HTTPClientTransport: Transport {
             streamingTask = Task { await startListeningForServerEvents() }
         }
 
-        logger.info("HTTP transport connected")
+        logger.debug("HTTP transport connected")
     }
 
     /// Disconnects from the transport
@@ -180,7 +180,7 @@ public actor HTTPClientTransport: Transport {
         initialSessionIDContinuation?.resume()
         initialSessionIDContinuation = nil
 
-        logger.info("HTTP clienttransport disconnected")
+        logger.debug("HTTP clienttransport disconnected")
     }
 
     /// Sends data through an HTTP POST request
@@ -440,7 +440,7 @@ public actor HTTPClientTransport: Transport {
                     "Initial sessionID already available. Proceeding with SSE streaming task immediately."
                 )
             } else {
-                logger.info(
+                logger.trace(
                     "Proceeding with SSE connection attempt; sessionID is nil. This might be expected for stateless servers or if initialize hasn't provided one yet."
                 )
             }

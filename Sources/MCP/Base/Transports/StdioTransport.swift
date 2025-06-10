@@ -94,7 +94,7 @@ import struct Foundation.Data
             try setNonBlocking(fileDescriptor: output)
 
             isConnected = true
-            logger.info("Transport connected successfully")
+            logger.debug("Transport connected successfully")
 
             // Start reading loop in background
             Task {
@@ -181,7 +181,7 @@ import struct Foundation.Data
             guard isConnected else { return }
             isConnected = false
             messageContinuation.finish()
-            logger.info("Transport disconnected")
+            logger.debug("Transport disconnected")
         }
 
         /// Sends a message over the transport.
