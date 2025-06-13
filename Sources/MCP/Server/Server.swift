@@ -174,7 +174,7 @@ public actor Server {
         registerDefaultHandlers(initializeHook: initializeHook)
         try await transport.connect()
 
-        await logger?.info(
+        await logger?.debug(
             "Server started", metadata: ["name": "\(name)", "version": "\(version)"])
 
         // Start message handling loop
@@ -227,7 +227,7 @@ public actor Server {
                 await logger?.error(
                     "Fatal error in message handling loop", metadata: ["error": "\(error)"])
             }
-            await logger?.info("Server finished", metadata: [:])
+            await logger?.debug("Server finished", metadata: [:])
         }
     }
 
