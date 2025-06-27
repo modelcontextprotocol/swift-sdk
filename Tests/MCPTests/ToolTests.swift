@@ -11,7 +11,9 @@ struct ToolTests {
             name: "test_tool",
             description: "A test tool",
             inputSchema: .object([
-                "param1": .string("Test parameter")
+                "properties": .object([
+                    "param1": .string("Test parameter")
+                ])
             ])
         )
 
@@ -100,7 +102,9 @@ struct ToolTests {
             name: "calculate",
             description: "Performs calculations",
             inputSchema: .object([
-                "expression": .string("Mathematical expression to evaluate")
+                "properties": .object([
+                    "expression": .string("Mathematical expression to evaluate")
+                ])
             ]),
             annotations: annotations
         )
@@ -131,23 +135,23 @@ struct ToolTests {
 
         do {
             #expect(tool.annotations.isEmpty)
-            
+
             let encoder = JSONEncoder()
             let data = try encoder.encode(tool)
-            
+
             // Verify that empty annotations are not included in the JSON
             let jsonString = String(data: data, encoding: .utf8)!
             #expect(!jsonString.contains("\"annotations\""))
         }
-        
+
         do {
             tool.annotations.title = "Test"
 
             #expect(!tool.annotations.isEmpty)
-            
+
             let encoder = JSONEncoder()
             let data = try encoder.encode(tool)
-            
+
             // Verify that empty annotations are not included in the JSON
             let jsonString = String(data: data, encoding: .utf8)!
             #expect(jsonString.contains("\"annotations\""))
@@ -179,8 +183,10 @@ struct ToolTests {
             name: "test_tool",
             description: "Test tool description",
             inputSchema: .object([
-                "param1": .string("String parameter"),
-                "param2": .int(42),
+                "properties": .object([
+                    "param1": .string("String parameter"),
+                    "param2": .int(42),
+                ])
             ])
         )
 

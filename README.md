@@ -434,15 +434,19 @@ server.withMethodHandler(ListTools.self) { _ in
             name: "weather",
             description: "Get current weather for a location",
             inputSchema: .object([
-                "location": .string("City name or coordinates"),
-                "units": .string("Units of measurement, e.g., metric, imperial")
+                "properties": .object([
+                    "location": .string("City name or coordinates"),
+                    "units": .string("Units of measurement, e.g., metric, imperial")
+                ])
             ])
         ),
         Tool(
             name: "calculator",
             description: "Perform calculations",
             inputSchema: .object([
-                "expression": .string("Mathematical expression to evaluate")
+                "properties": .object([
+                    "expression": .string("Mathematical expression to evaluate")
+                ])
             ])
         )
     ]
