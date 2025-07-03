@@ -128,10 +128,13 @@ public actor Server {
     public nonisolated var name: String { serverInfo.name }
     /// The server version
     public nonisolated var version: String { serverInfo.version }
+    /// Overall instructions about this server and what it offers to provide to the client
+    public nonisolated let instructions: String?
     /// The server capabilities
     public var capabilities: Capabilities
     /// The server configuration
     public var configuration: Configuration
+    
 
     /// Request handlers
     private var methodHandlers: [String: RequestHandlerBox] = [:]
@@ -154,12 +157,14 @@ public actor Server {
     public init(
         name: String,
         version: String,
+        instructions: String? = nil,
         capabilities: Server.Capabilities = .init(),
         configuration: Configuration = .default
     ) {
         self.serverInfo = Server.Info(name: name, version: version)
         self.capabilities = capabilities
         self.configuration = configuration
+        self.instructions = instructions
     }
 
     /// Start the server
@@ -574,7 +579,7 @@ public actor Server {
                 protocolVersion: negotiatedProtocolVersion,
                 capabilities: await self.capabilities,
                 serverInfo: self.serverInfo,
-                instructions: nil
+                instructions: self.instructions
             )
         }
 
