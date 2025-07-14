@@ -242,9 +242,6 @@ import Logging
         private let messageStream: AsyncThrowingStream<Data, Swift.Error>
         private let messageContinuation: AsyncThrowingStream<Data, Swift.Error>.Continuation
 
-        // Track connection state for continuations
-        private var connectionContinuationResumed = false
-
         // Connection is marked nonisolated(unsafe) to allow access from closures
         private nonisolated(unsafe) var connection: NetworkConnectionProtocol
 
@@ -312,72 +309,99 @@ import Logging
         /// - Throws: Error if the connection fails to establish
         public func connect() async throws {
             guard !isConnected else { return }
-
+            
             // Reset state for fresh connection
             isStopping = false
             reconnectAttempt = 0
-
-            // Reset continuation state
-            connectionContinuationResumed = false
-
-            // Wait for connection to be ready
-            try await withCheckedThrowingContinuation {
-                [weak self] (continuation: CheckedContinuation<Void, Swift.Error>) in
+            
+            // Attempt to establish connection with retry loop
+            while !isConnected {
+                do {
+                    try await waitForReady()
+                    // Reset reconnect attempt counter on successful connection
+                    isConnected = true
+                    reconnectAttempt = 0
+                    logger.info("Network transport connected successfully")
+                    
+                } catch {
+                    // Try to reconnect with exponential backoff
+                    reconnectAttempt += 1
+                    let context = switch error {
+                    case MCPError.internalError("Connection cancelled"): "cancellation"
+                    default:                                             "failure"
+                    }
+                    logger.info("Attempting reconnection after \(context) (\(reconnectAttempt)/\(reconnectionConfig.maxAttempts))...")
+                    
+                    guard !isStopping, reconnectionConfig.enabled, reconnectAttempt < reconnectionConfig.maxAttempts else {
+                        // Not configured to reconnect, exceeded max attempts, or stopping
+                        connection.cancel() // Ensure connection is cancelled
+                        throw error
+                    }
+                    
+                    // Backoff before retry
+                    let delay = reconnectionConfig.backoffDelay(for: reconnectAttempt)
+                    logger.info("Reconnection attempt \(reconnectAttempt)/\(reconnectionConfig.maxAttempts) after \(delay) seconds")
+                    try? await Task.sleep(for: .seconds(delay))
+                    if !isStopping {
+                        // Cancel the current connection before attempting to reconnect.
+                        connection.cancel()
+                    } else {
+                        // Stopping, so fail.
+                        throw error
+                    }
+                }
+            }
+            
+            // Start receive loop and heartbeat if needed
+            Task { await self.receiveLoop() }
+            
+            // Start heartbeat task if enabled
+            if heartbeatConfig.enabled {
+                startHeartbeat()
+            }
+        }
+        
+        /// Waits for NWConnection to reach .ready or fail/cancel, once per call.
+        private func waitForReady() async throws {
+            try await withCheckedThrowingContinuation { [weak self]  (continuation: CheckedContinuation<Void, Swift.Error>) in
                 guard let self = self else {
                     continuation.resume(throwing: MCPError.internalError("Transport deallocated"))
                     return
                 }
 
                 connection.stateUpdateHandler = { [weak self] state in
-                    guard let self = self else { return }
+                    guard let self = self else {
+                        continuation.resume(throwing: MCPError.internalError("Transport deallocated"))
+                        return
+                    }
+                    
+                    switch state {
+                    case .ready:
+                        self.connection.stateUpdateHandler = nil
+                        continuation.resume()
 
-                    Task { @MainActor in
-                        switch state {
-                        case .ready:
-                            await self.handleConnectionReady(continuation: continuation)
-                        case .failed(let error):
-                            await self.handleConnectionFailed(
-                                error: error, continuation: continuation)
-                        case .cancelled:
-                            await self.handleConnectionCancelled(continuation: continuation)
-                        case .waiting(let error):
-                            self.logger.debug("Connection waiting: \(error)")
-                        case .preparing:
-                            self.logger.debug("Connection preparing...")
-                        case .setup:
-                            self.logger.debug("Connection setup...")
-                        @unknown default:
-                            self.logger.warning("Unknown connection state")
-                        }
+                    case .failed(let error):
+                        self.connection.stateUpdateHandler = nil
+                        continuation.resume(throwing: error)
+
+                    case .cancelled:
+                        self.connection.stateUpdateHandler = nil
+                        continuation.resume(throwing: MCPError.internalError("Connection cancelled"))
+                        
+                    case .waiting(let error):
+                        self.logger.debug("Connection waiting: \(error)")
+                        
+                    case .preparing:
+                        self.logger.debug("Connection preparing...")
+
+                    case .setup:
+                        self.logger.debug("Connection setup...")
+                        
+                    @unknown default:
+                        self.logger.warning("Unknown connection state: \(state)")
                     }
                 }
-
                 connection.start(queue: .main)
-            }
-        }
-
-        /// Handles when the connection reaches the ready state
-        ///
-        /// - Parameter continuation: The continuation to resume when connection is ready
-        private func handleConnectionReady(continuation: CheckedContinuation<Void, Swift.Error>)
-            async
-        {
-            if !connectionContinuationResumed {
-                connectionContinuationResumed = true
-                isConnected = true
-
-                // Reset reconnect attempt counter on successful connection
-                reconnectAttempt = 0
-                logger.info("Network transport connected successfully")
-                continuation.resume()
-
-                // Start the receive loop after connection is established
-                Task { await self.receiveLoop() }
-
-                // Start heartbeat task if enabled
-                if heartbeatConfig.enabled {
-                    startHeartbeat()
-                }
             }
         }
 
@@ -441,87 +465,6 @@ import Logging
             }
 
             logger.trace("Heartbeat sent")
-        }
-
-        /// Handles connection failure
-        ///
-        /// - Parameters:
-        ///   - error: The error that caused the connection to fail
-        ///   - continuation: The continuation to resume with the error
-        private func handleConnectionFailed(
-            error: Swift.Error, continuation: CheckedContinuation<Void, Swift.Error>
-        ) async {
-            if !connectionContinuationResumed {
-                connectionContinuationResumed = true
-                logger.error("Connection failed: \(error)")
-
-                await handleReconnection(
-                    error: error,
-                    continuation: continuation,
-                    context: "failure"
-                )
-            }
-        }
-
-        /// Handles connection cancellation
-        ///
-        /// - Parameter continuation: The continuation to resume with cancellation error
-        private func handleConnectionCancelled(continuation: CheckedContinuation<Void, Swift.Error>)
-            async
-        {
-            if !connectionContinuationResumed {
-                connectionContinuationResumed = true
-                logger.warning("Connection cancelled")
-
-                await handleReconnection(
-                    error: MCPError.internalError("Connection cancelled"),
-                    continuation: continuation,
-                    context: "cancellation"
-                )
-            }
-        }
-
-        /// Common reconnection handling logic
-        ///
-        /// - Parameters:
-        ///   - error: The error that triggered the reconnection
-        ///   - continuation: The continuation to resume with the error
-        ///   - context: The context of the reconnection (for logging)
-        private func handleReconnection(
-            error: Swift.Error,
-            continuation: CheckedContinuation<Void, Swift.Error>,
-            context: String
-        ) async {
-            if !isStopping,
-                reconnectionConfig.enabled,
-                reconnectAttempt < reconnectionConfig.maxAttempts
-            {
-                // Try to reconnect with exponential backoff
-                reconnectAttempt += 1
-                logger.info(
-                    "Attempting reconnection after \(context) (\(reconnectAttempt)/\(reconnectionConfig.maxAttempts))..."
-                )
-
-                // Calculate backoff delay
-                let delay = reconnectionConfig.backoffDelay(for: reconnectAttempt)
-
-                // Schedule reconnection attempt after delay
-                Task {
-                    try? await Task.sleep(for: .seconds(delay))
-                    if !isStopping {
-                        // Cancel the current connection before attempting to reconnect.
-                        self.connection.cancel()
-                        // Resume original continuation with error; outer logic or a new call to connect() will handle retry.
-                        continuation.resume(throwing: error)
-                    } else {
-                        continuation.resume(throwing: error)  // Stopping, so fail.
-                    }
-                }
-            } else {
-                // Not configured to reconnect, exceeded max attempts, or stopping
-                self.connection.cancel()  // Ensure connection is cancelled
-                continuation.resume(throwing: error)
-            }
         }
 
         /// Disconnects from the transport
