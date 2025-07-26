@@ -49,6 +49,13 @@ public actor HTTPClientTransport: Transport {
     public let endpoint: URL
     private let session: URLSession
 
+    /// The standard header for mcp remote server request
+    private let mcpRequestHeaders = ["Accept": "application/json, text/event-stream",
+                                     "Content-Type": "application/json"]
+
+    /// The extra headers for the remote server needed like bearer token etc.
+    private let headers: [String: String]
+
     /// The session ID assigned by the server, used for maintaining state across requests
     public private(set) var sessionID: String?
     private let streaming: Bool
@@ -77,6 +84,7 @@ public actor HTTPClientTransport: Transport {
     ///   - logger: Optional logger instance for transport events
     public init(
         endpoint: URL,
+        headers: [String: String] = [:],
         configuration: URLSessionConfiguration = .default,
         streaming: Bool = true,
         sseInitializationTimeout: TimeInterval = 10,
@@ -84,6 +92,7 @@ public actor HTTPClientTransport: Transport {
     ) {
         self.init(
             endpoint: endpoint,
+            headers: headers,
             session: URLSession(configuration: configuration),
             streaming: streaming,
             sseInitializationTimeout: sseInitializationTimeout,
@@ -93,12 +102,14 @@ public actor HTTPClientTransport: Transport {
 
     internal init(
         endpoint: URL,
+        headers: [String: String],
         session: URLSession,
         streaming: Bool = false,
         sseInitializationTimeout: TimeInterval = 10,
         logger: Logger? = nil
     ) {
         self.endpoint = endpoint
+        self.headers = headers
         self.session = session
         self.streaming = streaming
         self.sseInitializationTimeout = sseInitializationTimeout
@@ -202,8 +213,13 @@ public actor HTTPClientTransport: Transport {
 
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
-        request.addValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
-        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+        mcpRequestHeaders
+            .merging(headers) { mcpHeaderValue, _ in
+                mcpHeaderValue
+            }
+            .forEach { key, value in
+                request.addValue(value, forHTTPHeaderField: key)
+            }
         request.httpBody = data
 
         // Add session ID if available
