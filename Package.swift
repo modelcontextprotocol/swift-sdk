@@ -7,20 +7,15 @@ import PackageDescription
 var dependencies: [Package.Dependency] = [
     .package(url: "https://github.com/apple/swift-system.git", from: "1.0.0"),
     .package(url: "https://github.com/apple/swift-log.git", from: "1.5.0"),
+    .package(url: "https://github.com/loopwork-ai/eventsource.git", from: "1.1.0")
 ]
 
 // Target dependencies needed on all platforms
 var targetDependencies: [Target.Dependency] = [
     .product(name: "SystemPackage", package: "swift-system"),
     .product(name: "Logging", package: "swift-log"),
+    .product(name: "EventSource", package: "eventsource", condition: .when(platforms: [.macOS, .iOS, .tvOS, .visionOS, .watchOS]))
 ]
-
-// Add EventSource only on Apple platforms (non-Linux)
-#if !os(Linux)
-    dependencies.append(
-        .package(url: "https://github.com/loopwork-ai/eventsource.git", from: "1.1.0"))
-    targetDependencies.append(.product(name: "EventSource", package: "eventsource"))
-#endif
 
 let package = Package(
     name: "mcp-swift-sdk",
