@@ -48,6 +48,12 @@ import Logging
     /// // Initialize the transport with the connection
     /// let transport = NetworkTransport(connection: connection)
     ///
+    /// // For large messages (e.g., images), configure unlimited buffer size
+    /// let largeBufferTransport = NetworkTransport(
+    ///     connection: connection,
+    ///     bufferConfig: .unlimited
+    /// )
+    ///
     /// // Use the transport with an MCP client
     /// let client = Client(name: "MyApp", version: "1.0.0")
     /// try await client.connect(transport: transport)
@@ -207,6 +213,26 @@ import Logging
             }
         }
 
+        /// Configuration for buffer behavior.
+        public struct BufferConfiguration: Hashable, Sendable {
+            /// Maximum buffer size for receiving data chunks.
+            /// Set to nil for unlimited (uses system default).
+            public let maxReceiveBufferSize: Int?
+
+            /// Creates a new buffer configuration.
+            ///
+            /// - Parameter maxReceiveBufferSize: Maximum buffer size in bytes (default: 10MB, nil for unlimited)
+            public init(maxReceiveBufferSize: Int? = 10 * 1024 * 1024) {
+                self.maxReceiveBufferSize = maxReceiveBufferSize
+            }
+
+            /// Default buffer configuration with 10MB limit.
+            public static let `default` = BufferConfiguration()
+
+            /// Configuration with no buffer size limit.
+            public static let unlimited = BufferConfiguration(maxReceiveBufferSize: nil)
+        }
+
         // State tracking
         private var isConnected = false
         private var isStopping = false
@@ -228,6 +254,7 @@ import Logging
         // Configuration
         private let heartbeatConfig: HeartbeatConfiguration
         private let reconnectionConfig: ReconnectionConfiguration
+        private let bufferConfig: BufferConfiguration
 
         /// Creates a new NetworkTransport with the specified NWConnection
         ///
@@ -236,17 +263,20 @@ import Logging
         ///   - logger: Optional logger instance for transport events
         ///   - reconnectionConfig: Configuration for reconnection behavior (default: .default)
         ///   - heartbeatConfig: Configuration for heartbeat behavior (default: .default)
+        ///   - bufferConfig: Configuration for buffer behavior (default: .default)
         public init(
             connection: NWConnection,
             logger: Logger? = nil,
             heartbeatConfig: HeartbeatConfiguration = .default,
-            reconnectionConfig: ReconnectionConfiguration = .default
+            reconnectionConfig: ReconnectionConfiguration = .default,
+            bufferConfig: BufferConfiguration = .default
         ) {
             self.init(
                 connection,
                 logger: logger,
                 heartbeatConfig: heartbeatConfig,
-                reconnectionConfig: reconnectionConfig
+                reconnectionConfig: reconnectionConfig,
+                bufferConfig: bufferConfig
             )
         }
 
@@ -254,7 +284,8 @@ import Logging
             _ connection: NetworkConnectionProtocol,
             logger: Logger? = nil,
             heartbeatConfig: HeartbeatConfiguration = .default,
-            reconnectionConfig: ReconnectionConfiguration = .default
+            reconnectionConfig: ReconnectionConfiguration = .default,
+            bufferConfig: BufferConfiguration = .default
         ) {
             self.connection = connection
             self.logger =
@@ -265,6 +296,7 @@ import Logging
                 )
             self.reconnectionConfig = reconnectionConfig
             self.heartbeatConfig = heartbeatConfig
+            self.bufferConfig = bufferConfig
 
             // Create message stream
             var continuation: AsyncThrowingStream<Data, Swift.Error>.Continuation!
@@ -773,7 +805,8 @@ import Logging
                     return
                 }
 
-                connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) {
+                let maxLength = bufferConfig.maxReceiveBufferSize ?? Int.max
+                connection.receive(minimumIncompleteLength: 1, maximumLength: maxLength) {
                     content, _, isComplete, error in
                     Task { @MainActor in
                         if !receiveContinuationResumed {
