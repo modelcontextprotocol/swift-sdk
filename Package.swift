@@ -19,7 +19,10 @@ var targetDependencies: [Target.Dependency] = [
 #if !os(Linux)
     dependencies.append(
         .package(url: "https://github.com/loopwork-ai/eventsource.git", from: "1.1.0"))
-    targetDependencies.append(.product(name: "EventSource", package: "eventsource"))
+    targetDependencies.append(
+        .product(
+            name: "EventSource", package: "eventsource",
+            condition: .when(platforms: [.macOS, .iOS, .tvOS, .watchOS, .visionOS])))
 #endif
 
 let package = Package(
