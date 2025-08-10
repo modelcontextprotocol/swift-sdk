@@ -32,9 +32,14 @@ import Logging
 /// ```swift
 /// import MCP
 ///
-/// // Create a streaming HTTP transport
+/// // Create a streaming HTTP transport with bearer token authentication
 /// let transport = HTTPClientTransport(
-///     endpoint: URL(string: "http://localhost:8080")!,
+///     endpoint: URL(string: "https://api.example.com/mcp")!,
+///     requestModifier: { request in
+///         var modifiedRequest = request
+///         modifiedRequest.addValue("Bearer your-token-here", forHTTPHeaderField: "Authorization")
+///         return modifiedRequest
+///     }
 /// )
 ///
 /// // Initialize the client with streaming transport
@@ -60,6 +65,9 @@ public actor HTTPClientTransport: Transport {
     /// Maximum time to wait for a session ID before proceeding with SSE connection
     public let sseInitializationTimeout: TimeInterval
 
+    /// Closure to modify requests before they are sent
+    private let requestModifier: (URLRequest) -> URLRequest
+
     private var isConnected = false
     private let messageStream: AsyncThrowingStream<Data, Swift.Error>
     private let messageContinuation: AsyncThrowingStream<Data, Swift.Error>.Continuation
@@ -74,12 +82,14 @@ public actor HTTPClientTransport: Transport {
     ///   - configuration: URLSession configuration to use for HTTP requests
     ///   - streaming: Whether to enable SSE streaming mode (default: true)
     ///   - sseInitializationTimeout: Maximum time to wait for session ID before proceeding with SSE (default: 10 seconds)
+    ///   - requestModifier: Optional closure to customize requests before they are sent (default: no modification)
     ///   - logger: Optional logger instance for transport events
     public init(
         endpoint: URL,
         configuration: URLSessionConfiguration = .default,
         streaming: Bool = true,
         sseInitializationTimeout: TimeInterval = 10,
+        requestModifier: @escaping (URLRequest) -> URLRequest = { $0 },
         logger: Logger? = nil
     ) {
         self.init(
@@ -87,6 +97,7 @@ public actor HTTPClientTransport: Transport {
             session: URLSession(configuration: configuration),
             streaming: streaming,
             sseInitializationTimeout: sseInitializationTimeout,
+            requestModifier: requestModifier,
             logger: logger
         )
     }
@@ -96,12 +107,14 @@ public actor HTTPClientTransport: Transport {
         session: URLSession,
         streaming: Bool = false,
         sseInitializationTimeout: TimeInterval = 10,
+        requestModifier: @escaping (URLRequest) -> URLRequest = { $0 },
         logger: Logger? = nil
     ) {
         self.endpoint = endpoint
         self.session = session
         self.streaming = streaming
         self.sseInitializationTimeout = sseInitializationTimeout
+        self.requestModifier = requestModifier
 
         // Create message stream
         var continuation: AsyncThrowingStream<Data, Swift.Error>.Continuation!
@@ -210,6 +223,9 @@ public actor HTTPClientTransport: Transport {
         if let sessionID = sessionID {
             request.addValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
         }
+
+        // Apply request modifier
+        request = requestModifier(request)
 
         #if os(Linux)
             // Linux implementation using data(for:) instead of bytes(for:)
@@ -479,6 +495,9 @@ public actor HTTPClientTransport: Transport {
             if let sessionID = sessionID {
                 request.addValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
             }
+
+            // Apply request modifier
+            request = requestModifier(request)
 
             logger.debug("Starting SSE connection")
 
