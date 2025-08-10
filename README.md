@@ -777,6 +777,7 @@ The Swift SDK provides multiple built-in transports:
 |-----------|-------------|-----------|----------|
 | [`StdioTransport`](/Sources/MCP/Base/Transports/StdioTransport.swift) | Implements [stdio transport](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#stdio) using standard input/output streams | Apple platforms, Linux with glibc | Local subprocesses, CLI tools |
 | [`HTTPClientTransport`](/Sources/MCP/Base/Transports/HTTPClientTransport.swift) | Implements [Streamable HTTP transport](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#streamable-http) using Foundation's URL Loading System | All platforms with Foundation | Remote servers, web applications |
+| [`InMemoryTransport`](/Sources/MCP/Base/Transports/InMemoryTransport.swift) | Custom in-memory transport for direct communication within the same process | All platforms | Testing, debugging, same-process client-server communication |
 | [`NetworkTransport`](/Sources/MCP/Base/Transports/NetworkTransport.swift) | Custom transport using Apple's Network framework for TCP/UDP connections | Apple platforms only | Low-level networking, custom protocols |
 
 ### Custom Transport Implementation
