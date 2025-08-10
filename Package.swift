@@ -7,7 +7,7 @@ import PackageDescription
 var dependencies: [Package.Dependency] = [
     .package(url: "https://github.com/apple/swift-system.git", from: "1.0.0"),
     .package(url: "https://github.com/apple/swift-log.git", from: "1.5.0"),
-    .package(url: "https://github.com/loopwork-ai/eventsource.git", from: "1.1.0")
+    .package(url: "https://github.com/mattt/eventsource.git", from: "1.1.0")
 ]
 
 // Target dependencies needed on all platforms
