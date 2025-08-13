@@ -25,7 +25,7 @@ Add the following to your `Package.swift` file:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", from: "0.9.0")
+    .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", from: "0.10.0")
 ]
 ```
 
@@ -98,7 +98,7 @@ Tools represent functions that can be called by the client:
 
 ```swift
 // List available tools
-let tools = try await client.listTools()
+let (tools, cursor) = try await client.listTools()
 print("Available tools: \(tools.map { $0.name }.joined(separator: ", "))")
 
 // Call a tool with arguments
@@ -335,7 +335,7 @@ Improve performance by sending multiple requests in a single batch:
 
 ```swift
 // Array to hold tool call tasks
-var toolTasks: [Task<CallTool.Result, Error>] = []
+var toolTasks: [Task<CallTool.Result, Swift.Error>] = []
 
 // Send a batch of requests
 try await client.withBatch { batch in
@@ -343,7 +343,7 @@ try await client.withBatch { batch in
     for i in 0..<10 {
         toolTasks.append(
             try await batch.addRequest(
-                CallTool.request(.init(name: "square", arguments: ["n": i]))
+                CallTool.request(.init(name: "square", arguments: ["n": Value(i)]))
             )
         )
     }
@@ -428,7 +428,7 @@ Register tool handlers to respond to client tool calls:
 
 ```swift
 // Register a tool list handler
-server.withMethodHandler(ListTools.self) { _ in
+await server.withMethodHandler(ListTools.self) { _ in
     let tools = [
         Tool(
             name: "weather",
@@ -454,7 +454,7 @@ server.withMethodHandler(ListTools.self) { _ in
 }
 
 // Register a tool call handler
-server.withMethodHandler(CallTool.self) { params in
+await server.withMethodHandler(CallTool.self) { params in
     switch params.name {
     case "weather":
         let location = params.arguments?["location"]?.stringValue ?? "Unknown"
@@ -485,16 +485,16 @@ Implement resource handlers for data access:
 
 ```swift
 // Register a resource list handler
-server.withMethodHandler(ListResources.self) { params in
+await server.withMethodHandler(ListResources.self) { params in
     let resources = [
         Resource(
-            uri: "resource://knowledge-base/articles",
             name: "Knowledge Base Articles",
+            uri: "resource://knowledge-base/articles",
             description: "Collection of support articles and documentation"
         ),
         Resource(
-            uri: "resource://system/status",
             name: "System Status",
+            uri: "resource://system/status",
             description: "Current system operational status"
         )
     ]
@@ -502,7 +502,7 @@ server.withMethodHandler(ListResources.self) { params in
 }
 
 // Register a resource read handler
-server.withMethodHandler(ReadResource.self) { params in
+await server.withMethodHandler(ReadResource.self) { params in
     switch params.uri {
     case "resource://knowledge-base/articles":
         return .init(contents: [Resource.Content.text("# Knowledge Base\n\nThis is the content of the knowledge base...", uri: params.uri)])
@@ -528,7 +528,7 @@ server.withMethodHandler(ReadResource.self) { params in
 }
 
 // Register a resource subscribe handler
-server.withMethodHandler(SubscribeToResource.self) { params in
+await server.withMethodHandler(ResourceSubscribe.self) { params in
     // Store subscription for later notifications.
     // Client identity for multi-client scenarios needs to be managed by the server application,
     // potentially using information from the initialize handshake if the server handles one client post-init.
@@ -544,7 +544,7 @@ Implement prompt handlers:
 
 ```swift
 // Register a prompt list handler
-server.withMethodHandler(ListPrompts.self) { params in
+await server.withMethodHandler(ListPrompts.self) { params in
     let prompts = [
         Prompt(
             name: "interview",
@@ -568,7 +568,7 @@ server.withMethodHandler(ListPrompts.self) { params in
 }
 
 // Register a prompt get handler
-server.withMethodHandler(GetPrompt.self) { params in
+await server.withMethodHandler(GetPrompt.self) { params in
     switch params.name {
     case "interview":
         let position = params.arguments?["position"]?.stringValue ?? "Software Engineer"
@@ -618,8 +618,8 @@ do {
             .user("Analyze this data and suggest next steps")
         ],
         systemPrompt: "You are a helpful data analyst",
-        maxTokens: 150,
-        temperature: 0.7
+        temperature: 0.7,
+        maxTokens: 150
     )
     
     // Use the LLM completion in your server logic
@@ -649,8 +649,8 @@ try await server.start(transport: transport) { clientInfo, clientCapabilities in
     }
 
     // You can also inspect client capabilities
-    if clientCapabilities.tools == nil {
-        print("Client does not support tools")
+    if clientCapabilities.sampling == nil {
+        print("Client does not support sampling")
     }
 
     // Perform any server-side setup based on client info
@@ -720,19 +720,18 @@ let server = Server(
         prompts: .init(listChanged: true),
         resources: .init(subscribe: true, listChanged: true),
         tools: .init(listChanged: true)
-    ),
-    logger: logger
+    )
 )
 
 // Add handlers directly to the server
-server.withMethodHandler(ListTools.self) { _ in
+await server.withMethodHandler(ListTools.self) { _ in
     // Your implementation
     return .init(tools: [
         Tool(name: "example", description: "An example tool")
     ])
 }
 
-server.withMethodHandler(CallTool.self) { params in
+await server.withMethodHandler(CallTool.self) { params in
     // Your implementation
     return .init(content: [.text("Tool result")], isError: false)
 }
@@ -777,6 +776,7 @@ The Swift SDK provides multiple built-in transports:
 |-----------|-------------|-----------|----------|
 | [`StdioTransport`](/Sources/MCP/Base/Transports/StdioTransport.swift) | Implements [stdio transport](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#stdio) using standard input/output streams | Apple platforms, Linux with glibc | Local subprocesses, CLI tools |
 | [`HTTPClientTransport`](/Sources/MCP/Base/Transports/HTTPClientTransport.swift) | Implements [Streamable HTTP transport](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#streamable-http) using Foundation's URL Loading System | All platforms with Foundation | Remote servers, web applications |
+| [`InMemoryTransport`](/Sources/MCP/Base/Transports/InMemoryTransport.swift) | Custom in-memory transport for direct communication within the same process | All platforms | Testing, debugging, same-process client-server communication |
 | [`NetworkTransport`](/Sources/MCP/Base/Transports/NetworkTransport.swift) | Custom transport using Apple's Network framework for TCP/UDP connections | Apple platforms only | Low-level networking, custom protocols |
 
 ### Custom Transport Implementation
@@ -790,13 +790,13 @@ import Foundation
 public actor MyCustomTransport: Transport {
     public nonisolated let logger: Logger
     private var isConnected = false
-    private let messageStream: AsyncThrowingStream<Data, Error>
-    private let messageContinuation: AsyncThrowingStream<Data, Error>.Continuation
+    private let messageStream: AsyncThrowingStream<Data, any Swift.Error>
+    private let messageContinuation: AsyncThrowingStream<Data, any Swift.Error>.Continuation
 
     public init(logger: Logger? = nil) {
         self.logger = logger ?? Logger(label: "my.custom.transport")
 
-        var continuation: AsyncThrowingStream<Data, Error>.Continuation!
+        var continuation: AsyncThrowingStream<Data, any Swift.Error>.Continuation!
         self.messageStream = AsyncThrowingStream { continuation = $0 }
         self.messageContinuation = continuation
     }
@@ -816,7 +816,7 @@ public actor MyCustomTransport: Transport {
         // Implement your message sending logic
     }
 
-    public func receive() -> AsyncThrowingStream<Data, Error> {
+    public func receive() -> AsyncThrowingStream<Data, any Swift.Error> {
         return messageStream
     }
 }
@@ -862,7 +862,7 @@ LoggingSystem.bootstrap { label in
 let logger = Logger(label: "com.example.mcp")
 
 // Pass to client/server
-let client = Client(name: "MyApp", version: "1.0.0", logger: logger)
+let client = Client(name: "MyApp", version: "1.0.0")
 
 // Pass to transport
 let transport = StdioTransport(logger: logger)

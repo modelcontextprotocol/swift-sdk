@@ -128,10 +128,18 @@ public actor Server {
     public nonisolated var name: String { serverInfo.name }
     /// The server version
     public nonisolated var version: String { serverInfo.version }
+    /// Instructions describing how to use the server and its features
+    ///
+    /// This can be used by clients to improve the LLM's understanding of 
+    /// available tools, resources, etc. 
+    /// It can be thought of like a "hint" to the model. 
+    /// For example, this information MAY be added to the system prompt.
+    public nonisolated let instructions: String?
     /// The server capabilities
     public var capabilities: Capabilities
     /// The server configuration
     public var configuration: Configuration
+    
 
     /// Request handlers
     private var methodHandlers: [String: RequestHandlerBox] = [:]
@@ -154,12 +162,14 @@ public actor Server {
     public init(
         name: String,
         version: String,
+        instructions: String? = nil,
         capabilities: Server.Capabilities = .init(),
         configuration: Configuration = .default
     ) {
         self.serverInfo = Server.Info(name: name, version: version)
         self.capabilities = capabilities
         self.configuration = configuration
+        self.instructions = instructions
     }
 
     /// Start the server
@@ -174,7 +184,7 @@ public actor Server {
         registerDefaultHandlers(initializeHook: initializeHook)
         try await transport.connect()
 
-        await logger?.info(
+        await logger?.debug(
             "Server started", metadata: ["name": "\(name)", "version": "\(version)"])
 
         // Start message handling loop
@@ -227,7 +237,7 @@ public actor Server {
                 await logger?.error(
                     "Fatal error in message handling loop", metadata: ["error": "\(error)"])
             }
-            await logger?.info("Server finished", metadata: [:])
+            await logger?.debug("Server finished", metadata: [:])
         }
     }
 
@@ -574,7 +584,7 @@ public actor Server {
                 protocolVersion: negotiatedProtocolVersion,
                 capabilities: await self.capabilities,
                 serverInfo: self.serverInfo,
-                instructions: nil
+                instructions: self.instructions
             )
         }
 

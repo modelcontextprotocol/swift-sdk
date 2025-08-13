@@ -279,6 +279,16 @@ import Testing
             let configuration = URLSessionConfiguration.ephemeral
             configuration.protocolClasses = [MockURLProtocol.self]
 
+            let messageData = #"{"jsonrpc":"2.0","method":"test","id":3}"#.data(using: .utf8)!
+
+            // Set up the handler BEFORE creating the transport
+            await MockURLProtocol.requestHandlerStorage.setHandler {
+                [testEndpoint] (request: URLRequest) in
+                let response = HTTPURLResponse(
+                    url: testEndpoint, statusCode: 404, httpVersion: "HTTP/1.1", headerFields: nil)!
+                return (response, Data("Not Found".utf8))
+            }
+
             let transport = HTTPClientTransport(
                 endpoint: testEndpoint,
                 configuration: configuration,
@@ -286,15 +296,6 @@ import Testing
                 logger: nil
             )
             try await transport.connect()
-
-            let messageData = #"{"jsonrpc":"2.0","method":"test","id":3}"#.data(using: .utf8)!
-
-            await MockURLProtocol.requestHandlerStorage.setHandler {
-                [testEndpoint] (request: URLRequest) in
-                let response = HTTPURLResponse(
-                    url: testEndpoint, statusCode: 404, httpVersion: "HTTP/1.1", headerFields: nil)!
-                return (response, Data("Not Found".utf8))
-            }
 
             do {
                 try await transport.send(messageData)
@@ -316,6 +317,16 @@ import Testing
             let configuration = URLSessionConfiguration.ephemeral
             configuration.protocolClasses = [MockURLProtocol.self]
 
+            let messageData = #"{"jsonrpc":"2.0","method":"test","id":4}"#.data(using: .utf8)!
+
+            // Set up the handler BEFORE creating the transport
+            await MockURLProtocol.requestHandlerStorage.setHandler {
+                [testEndpoint] (request: URLRequest) in
+                let response = HTTPURLResponse(
+                    url: testEndpoint, statusCode: 500, httpVersion: "HTTP/1.1", headerFields: nil)!
+                return (response, Data("Server Error".utf8))
+            }
+
             let transport = HTTPClientTransport(
                 endpoint: testEndpoint,
                 configuration: configuration,
@@ -323,15 +334,6 @@ import Testing
                 logger: nil
             )
             try await transport.connect()
-
-            let messageData = #"{"jsonrpc":"2.0","method":"test","id":4}"#.data(using: .utf8)!
-
-            await MockURLProtocol.requestHandlerStorage.setHandler {
-                [testEndpoint] (request: URLRequest) in
-                let response = HTTPURLResponse(
-                    url: testEndpoint, statusCode: 500, httpVersion: "HTTP/1.1", headerFields: nil)!
-                return (response, Data("Server Error".utf8))
-            }
 
             do {
                 try await transport.send(messageData)
@@ -353,22 +355,15 @@ import Testing
             let configuration = URLSessionConfiguration.ephemeral
             configuration.protocolClasses = [MockURLProtocol.self]
 
-            let transport = HTTPClientTransport(
-                endpoint: testEndpoint,
-                configuration: configuration,
-                streaming: false,
-                logger: nil
-            )
-            try await transport.connect()
-
             let initialSessionID = "expired-session-xyz"
             let firstMessageData = #"{"jsonrpc":"2.0","method":"initialize","id":1}"#.data(
                 using: .utf8)!
             let secondMessageData = #"{"jsonrpc":"2.0","method":"ping","id":2}"#.data(
                 using: .utf8)!
 
+            // Set up the first handler BEFORE creating the transport
             await MockURLProtocol.requestHandlerStorage.setHandler {
-                [testEndpoint] (request: URLRequest) in
+                [testEndpoint, initialSessionID] (request: URLRequest) in
                 let response = HTTPURLResponse(
                     url: testEndpoint, statusCode: 200, httpVersion: "HTTP/1.1",
                     headerFields: [
@@ -377,11 +372,21 @@ import Testing
                     ])!
                 return (response, Data())
             }
+
+            let transport = HTTPClientTransport(
+                endpoint: testEndpoint,
+                configuration: configuration,
+                streaming: false,
+                logger: nil
+            )
+            try await transport.connect()
+
             try await transport.send(firstMessageData)
             #expect(await transport.sessionID == initialSessionID)
 
+            // Set up the second handler for the 404 response
             await MockURLProtocol.requestHandlerStorage.setHandler {
-                [testEndpoint] (request: URLRequest) in
+                [testEndpoint, initialSessionID] (request: URLRequest) in
                 #expect(request.value(forHTTPHeaderField: "Mcp-Session-Id") == initialSessionID)
                 let response = HTTPURLResponse(
                     url: testEndpoint, statusCode: 404, httpVersion: "HTTP/1.1", headerFields: nil)!
@@ -528,150 +533,197 @@ import Testing
 
                 await transport.disconnect()
             }
-        #endif  // !canImport(FoundationNetworking)
 
-        @Test(
-            "Client with HTTP Transport complete flow", .httpClientTransportSetup,
-            .timeLimit(.minutes(1)))
-        func testClientFlow() async throws {
-            let configuration = URLSessionConfiguration.ephemeral
-            configuration.protocolClasses = [MockURLProtocol.self]
+            @Test(
+                "Client with HTTP Transport complete flow", .httpClientTransportSetup,
+                .timeLimit(.minutes(1)))
+            func testClientFlow() async throws {
+                let configuration = URLSessionConfiguration.ephemeral
+                configuration.protocolClasses = [MockURLProtocol.self]
 
-            let transport = HTTPClientTransport(
-                endpoint: testEndpoint,
-                configuration: configuration,
-                streaming: false,
-                logger: nil
-            )
+                let transport = HTTPClientTransport(
+                    endpoint: testEndpoint,
+                    configuration: configuration,
+                    streaming: false,
+                    logger: nil
+                )
 
-            let client = Client(name: "TestClient", version: "1.0.0")
+                let client = Client(name: "TestClient", version: "1.0.0")
 
-            // Use an actor to track request sequence
-            actor RequestTracker {
-                enum RequestType {
-                    case initialize
-                    case callTool
-                }
-
-                private(set) var lastRequest: RequestType?
-
-                func setRequest(_ type: RequestType) {
-                    lastRequest = type
-                }
-
-                func getLastRequest() -> RequestType? {
-                    return lastRequest
-                }
-            }
-
-            let tracker = RequestTracker()
-
-            // Setup mock responses
-            await MockURLProtocol.requestHandlerStorage.setHandler {
-                [testEndpoint, tracker] (request: URLRequest) in
-                switch request.httpMethod {
-                case "GET":
-                    #expect(
-                        request.allHTTPHeaderFields?["Accept"]?.contains("text/event-stream")
-                            == true)
-                case "POST":
-                    #expect(
-                        request.allHTTPHeaderFields?["Accept"]?.contains("application/json") == true
-                    )
-                default:
-                    Issue.record(
-                        "Unsupported HTTP method \(String(describing: request.httpMethod))")
-                }
-
-                #expect(request.url == testEndpoint)
-
-                let bodyData = request.readBody()
-
-                guard let bodyData = bodyData,
-                    let json = try JSONSerialization.jsonObject(with: bodyData) as? [String: Any],
-                    let method = json["method"] as? String
-                else {
-                    throw NSError(
-                        domain: "MockURLProtocolError", code: 0,
-                        userInfo: [
-                            NSLocalizedDescriptionKey: "Invalid JSON-RPC message \(#file):\(#line)"
-                        ])
-                }
-
-                if method == "initialize" {
-                    await tracker.setRequest(.initialize)
-
-                    let requestID = json["id"] as! String
-                    let result = Initialize.Result(
-                        protocolVersion: Version.latest,
-                        capabilities: .init(tools: .init()),
-                        serverInfo: .init(name: "Mock Server", version: "0.0.1"),
-                        instructions: nil
-                    )
-                    let response = Initialize.response(id: .string(requestID), result: result)
-                    let responseData = try JSONEncoder().encode(response)
-
-                    let httpResponse = HTTPURLResponse(
-                        url: testEndpoint, statusCode: 200, httpVersion: "HTTP/1.1",
-                        headerFields: ["Content-Type": "application/json"])!
-                    return (httpResponse, responseData)
-                } else if method == "tools/call" {
-                    // Verify initialize was called first
-                    if let lastRequest = await tracker.getLastRequest(), lastRequest != .initialize
-                    {
-                        #expect(Bool(false), "Initialize should be called before callTool")
+                // Use an actor to track request sequence
+                actor RequestTracker {
+                    enum RequestType {
+                        case initialize
+                        case callTool
                     }
 
-                    await tracker.setRequest(.callTool)
+                    private(set) var lastRequest: RequestType?
 
-                    let params = json["params"] as? [String: Any]
-                    let toolName = params?["name"] as? String
-                    #expect(toolName == "calculator")
+                    func setRequest(_ type: RequestType) {
+                        lastRequest = type
+                    }
 
-                    let requestID = json["id"] as! String
-                    let result = CallTool.Result(content: [.text("42")])
-                    let response = CallTool.response(id: .string(requestID), result: result)
-                    let responseData = try JSONEncoder().encode(response)
-
-                    let httpResponse = HTTPURLResponse(
-                        url: testEndpoint, statusCode: 200, httpVersion: "HTTP/1.1",
-                        headerFields: ["Content-Type": "application/json"])!
-                    return (httpResponse, responseData)
-                } else if method == "notifications/initialized" {
-                    // Ignore initialized notifications
-                    let httpResponse = HTTPURLResponse(
-                        url: testEndpoint, statusCode: 200, httpVersion: "HTTP/1.1",
-                        headerFields: ["Content-Type": "application/json"])!
-                    return (httpResponse, Data())
-                } else {
-                    throw NSError(
-                        domain: "MockURLProtocolError", code: 0,
-                        userInfo: [
-                            NSLocalizedDescriptionKey:
-                                "Unexpected request method: \(method) \(#file):\(#line)"
-                        ])
+                    func getLastRequest() -> RequestType? {
+                        return lastRequest
+                    }
                 }
+
+                let tracker = RequestTracker()
+
+                // Setup mock responses
+                await MockURLProtocol.requestHandlerStorage.setHandler {
+                    [testEndpoint, tracker] (request: URLRequest) in
+                    switch request.httpMethod {
+                    case "GET":
+                        #expect(
+                            request.allHTTPHeaderFields?["Accept"]?.contains("text/event-stream")
+                                == true)
+                    case "POST":
+                        #expect(
+                            request.allHTTPHeaderFields?["Accept"]?.contains("application/json")
+                                == true
+                        )
+                    default:
+                        Issue.record(
+                            "Unsupported HTTP method \(String(describing: request.httpMethod))")
+                    }
+
+                    #expect(request.url == testEndpoint)
+
+                    let bodyData = request.readBody()
+
+                    guard let bodyData = bodyData,
+                        let json = try JSONSerialization.jsonObject(with: bodyData)
+                            as? [String: Any],
+                        let method = json["method"] as? String
+                    else {
+                        throw NSError(
+                            domain: "MockURLProtocolError", code: 0,
+                            userInfo: [
+                                NSLocalizedDescriptionKey:
+                                    "Invalid JSON-RPC message \(#file):\(#line)"
+                            ])
+                    }
+
+                    if method == "initialize" {
+                        await tracker.setRequest(.initialize)
+
+                        let requestID = json["id"] as! String
+                        let result = Initialize.Result(
+                            protocolVersion: Version.latest,
+                            capabilities: .init(tools: .init()),
+                            serverInfo: .init(name: "Mock Server", version: "0.0.1"),
+                            instructions: nil
+                        )
+                        let response = Initialize.response(id: .string(requestID), result: result)
+                        let responseData = try JSONEncoder().encode(response)
+
+                        let httpResponse = HTTPURLResponse(
+                            url: testEndpoint, statusCode: 200, httpVersion: "HTTP/1.1",
+                            headerFields: ["Content-Type": "application/json"])!
+                        return (httpResponse, responseData)
+                    } else if method == "tools/call" {
+                        // Verify initialize was called first
+                        if let lastRequest = await tracker.getLastRequest(),
+                            lastRequest != .initialize
+                        {
+                            #expect(Bool(false), "Initialize should be called before callTool")
+                        }
+
+                        await tracker.setRequest(.callTool)
+
+                        let params = json["params"] as? [String: Any]
+                        let toolName = params?["name"] as? String
+                        #expect(toolName == "calculator")
+
+                        let requestID = json["id"] as! String
+                        let result = CallTool.Result(content: [.text("42")])
+                        let response = CallTool.response(id: .string(requestID), result: result)
+                        let responseData = try JSONEncoder().encode(response)
+
+                        let httpResponse = HTTPURLResponse(
+                            url: testEndpoint, statusCode: 200, httpVersion: "HTTP/1.1",
+                            headerFields: ["Content-Type": "application/json"])!
+                        return (httpResponse, responseData)
+                    } else if method == "notifications/initialized" {
+                        // Ignore initialized notifications
+                        let httpResponse = HTTPURLResponse(
+                            url: testEndpoint, statusCode: 200, httpVersion: "HTTP/1.1",
+                            headerFields: ["Content-Type": "application/json"])!
+                        return (httpResponse, Data())
+                    } else {
+                        throw NSError(
+                            domain: "MockURLProtocolError", code: 0,
+                            userInfo: [
+                                NSLocalizedDescriptionKey:
+                                    "Unexpected request method: \(method) \(#file):\(#line)"
+                            ])
+                    }
+                }
+
+                // Step 1: Initialize client
+                let initResult = try await client.connect(transport: transport)
+                #expect(initResult.protocolVersion == Version.latest)
+                #expect(initResult.capabilities.tools != nil)
+
+                // Step 2: Call a tool
+                let toolResult = try await client.callTool(name: "calculator")
+                #expect(toolResult.content.count == 1)
+                if case let .text(text) = toolResult.content[0] {
+                    #expect(text == "42")
+                } else {
+                    #expect(Bool(false), "Expected text content")
+                }
+
+                // Step 3: Verify request sequence
+                #expect(await tracker.getLastRequest() == .callTool)
+
+                // Step 4: Disconnect
+                await client.disconnect()
             }
 
-            // Step 1: Initialize client
-            let initResult = try await client.connect(transport: transport)
-            #expect(initResult.protocolVersion == Version.latest)
-            #expect(initResult.capabilities.tools != nil)
+            @Test("Request modifier functionality", .httpClientTransportSetup)
+            func testRequestModifier() async throws {
+                let testEndpoint = URL(string: "https://api.example.com/mcp")!
+                let testToken = "test-bearer-token-12345"
 
-            // Step 2: Call a tool
-            let toolResult = try await client.callTool(name: "calculator")
-            #expect(toolResult.content.count == 1)
-            if case let .text(text) = toolResult.content[0] {
-                #expect(text == "42")
-            } else {
-                #expect(Bool(false), "Expected text content")
+                let configuration = URLSessionConfiguration.ephemeral
+                configuration.protocolClasses = [MockURLProtocol.self]
+
+                await MockURLProtocol.requestHandlerStorage.setHandler {
+                    [testEndpoint, testToken] (request: URLRequest) in
+                    // Verify the Authorization header was added by the requestModifier
+                    #expect(
+                        request.value(forHTTPHeaderField: "Authorization") == "Bearer \(testToken)")
+
+                    // Return a successful response
+                    let response = HTTPURLResponse(
+                        url: testEndpoint, statusCode: 200, httpVersion: "HTTP/1.1",
+                        headerFields: ["Content-Type": "application/json"])!
+                    return (response, Data())
+                }
+
+                // Create transport with requestModifier that adds Authorization header
+                let transport = HTTPClientTransport(
+                    endpoint: testEndpoint,
+                    configuration: configuration,
+                    streaming: false,
+                    requestModifier: { request in
+                        var modifiedRequest = request
+                        modifiedRequest.addValue(
+                            "Bearer \(testToken)", forHTTPHeaderField: "Authorization")
+                        return modifiedRequest
+                    },
+                    logger: nil
+                )
+
+                try await transport.connect()
+
+                let messageData = #"{"jsonrpc":"2.0","method":"test","id":5}"#.data(using: .utf8)!
+
+                try await transport.send(messageData)
+                await transport.disconnect()
             }
-
-            // Step 3: Verify request sequence
-            #expect(await tracker.getLastRequest() == .callTool)
-
-            // Step 4: Disconnect
-            await client.disconnect()
-        }
+        #endif  // !canImport(FoundationNetworking)
     }
 #endif  // swift(>=6.1)

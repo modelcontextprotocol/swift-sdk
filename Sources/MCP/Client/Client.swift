@@ -173,7 +173,7 @@ public actor Client {
         self.connection = transport
         try await self.connection?.connect()
 
-        await logger?.info(
+        await logger?.debug(
             "Client connected", metadata: ["name": "\(name)", "version": "\(version)"])
 
         // Start message handling loop
@@ -216,7 +216,7 @@ public actor Client {
                     break
                 }
             } while true
-            await self.logger?.info("Client message handling loop task is terminating.")
+            await self.logger?.debug("Client message handling loop task is terminating.")
         }
 
         // Automatically initialize after connecting
@@ -225,7 +225,7 @@ public actor Client {
 
     /// Disconnect the client and cancel all pending requests
     public func disconnect() async {
-        await logger?.info("Initiating client disconnect...")
+        await logger?.debug("Initiating client disconnect...")
 
         // Part 1: Inside actor - Grab state and clear internal references
         let taskToCancel = self.task
@@ -242,26 +242,26 @@ public actor Client {
         for (_, request) in pendingRequestsToCancel {
             request.resume(throwing: MCPError.internalError("Client disconnected"))
         }
-        await logger?.info("Pending requests cancelled.")
+        await logger?.debug("Pending requests cancelled.")
 
         // Cancel the task
         taskToCancel?.cancel()
-        await logger?.info("Message loop task cancellation requested.")
+        await logger?.debug("Message loop task cancellation requested.")
 
         // Disconnect the transport *before* awaiting the task
         // This should ensure the transport stream is finished, unblocking the loop.
         if let conn = connectionToDisconnect {
             await conn.disconnect()
-            await logger?.info("Transport disconnected.")
+            await logger?.debug("Transport disconnected.")
         } else {
-            await logger?.info("No active transport connection to disconnect.")
+            await logger?.debug("No active transport connection to disconnect.")
         }
 
         // Await the task completion *after* transport disconnect
         _ = await taskToCancel?.value
-        await logger?.info("Client message loop task finished.")
+        await logger?.debug("Client message loop task finished.")
 
-        await logger?.info("Client disconnect complete.")
+        await logger?.debug("Client disconnect complete.")
     }
 
     // MARK: - Registration
@@ -468,7 +468,7 @@ public actor Client {
 
         // Check if there are any requests to send
         guard !requests.isEmpty else {
-            await logger?.info("Batch requested but no requests were added.")
+            await logger?.debug("Batch requested but no requests were added.")
             return  // Nothing to send
         }
 

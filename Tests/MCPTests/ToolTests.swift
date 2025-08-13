@@ -130,7 +130,8 @@ struct ToolTests {
     func testToolWithEmptyAnnotations() throws {
         var tool = Tool(
             name: "test_tool",
-            description: "Test tool description"
+            description: "Test tool description",
+            inputSchema: [:]
         )
 
         do {
@@ -163,7 +164,7 @@ struct ToolTests {
         let tool = Tool(
             name: "test_tool",
             description: "Test tool description",
-            inputSchema: nil,
+            inputSchema: [:],
             annotations: nil
         )
 
@@ -324,8 +325,8 @@ struct ToolTests {
     @Test("ListTools result validation")
     func testListToolsResult() throws {
         let tools = [
-            Tool(name: "tool1", description: "First tool", inputSchema: nil),
-            Tool(name: "tool2", description: "Second tool", inputSchema: nil),
+            Tool(name: "tool1", description: "First tool", inputSchema: [:]),
+            Tool(name: "tool2", description: "Second tool", inputSchema: [:]),
         ]
 
         let result = ListTools.Result(tools: tools, nextCursor: "next_page")
@@ -399,7 +400,11 @@ struct ToolTests {
             #expect(request.id == 1)
             #expect(request.params.cursor == nil)
 
-            let testTool = Tool(name: "test_tool", description: "Test tool for verification")
+            let testTool = Tool(
+                name: "test_tool",
+                description: "Test tool for verification",
+                inputSchema: [:]
+            )
             return ListTools.response(id: request.id, result: ListTools.Result(tools: [testTool]))
         }
 
