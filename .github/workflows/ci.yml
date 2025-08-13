@@ -44,12 +44,15 @@ jobs:
         run: swift test -v
         
   static-linux-sdk-build:
-    name: Linux Static SDK Build (${{ matrix.swift-version }} - ${{ matrix.os }})
+    name: Linux Static SDK Build (${{ matrix.swift-version }} - ${{ matrix.triple }})
     strategy:
       matrix:
         os: [ubuntu-latest]
         swift-version:
           - 6.1.2
+        --triple:
+          - aarch64-swift-linux-musl
+          - x86_64-swift-linux-musl
     runs-on: ${{ matrix.os }}
     container: swift:${{ matrix.swift-version }}-noble
     timeout-minutes: 30
@@ -57,7 +60,9 @@ jobs:
       - name: Check out code
         uses: actions/checkout@v4
       - name: Install static SDK and build
+        env:
+          BUILD_FLAGS:  --triple ${{ matrix.triple }}
         run: |
           which curl || (apt -q update && apt -yq install curl)
           curl -s --retry 3 https://raw.githubusercontent.com/swiftlang/github-workflows/refs/heads/main/.github/workflows/scripts/install-and-build-with-sdk.sh | \
-          bash -s -- --static  ${{ matrix.swift-version }}
+          bash -s -- --static --flags="$BUILD_FLAGS" ${{ matrix.swift-version }}
