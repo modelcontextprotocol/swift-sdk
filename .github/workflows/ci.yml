@@ -50,7 +50,7 @@ jobs:
         os: [ubuntu-latest]
         swift-version:
           - 6.1.2
-        --triple:
+        triple:
           - aarch64-swift-linux-musl
           - x86_64-swift-linux-musl
     runs-on: ${{ matrix.os }}
