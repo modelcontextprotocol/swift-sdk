@@ -833,15 +833,13 @@ The Swift SDK has the following platform requirements:
 | watchOS | 9.0+ |
 | tvOS | 16.0+ |
 | visionOS | 1.0+ |
-| Linux | Distributions with `glibc` |
+| Linux | Distributions with `glibc` or `musl`, including Ubuntu, Debian, Fedora, and Alpine Linux |
 
 While the core library works on any platform supporting Swift 6
 (including Linux and Windows),
 running a client or server requires a compatible transport.
 
-We're actively working to expand platform support:
-- [Alpine Linux support](https://github.com/modelcontextprotocol/swift-sdk/pull/64)
-- [Windows support](https://github.com/modelcontextprotocol/swift-sdk/pull/64)
+We're working to add [Windows support](https://github.com/modelcontextprotocol/swift-sdk/pull/64).
 
 ## Debugging and Logging
 
