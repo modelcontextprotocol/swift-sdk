@@ -87,6 +87,11 @@ public actor Server {
             public init() {}
         }
 
+        /// Elicitation capabilities
+        public struct Elicitation: Hashable, Codable, Sendable {
+            public init() {}
+        }
+
         /// Logging capabilities
         public var logging: Logging?
         /// Prompts capabilities
@@ -95,6 +100,8 @@ public actor Server {
         public var resources: Resources?
         /// Sampling capabilities
         public var sampling: Sampling?
+        /// Elicitation capabilities
+        public var elicitation: Elicitation?
         /// Tools capabilities
         public var tools: Tools?
 
@@ -103,12 +110,14 @@ public actor Server {
             prompts: Prompts? = nil,
             resources: Resources? = nil,
             sampling: Sampling? = nil,
+            elicitation: Elicitation? = nil,
             tools: Tools? = nil
         ) {
             self.logging = logging
             self.prompts = prompts
             self.resources = resources
             self.sampling = sampling
+            self.elicitation = elicitation
             self.tools = tools
         }
     }
@@ -370,6 +379,34 @@ public actor Server {
         // similar to how the client sends requests to servers
         throw MCPError.internalError(
             "Bidirectional sampling requests not yet implemented in transport layer")
+    }
+
+    /// Request elicitation from the connected client
+    ///
+    /// Elicitation allows servers to request structured user input through the client,
+    /// enabling dynamic data collection with schema validation and human approval.
+    ///
+    /// - Parameters:
+    ///   - parameters: The elicitation request parameters
+    /// - Returns: The elicitation result containing the user's action and data
+    /// - Throws: MCPError if the request fails
+    /// - SeeAlso: https://modelcontextprotocol.io/specification/draft/client/elicitation
+    public func requestElicitation(
+        _ parameters: CreateElicitation.Parameters
+    ) async throws -> CreateElicitation.Result {
+        guard connection != nil else {
+            throw MCPError.internalError("Server connection not initialized")
+        }
+
+        // Note: This requires bidirectional communication support in the transport layer
+        // 2. Wait for client response
+
+        let request = CreateElicitation.request(parameters)
+        
+        // This would need to be implemented with proper request/response handling
+        // similar to how the client sends requests to servers
+        throw MCPError.internalError(
+            "Bidirectional elicitation requests not yet implemented in transport layer")
     }
 
     /// A JSON-RPC batch containing multiple requests and/or notifications

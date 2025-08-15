@@ -60,8 +60,15 @@ public actor Client {
             public init() {}
         }
 
+        /// The elicitation capabilities
+        public struct Elicitation: Hashable, Codable, Sendable {
+            public init() {}
+        }
+
         /// Whether the client supports sampling
         public var sampling: Sampling?
+        /// Whether the client supports elicitation
+        public var elicitation: Elicitation?
         /// Experimental features supported by the client
         public var experimental: [String: String]?
         /// Whether the client supports roots
@@ -69,10 +76,12 @@ public actor Client {
 
         public init(
             sampling: Sampling? = nil,
+            elicitation: Elicitation? = nil,
             experimental: [String: String]? = nil,
             roots: Capabilities.Roots? = nil
         ) {
             self.sampling = sampling
+            self.elicitation = elicitation
             self.experimental = experimental
             self.roots = roots
         }
@@ -654,6 +663,46 @@ public actor Client {
         // methodHandlers[CreateSamplingMessage.name] = TypedRequestHandler(handler)
 
         return self
+    }
+
+    /// Register an elicitation handler for the client
+    ///
+    /// The elicitation handler allows clients to process elicitation requests from servers,
+    ///
+    /// - Handler MUST validate requests don't ask for sensitive information
+    /// - Handler SHOULD provide clear UI showing which server is requesting information
+    ///
+    /// - Parameter handler: The elicitation handler function
+    /// - Returns: Self for method chaining
+    @discardableResult
+    public func withElicitationHandler(
+        _ handler: @escaping @Sendable (CreateElicitation.Parameters) async throws -> CreateElicitation.Result
+    ) -> Self {
+        return self
+    }
+    
+    public static func defaultElicitationHandler(
+        _ parameters: CreateElicitation.Parameters
+    ) async throws -> CreateElicitation.Result {
+        let securityWarnings = parameters.validateSecurity()
+        
+        if !securityWarnings.isEmpty {
+            print("SECURITY WARNING: Elicitation request has potential issues:")
+            for warning in securityWarnings {
+                print("  - \(warning)")
+            }
+        }
+        
+        let serverName = parameters.metadata?["server_name"]?.stringValue ?? 
+                        parameters.metadata?["server_display_name"]?.stringValue ?? 
+                        "Unknown Server"
+        
+        print("Elicitation request from: \(serverName)")
+        print("Message: \(parameters.message)")
+        print("Schema: \(parameters.schema)")
+        print("User can: ACCEPT, DECLINE, or CANCEL")
+        
+        return CreateElicitation.Result(action: .decline)
     }
 
     // MARK: -

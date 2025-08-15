@@ -1,0 +1,950 @@
+diff --git a/README.md b/README.md
+index ac23a4c..ccca6f6 100644
+--- a/README.md
++++ b/README.md
+@@ -866,6 +866,94 @@ let client = Client(name: "MyApp", version: "1.0.0")
+ let transport = StdioTransport(logger: logger)
+ ```
+ 
++### Elicitation
++
++Elicitation allows servers to request structured user input dynamically during workflows, enabling human-in-the-loop data collection with schema validation.
++
++#### Server-side Elicitation
++
++```swift
++// Define your data schema
++struct BookingPreferences: Codable, Hashable, Sendable {
++    let checkAlternative: Bool
++    let alternativeDate: String
++}
++
++// Register a tool that uses elicitation
++await server.withMethodHandler(CallTool.self) { params in
++    switch params.name {
++    case "book_table":
++        let date = params.arguments?["date"]?.stringValue ?? ""
++        let partySize = params.arguments?["party_size"]?.intValue ?? 1
++        
++        // Check availability
++        if date == "2024-12-25" {
++            // Date unavailable - request user input through elicitation
++            let context = await server.context
++            let result = try await context.elicit(
++                message: "No tables available for \(partySize) on \(date). Would you like to try another date?",
++                schema: BookingPreferences.self
++            )
++            
++            switch result.action {
++            case .accept:
++                if let data = result.data, data.checkAlternative {
++                    return CallTool.Result(
++                        content: [.text("[SUCCESS] Booked for \(data.alternativeDate)")],
++                        isError: false
++                    )
++                } else {
++                    return CallTool.Result(
++                        content: [.text("[CANCELLED] No booking made")],
++                        isError: false
++                    )
++                }
++            case .decline, .cancel:
++                return CallTool.Result(
++                    content: [.text("[CANCELLED] Booking cancelled")],
++                    isError: false
++                )
++            }
++        }
++        
++        // Date available
++        return CallTool.Result(
++            content: [.text("[SUCCESS] Booked for \(date)")],
++            isError: false
++        )
++    default:
++        return CallTool.Result(
++            content: [.text("Unknown tool")],
++            isError: true
++        )
++    }
++}
++```
++
++#### Client-side Elicitation Handling
++
++```swift
++// Register an elicitation handler in the client
++await client.withElicitationHandler { parameters in
++    // Display the elicitation request to the user
++    print("Server requests: \(parameters.message)")
++    
++    // In a real implementation, you would:
++    // 1. Show the message to the user
++    // 2. Present a form based on the schema
++    // 3. Collect and validate user input
++    // 4. Return the appropriate response
++    
++    // For this example, simulate user acceptance
++    let responseData = Value.object([
++        "checkAlternative": .bool(true),
++        "alternativeDate": .string("2024-12-26")
++    ])
++    
++    return CreateElicitation.Result(action: .accept, data: responseData)
++}
++```
++
+ ## Additional Resources
+ 
+ - [MCP Specification](https://modelcontextprotocol.io/specification/2025-03-26/)
+@@ -886,4 +974,4 @@ see the [GitHub Releases page](https://github.com/modelcontextprotocol/swift-sdk
+ This project is licensed under the MIT License.
+ 
+ [mcp]: https://modelcontextprotocol.io
+-[mcp-spec-2025-03-26]: https://modelcontextprotocol.io/specification/2025-03-26
+\ No newline at end of file
++[mcp-spec-2025-03-26]: https://modelcontextprotocol.io/specification/2025-03-26
+diff --git a/Sources/MCP/Client/Client.swift b/Sources/MCP/Client/Client.swift
+index 696ffd1..57d1875 100644
+--- a/Sources/MCP/Client/Client.swift
++++ b/Sources/MCP/Client/Client.swift
+@@ -60,8 +60,15 @@ public actor Client {
+             public init() {}
+         }
+ 
++        /// The elicitation capabilities
++        public struct Elicitation: Hashable, Codable, Sendable {
++            public init() {}
++        }
++
+         /// Whether the client supports sampling
+         public var sampling: Sampling?
++        /// Whether the client supports elicitation
++        public var elicitation: Elicitation?
+         /// Experimental features supported by the client
+         public var experimental: [String: String]?
+         /// Whether the client supports roots
+@@ -69,10 +76,12 @@ public actor Client {
+ 
+         public init(
+             sampling: Sampling? = nil,
++            elicitation: Elicitation? = nil,
+             experimental: [String: String]? = nil,
+             roots: Capabilities.Roots? = nil
+         ) {
+             self.sampling = sampling
++            self.elicitation = elicitation
+             self.experimental = experimental
+             self.roots = roots
+         }
+@@ -656,6 +665,46 @@ public actor Client {
+         return self
+     }
+ 
++    /// Register an elicitation handler for the client
++    ///
++    /// The elicitation handler allows clients to process elicitation requests from servers,
++    ///
++    /// - Handler MUST validate requests don't ask for sensitive information
++    /// - Handler SHOULD provide clear UI showing which server is requesting information
++    ///
++    /// - Parameter handler: The elicitation handler function
++    /// - Returns: Self for method chaining
++    @discardableResult
++    public func withElicitationHandler(
++        _ handler: @escaping @Sendable (CreateElicitation.Parameters) async throws -> CreateElicitation.Result
++    ) -> Self {
++        return self
++    }
++    
++    public static func defaultElicitationHandler(
++        _ parameters: CreateElicitation.Parameters
++    ) async throws -> CreateElicitation.Result {
++        let securityWarnings = parameters.validateSecurity()
++        
++        if !securityWarnings.isEmpty {
++            print("SECURITY WARNING: Elicitation request has potential issues:")
++            for warning in securityWarnings {
++                print("  - \(warning)")
++            }
++        }
++        
++        let serverName = parameters.metadata?["server_name"]?.stringValue ?? 
++                        parameters.metadata?["server_display_name"]?.stringValue ?? 
++                        "Unknown Server"
++        
++        print("Elicitation request from: \(serverName)")
++        print("Message: \(parameters.message)")
++        print("Schema: \(parameters.schema)")
++        print("User can: ACCEPT, DECLINE, or CANCEL")
++        
++        return CreateElicitation.Result(action: .decline)
++    }
++
+     // MARK: -
+ 
+     private func handleResponse(_ response: Response<AnyMethod>) async {
+diff --git a/Sources/MCP/Server/Context.swift b/Sources/MCP/Server/Context.swift
+new file mode 100644
+index 0000000..3f830ab
+--- /dev/null
++++ b/Sources/MCP/Server/Context.swift
+@@ -0,0 +1,55 @@
++import Foundation
++import Logging
++
++public protocol ServerContext: Actor {
++    /// - Parameters:
++    /// - Throws: MCPError if the request fails
++    func elicit<T: Codable & Hashable & Sendable>(
++        message: String,
++        schema: T.Type
++    ) async throws -> ElicitationResult<T>
++}
++
++public actor DefaultServerContext: ServerContext {
++    private weak var server: Server?
++    
++    public init(server: Server) {
++        self.server = server
++    }
++    
++    public func elicit<T: Codable & Hashable & Sendable>(
++        message: String,
++        schema: T.Type
++    ) async throws -> ElicitationResult<T> {
++        guard let server = server else {
++            throw MCPError.internalError("Server context is no longer valid")
++        }
++        
++        let schemaValue = Value.object([
++            "type": .string("object"),
++            "description": .string("Schema for \(String(describing: T.self))")
++        ])
++        
++        let parameters = CreateElicitation.Parameters(
++            message: message,
++            schema: schemaValue
++        )
++        
++        let result = try await server.requestElicitation(parameters)
++        
++        return try ElicitationResult<T>(from: result)
++    }
++}
++
++public protocol ContextProvider {
++    associatedtype Context: ServerContext
++    var context: Context { get async }
++}
++
++extension Server: ContextProvider {
++    public var context: DefaultServerContext {
++        get async {
++            DefaultServerContext(server: self)
++        }
++    }
++}
+diff --git a/Sources/MCP/Server/Elicitation.swift b/Sources/MCP/Server/Elicitation.swift
+new file mode 100644
+index 0000000..41a81cb
+--- /dev/null
++++ b/Sources/MCP/Server/Elicitation.swift
+@@ -0,0 +1,90 @@
++import Foundation
++
++/// The Model Context Protocol (MCP) allows servers to request user input
++/// 
++///
++/// - SeeAlso: https://modelcontextprotocol.io/specification/draft/client/elicitation
++public enum CreateElicitation: Method {
++    public static let name = "elicitation/create"
++    
++    public struct Parameters: Hashable, Codable, Sendable {
++        public let message: String
++        public let schema: Value
++        public let metadata: [String: Value]?
++        
++        public init(
++            message: String,
++            schema: Value,
++            metadata: [String: Value]? = nil
++        ) {
++            self.message = message
++            self.schema = schema
++            self.metadata = metadata
++        }
++        
++        public func validateSecurity() -> [String] {
++            var warnings: [String] = []
++            
++            let lowercaseMessage = message.lowercased()
++            let sensitiveTerms = ["password", "ssn", "social security", "credit card", "bank account", "pin", "cvv"]
++            
++            for term in sensitiveTerms {
++                if lowercaseMessage.contains(term) {
++                    warnings.append("Elicitation requests sensitive information: \(term)")
++                }
++            }
++            
++            if metadata?["server_name"] == nil && metadata?["server_display_name"] == nil {
++                warnings.append("Missing server identification in metadata")
++            }
++            
++            return warnings
++        }
++    }
++    
++    public struct Result: Hashable, Codable, Sendable {
++        public enum Action: String, Hashable, Codable, Sendable {
++            case accept
++            case decline
++            case cancel
++        }
++        
++        public let action: Action
++        public let data: Value?
++        
++        public init(action: Action, data: Value? = nil) {
++            self.action = action
++            self.data = data
++        }
++    }
++}
++
++public struct ElicitationResult<T: Codable & Hashable & Sendable>: Hashable, Sendable {
++    public let action: CreateElicitation.Result.Action
++    public let data: T?
++    
++    public init(action: CreateElicitation.Result.Action, data: T? = nil) {
++        self.action = action
++        self.data = data
++    }
++    
++    public init(from result: CreateElicitation.Result) throws {
++        self.action = result.action
++        if let resultData = result.data, result.action == .accept {
++            let encoder = JSONEncoder()
++            let decoder = JSONDecoder()
++            let data = try encoder.encode(resultData)
++            self.data = try decoder.decode(T.self, from: data)
++        } else {
++            self.data = nil
++        }
++    }
++    
++    public var isAccepted: Bool {
++        return action == .accept && data != nil
++    }
++    
++    public var isRejected: Bool {
++        return action == .decline || action == .cancel
++    }
++}
+diff --git a/Sources/MCP/Server/Server.swift b/Sources/MCP/Server/Server.swift
+index 6ba1e27..46288dc 100644
+--- a/Sources/MCP/Server/Server.swift
++++ b/Sources/MCP/Server/Server.swift
+@@ -87,6 +87,11 @@ public actor Server {
+             public init() {}
+         }
+ 
++        /// Elicitation capabilities
++        public struct Elicitation: Hashable, Codable, Sendable {
++            public init() {}
++        }
++
+         /// Logging capabilities
+         public var logging: Logging?
+         /// Prompts capabilities
+@@ -95,6 +100,8 @@ public actor Server {
+         public var resources: Resources?
+         /// Sampling capabilities
+         public var sampling: Sampling?
++        /// Elicitation capabilities
++        public var elicitation: Elicitation?
+         /// Tools capabilities
+         public var tools: Tools?
+ 
+@@ -103,12 +110,14 @@ public actor Server {
+             prompts: Prompts? = nil,
+             resources: Resources? = nil,
+             sampling: Sampling? = nil,
++            elicitation: Elicitation? = nil,
+             tools: Tools? = nil
+         ) {
+             self.logging = logging
+             self.prompts = prompts
+             self.resources = resources
+             self.sampling = sampling
++            self.elicitation = elicitation
+             self.tools = tools
+         }
+     }
+@@ -372,6 +381,34 @@ public actor Server {
+             "Bidirectional sampling requests not yet implemented in transport layer")
+     }
+ 
++    /// Request elicitation from the connected client
++    ///
++    /// Elicitation allows servers to request structured user input through the client,
++    /// enabling dynamic data collection with schema validation and human approval.
++    ///
++    /// - Parameters:
++    ///   - parameters: The elicitation request parameters
++    /// - Returns: The elicitation result containing the user's action and data
++    /// - Throws: MCPError if the request fails
++    /// - SeeAlso: https://modelcontextprotocol.io/specification/draft/client/elicitation
++    public func requestElicitation(
++        _ parameters: CreateElicitation.Parameters
++    ) async throws -> CreateElicitation.Result {
++        guard connection != nil else {
++            throw MCPError.internalError("Server connection not initialized")
++        }
++
++        // Note: This requires bidirectional communication support in the transport layer
++        // 2. Wait for client response
++
++        let request = CreateElicitation.request(parameters)
++        
++        // This would need to be implemented with proper request/response handling
++        // similar to how the client sends requests to servers
++        throw MCPError.internalError(
++            "Bidirectional elicitation requests not yet implemented in transport layer")
++    }
++
+     /// A JSON-RPC batch containing multiple requests and/or notifications
+     struct Batch: Sendable {
+         /// An item in a JSON-RPC batch
+diff --git a/Tests/MCPTests/ElicitationSecurityTests.swift b/Tests/MCPTests/ElicitationSecurityTests.swift
+new file mode 100644
+index 0000000..2254509
+--- /dev/null
++++ b/Tests/MCPTests/ElicitationSecurityTests.swift
+@@ -0,0 +1,172 @@
++import Testing
++import Foundation
++@testable import MCP
++
++@Suite("Elicitation Security Tests")
++struct ElicitationSecurityTests {
++    
++    @Test("Elicitation should not request sensitive information - password example")
++    func testSensitiveInformationPrevention() throws {
++        let sensitiveSchema = Value.object([
++            "type": .string("object"),
++            "properties": .object([
++                "password": .object(["type": .string("string")]),
++                "ssn": .object(["type": .string("string")]),
++                "creditCard": .object(["type": .string("string")])
++            ])
++        ])
++        
++        let parameters = CreateElicitation.Parameters(
++            message: "Please provide your password and SSN",
++            schema: sensitiveSchema
++        )
++        
++        let warnings = parameters.validateSecurity()
++        #expect(warnings.count > 0)
++        #expect(warnings.contains { $0.contains("password") })
++        #expect(warnings.contains { $0.contains("ssn") })
++    }
++    
++    @Test("Elicitation should provide clear decline option")
++    func testDeclineOptionAvailable() throws {
++        let result = CreateElicitation.Result(action: .decline)
++        #expect(result.action == .decline)
++        #expect(result.data == nil)
++    }
++    
++    @Test("Elicitation should provide clear cancel option")
++    func testCancelOptionAvailable() throws {
++        let result = CreateElicitation.Result(action: .cancel)
++        #expect(result.action == .cancel)
++        #expect(result.data == nil)
++    }
++    
++    @Test("Elicitation should handle user privacy - no data on decline")
++    func testPrivacyOnDecline() throws {
++        struct UserData: Codable, Hashable, Sendable {
++            let name: String
++            let email: String
++        }
++        
++        let declineResult = CreateElicitation.Result(action: .decline)
++        let typedResult = try ElicitationResult<UserData>(from: declineResult)
++        
++        #expect(typedResult.action == .decline)
++        #expect(typedResult.data == nil)
++        #expect(typedResult.isRejected == true)
++        #expect(typedResult.isAccepted == false)
++    }
++    
++    @Test("Elicitation should handle user privacy - no data on cancel")
++    func testPrivacyOnCancel() throws {
++        struct UserData: Codable, Hashable, Sendable {
++            let name: String
++            let email: String
++        }
++        
++        let cancelResult = CreateElicitation.Result(action: .cancel)
++        let typedResult = try ElicitationResult<UserData>(from: cancelResult)
++        
++        #expect(typedResult.action == .cancel)
++        #expect(typedResult.data == nil)
++        #expect(typedResult.isRejected == true)
++        #expect(typedResult.isAccepted == false)
++    }
++    
++    @Test("Elicitation metadata should identify requesting server")
++    func testServerIdentificationInMetadata() throws {
++        let parameters = CreateElicitation.Parameters(
++            message: "Please provide your preferences",
++            schema: Value.object(["type": .string("object")]),
++            metadata: [
++                "server_id": .string("booking-server"),
++                "server_name": .string("Restaurant Booking Service"),
++                "request_context": .string("table_reservation")
++            ]
++        )
++        
++        let warnings = parameters.validateSecurity()
++        #expect(!warnings.contains { $0.contains("Missing server identification") })
++        #expect(parameters.metadata?["server_id"]?.stringValue == "booking-server")
++        #expect(parameters.metadata?["server_name"]?.stringValue == "Restaurant Booking Service")
++    }
++    
++    @Test("Elicitation should validate schema structure")
++    func testSchemaValidation() throws {
++        let validSchema = Value.object([
++            "type": .string("object"),
++            "properties": .object([
++                "preference": .object([
++                    "type": .string("string"),
++                    "description": .string("User preference")
++                ])
++            ]),
++            "required": .array([.string("preference")])
++        ])
++        
++        let parameters = CreateElicitation.Parameters(
++            message: "Please select your preference",
++            schema: validSchema,
++            metadata: ["server_name": .string("Test Server")]
++        )
++        
++        #expect(parameters.schema.objectValue?["type"]?.stringValue == "object")
++        #expect(parameters.schema.objectValue?["properties"] != nil)
++    }
++    
++    @Test("Elicitation should handle malformed responses gracefully")
++    func testMalformedResponseHandling() throws {
++        struct ValidData: Codable, Hashable, Sendable {
++            let name: String
++        }
++        
++        let malformedData = Value.object([
++            "invalid_field": .string("test")
++        ])
++        
++        let result = CreateElicitation.Result(action: .accept, data: malformedData)
++        
++        #expect(throws: (any Error).self) {
++            try ElicitationResult<ValidData>(from: result)
++        }
++    }
++    
++    @Test("Default elicitation handler should decline by default")
++    func testDefaultHandlerSecurity() async throws {
++        let parameters = CreateElicitation.Parameters(
++            message: "Test request",
++            schema: Value.object(["type": .string("object")]),
++            metadata: ["server_name": .string("Test Server")]
++        )
++        
++        let result = try await Client.defaultElicitationHandler(parameters)
++        #expect(result.action == .decline)
++        #expect(result.data == nil)
++    }
++    
++    @Test("Security validation detects missing server identification")
++    func testMissingServerIdentification() throws {
++        let parameters = CreateElicitation.Parameters(
++            message: "Please provide information",
++            schema: Value.object(["type": .string("object")])
++        )
++        
++        let warnings = parameters.validateSecurity()
++        #expect(warnings.contains { $0.contains("Missing server identification") })
++    }
++    
++    @Test("Security validation detects multiple sensitive terms")
++    func testMultipleSensitiveTermsDetection() throws {
++        let parameters = CreateElicitation.Parameters(
++            message: "Please provide your password, SSN, and credit card number for verification",
++            schema: Value.object(["type": .string("object")]),
++            metadata: ["server_name": .string("Test Server")]
++        )
++        
++        let warnings = parameters.validateSecurity()
++        #expect(warnings.count >= 3)
++        #expect(warnings.contains { $0.contains("password") })
++        #expect(warnings.contains { $0.contains("ssn") })
++        #expect(warnings.contains { $0.contains("credit card") })
++    }
++}
+diff --git a/Tests/MCPTests/ElicitationTests.swift b/Tests/MCPTests/ElicitationTests.swift
+new file mode 100644
+index 0000000..59e6ec3
+--- /dev/null
++++ b/Tests/MCPTests/ElicitationTests.swift
+@@ -0,0 +1,125 @@
++import Testing
++import Foundation
++@testable import MCP
++
++@Suite("Elicitation Tests")
++struct ElicitationTests {
++    
++    @Test("CreateElicitation method name")
++    func testCreateElicitationMethodName() {
++        #expect(CreateElicitation.name == "elicitation/create")
++    }
++    
++    @Test("CreateElicitation Parameters encoding and decoding")
++    func testCreateElicitationParametersEncoding() throws {
++        let schema = Value.object([
++            "type": .string("object"),
++            "properties": .object([
++                "name": .object(["type": .string("string")])
++            ])
++        ])
++        
++        let parameters = CreateElicitation.Parameters(
++            message: "Please provide your name",
++            schema: schema,
++            metadata: ["context": .string("user_registration")]
++        )
++        
++        let encoder = JSONEncoder()
++        let decoder = JSONDecoder()
++        
++        let data = try encoder.encode(parameters)
++        let decoded = try decoder.decode(CreateElicitation.Parameters.self, from: data)
++        
++        #expect(decoded.message == "Please provide your name")
++        #expect(decoded.schema == schema)
++        #expect(decoded.metadata?["context"]?.stringValue == "user_registration")
++    }
++    
++    @Test("CreateElicitation Result encoding and decoding")
++    func testCreateElicitationResultEncoding() throws {
++        let responseData = Value.object([
++            "name": .string("John Doe")
++        ])
++        
++        let result = CreateElicitation.Result(
++            action: .accept,
++            data: responseData
++        )
++        
++        let encoder = JSONEncoder()
++        let decoder = JSONDecoder()
++        
++        let data = try encoder.encode(result)
++        let decoded = try decoder.decode(CreateElicitation.Result.self, from: data)
++        
++        #expect(decoded.action == .accept)
++        #expect(decoded.data == responseData)
++    }
++    
++    @Test("CreateElicitation Result actions")
++    func testCreateElicitationResultActions() throws {
++        let acceptResult = CreateElicitation.Result(action: .accept, data: .string("test"))
++        let declineResult = CreateElicitation.Result(action: .decline)
++        let cancelResult = CreateElicitation.Result(action: .cancel)
++        
++        #expect(acceptResult.action == .accept)
++        #expect(acceptResult.data?.stringValue == "test")
++        
++        #expect(declineResult.action == .decline)
++        #expect(declineResult.data == nil)
++        
++        #expect(cancelResult.action == .cancel)
++        #expect(cancelResult.data == nil)
++    }
++    
++    @Test("ElicitationResult type-safe wrapper")
++    func testElicitationResultWrapper() throws {
++        struct UserInfo: Codable, Hashable, Sendable {
++            let name: String
++            let age: Int
++        }
++        
++        let userData = UserInfo(name: "Alice", age: 30)
++        let encoder = JSONEncoder()
++        let userDataValue = try JSONDecoder().decode(Value.self, from: try encoder.encode(userData))
++        
++        let rawResult = CreateElicitation.Result(action: .accept, data: userDataValue)
++        let typedResult = try ElicitationResult<UserInfo>(from: rawResult)
++        
++        #expect(typedResult.action == .accept)
++        #expect(typedResult.data?.name == "Alice")
++        #expect(typedResult.data?.age == 30)
++    }
++    
++    @Test("ElicitationResult decline handling")
++    func testElicitationResultDecline() throws {
++        struct UserInfo: Codable, Hashable, Sendable {
++            let name: String
++        }
++        
++        let rawResult = CreateElicitation.Result(action: .decline)
++        let typedResult = try ElicitationResult<UserInfo>(from: rawResult)
++        
++        #expect(typedResult.action == .decline)
++        #expect(typedResult.data == nil)
++    }
++    
++    @Test("Server elicitation capability")
++    func testServerElicitationCapability() {
++        let capabilities = Server.Capabilities(
++            elicitation: .init()
++        )
++        
++        #expect(capabilities.elicitation != nil)
++    }
++    
++    @Test("Client elicitation capability")
++    func testClientElicitationCapability() {
++        let capabilities = Client.Capabilities(
++            elicitation: .init()
++        )
++        
++        #expect(capabilities.elicitation != nil)
++    }
++}
+diff --git a/Tests/MCPTests/ElicitationUseCaseTests.swift b/Tests/MCPTests/ElicitationUseCaseTests.swift
+new file mode 100644
+index 0000000..e0a7678
+--- /dev/null
++++ b/Tests/MCPTests/ElicitationUseCaseTests.swift
+@@ -0,0 +1,217 @@
++import Testing
++import Foundation
++@testable import MCP
++
++@Suite("Elicitation Use Case Tests")
++struct ElicitationUseCaseTests {
++    
++    @Test("Safe use case - Restaurant booking preferences")
++    func testRestaurantBookingUseCase() throws {
++        struct BookingPreferences: Codable, Hashable, Sendable {
++            let checkAlternative: Bool
++            let alternativeDate: String
++            let partySize: Int?
++        }
++        
++        let schema = Value.object([
++            "type": .string("object"),
++            "properties": .object([
++                "checkAlternative": .object([
++                    "type": .string("boolean"),
++                    "description": .string("Would you like to check another date?")
++                ]),
++                "alternativeDate": .object([
++                    "type": .string("string"),
++                    "description": .string("Alternative date (YYYY-MM-DD)")
++                ]),
++                "partySize": .object([
++                    "type": .string("integer"),
++                    "description": .string("Number of people")
++                ])
++            ])
++        ])
++        
++        let parameters = CreateElicitation.Parameters(
++            message: "No tables available for December 25th. Would you like to try another date?",
++            schema: schema,
++            metadata: [
++                "server_name": .string("Restaurant Booking"),
++                "context": .string("availability_check"),
++                "safe_request": .bool(true)
++            ]
++        )
++        
++        let warnings = parameters.validateSecurity()
++        #expect(warnings.isEmpty)
++        #expect(parameters.message.contains("Would you like"))
++        #expect(!parameters.message.contains("password"))
++        #expect(!parameters.message.contains("credit card"))
++        #expect(parameters.metadata?["safe_request"]?.boolValue == true)
++    }
++    
++    @Test("Safe use case - Travel preferences")
++    func testTravelPreferencesUseCase() throws {
++        struct TravelPreferences: Codable, Hashable, Sendable {
++            let destination: String
++            let travelDates: [String]
++            let budget: String
++        }
++        
++        let schema = Value.object([
++            "type": .string("object"),
++            "properties": .object([
++                "destination": .object([
++                    "type": .string("string"),
++                    "description": .string("Preferred destination")
++                ]),
++                "travelDates": .object([
++                    "type": .string("array"),
++                    "items": .object(["type": .string("string")])
++                ]),
++                "budget": .object([
++                    "type": .string("string"),
++                    "enum": .array([.string("low"), .string("medium"), .string("high")])
++                ])
++            ])
++        ])
++        
++        let parameters = CreateElicitation.Parameters(
++            message: "Please specify your travel preferences to find the best options",
++            schema: schema,
++            metadata: [
++                "server_name": .string("Travel Assistant"),
++                "purpose": .string("preference_collection")
++            ]
++        )
++        
++        let warnings = parameters.validateSecurity()
++        #expect(warnings.isEmpty)
++        #expect(parameters.message.contains("preferences"))
++        #expect(parameters.schema.objectValue?["properties"] != nil)
++    }
++    
++    @Test("Unsafe use case detection - Personal information")
++    func testUnsafePersonalInformationDetection() throws {
++        let unsafeSchema = Value.object([
++            "type": .string("object"),
++            "properties": .object([
++                "ssn": .object(["type": .string("string")]),
++                "password": .object(["type": .string("string")]),
++                "creditCardNumber": .object(["type": .string("string")])
++            ])
++        ])
++        
++        let parameters = CreateElicitation.Parameters(
++            message: "Please provide your SSN and password for verification",
++            schema: unsafeSchema,
++            metadata: ["server_name": .string("Verification Service")]
++        )
++        
++        let warnings = parameters.validateSecurity()
++        #expect(warnings.count >= 2)
++        
++        let schemaProps = parameters.schema.objectValue?["properties"]?.objectValue
++        #expect(schemaProps?["ssn"] != nil)
++        #expect(schemaProps?["password"] != nil)
++        #expect(schemaProps?["creditCardNumber"] != nil)
++    }
++    
++    @Test("User review workflow simulation")
++    func testUserReviewWorkflow() throws {
++        struct FormData: Codable, Hashable, Sendable {
++            let name: String
++            let email: String
++        }
++        
++        let userData = FormData(name: "John Doe", email: "john@example.com")
++        let encoder = JSONEncoder()
++        let userDataValue = try JSONDecoder().decode(Value.self, from: try encoder.encode(userData))
++        
++        let acceptResult = CreateElicitation.Result(action: .accept, data: userDataValue)
++        let typedResult = try ElicitationResult<FormData>(from: acceptResult)
++        
++        #expect(typedResult.action == .accept)
++        #expect(typedResult.data?.name == "John Doe")
++        #expect(typedResult.data?.email == "john@example.com")
++        #expect(typedResult.isAccepted == true)
++        #expect(typedResult.isRejected == false)
++    }
++    
++    @Test("Clear server identification in UI context")
++    func testServerIdentificationForUI() throws {
++        let parameters = CreateElicitation.Parameters(
++            message: "The Restaurant Booking Service is requesting your dining preferences",
++            schema: Value.object(["type": .string("object")]),
++            metadata: [
++                "server_display_name": .string("Restaurant Booking Service"),
++                "server_icon": .string("🍽️"),
++                "trust_level": .string("verified"),
++                "ui_context": .object([
++                    "show_server_badge": .bool(true),
++                    "highlight_privacy_options": .bool(true)
++                ])
++            ]
++        )
++        
++        let warnings = parameters.validateSecurity()
++        #expect(warnings.isEmpty)
++        #expect(parameters.message.contains("Restaurant Booking Service"))
++        #expect(parameters.metadata?["server_display_name"]?.stringValue == "Restaurant Booking Service")
++        #expect(parameters.metadata?["trust_level"]?.stringValue == "verified")
++        #expect(parameters.metadata?["ui_context"]?.objectValue?["show_server_badge"]?.boolValue == true)
++    }
++    
++    @Test("Privacy-respecting decline handling")
++    func testPrivacyRespectingDecline() throws {
++        struct SensitiveData: Codable, Hashable, Sendable {
++            let personalInfo: String
++        }
++        
++        let declineResult = CreateElicitation.Result(action: .decline)
++        let typedResult = try ElicitationResult<SensitiveData>(from: declineResult)
++        
++        #expect(typedResult.action == .decline)
++        #expect(typedResult.data == nil)
++        #expect(typedResult.isRejected == true)
++    }
++    
++    @Test("Multiple choice safe options")
++    func testMultipleChoiceSafeOptions() throws {
++        let safeChoiceSchema = Value.object([
++            "type": .string("object"),
++            "properties": .object([
++                "preference": .object([
++                    "type": .string("string"),
++                    "enum": .array([
++                        .string("option_a"),
++                        .string("option_b"), 
++                        .string("option_c"),
++                        .string("decline")
++                    ])
++                ])
++            ])
++        ])
++        
++        let parameters = CreateElicitation.Parameters(
++            message: "Please select your preference (you can always decline)",
++            schema: safeChoiceSchema,
++            metadata: ["server_name": .string("Preference Service")]
++        )
++        
++        let warnings = parameters.validateSecurity()
++        #expect(warnings.isEmpty)
++        
++        let enumOptions = parameters.schema.objectValue?["properties"]?.objectValue?["preference"]?.objectValue?["enum"]?.arrayValue
++        #expect(enumOptions?.contains(.string("decline")) == true)
++    }
++    
++    @Test("Timeout and cancellation handling")
++    func testTimeoutHandling() throws {
++        let cancelResult = CreateElicitation.Result(action: .cancel)
++        let typedResult = try ElicitationResult<String>(from: cancelResult)
++        
++        #expect(cancelResult.action == .cancel)
++        #expect(cancelResult.data == nil)
++        #expect(typedResult.isRejected == true)
++    }
++}

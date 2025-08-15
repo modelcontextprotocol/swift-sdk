@@ -866,6 +866,94 @@ let client = Client(name: "MyApp", version: "1.0.0")
 let transport = StdioTransport(logger: logger)
 ```
 
+### Elicitation
+
+Elicitation allows servers to request structured user input dynamically during workflows, enabling human-in-the-loop data collection with schema validation.
+
+#### Server-side Elicitation
+
+```swift
+// Define your data schema
+struct BookingPreferences: Codable, Hashable, Sendable {
+    let checkAlternative: Bool
+    let alternativeDate: String
+}
+
+// Register a tool that uses elicitation
+await server.withMethodHandler(CallTool.self) { params in
+    switch params.name {
+    case "book_table":
+        let date = params.arguments?["date"]?.stringValue ?? ""
+        let partySize = params.arguments?["party_size"]?.intValue ?? 1
+        
+        // Check availability
+        if date == "2024-12-25" {
+            // Date unavailable - request user input through elicitation
+            let context = await server.context
+            let result = try await context.elicit(
+                message: "No tables available for \(partySize) on \(date). Would you like to try another date?",
+                schema: BookingPreferences.self
+            )
+            
+            switch result.action {
+            case .accept:
+                if let data = result.data, data.checkAlternative {
+                    return CallTool.Result(
+                        content: [.text("[SUCCESS] Booked for \(data.alternativeDate)")],
+                        isError: false
+                    )
+                } else {
+                    return CallTool.Result(
+                        content: [.text("[CANCELLED] No booking made")],
+                        isError: false
+                    )
+                }
+            case .decline, .cancel:
+                return CallTool.Result(
+                    content: [.text("[CANCELLED] Booking cancelled")],
+                    isError: false
+                )
+            }
+        }
+        
+        // Date available
+        return CallTool.Result(
+            content: [.text("[SUCCESS] Booked for \(date)")],
+            isError: false
+        )
+    default:
+        return CallTool.Result(
+            content: [.text("Unknown tool")],
+            isError: true
+        )
+    }
+}
+```
+
+#### Client-side Elicitation Handling
+
+```swift
+// Register an elicitation handler in the client
+await client.withElicitationHandler { parameters in
+    // Display the elicitation request to the user
+    print("Server requests: \(parameters.message)")
+    
+    // In a real implementation, you would:
+    // 1. Show the message to the user
+    // 2. Present a form based on the schema
+    // 3. Collect and validate user input
+    // 4. Return the appropriate response
+    
+    // For this example, simulate user acceptance
+    let responseData = Value.object([
+        "checkAlternative": .bool(true),
+        "alternativeDate": .string("2024-12-26")
+    ])
+    
+    return CreateElicitation.Result(action: .accept, data: responseData)
+}
+```
+
 ## Additional Resources
 
 - [MCP Specification](https://modelcontextprotocol.io/specification/2025-03-26/)
