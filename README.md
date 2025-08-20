@@ -859,11 +859,18 @@ LoggingSystem.bootstrap { label in
 // Create logger
 let logger = Logger(label: "com.example.mcp")
 
-// Pass to client/server
+// Create client/server
 let client = Client(name: "MyApp", version: "1.0.0")
+let server = Server(name: "MyServer", version: "1.0.0")
 
-// Pass to transport
+// Create transport with logger
 let transport = StdioTransport(logger: logger)
+
+// Connect client and transport with logger
+try await client.connect(transport: transport)
+
+// Connect server and transport with logger
+try await server.start(transport: transport)
 ```
 
 ## Additional Resources
