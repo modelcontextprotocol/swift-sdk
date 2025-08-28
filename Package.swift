@@ -39,7 +39,11 @@ let package = Package(
         // Targets can depend on other targets in this package and products from dependencies.
         .target(
             name: "MCP",
-            dependencies: targetDependencies),
+            dependencies: targetDependencies,
+            swiftSettings: [
+              .enableUpcomingFeature("StrictConcurrency")
+            ]
+        ),
         .testTarget(
             name: "MCPTests",
             dependencies: ["MCP"] + targetDependencies),
