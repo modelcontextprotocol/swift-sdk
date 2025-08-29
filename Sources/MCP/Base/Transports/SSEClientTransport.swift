@@ -186,7 +186,7 @@ import Logging
                 request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
             }
 
-            let (responseData, response) = try await session.data(for: request)
+            let (_, response) = try await session.data(for: request)
 
             guard let httpResponse = response as? HTTPURLResponse else {
                 throw MCPError.internalError("Invalid HTTP response")
@@ -194,12 +194,6 @@ import Logging
 
             guard (200..<300).contains(httpResponse.statusCode) else {
                 throw MCPError.internalError("HTTP error: \(httpResponse.statusCode)")
-            }
-
-            // If there's response data, yield it to the message stream so the client can receive it
-            if !responseData.isEmpty {
-                logger.debug("Received response data", metadata: ["size": "\(responseData.count)"])
-//                messageContinuation.yield(responseData)
             }
         }
 
