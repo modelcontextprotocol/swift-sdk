@@ -104,6 +104,7 @@ let sseTransport = SSEClientTransport(
     endpoint: URL(string: "http://localhost:8080/sse")! // Ensure endpoint is SSE-specific if needed
 )
 try await client.connect(transport: sseTransport)
+try await client.initialize()
 ```
 
 ### Tools
