@@ -422,7 +422,18 @@ import Logging
 
             // For relative paths, preserve the scheme, host, and port
             let pathToUse = path.starts(with: "/") ? path : "/\(path)"
-            components.path = pathToUse
+            
+            // Parse the path to separate path and query components
+            if let pathComponents = URLComponents(string: pathToUse) {
+                components.path = pathComponents.path
+                // Preserve any query parameters from the endpoint path
+                if let queryItems = pathComponents.queryItems {
+                    components.queryItems = queryItems
+                }
+            } else {
+                components.path = pathToUse
+            }
+            
             return components.url
         }
     }
