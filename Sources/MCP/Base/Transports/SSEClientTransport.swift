@@ -199,7 +199,7 @@ import Logging
             // If there's response data, yield it to the message stream so the client can receive it
             if !responseData.isEmpty {
                 logger.debug("Received response data", metadata: ["size": "\(responseData.count)"])
-                messageContinuation.yield(responseData)
+//                messageContinuation.yield(responseData)
             }
         }
 
