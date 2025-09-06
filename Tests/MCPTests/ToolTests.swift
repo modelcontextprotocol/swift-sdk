@@ -423,3 +423,20 @@ struct ToolTests {
         }
     }
 }
+
+    @Test("Tool with missing description defaults to empty string")
+    func testToolWithMissingDescription() throws {
+        let jsonString = """
+            {
+                "name": "test_tool",
+                "inputSchema": {}
+            }
+            """
+        let jsonData = jsonString.data(using: .utf8)!
+        
+        let tool = try JSONDecoder().decode(Tool.self, from: jsonData)
+        
+        #expect(tool.name == "test_tool")
+        #expect(tool.description == "")
+        #expect(tool.inputSchema == [:])
+    }

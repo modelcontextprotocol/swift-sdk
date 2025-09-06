@@ -182,7 +182,7 @@ public struct Tool: Hashable, Codable, Sendable {
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         name = try container.decode(String.self, forKey: .name)
-        description = try container.decode(String.self, forKey: .description)
+        description = try container.decodeIfPresent(String.self, forKey: .description) ?? ""
         inputSchema = try container.decode(Value.self, forKey: .inputSchema)
         annotations =
             try container.decodeIfPresent(Tool.Annotations.self, forKey: .annotations) ?? .init()
