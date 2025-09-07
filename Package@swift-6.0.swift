@@ -1,4 +1,4 @@
-// swift-tools-version:6.1
+// swift-tools-version:6.0
 // The swift-tools-version declares the minimum version of Swift required to build this package.
 
 import PackageDescription
@@ -41,11 +41,7 @@ let package = Package(
         // Targets can depend on other targets in this package and products from dependencies.
         .target(
             name: "MCP",
-            dependencies: targetDependencies,
-            swiftSettings: [
-                .enableUpcomingFeature("StrictConcurrency")
-            ]
-        ),
+            dependencies: targetDependencies),
         .testTarget(
             name: "MCPTests",
             dependencies: ["MCP"] + targetDependencies),
