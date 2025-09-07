@@ -437,6 +437,6 @@ struct ToolTests {
         let tool = try JSONDecoder().decode(Tool.self, from: jsonData)
         
         #expect(tool.name == "test_tool")
-        #expect(tool.description == "")
+        #expect(tool.description == nil)
         #expect(tool.inputSchema == [:])
     }
