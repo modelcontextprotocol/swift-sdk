@@ -12,7 +12,7 @@ public struct Tool: Hashable, Codable, Sendable {
     /// The tool name
     public let name: String
     /// The tool description
-    public let description: String
+    public let description: String?
     /// The tool input schema
     public let inputSchema: Value
 
