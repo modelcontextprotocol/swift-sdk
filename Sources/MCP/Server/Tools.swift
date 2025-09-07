@@ -85,7 +85,7 @@ public struct Tool: Hashable, Codable, Sendable {
     /// Initialize a tool with a name, description, input schema, and annotations
     public init(
         name: String,
-        description: String,
+        description: String?,
         inputSchema: Value,
         annotations: Annotations = nil
     ) {
