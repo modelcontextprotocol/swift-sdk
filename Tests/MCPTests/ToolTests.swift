@@ -424,7 +424,7 @@ struct ToolTests {
     }
 }
 
-    @Test("Tool with missing description defaults to empty string")
+    @Test("Tool with missing description")
     func testToolWithMissingDescription() throws {
         let jsonString = """
             {
