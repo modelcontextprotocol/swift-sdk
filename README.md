@@ -694,13 +694,8 @@ struct MCPService: Service {
         // Start the server
         try await server.start(transport: transport)
 
-        // Keep running until external cancellation
-        try await Task.sleep(for: .days(365 * 100))  // Effectively forever
-    }
-
-    func shutdown() async throws {
-        // Gracefully shutdown the server
-        await server.stop()
+        // Keep running until external cancellation or receiving EOF
+        await server.waitUntilCompleted()
     }
 }
 ```
