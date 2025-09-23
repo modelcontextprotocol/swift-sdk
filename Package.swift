@@ -16,7 +16,7 @@ var targetDependencies: [Target.Dependency] = [
     .product(name: "Logging", package: "swift-log"),
     .product(
         name: "EventSource", package: "eventsource",
-        condition: .when(platforms: [.macOS, .iOS, .tvOS, .visionOS, .watchOS])),
+        condition: .when(platforms: [.macOS, .iOS, .tvOS, .visionOS, .watchOS, .macCatalyst])),
 ]
 
 let package = Package(
