@@ -15,6 +15,8 @@ public struct Tool: Hashable, Codable, Sendable {
     public let description: String?
     /// The tool input schema
     public let inputSchema: Value
+    /// Additional properties for a tool for OpenAI use. Not part of spec. Encoded as `_meta`.
+    public let meta: [String: Value]?
 
     /// Annotations that provide display-facing and operational information for a Tool.
     ///
@@ -177,6 +179,7 @@ public struct Tool: Hashable, Codable, Sendable {
         case description
         case inputSchema
         case annotations
+        case meta = "_meta"
     }
 
     public init(from decoder: Decoder) throws {
@@ -186,6 +189,7 @@ public struct Tool: Hashable, Codable, Sendable {
         inputSchema = try container.decode(Value.self, forKey: .inputSchema)
         annotations =
             try container.decodeIfPresent(Tool.Annotations.self, forKey: .annotations) ?? .init()
+        meta = try container.decodeIfPresent([String: Value].self, forKey: .meta)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -195,6 +199,9 @@ public struct Tool: Hashable, Codable, Sendable {
         try container.encode(inputSchema, forKey: .inputSchema)
         if !annotations.isEmpty {
             try container.encode(annotations, forKey: .annotations)
+        }
+        if meta?.isEmpty == false {
+            try container.encode(meta, forKey: .meta)
         }
     }
 }
