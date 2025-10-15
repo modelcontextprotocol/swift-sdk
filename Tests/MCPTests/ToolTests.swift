@@ -20,6 +20,8 @@ struct ToolTests {
         #expect(tool.name == "test_tool")
         #expect(tool.description == "A test tool")
         #expect(tool.inputSchema != nil)
+        #expect(tool.title == nil)
+        #expect(tool.outputSchema == nil)
     }
 
     @Test("Tool Annotations initialization and properties")
@@ -200,6 +202,40 @@ struct ToolTests {
         #expect(decoded.name == tool.name)
         #expect(decoded.description == tool.description)
         #expect(decoded.inputSchema == tool.inputSchema)
+    }
+
+    @Test("Tool encoding and decoding with title and output schema")
+    func testToolEncodingDecodingWithTitleAndOutputSchema() throws {
+        let tool = Tool(
+            name: "test_tool",
+            title: "Readable Test Tool",
+            description: "Test tool description",
+            inputSchema: .object([
+                "type": .string("object"),
+                "properties": .object([
+                    "param1": .string("String parameter")
+                ])
+            ]),
+            outputSchema: .object([
+                "type": .string("object"),
+                "properties": .object([
+                    "result": .string("String result")
+                ])
+            ])
+        )
+
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+
+        let data = try encoder.encode(tool)
+        let decoded = try decoder.decode(Tool.self, from: data)
+
+        #expect(decoded.title == tool.title)
+        #expect(decoded.outputSchema == tool.outputSchema)
+
+        let jsonString = String(decoding: data, as: UTF8.self)
+        #expect(jsonString.contains("\"title\":\"Readable Test Tool\""))
+        #expect(jsonString.contains("\"outputSchema\""))
     }
 
     @Test("Text content encoding and decoding")
