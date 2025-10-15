@@ -7,14 +7,18 @@ import Foundation
 /// Each tool is uniquely identified by a name and includes metadata
 /// describing its schema.
 ///
-/// - SeeAlso: https://spec.modelcontextprotocol.io/specification/2024-11-05/server/tools/
+/// - SeeAlso: https://modelcontextprotocol.io/specification/2025-06-18/server/tools
 public struct Tool: Hashable, Codable, Sendable {
     /// The tool name
     public let name: String
+    /// The human-readable name of the tool for display purposes.
+    public let title: String?
     /// The tool description
     public let description: String?
     /// The tool input schema
     public let inputSchema: Value
+    /// The tool output schema, defining expected output structure
+    public let outputSchema: Value?
 
     /// Annotations that provide display-facing and operational information for a Tool.
     ///
@@ -85,13 +89,17 @@ public struct Tool: Hashable, Codable, Sendable {
     /// Initialize a tool with a name, description, input schema, and annotations
     public init(
         name: String,
+        title: String? = nil,
         description: String?,
         inputSchema: Value,
+        outputSchema: Value? = nil,
         annotations: Annotations = nil
     ) {
         self.name = name
+        self.title = title
         self.description = description
         self.inputSchema = inputSchema
+        self.outputSchema = outputSchema
         self.annotations = annotations
     }
 
@@ -174,16 +182,20 @@ public struct Tool: Hashable, Codable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case name
+        case title
         case description
         case inputSchema
+        case outputSchema
         case annotations
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         name = try container.decode(String.self, forKey: .name)
+        title = try container.decodeIfPresent(String.self, forKey: .title)
         description = try container.decodeIfPresent(String.self, forKey: .description)
         inputSchema = try container.decode(Value.self, forKey: .inputSchema)
+        outputSchema = try container.decodeIfPresent(Value.self, forKey: .outputSchema)
         annotations =
             try container.decodeIfPresent(Tool.Annotations.self, forKey: .annotations) ?? .init()
     }
@@ -191,8 +203,10 @@ public struct Tool: Hashable, Codable, Sendable {
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(name, forKey: .name)
+        try container.encodeIfPresent(title, forKey: .title)
         try container.encode(description, forKey: .description)
         try container.encode(inputSchema, forKey: .inputSchema)
+        try container.encodeIfPresent(outputSchema, forKey: .outputSchema)
         if !annotations.isEmpty {
             try container.encode(annotations, forKey: .annotations)
         }
