@@ -89,12 +89,14 @@ public struct Tool: Hashable, Codable, Sendable {
         name: String,
         description: String?,
         inputSchema: Value,
-        annotations: Annotations = nil
+        annotations: Annotations = nil,
+        meta: [String: Value]? = nil
     ) {
         self.name = name
         self.description = description
         self.inputSchema = inputSchema
         self.annotations = annotations
+        self.meta = meta
     }
 
     /// Content types that can be returned by a tool
