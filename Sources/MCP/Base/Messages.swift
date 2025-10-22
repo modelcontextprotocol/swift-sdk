@@ -37,8 +37,11 @@ struct AnyMethod: Method, Sendable {
 }
 
 extension Method where Parameters == Empty {
-    public static func request(id: ID = .random) -> Request<Self> {
-        Request(id: id, method: name, params: Empty())
+    public static func request(
+        id: ID = .random,
+        generalFields: GeneralFields = .init()
+    ) -> Request<Self> {
+        Request(id: id, method: name, params: Empty(), generalFields: generalFields)
     }
 }
 
@@ -50,18 +53,30 @@ extension Method where Result == Empty {
 
 extension Method {
     /// Create a request with the given parameters.
-    public static func request(id: ID = .random, _ parameters: Self.Parameters) -> Request<Self> {
-        Request(id: id, method: name, params: parameters)
+    public static func request(
+        id: ID = .random,
+        _ parameters: Self.Parameters,
+        generalFields: GeneralFields = .init()
+    ) -> Request<Self> {
+        Request(id: id, method: name, params: parameters, generalFields: generalFields)
     }
 
     /// Create a response with the given result.
-    public static func response(id: ID, result: Self.Result) -> Response<Self> {
-        Response(id: id, result: result)
+    public static func response(
+        id: ID,
+        result: Self.Result,
+        general: GeneralFields = .init()
+    ) -> Response<Self> {
+        Response(id: id, result: result, general: general)
     }
 
     /// Create a response with the given error.
-    public static func response(id: ID, error: MCPError) -> Response<Self> {
-        Response(id: id, error: error)
+    public static func response(
+        id: ID,
+        error: MCPError,
+        general: GeneralFields = .init()
+    ) -> Response<Self> {
+        Response(id: id, error: error, general: general)
     }
 }
 
@@ -75,11 +90,19 @@ public struct Request<M: Method>: Hashable, Identifiable, Codable, Sendable {
     public let method: String
     /// The request parameters.
     public let params: M.Parameters
+    /// General MCP fields like `_meta`.
+    public let generalFields: GeneralFields
 
-    init(id: ID = .random, method: String, params: M.Parameters) {
+    init(
+        id: ID = .random,
+        method: String,
+        params: M.Parameters,
+        generalFields: GeneralFields = .init()
+    ) {
         self.id = id
         self.method = method
         self.params = params
+        self.generalFields = generalFields
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -92,6 +115,11 @@ public struct Request<M: Method>: Hashable, Identifiable, Codable, Sendable {
         try container.encode(id, forKey: .id)
         try container.encode(method, forKey: .method)
         try container.encode(params, forKey: .params)
+        try generalFields.encode(into: encoder, reservedKeyNames: Self.reservedGeneralFieldNames)
+    }
+
+    private static var reservedGeneralFieldNames: Set<String> {
+        ["jsonrpc", "id", "method", "params"]
     }
 }
 
@@ -133,6 +161,11 @@ extension Request {
                     codingPath: container.codingPath,
                     debugDescription: "Invalid params field"))
         }
+
+        let dynamicContainer = try decoder.container(keyedBy: DynamicCodingKey.self)
+        generalFields = try GeneralFields.decode(
+            from: dynamicContainer,
+            reservedKeyNames: Self.reservedGeneralFieldNames)
     }
 }
 
@@ -196,15 +229,25 @@ public struct Response<M: Method>: Hashable, Identifiable, Codable, Sendable {
     public let id: ID
     /// The response result.
     public let result: Swift.Result<M.Result, MCPError>
+    /// General MCP fields such as `_meta`.
+    public let general: GeneralFields
 
-    public init(id: ID, result: M.Result) {
+    public init(
+        id: ID,
+        result: Swift.Result<M.Result, MCPError>,
+        general: GeneralFields = .init()
+    ) {
         self.id = id
-        self.result = .success(result)
+        self.result = result
+        self.general = general
     }
 
-    public init(id: ID, error: MCPError) {
-        self.id = id
-        self.result = .failure(error)
+    public init(id: ID, result: M.Result, general: GeneralFields = .init()) {
+        self.init(id: id, result: .success(result), general: general)
+    }
+
+    public init(id: ID, error: MCPError, general: GeneralFields = .init()) {
+        self.init(id: id, result: .failure(error), general: general)
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -221,6 +264,7 @@ public struct Response<M: Method>: Hashable, Identifiable, Codable, Sendable {
         case .failure(let error):
             try container.encode(error, forKey: .error)
         }
+        try general.encode(into: encoder, reservedKeyNames: Self.reservedGeneralFieldNames)
     }
 
     public init(from decoder: Decoder) throws {
@@ -241,6 +285,15 @@ public struct Response<M: Method>: Hashable, Identifiable, Codable, Sendable {
                     codingPath: container.codingPath,
                     debugDescription: "Invalid response"))
         }
+
+        let dynamicContainer = try decoder.container(keyedBy: DynamicCodingKey.self)
+        general = try GeneralFields.decode(
+            from: dynamicContainer,
+            reservedKeyNames: Self.reservedGeneralFieldNames)
+    }
+
+    private static var reservedGeneralFieldNames: Set<String> {
+        ["jsonrpc", "id", "result", "error"]
     }
 }
 
@@ -249,18 +302,19 @@ typealias AnyResponse = Response<AnyMethod>
 
 extension AnyResponse {
     init<T: Method>(_ response: Response<T>) throws {
-        // Instead of re-encoding/decoding which might double-wrap the error,
-        // directly transfer the properties
-        self.id = response.id
         switch response.result {
         case .success(let result):
-            // For success, we still need to convert the result to a Value
             let data = try JSONEncoder().encode(result)
             let resultValue = try JSONDecoder().decode(Value.self, from: data)
-            self.result = .success(resultValue)
+            self = Response<AnyMethod>(
+                id: response.id,
+                result: .success(resultValue),
+                general: response.general)
         case .failure(let error):
-            // Keep the original error without re-encoding/decoding
-            self.result = .failure(error)
+            self = Response<AnyMethod>(
+                id: response.id,
+                result: .failure(error),
+                general: response.general)
         }
     }
 }

@@ -17,10 +17,10 @@ public struct Tool: Hashable, Codable, Sendable {
   public let description: String?
   /// The tool input schema
   public let inputSchema: Value
-  /// Additional properties for a tool for OpenAI use. Not part of spec. Encoded as `_meta`.
-  public let meta: [String: Value]?
   /// The tool output schema, defining expected output structure
   public let outputSchema: Value?
+  /// General MCP fields (e.g. `_meta`).
+  public var general: GeneralFields
 
   /// Annotations that provide display-facing and operational information for a Tool.
   ///
@@ -95,7 +95,7 @@ public struct Tool: Hashable, Codable, Sendable {
     description: String?,
     inputSchema: Value,
     annotations: Annotations = nil,
-    meta: [String: Value]? = nil,
+    general: GeneralFields = .init(),
     outputSchema: Value? = nil
   ) {
     self.name = name
@@ -104,7 +104,7 @@ public struct Tool: Hashable, Codable, Sendable {
     self.inputSchema = inputSchema
     self.outputSchema = outputSchema
     self.annotations = annotations
-    self.meta = meta
+    self.general = general
   }
 
   /// Content types that can be returned by a tool
@@ -116,15 +116,28 @@ public struct Tool: Hashable, Codable, Sendable {
     /// Audio content
     case audio(data: String, mimeType: String)
     /// Embedded resource content
-    case resource(uri: String, mimeType: String, text: String?)
+    case resource(
+      uri: String, mimeType: String, text: String?, title: String? = nil,
+      annotations: Resource.Annotations? = nil
+    )
+    /// Resource link
+    case resourceLink(
+      uri: String, name: String, description: String? = nil, mimeType: String? = nil,
+      annotations: Resource.Annotations? = nil
+    )
 
     private enum CodingKeys: String, CodingKey {
       case type
       case text
       case image
       case resource
+      case resourceLink
       case audio
       case uri
+      case name
+      case title
+      case description
+      case annotations
       case mimeType
       case data
       case metadata
@@ -150,9 +163,23 @@ public struct Tool: Hashable, Codable, Sendable {
         self = .audio(data: data, mimeType: mimeType)
       case "resource":
         let uri = try container.decode(String.self, forKey: .uri)
+        let title = try container.decodeIfPresent(String.self, forKey: .title)
         let mimeType = try container.decode(String.self, forKey: .mimeType)
         let text = try container.decodeIfPresent(String.self, forKey: .text)
-        self = .resource(uri: uri, mimeType: mimeType, text: text)
+        let annotations = try container.decodeIfPresent(
+          Resource.Annotations.self, forKey: .annotations)
+        self = .resource(
+          uri: uri, mimeType: mimeType, text: text, title: title, annotations: annotations)
+      case "resourceLink":
+        let uri = try container.decode(String.self, forKey: .uri)
+        let name = try container.decode(String.self, forKey: .name)
+        let description = try container.decodeIfPresent(String.self, forKey: .description)
+        let mimeType = try container.decodeIfPresent(String.self, forKey: .mimeType)
+        let annotations = try container.decodeIfPresent(
+          Resource.Annotations.self, forKey: .annotations)
+        self = .resourceLink(
+          uri: uri, name: name, description: description, mimeType: mimeType,
+          annotations: annotations)
       default:
         throw DecodingError.dataCorruptedError(
           forKey: .type, in: container, debugDescription: "Unknown tool content type")
@@ -175,11 +202,20 @@ public struct Tool: Hashable, Codable, Sendable {
         try container.encode("audio", forKey: .type)
         try container.encode(data, forKey: .data)
         try container.encode(mimeType, forKey: .mimeType)
-      case .resource(let uri, let mimeType, let text):
+      case .resource(let uri, let mimeType, let text, let title, let annotations):
         try container.encode("resource", forKey: .type)
         try container.encode(uri, forKey: .uri)
         try container.encode(mimeType, forKey: .mimeType)
         try container.encodeIfPresent(text, forKey: .text)
+        try container.encodeIfPresent(title, forKey: .title)
+        try container.encodeIfPresent(annotations, forKey: .annotations)
+      case .resourceLink(let uri, let name, let description, let mimeType, let annotations):
+        try container.encode("resourceLink", forKey: .type)
+        try container.encode(uri, forKey: .uri)
+        try container.encode(name, forKey: .name)
+        try container.encodeIfPresent(description, forKey: .description)
+        try container.encodeIfPresent(mimeType, forKey: .mimeType)
+        try container.encodeIfPresent(annotations, forKey: .annotations)
       }
     }
   }
@@ -191,7 +227,6 @@ public struct Tool: Hashable, Codable, Sendable {
     case inputSchema
     case outputSchema
     case annotations
-    case meta = "_meta"
   }
 
   public init(from decoder: Decoder) throws {
@@ -203,7 +238,10 @@ public struct Tool: Hashable, Codable, Sendable {
     outputSchema = try container.decodeIfPresent(Value.self, forKey: .outputSchema)
     annotations =
       try container.decodeIfPresent(Tool.Annotations.self, forKey: .annotations) ?? .init()
-    meta = try container.decodeIfPresent([String: Value].self, forKey: .meta)
+    let dynamic = try decoder.container(keyedBy: DynamicCodingKey.self)
+    general = try GeneralFields.decode(
+      from: dynamic,
+      reservedKeyNames: Self.reservedGeneralFieldNames)
   }
 
   public func encode(to encoder: Encoder) throws {
@@ -216,9 +254,13 @@ public struct Tool: Hashable, Codable, Sendable {
     if !annotations.isEmpty {
       try container.encode(annotations, forKey: .annotations)
     }
-    if meta?.isEmpty == false {
-      try container.encode(meta, forKey: .meta)
-    }
+    try general.encode(
+      into: encoder,
+      reservedKeyNames: Self.reservedGeneralFieldNames)
+  }
+
+  private static var reservedGeneralFieldNames: Set<String> {
+    ["name", "title", "description", "inputSchema", "outputSchema", "annotations"]
   }
 }
 
@@ -269,11 +311,41 @@ public enum CallTool: Method {
 
   public struct Result: Hashable, Codable, Sendable {
     public let content: [Tool.Content]
+    public let structuredContent: Value?
     public let isError: Bool?
 
-    public init(content: [Tool.Content], isError: Bool? = nil) {
+    public init(
+      content: [Tool.Content] = [],
+      structuredContent: Value? = nil,
+      isError: Bool? = nil
+    ) {
       self.content = content
+      self.structuredContent = structuredContent
       self.isError = isError
+    }
+
+    public init<Output: Codable>(
+      content: [Tool.Content] = [],
+      structuredContent: Output,
+      isError: Bool? = nil
+    ) throws {
+      let encoded = try Value(structuredContent)
+      self.init(
+        content: content,
+        structuredContent: Optional.some(encoded),
+        isError: isError
+      )
+    }
+
+    public init<Output: Codable>(
+      structuredContent: Output,
+      isError: Bool? = nil
+    ) throws {
+      try self.init(
+        content: [],
+        structuredContent: structuredContent,
+        isError: isError
+      )
     }
   }
 }
