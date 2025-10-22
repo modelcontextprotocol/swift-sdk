@@ -184,12 +184,12 @@ extension MetaFields: Codable {
     }
 }
 
-private extension Character {
-    var isLetter: Bool {
+extension Character {
+    fileprivate var isLetter: Bool {
         unicodeScalars.allSatisfy { CharacterSet.letters.contains($0) }
     }
 
-    var isNumber: Bool {
+    fileprivate var isNumber: Bool {
         unicodeScalars.allSatisfy { CharacterSet.decimalDigits.contains($0) }
     }
 }

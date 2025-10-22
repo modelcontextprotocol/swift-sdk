@@ -7,5 +7,9 @@
 	},
 	"[github-actions-workflow]": {
 		"editor.defaultFormatter": "esbenp.prettier-vscode"
+	},
+	"[swift]": {
+		"editor.insertSpaces": true,
+		"editor.tabSize": 4
 	}
 }
