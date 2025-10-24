@@ -113,6 +113,43 @@ struct NotificationTests {
         #expect(decoded.params.uri == "test://resource")
     }
 
+    @Test("Progress notification with parameters")
+    func testProgressNotification() throws {
+        let params = ProgressNotification.Parameters(
+            progressToken: "some-token",
+            progress: 20,
+            total: 25,
+            message: "beep boop bop"
+        )
+        let notification = ProgressNotification.message(params)
+
+        #expect(notification.method == ProgressNotification.name)
+        #expect(notification.params.progressToken == "some-token")
+        #expect(notification.params.progress == 20)
+        #expect(notification.params.total == 25)
+        #expect(notification.params.message == "beep boop bop")
+
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+
+        let data = try encoder.encode(notification)
+
+        // Verify the exact JSON structure
+        let json = try JSONDecoder().decode([String: Value].self, from: data)
+        #expect(json["jsonrpc"] == "2.0")
+        #expect(json["method"] == "notifications/progress")
+        #expect(json["params"] != nil)
+        #expect(json.count == 3, "Should contain jsonrpc, method, and params fields")
+
+        // Verify we can decode it back
+        let decoded = try decoder.decode(Message<ProgressNotification>.self, from: data)
+        #expect(decoded.method == ProgressNotification.name)
+        #expect(decoded.params.progressToken == "some-token")
+        #expect(decoded.params.progress == 20)
+        #expect(decoded.params.total == 25)
+        #expect(decoded.params.message == "beep boop bop")
+    }
+
     @Test("AnyNotification decoding - without params")
     func testAnyNotificationDecodingWithoutParams() throws {
         // Test decoding when params field is missing
