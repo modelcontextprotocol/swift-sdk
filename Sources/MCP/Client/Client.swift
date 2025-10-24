@@ -60,8 +60,15 @@ public actor Client {
             public init() {}
         }
 
+        /// The elicitation capabilities
+        public struct Elicitation: Hashable, Codable, Sendable {
+            public init() {}
+        }
+
         /// Whether the client supports sampling
         public var sampling: Sampling?
+        /// Whether the client supports elicitation
+        public var elicitation: Elicitation?
         /// Experimental features supported by the client
         public var experimental: [String: String]?
         /// Whether the client supports roots
@@ -69,10 +76,12 @@ public actor Client {
 
         public init(
             sampling: Sampling? = nil,
+            elicitation: Elicitation? = nil,
             experimental: [String: String]? = nil,
             roots: Capabilities.Roots? = nil
         ) {
             self.sampling = sampling
+            self.elicitation = elicitation
             self.experimental = experimental
             self.roots = roots
         }
@@ -653,6 +662,27 @@ public actor Client {
         // This would register the handler similar to how servers register method handlers:
         // methodHandlers[CreateSamplingMessage.name] = TypedRequestHandler(handler)
 
+        return self
+    }
+
+    // MARK: - Elicitation
+
+    /// Register a handler for elicitation requests from servers
+    ///
+    /// The elicitation flow lets servers collect structured input from users during
+    /// ongoing interactions. Clients remain in control by mediating the prompt,
+    /// collecting the response, and returning the chosen action to the server.
+    ///
+    /// - Parameter handler: A closure that processes elicitation requests and returns user actions
+    /// - Returns: Self for method chaining
+    /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-06-18/client/elicitation
+    @discardableResult
+    public func withElicitationHandler(
+        _ handler: @escaping @Sendable (CreateElicitation.Parameters) async throws ->
+            CreateElicitation.Result
+    ) -> Self {
+        // Supporting server-initiated requests requires bidirectional transports.
+        // Once available, this handler will be wired into the request routing path.
         return self
     }
 
