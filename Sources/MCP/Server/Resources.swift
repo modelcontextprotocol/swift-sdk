@@ -6,7 +6,7 @@ import Foundation
 /// such as files, database schemas, or application-specific information.
 /// Each resource is uniquely identified by a URI.
 ///
-/// - SeeAlso: https://spec.modelcontextprotocol.io/specification/2024-11-05/server/resources/
+/// - SeeAlso: https://spec.modelcontextprotocol.io/specification/2025-06-18/server/resources/
 public struct Resource: Hashable, Codable, Sendable {
     /// The resource name
     public var name: String
@@ -227,7 +227,7 @@ public struct Resource: Hashable, Codable, Sendable {
 // MARK: -
 
 /// To discover available resources, clients send a `resources/list` request.
-/// - SeeAlso: https://spec.modelcontextprotocol.io/specification/2024-11-05/server/resources/#listing-resources
+/// - SeeAlso: https://spec.modelcontextprotocol.io/specification/2025-06-18/server/resources/#listing-resources
 public enum ListResources: Method {
     public static let name: String = "resources/list"
 
@@ -255,7 +255,7 @@ public enum ListResources: Method {
 }
 
 /// To retrieve resource contents, clients send a `resources/read` request:
-/// - SeeAlso: https://spec.modelcontextprotocol.io/specification/2024-11-05/server/resources/#reading-resources
+/// - SeeAlso: https://spec.modelcontextprotocol.io/specification/2025-06-18/server/resources/#reading-resources
 public enum ReadResource: Method {
     public static let name: String = "resources/read"
 
@@ -277,7 +277,7 @@ public enum ReadResource: Method {
 }
 
 /// To discover available resource templates, clients send a `resources/templates/list` request.
-/// - SeeAlso: https://spec.modelcontextprotocol.io/specification/2024-11-05/server/resources/#resource-templates
+/// - SeeAlso: https://spec.modelcontextprotocol.io/specification/2025-06-18/server/resources/#resource-templates
 public enum ListResourceTemplates: Method {
     public static let name: String = "resources/templates/list"
 
@@ -310,7 +310,7 @@ public enum ListResourceTemplates: Method {
 }
 
 /// When the list of available resources changes, servers that declared the listChanged capability SHOULD send a notification.
-/// - SeeAlso: https://spec.modelcontextprotocol.io/specification/2024-11-05/server/resources/#list-changed-notification
+/// - SeeAlso: https://spec.modelcontextprotocol.io/specification/2025-06-18/server/resources/#list-changed-notification
 public struct ResourceListChangedNotification: Notification {
     public static let name: String = "notifications/resources/list_changed"
 
@@ -318,7 +318,7 @@ public struct ResourceListChangedNotification: Notification {
 }
 
 /// Clients can subscribe to specific resources and receive notifications when they change.
-/// - SeeAlso: https://spec.modelcontextprotocol.io/specification/2024-11-05/server/resources/#subscriptions
+/// - SeeAlso: https://spec.modelcontextprotocol.io/specification/2025-06-18/server/resources/#subscriptions
 public enum ResourceSubscribe: Method {
     public static let name: String = "resources/subscribe"
 
@@ -330,7 +330,7 @@ public enum ResourceSubscribe: Method {
 }
 
 /// When a resource changes, servers that declared the updated capability SHOULD send a notification to subscribed clients.
-/// - SeeAlso: https://spec.modelcontextprotocol.io/specification/2024-11-05/server/resources/#subscriptions
+/// - SeeAlso: https://spec.modelcontextprotocol.io/specification/2025-06-18/server/resources/#subscriptions
 public struct ResourceUpdatedNotification: Notification {
     public static let name: String = "notifications/resources/updated"
 

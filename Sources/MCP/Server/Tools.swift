@@ -268,7 +268,7 @@ public struct Tool: Hashable, Codable, Sendable {
 // MARK: -
 
 /// To discover available tools, clients send a `tools/list` request.
-/// - SeeAlso: https://spec.modelcontextprotocol.io/specification/2024-11-05/server/tools/#listing-tools
+/// - SeeAlso: https://spec.modelcontextprotocol.io/specification/2025-06-18/server/tools/#listing-tools
 public enum ListTools: Method {
     public static let name = "tools/list"
 
@@ -296,7 +296,7 @@ public enum ListTools: Method {
 }
 
 /// To call a tool, clients send a `tools/call` request.
-/// - SeeAlso: https://spec.modelcontextprotocol.io/specification/2024-11-05/server/tools/#calling-tools
+/// - SeeAlso: https://spec.modelcontextprotocol.io/specification/2025-06-18/server/tools/#calling-tools
 public enum CallTool: Method {
     public static let name = "tools/call"
 
@@ -352,7 +352,7 @@ public enum CallTool: Method {
 }
 
 /// When the list of available tools changes, servers that declared the listChanged capability SHOULD send a notification:
-/// - SeeAlso: https://spec.modelcontextprotocol.io/specification/2024-11-05/server/tools/#list-changed-notification
+/// - SeeAlso: https://spec.modelcontextprotocol.io/specification/2025-06-18/server/tools/#list-changed-notification
 public struct ToolListChangedNotification: Notification {
     public static let name: String = "notifications/tools/list_changed"
 }

@@ -7,7 +7,7 @@ Official Swift SDK for the [Model Context Protocol][mcp] (MCP).
 The Model Context Protocol (MCP) defines a standardized way
 for applications to communicate with AI and ML models.
 This Swift SDK implements both client and server components
-according to the [2025-03-26][mcp-spec-2025-03-26] (latest) version 
+according to the [2025-06-18][mcp-spec-2025-06-18] (latest) version 
 of the MCP specification.
 
 ## Requirements
@@ -774,8 +774,8 @@ The Swift SDK provides multiple built-in transports:
 
 | Transport | Description | Platforms | Best for |
 |-----------|-------------|-----------|----------|
-| [`StdioTransport`](/Sources/MCP/Base/Transports/StdioTransport.swift) | Implements [stdio transport](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#stdio) using standard input/output streams | Apple platforms, Linux with glibc | Local subprocesses, CLI tools |
-| [`HTTPClientTransport`](/Sources/MCP/Base/Transports/HTTPClientTransport.swift) | Implements [Streamable HTTP transport](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#streamable-http) using Foundation's URL Loading System | All platforms with Foundation | Remote servers, web applications |
+| [`StdioTransport`](/Sources/MCP/Base/Transports/StdioTransport.swift) | Implements [stdio transport](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#stdio) using standard input/output streams | Apple platforms, Linux with glibc | Local subprocesses, CLI tools |
+| [`HTTPClientTransport`](/Sources/MCP/Base/Transports/HTTPClientTransport.swift) | Implements [Streamable HTTP transport](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#streamable-http) using Foundation's URL Loading System | All platforms with Foundation | Remote servers, web applications |
 | [`InMemoryTransport`](/Sources/MCP/Base/Transports/InMemoryTransport.swift) | Custom in-memory transport for direct communication within the same process | All platforms | Testing, debugging, same-process client-server communication |
 | [`NetworkTransport`](/Sources/MCP/Base/Transports/NetworkTransport.swift) | Custom transport using Apple's Network framework for TCP/UDP connections | Apple platforms only | Low-level networking, custom protocols |
 
@@ -868,7 +868,7 @@ let transport = StdioTransport(logger: logger)
 
 ## Additional Resources
 
-- [MCP Specification](https://modelcontextprotocol.io/specification/2025-03-26/)
+- [MCP Specification](https://modelcontextprotocol.io/specification/2025-06-18)
 - [Protocol Documentation](https://modelcontextprotocol.io)
 - [GitHub Repository](https://github.com/modelcontextprotocol/swift-sdk)
 
@@ -886,4 +886,4 @@ see the [GitHub Releases page](https://github.com/modelcontextprotocol/swift-sdk
 This project is licensed under the MIT License.
 
 [mcp]: https://modelcontextprotocol.io
-[mcp-spec-2025-03-26]: https://modelcontextprotocol.io/specification/2025-03-26
+[mcp-spec-2025-06-18]: https://modelcontextprotocol.io/specification/2025-06-18
