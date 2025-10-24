@@ -645,7 +645,8 @@ public actor Client {
     /// - SeeAlso: https://modelcontextprotocol.io/docs/concepts/sampling#how-sampling-works
     @discardableResult
     public func withSamplingHandler(
-        _ handler: @escaping @Sendable (CreateSamplingMessage.Parameters) async throws ->
+        _ handler:
+            @escaping @Sendable (CreateSamplingMessage.Parameters) async throws ->
             CreateSamplingMessage.Result
     ) -> Self {
         // Note: This would require extending the client architecture to handle incoming requests from servers.
@@ -678,7 +679,8 @@ public actor Client {
     /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-06-18/client/elicitation
     @discardableResult
     public func withElicitationHandler(
-        _ handler: @escaping @Sendable (CreateElicitation.Parameters) async throws ->
+        _ handler:
+            @escaping @Sendable (CreateElicitation.Parameters) async throws ->
             CreateElicitation.Result
     ) -> Self {
         // Supporting server-initiated requests requires bidirectional transports.
