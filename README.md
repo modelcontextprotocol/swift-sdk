@@ -404,17 +404,9 @@ For example, a client might wish to update its loading UI whenever the server se
 ```swift
 let callToolProgressToken = "abc-123"
 
-try await client.callTool(
-    name: "content-recommender",
-    arguments: [
-        "prompt": "The cutest Samoyed accounts across all social media",
-        "_meta": [
-            "progressToken": callToolProgressToken
-        ]
-    ]
-)
-
+// Register notification handler before invoking callTool
 await client.onNotification(ProgressNotification.self) { message in
+    // Access progress notifications for a particular request by filtering for that request's progressToken
     guard message.params.progressToken == callToolProgressToken else { return }
 
     if let progressTotal = message.params.total {
@@ -425,7 +417,18 @@ await client.onNotification(ProgressNotification.self) { message in
     if let progressMessage = message.params.message {
         // update loading UI with human-readable progress information
     }
-} 
+}
+
+// Call a tool with a progressToken specified in the _meta arguments
+try await client.callTool(
+    name: "content-recommender",
+    arguments: [
+        "prompt": "The cutest Samoyed accounts across all social media",
+        "_meta": [
+            "progressToken": callToolProgressToken
+        ]
+    ]
+) 
 ```
 
 
