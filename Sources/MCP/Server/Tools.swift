@@ -19,8 +19,8 @@ public struct Tool: Hashable, Codable, Sendable {
     public let inputSchema: Value
     /// The tool output schema, defining expected output structure
     public let outputSchema: Value?
-    /// General MCP fields (e.g. `_meta`).
-    public var general: GeneralFields
+    /// Metadata fields for the tool (see spec for _meta usage)
+    public var _meta: [String: Value]?
 
     /// Annotations that provide display-facing and operational information for a Tool.
     ///
@@ -95,8 +95,8 @@ public struct Tool: Hashable, Codable, Sendable {
         description: String?,
         inputSchema: Value,
         annotations: Annotations = nil,
-        general: GeneralFields = .init(),
-        outputSchema: Value? = nil
+        outputSchema: Value? = nil,
+        _meta: [String: Value]? = nil
     ) {
         self.name = name
         self.title = title
@@ -104,7 +104,7 @@ public struct Tool: Hashable, Codable, Sendable {
         self.inputSchema = inputSchema
         self.outputSchema = outputSchema
         self.annotations = annotations
-        self.general = general
+        self._meta = _meta
     }
 
     /// Content types that can be returned by a tool
@@ -239,10 +239,8 @@ public struct Tool: Hashable, Codable, Sendable {
         outputSchema = try container.decodeIfPresent(Value.self, forKey: .outputSchema)
         annotations =
             try container.decodeIfPresent(Tool.Annotations.self, forKey: .annotations) ?? .init()
-        let dynamic = try decoder.container(keyedBy: DynamicCodingKey.self)
-        general = try GeneralFields.decode(
-            from: dynamic,
-            reservedKeyNames: Self.reservedGeneralFieldNames)
+        let metaContainer = try decoder.container(keyedBy: DynamicCodingKey.self)
+        _meta = try decodeMeta(from: metaContainer)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -255,13 +253,8 @@ public struct Tool: Hashable, Codable, Sendable {
         if !annotations.isEmpty {
             try container.encode(annotations, forKey: .annotations)
         }
-        try general.encode(
-            into: encoder,
-            reservedKeyNames: Self.reservedGeneralFieldNames)
-    }
-
-    private static var reservedGeneralFieldNames: Set<String> {
-        ["name", "title", "description", "inputSchema", "outputSchema", "annotations"]
+        var metaContainer = encoder.container(keyedBy: DynamicCodingKey.self)
+        try encodeMeta(_meta, to: &metaContainer)
     }
 }
 
@@ -285,12 +278,45 @@ public enum ListTools: Method {
     }
 
     public struct Result: Hashable, Codable, Sendable {
-        public let tools: [Tool]
-        public let nextCursor: String?
+        let tools: [Tool]
+        let nextCursor: String?
+        var _meta: [String: Value]?
+        var extraFields: [String: Value]?
 
-        public init(tools: [Tool], nextCursor: String? = nil) {
+        public init(
+            tools: [Tool],
+            nextCursor: String? = nil,
+            _meta: [String: Value]? = nil,
+            extraFields: [String: Value]? = nil
+        ) {
             self.tools = tools
             self.nextCursor = nextCursor
+            self._meta = _meta
+            self.extraFields = extraFields
+        }
+
+        private enum CodingKeys: String, CodingKey, CaseIterable {
+            case tools, nextCursor
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(tools, forKey: .tools)
+            try container.encodeIfPresent(nextCursor, forKey: .nextCursor)
+
+            var dynamicContainer = encoder.container(keyedBy: DynamicCodingKey.self)
+            try encodeMeta(_meta, to: &dynamicContainer)
+            try encodeExtraFields(extraFields, to: &dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
+        }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            tools = try container.decode([Tool].self, forKey: .tools)
+            nextCursor = try container.decodeIfPresent(String.self, forKey: .nextCursor)
+
+            let dynamicContainer = try decoder.container(keyedBy: DynamicCodingKey.self)
+            _meta = try decodeMeta(from: dynamicContainer)
+            extraFields = try decodeExtraFields(from: dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
         }
     }
 }
@@ -314,39 +340,66 @@ public enum CallTool: Method {
         public let content: [Tool.Content]
         public let structuredContent: Value?
         public let isError: Bool?
+        /// Optional metadata about this result
+        public var _meta: [String: Value]?
+        /// Extra fields for this result (index signature)
+        public var extraFields: [String: Value]?
 
         public init(
             content: [Tool.Content] = [],
             structuredContent: Value? = nil,
-            isError: Bool? = nil
+            isError: Bool? = nil,
+            _meta: [String: Value]? = nil,
+            extraFields: [String: Value]? = nil
         ) {
             self.content = content
             self.structuredContent = structuredContent
             self.isError = isError
+            self._meta = _meta
+            self.extraFields = extraFields
         }
 
         public init<Output: Codable>(
             content: [Tool.Content] = [],
             structuredContent: Output,
-            isError: Bool? = nil
+            isError: Bool? = nil,
+            _meta: [String: Value]? = nil,
+            extraFields: [String: Value]? = nil
         ) throws {
             let encoded = try Value(structuredContent)
             self.init(
                 content: content,
                 structuredContent: Optional.some(encoded),
-                isError: isError
+                isError: isError,
+                _meta: _meta,
+                extraFields: extraFields
             )
         }
 
-        public init<Output: Codable>(
-            structuredContent: Output,
-            isError: Bool? = nil
-        ) throws {
-            try self.init(
-                content: [],
-                structuredContent: structuredContent,
-                isError: isError
-            )
+        private enum CodingKeys: String, CodingKey, CaseIterable {
+            case content, structuredContent, isError
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(content, forKey: .content)
+            try container.encodeIfPresent(structuredContent, forKey: .structuredContent)
+            try container.encodeIfPresent(isError, forKey: .isError)
+
+            var dynamicContainer = encoder.container(keyedBy: DynamicCodingKey.self)
+            try encodeMeta(_meta, to: &dynamicContainer)
+            try encodeExtraFields(extraFields, to: &dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
+        }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            content = try container.decode([Tool.Content].self, forKey: .content)
+            structuredContent = try container.decodeIfPresent(Value.self, forKey: .structuredContent)
+            isError = try container.decodeIfPresent(Bool.self, forKey: .isError)
+
+            let dynamicContainer = try decoder.container(keyedBy: DynamicCodingKey.self)
+            _meta = try decodeMeta(from: dynamicContainer)
+            extraFields = try decodeExtraFields(from: dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
         }
     }
 }

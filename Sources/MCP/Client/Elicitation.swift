@@ -79,10 +79,45 @@ public enum CreateElicitation: Method {
         public var action: Action
         /// Submitted content when action is `.accept`.
         public var content: [String: Value]?
+        /// Optional metadata about this result
+        public var _meta: [String: Value]?
+        /// Extra fields for this result (index signature)
+        public var extraFields: [String: Value]?
 
-        public init(action: Action, content: [String: Value]? = nil) {
+        public init(
+            action: Action,
+            content: [String: Value]? = nil,
+            _meta: [String: Value]? = nil,
+            extraFields: [String: Value]? = nil
+        ) {
             self.action = action
             self.content = content
+            self._meta = _meta
+            self.extraFields = extraFields
+        }
+
+        private enum CodingKeys: String, CodingKey, CaseIterable {
+            case action, content
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(action, forKey: .action)
+            try container.encodeIfPresent(content, forKey: .content)
+
+            var dynamicContainer = encoder.container(keyedBy: DynamicCodingKey.self)
+            try encodeMeta(_meta, to: &dynamicContainer)
+            try encodeExtraFields(extraFields, to: &dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
+        }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            action = try container.decode(Action.self, forKey: .action)
+            content = try container.decodeIfPresent([String: Value].self, forKey: .content)
+
+            let dynamicContainer = try decoder.container(keyedBy: DynamicCodingKey.self)
+            _meta = try decodeMeta(from: dynamicContainer)
+            extraFields = try decodeExtraFields(from: dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
         }
     }
 }
