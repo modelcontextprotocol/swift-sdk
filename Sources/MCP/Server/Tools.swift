@@ -122,7 +122,8 @@ public struct Tool: Hashable, Codable, Sendable {
         )
         /// Resource link
         case resourceLink(
-            uri: String, name: String, description: String? = nil, mimeType: String? = nil,
+            uri: String, name: String, title: String? = nil, description: String? = nil,
+            mimeType: String? = nil,
             annotations: Resource.Annotations? = nil
         )
 
@@ -174,13 +175,14 @@ public struct Tool: Hashable, Codable, Sendable {
             case "resourceLink":
                 let uri = try container.decode(String.self, forKey: .uri)
                 let name = try container.decode(String.self, forKey: .name)
+                let title = try container.decodeIfPresent(String.self, forKey: .title)
                 let description = try container.decodeIfPresent(String.self, forKey: .description)
                 let mimeType = try container.decodeIfPresent(String.self, forKey: .mimeType)
                 let annotations = try container.decodeIfPresent(
                     Resource.Annotations.self, forKey: .annotations)
                 self = .resourceLink(
-                    uri: uri, name: name, description: description, mimeType: mimeType,
-                    annotations: annotations)
+                    uri: uri, name: name, title: title, description: description,
+                    mimeType: mimeType, annotations: annotations)
             default:
                 throw DecodingError.dataCorruptedError(
                     forKey: .type, in: container, debugDescription: "Unknown tool content type")
@@ -210,10 +212,12 @@ public struct Tool: Hashable, Codable, Sendable {
                 try container.encodeIfPresent(text, forKey: .text)
                 try container.encodeIfPresent(title, forKey: .title)
                 try container.encodeIfPresent(annotations, forKey: .annotations)
-            case .resourceLink(let uri, let name, let description, let mimeType, let annotations):
+            case .resourceLink(
+                let uri, let name, let title, let description, let mimeType, let annotations):
                 try container.encode("resourceLink", forKey: .type)
                 try container.encode(uri, forKey: .uri)
                 try container.encode(name, forKey: .name)
+                try container.encodeIfPresent(title, forKey: .title)
                 try container.encodeIfPresent(description, forKey: .description)
                 try container.encodeIfPresent(mimeType, forKey: .mimeType)
                 try container.encodeIfPresent(annotations, forKey: .annotations)
@@ -306,7 +310,9 @@ public enum ListTools: Method {
 
             var dynamicContainer = encoder.container(keyedBy: DynamicCodingKey.self)
             try encodeMeta(_meta, to: &dynamicContainer)
-            try encodeExtraFields(extraFields, to: &dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
+            try encodeExtraFields(
+                extraFields, to: &dynamicContainer,
+                excluding: Set(CodingKeys.allCases.map(\.rawValue)))
         }
 
         public init(from decoder: Decoder) throws {
@@ -316,7 +322,8 @@ public enum ListTools: Method {
 
             let dynamicContainer = try decoder.container(keyedBy: DynamicCodingKey.self)
             _meta = try decodeMeta(from: dynamicContainer)
-            extraFields = try decodeExtraFields(from: dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
+            extraFields = try decodeExtraFields(
+                from: dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
         }
     }
 }
@@ -388,18 +395,22 @@ public enum CallTool: Method {
 
             var dynamicContainer = encoder.container(keyedBy: DynamicCodingKey.self)
             try encodeMeta(_meta, to: &dynamicContainer)
-            try encodeExtraFields(extraFields, to: &dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
+            try encodeExtraFields(
+                extraFields, to: &dynamicContainer,
+                excluding: Set(CodingKeys.allCases.map(\.rawValue)))
         }
 
         public init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             content = try container.decode([Tool.Content].self, forKey: .content)
-            structuredContent = try container.decodeIfPresent(Value.self, forKey: .structuredContent)
+            structuredContent = try container.decodeIfPresent(
+                Value.self, forKey: .structuredContent)
             isError = try container.decodeIfPresent(Bool.self, forKey: .isError)
 
             let dynamicContainer = try decoder.container(keyedBy: DynamicCodingKey.self)
             _meta = try decodeMeta(from: dynamicContainer)
-            extraFields = try decodeExtraFields(from: dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
+            extraFields = try decodeExtraFields(
+                from: dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
         }
     }
 }

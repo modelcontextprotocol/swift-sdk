@@ -10,6 +10,8 @@ import Foundation
 public struct Resource: Hashable, Codable, Sendable {
     /// The resource name
     public var name: String
+    /// A human-readable resource title
+    public var title: String?
     /// The resource URI
     public var uri: String
     /// The resource description
@@ -24,12 +26,14 @@ public struct Resource: Hashable, Codable, Sendable {
     public init(
         name: String,
         uri: String,
+        title: String? = nil,
         description: String? = nil,
         mimeType: String? = nil,
         metadata: [String: String]? = nil,
         _meta: [String: Value]? = nil
     ) {
         self.name = name
+        self.title = title
         self.uri = uri
         self.description = description
         self.mimeType = mimeType
@@ -40,6 +44,7 @@ public struct Resource: Hashable, Codable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case name
         case uri
+        case title
         case description
         case mimeType
         case metadata
@@ -49,6 +54,7 @@ public struct Resource: Hashable, Codable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         name = try container.decode(String.self, forKey: .name)
         uri = try container.decode(String.self, forKey: .uri)
+        title = try container.decodeIfPresent(String.self, forKey: .title)
         description = try container.decodeIfPresent(String.self, forKey: .description)
         mimeType = try container.decodeIfPresent(String.self, forKey: .mimeType)
         metadata = try container.decodeIfPresent([String: String].self, forKey: .metadata)
@@ -60,6 +66,7 @@ public struct Resource: Hashable, Codable, Sendable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(name, forKey: .name)
         try container.encode(uri, forKey: .uri)
+        try container.encodeIfPresent(title, forKey: .title)
         try container.encodeIfPresent(description, forKey: .description)
         try container.encodeIfPresent(mimeType, forKey: .mimeType)
         try container.encodeIfPresent(metadata, forKey: .metadata)
@@ -165,6 +172,8 @@ public struct Resource: Hashable, Codable, Sendable {
         public var uriTemplate: String
         /// The template name
         public var name: String
+        /// A human-readable template title
+        public var title: String?
         /// The template description
         public var description: String?
         /// The resource MIME type
@@ -173,11 +182,13 @@ public struct Resource: Hashable, Codable, Sendable {
         public init(
             uriTemplate: String,
             name: String,
+            title: String? = nil,
             description: String? = nil,
             mimeType: String? = nil
         ) {
             self.uriTemplate = uriTemplate
             self.name = name
+            self.title = title
             self.description = description
             self.mimeType = mimeType
         }
@@ -260,7 +271,9 @@ public enum ListResources: Method {
 
             var dynamicContainer = encoder.container(keyedBy: DynamicCodingKey.self)
             try encodeMeta(_meta, to: &dynamicContainer)
-            try encodeExtraFields(extraFields, to: &dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
+            try encodeExtraFields(
+                extraFields, to: &dynamicContainer,
+                excluding: Set(CodingKeys.allCases.map(\.rawValue)))
         }
 
         public init(from decoder: Decoder) throws {
@@ -270,7 +283,8 @@ public enum ListResources: Method {
 
             let dynamicContainer = try decoder.container(keyedBy: DynamicCodingKey.self)
             _meta = try decodeMeta(from: dynamicContainer)
-            extraFields = try decodeExtraFields(from: dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
+            extraFields = try decodeExtraFields(
+                from: dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
         }
     }
 }
@@ -315,7 +329,9 @@ public enum ReadResource: Method {
 
             var dynamicContainer = encoder.container(keyedBy: DynamicCodingKey.self)
             try encodeMeta(_meta, to: &dynamicContainer)
-            try encodeExtraFields(extraFields, to: &dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
+            try encodeExtraFields(
+                extraFields, to: &dynamicContainer,
+                excluding: Set(CodingKeys.allCases.map(\.rawValue)))
         }
 
         public init(from decoder: Decoder) throws {
@@ -324,7 +340,8 @@ public enum ReadResource: Method {
 
             let dynamicContainer = try decoder.container(keyedBy: DynamicCodingKey.self)
             _meta = try decodeMeta(from: dynamicContainer)
-            extraFields = try decodeExtraFields(from: dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
+            extraFields = try decodeExtraFields(
+                from: dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
         }
     }
 }
@@ -378,7 +395,9 @@ public enum ListResourceTemplates: Method {
 
             var dynamicContainer = encoder.container(keyedBy: DynamicCodingKey.self)
             try encodeMeta(_meta, to: &dynamicContainer)
-            try encodeExtraFields(extraFields, to: &dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
+            try encodeExtraFields(
+                extraFields, to: &dynamicContainer,
+                excluding: Set(CodingKeys.allCases.map(\.rawValue)))
         }
 
         public init(from decoder: Decoder) throws {
@@ -388,7 +407,8 @@ public enum ListResourceTemplates: Method {
 
             let dynamicContainer = try decoder.container(keyedBy: DynamicCodingKey.self)
             _meta = try decodeMeta(from: dynamicContainer)
-            extraFields = try decodeExtraFields(from: dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
+            extraFields = try decodeExtraFields(
+                from: dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
         }
     }
 }

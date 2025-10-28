@@ -34,11 +34,14 @@ public actor Client {
     public struct Info: Hashable, Codable, Sendable {
         /// The client name
         public var name: String
+        /// A human-readable title for display purposes
+        public var title: String?
         /// The client version
         public var version: String
 
-        public init(name: String, version: String) {
+        public init(name: String, version: String, title: String? = nil) {
             self.name = name
+            self.title = title
             self.version = version
         }
     }
@@ -100,6 +103,8 @@ public actor Client {
     private let clientInfo: Client.Info
     /// The client name
     public nonisolated var name: String { clientInfo.name }
+    /// A human-readable client title
+    public nonisolated var title: String? { clientInfo.title }
     /// The client version
     public nonisolated var version: String { clientInfo.version }
 
@@ -169,9 +174,10 @@ public actor Client {
     public init(
         name: String,
         version: String,
+        title: String? = nil,
         configuration: Configuration = .default
     ) {
-        self.clientInfo = Client.Info(name: name, version: version)
+        self.clientInfo = Client.Info(name: name, version: version, title: title)
         self.capabilities = Capabilities()
         self.configuration = configuration
     }

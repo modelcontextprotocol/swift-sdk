@@ -301,6 +301,37 @@ struct ToolTests {
         }
     }
 
+    @Test("Resource link content includes title")
+    func testToolContentResourceLinkEncoding() throws {
+        let content = Tool.Content.resourceLink(
+            uri: "file://resource.txt",
+            name: "resource_name",
+            title: "Resource Title",
+            description: "Resource description",
+            mimeType: "text/plain"
+        )
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+
+        let data = try encoder.encode(content)
+        let jsonString = String(decoding: data, as: UTF8.self)
+        #expect(jsonString.contains("\"title\":\"Resource Title\""))
+
+        let decoded = try decoder.decode(Tool.Content.self, from: data)
+        if case .resourceLink(
+            let uri, let name, let title, let description, let mimeType, let annotations
+        ) = decoded {
+            #expect(uri == "file://resource.txt")
+            #expect(name == "resource_name")
+            #expect(title == "Resource Title")
+            #expect(description == "Resource description")
+            #expect(mimeType == "text/plain")
+            #expect(annotations == nil)
+        } else {
+            #expect(Bool(false), "Expected resourceLink content")
+        }
+    }
+
     @Test("Audio content encoding and decoding")
     func testToolContentAudioEncoding() throws {
         let content = Tool.Content.audio(

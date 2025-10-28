@@ -11,6 +11,8 @@ import Foundation
 public struct Prompt: Hashable, Codable, Sendable {
     /// The prompt name
     public let name: String
+    /// A human-readable prompt title
+    public let title: String?
     /// The prompt description
     public let description: String?
     /// The prompt arguments
@@ -18,20 +20,28 @@ public struct Prompt: Hashable, Codable, Sendable {
     /// Optional metadata about this prompt
     public var _meta: [String: Value]?
 
-    public init(name: String, description: String? = nil, arguments: [Argument]? = nil, meta: [String: Value]? = nil) {
+    public init(
+        name: String,
+        title: String? = nil,
+        description: String? = nil,
+        arguments: [Argument]? = nil,
+        meta: [String: Value]? = nil
+    ) {
         self.name = name
+        self.title = title
         self.description = description
         self.arguments = arguments
         self._meta = meta
     }
 
     private enum CodingKeys: String, CodingKey {
-        case name, description, arguments
+        case name, title, description, arguments
     }
 
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(name, forKey: .name)
+        try container.encodeIfPresent(title, forKey: .title)
         try container.encodeIfPresent(description, forKey: .description)
         try container.encodeIfPresent(arguments, forKey: .arguments)
 
@@ -42,6 +52,7 @@ public struct Prompt: Hashable, Codable, Sendable {
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         name = try container.decode(String.self, forKey: .name)
+        title = try container.decodeIfPresent(String.self, forKey: .title)
         description = try container.decodeIfPresent(String.self, forKey: .description)
         arguments = try container.decodeIfPresent([Argument].self, forKey: .arguments)
 
@@ -53,13 +64,21 @@ public struct Prompt: Hashable, Codable, Sendable {
     public struct Argument: Hashable, Codable, Sendable {
         /// The argument name
         public let name: String
+        /// A human-readable argument title
+        public let title: String?
         /// The argument description
         public let description: String?
         /// Whether the argument is required
         public let required: Bool?
 
-        public init(name: String, description: String? = nil, required: Bool? = nil) {
+        public init(
+            name: String,
+            title: String? = nil,
+            description: String? = nil,
+            required: Bool? = nil
+        ) {
             self.name = name
+            self.title = title
             self.description = description
             self.required = required
         }
@@ -122,25 +141,30 @@ public struct Prompt: Hashable, Codable, Sendable {
     public struct Reference: Hashable, Codable, Sendable {
         /// The prompt reference name
         public let name: String
+        /// A human-readable prompt title
+        public let title: String?
 
-        public init(name: String) {
+        public init(name: String, title: String? = nil) {
             self.name = name
+            self.title = title
         }
 
         private enum CodingKeys: String, CodingKey {
-            case type, name
+            case type, name, title
         }
 
         public func encode(to encoder: Encoder) throws {
             var container = encoder.container(keyedBy: CodingKeys.self)
             try container.encode("ref/prompt", forKey: .type)
             try container.encode(name, forKey: .name)
+            try container.encodeIfPresent(title, forKey: .title)
         }
 
         public init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             _ = try container.decode(String.self, forKey: .type)
             name = try container.decode(String.self, forKey: .name)
+            title = try container.decodeIfPresent(String.self, forKey: .title)
         }
     }
 }
@@ -271,7 +295,9 @@ public enum ListPrompts: Method {
 
             var dynamicContainer = encoder.container(keyedBy: DynamicCodingKey.self)
             try encodeMeta(_meta, to: &dynamicContainer)
-            try encodeExtraFields(extraFields, to: &dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
+            try encodeExtraFields(
+                extraFields, to: &dynamicContainer,
+                excluding: Set(CodingKeys.allCases.map(\.rawValue)))
         }
 
         public init(from decoder: Decoder) throws {
@@ -281,7 +307,8 @@ public enum ListPrompts: Method {
 
             let dynamicContainer = try decoder.container(keyedBy: DynamicCodingKey.self)
             _meta = try decodeMeta(from: dynamicContainer)
-            extraFields = try decodeExtraFields(from: dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
+            extraFields = try decodeExtraFields(
+                from: dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
         }
     }
 }
@@ -333,7 +360,9 @@ public enum GetPrompt: Method {
 
             var dynamicContainer = encoder.container(keyedBy: DynamicCodingKey.self)
             try encodeMeta(_meta, to: &dynamicContainer)
-            try encodeExtraFields(extraFields, to: &dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
+            try encodeExtraFields(
+                extraFields, to: &dynamicContainer,
+                excluding: Set(CodingKeys.allCases.map(\.rawValue)))
         }
 
         public init(from decoder: Decoder) throws {
@@ -343,7 +372,8 @@ public enum GetPrompt: Method {
 
             let dynamicContainer = try decoder.container(keyedBy: DynamicCodingKey.self)
             _meta = try decodeMeta(from: dynamicContainer)
-            extraFields = try decodeExtraFields(from: dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
+            extraFields = try decodeExtraFields(
+                from: dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
         }
     }
 }
