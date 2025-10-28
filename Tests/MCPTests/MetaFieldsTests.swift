@@ -147,10 +147,32 @@ struct MetaFieldsTests {
         )
     }
 
+    @Test("Meta keys allow nested prefixes")
+    func testMetaKeyNestedPrefixes() throws {
+        let meta: [String: Value] = [
+            "vendor.example/toolInvocation/invoking": .bool(true)
+        ]
+
+        let tool = Tool(
+            name: "invoke",
+            description: "Invoke tool",
+            inputSchema: [:],
+            _meta: meta
+        )
+
+        let data = try JSONEncoder().encode(tool)
+        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let metaObject = json?["_meta"] as? [String: Any]
+        #expect(metaObject?["vendor.example/toolInvocation/invoking"] as? Bool == true)
+
+        let decoded = try JSONDecoder().decode(Tool.self, from: data)
+        #expect(decoded._meta?["vendor.example/toolInvocation/invoking"] == .bool(true))
+    }
+
     @Test("Resource content encodes meta")
     func testResourceContentGeneralFields() throws {
         let meta: [String: Value] = [
-            "openai/widgetPrefersBorder": .bool(true)
+            "vendor.example/widgetPrefersBorder": .bool(true)
         ]
 
         let content = Resource.Content.text(
@@ -164,10 +186,10 @@ struct MetaFieldsTests {
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         let metaObject = json?["_meta"] as? [String: Any]
 
-        #expect(metaObject?["openai/widgetPrefersBorder"] as? Bool == true)
+        #expect(metaObject?["vendor.example/widgetPrefersBorder"] as? Bool == true)
 
         let decoded = try JSONDecoder().decode(Resource.Content.self, from: data)
-        #expect(decoded._meta?["openai/widgetPrefersBorder"] == .bool(true))
+        #expect(decoded._meta?["vendor.example/widgetPrefersBorder"] == .bool(true))
     }
 
     @Test("Initialize.Result encoding with meta and extra fields")
