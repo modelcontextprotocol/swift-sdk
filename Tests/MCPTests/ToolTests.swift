@@ -460,21 +460,21 @@ struct ToolTests {
             #expect(Bool(false), "Expected success result")
         }
     }
-}
 
-@Test("Tool with missing description")
-func testToolWithMissingDescription() throws {
-    let jsonString = """
-        {
-            "name": "test_tool",
-            "inputSchema": {}
-        }
-        """
-    let jsonData = jsonString.data(using: .utf8)!
+    @Test("Tool with missing description")
+    func testToolWithMissingDescription() throws {
+        let jsonString = """
+            {
+                "name": "test_tool",
+                "inputSchema": {}
+            }
+            """
+        let jsonData = jsonString.data(using: .utf8)!
 
-    let tool = try JSONDecoder().decode(Tool.self, from: jsonData)
+        let tool = try JSONDecoder().decode(Tool.self, from: jsonData)
 
-    #expect(tool.name == "test_tool")
-    #expect(tool.description == nil)
-    #expect(tool.inputSchema == [:])
+        #expect(tool.name == "test_tool")
+        #expect(tool.description == nil)
+        #expect(tool.inputSchema == [:])
+    }
 }
