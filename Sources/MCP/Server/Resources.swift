@@ -309,7 +309,7 @@ public enum ReadResource: Method {
         /// Extra fields for this result (index signature)
         public var extraFields: [String: Value]?
 
-        init(
+        public init(
             contents: [Resource.Content],
             _meta: [String: Value]? = nil,
             extraFields: [String: Value]? = nil
@@ -371,7 +371,7 @@ public enum ListResourceTemplates: Method {
         /// Extra fields for this result (index signature)
         public var extraFields: [String: Value]?
 
-        init(
+        public init(
             templates: [Resource.Template],
             nextCursor: String? = nil,
             _meta: [String: Value]? = nil,
