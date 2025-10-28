@@ -274,6 +274,102 @@ This human-in-the-loop design ensures that users
 maintain control over what the LLM sees and generates, 
 even when servers initiate the requests.
 
+### Elicitation
+
+Elicitation allows servers to request structured information directly from users through the client. 
+This is useful when servers need user input that wasn't provided in the original request, 
+such as credentials, configuration choices, or approval for sensitive operations.
+
+> [!TIP]
+> Elicitation requests flow from **server to client**, 
+> similar to sampling. 
+> Clients must register a handler to respond to elicitation requests from servers.
+
+#### Client-Side: Handling Elicitation Requests
+
+Register an elicitation handler to respond to server requests:
+
+```swift
+// Register an elicitation handler in the client
+await client.setElicitationHandler { parameters in
+    // Display the request to the user
+    print("Server requests: \(parameters.message)")
+    
+    // If a schema was provided, validate against it
+    if let schema = parameters.requestedSchema {
+        print("Required fields: \(schema.required ?? [])")
+        print("Schema: \(schema.properties)")
+    }
+    
+    // Present UI to collect user input
+    let userResponse = presentElicitationUI(parameters)
+    
+    // Return the user's response
+    if userResponse.accepted {
+        return CreateElicitation.Result(
+            action: .accept,
+            content: userResponse.data
+        )
+    } else if userResponse.canceled {
+        return CreateElicitation.Result(action: .cancel)
+    } else {
+        return CreateElicitation.Result(action: .decline)
+    }
+}
+```
+
+#### Server-Side: Requesting User Input
+
+Servers can request information from users through elicitation:
+
+```swift
+// Request credentials from the user
+let schema = Elicitation.RequestSchema(
+    title: "API Credentials Required",
+    description: "Please provide your API credentials to continue",
+    properties: [
+        "apiKey": .object([
+            "type": .string("string"),
+            "description": .string("Your API key")
+        ]),
+        "apiSecret": .object([
+            "type": .string("string"),
+            "description": .string("Your API secret")
+        ])
+    ],
+    required: ["apiKey", "apiSecret"]
+)
+
+let result = try await client.request(
+    CreateElicitation.self,
+    params: CreateElicitation.Parameters(
+        message: "This operation requires API credentials",
+        requestedSchema: schema
+    )
+)
+
+switch result.action {
+case .accept:
+    if let credentials = result.content {
+        let apiKey = credentials["apiKey"]?.stringValue
+        let apiSecret = credentials["apiSecret"]?.stringValue
+        // Use the credentials...
+    }
+case .decline:
+    // User declined to provide credentials
+    throw MCPError.invalidRequest("User declined credential request")
+case .cancel:
+    // User canceled the operation
+    throw MCPError.invalidRequest("Operation canceled by user")
+}
+```
+
+Common use cases for elicitation:
+- **Authentication**: Request credentials when needed rather than upfront
+- **Confirmation**: Ask for user approval before sensitive operations
+- **Configuration**: Collect preferences or settings during operation
+- **Missing information**: Request additional details not provided initially
+
 ### Error Handling
 
 Handle common client errors:
