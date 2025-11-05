@@ -243,10 +243,10 @@ public enum ListResources: Method {
     }
 
     public struct Result: Hashable, Codable, Sendable {
-        let resources: [Resource]
-        let nextCursor: String?
-        var _meta: [String: Value]?
-        var extraFields: [String: Value]?
+        public let resources: [Resource]
+        public let nextCursor: String?
+        public var _meta: [String: Value]?
+        public var extraFields: [String: Value]?
 
         public init(
             resources: [Resource],

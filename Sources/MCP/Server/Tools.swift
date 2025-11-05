@@ -282,10 +282,10 @@ public enum ListTools: Method {
     }
 
     public struct Result: Hashable, Codable, Sendable {
-        let tools: [Tool]
-        let nextCursor: String?
-        var _meta: [String: Value]?
-        var extraFields: [String: Value]?
+        public let tools: [Tool]
+        public let nextCursor: String?
+        public var _meta: [String: Value]?
+        public var extraFields: [String: Value]?
 
         public init(
             tools: [Tool],
