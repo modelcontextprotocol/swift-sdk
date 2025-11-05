@@ -256,19 +256,23 @@ public enum CreateSamplingMessage: Method {
 
             var dynamicContainer = encoder.container(keyedBy: DynamicCodingKey.self)
             try encodeMeta(_meta, to: &dynamicContainer)
-            try encodeExtraFields(extraFields, to: &dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
+            try encodeExtraFields(
+                extraFields, to: &dynamicContainer,
+                excluding: Set(CodingKeys.allCases.map(\.rawValue)))
         }
 
         public init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             model = try container.decode(String.self, forKey: .model)
-            stopReason = try container.decodeIfPresent(Sampling.StopReason.self, forKey: .stopReason)
+            stopReason = try container.decodeIfPresent(
+                Sampling.StopReason.self, forKey: .stopReason)
             role = try container.decode(Sampling.Message.Role.self, forKey: .role)
             content = try container.decode(Sampling.Message.Content.self, forKey: .content)
 
             let dynamicContainer = try decoder.container(keyedBy: DynamicCodingKey.self)
             _meta = try decodeMeta(from: dynamicContainer)
-            extraFields = try decodeExtraFields(from: dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
+            extraFields = try decodeExtraFields(
+                from: dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
         }
     }
 }

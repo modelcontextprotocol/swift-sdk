@@ -42,12 +42,12 @@ public enum Initialize: Method {
     }
 
     public struct Result: Hashable, Codable, Sendable {
-        let protocolVersion: String
-        let capabilities: Server.Capabilities
-        let serverInfo: Server.Info
-        let instructions: String?
-        var _meta: [String: Value]?
-        var extraFields: [String: Value]?
+        public let protocolVersion: String
+        public let capabilities: Server.Capabilities
+        public let serverInfo: Server.Info
+        public let instructions: String?
+        public var _meta: [String: Value]?
+        public var extraFields: [String: Value]?
 
         public init(
             protocolVersion: String,
@@ -78,7 +78,9 @@ public enum Initialize: Method {
 
             var dynamicContainer = encoder.container(keyedBy: DynamicCodingKey.self)
             try encodeMeta(_meta, to: &dynamicContainer)
-            try encodeExtraFields(extraFields, to: &dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
+            try encodeExtraFields(
+                extraFields, to: &dynamicContainer,
+                excluding: Set(CodingKeys.allCases.map(\.rawValue)))
         }
 
         public init(from decoder: Decoder) throws {
@@ -90,7 +92,8 @@ public enum Initialize: Method {
 
             let dynamicContainer = try decoder.container(keyedBy: DynamicCodingKey.self)
             _meta = try decodeMeta(from: dynamicContainer)
-            extraFields = try decodeExtraFields(from: dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
+            extraFields = try decodeExtraFields(
+                from: dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
         }
     }
 }

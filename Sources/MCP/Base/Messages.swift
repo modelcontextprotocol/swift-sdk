@@ -123,11 +123,12 @@ public struct Request<M: Method>: Hashable, Identifiable, Codable, Sendable {
         try container.encode(id, forKey: .id)
         try container.encode(method, forKey: .method)
         try container.encode(params, forKey: .params)
-        
+
         // Encode _meta and extra fields, excluding JSON-RPC protocol fields
         var dynamicContainer = encoder.container(keyedBy: DynamicCodingKey.self)
         try encodeMeta(_meta, to: &dynamicContainer)
-        try encodeExtraFields(extraFields, to: &dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
+        try encodeExtraFields(
+            extraFields, to: &dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
     }
 }
 
@@ -172,7 +173,8 @@ extension Request {
 
         let dynamicContainer = try decoder.container(keyedBy: DynamicCodingKey.self)
         _meta = try decodeMeta(from: dynamicContainer)
-        extraFields = try decodeExtraFields(from: dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
+        extraFields = try decodeExtraFields(
+            from: dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
     }
 }
 
@@ -254,8 +256,8 @@ public struct Response<M: Method>: Hashable, Identifiable, Codable, Sendable {
     }
 
     public init(
-        id: ID, 
-        result: M.Result, 
+        id: ID,
+        result: M.Result,
         _meta: [String: Value]? = nil,
         extraFields: [String: Value]? = nil
     ) {
@@ -263,8 +265,8 @@ public struct Response<M: Method>: Hashable, Identifiable, Codable, Sendable {
     }
 
     public init(
-        id: ID, 
-        error: MCPError, 
+        id: ID,
+        error: MCPError,
         _meta: [String: Value]? = nil,
         extraFields: [String: Value]? = nil
     ) {
@@ -285,11 +287,12 @@ public struct Response<M: Method>: Hashable, Identifiable, Codable, Sendable {
         case .failure(let error):
             try container.encode(error, forKey: .error)
         }
-        
+
         // Encode _meta and extra fields, excluding JSON-RPC protocol fields
         var dynamicContainer = encoder.container(keyedBy: DynamicCodingKey.self)
         try encodeMeta(_meta, to: &dynamicContainer)
-        try encodeExtraFields(extraFields, to: &dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
+        try encodeExtraFields(
+            extraFields, to: &dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
     }
 
     public init(from decoder: Decoder) throws {
@@ -313,7 +316,8 @@ public struct Response<M: Method>: Hashable, Identifiable, Codable, Sendable {
 
         let dynamicContainer = try decoder.container(keyedBy: DynamicCodingKey.self)
         _meta = try decodeMeta(from: dynamicContainer)
-        extraFields = try decodeExtraFields(from: dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
+        extraFields = try decodeExtraFields(
+            from: dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
     }
 }
 
