@@ -179,7 +179,7 @@ public actor Client {
         // Start message handling loop
         task = Task {
             guard let connection = self.connection else { return }
-            repeat {
+            loop: while true {
                 // Check for cancellation before starting the iteration
                 if Task.isCancelled { break }
 
@@ -207,6 +207,8 @@ public actor Client {
                             )
                         }
                     }
+                    await logger?.debug("Client receive stream finished; exiting loop.")
+                    break loop
                 } catch let error where MCPError.isResourceTemporarilyUnavailable(error) {
                     try? await Task.sleep(for: .milliseconds(10))
                     continue
@@ -215,7 +217,7 @@ public actor Client {
                         "Error in message handling loop", metadata: ["error": "\(error)"])
                     break
                 }
-            } while true
+            }
             await self.logger?.debug("Client message handling loop task is terminating.")
         }
 
