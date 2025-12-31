@@ -345,12 +345,22 @@ struct ClientTests {
 
         let request1 = Ping.request()
         let request2 = Ping.request()
-        var resultTask1: Task<Ping.Result, Swift.Error>?
-        var resultTask2: Task<Ping.Result, Swift.Error>?
+
+        // Use an actor to safely capture the tasks from the closure
+        actor TaskHolder {
+            var task1: Task<Ping.Result, Swift.Error>?
+            var task2: Task<Ping.Result, Swift.Error>?
+            func set(task1: Task<Ping.Result, Swift.Error>, task2: Task<Ping.Result, Swift.Error>) {
+                self.task1 = task1
+                self.task2 = task2
+            }
+        }
+        let holder = TaskHolder()
 
         try await client.withBatch { batch in
-            resultTask1 = try await batch.addRequest(request1)
-            resultTask2 = try await batch.addRequest(request2)
+            let t1 = try await batch.addRequest(request1)
+            let t2 = try await batch.addRequest(request2)
+            await holder.set(task1: t1, task2: t2)
         }
 
         // Check if batch message was sent (after initialize and initialized notification)
@@ -381,7 +391,7 @@ struct ClientTests {
         try await transport.queue(batch: [anyResponse1, anyResponse2])
 
         // Wait for results and verify
-        guard let task1 = resultTask1, let task2 = resultTask2 else {
+        guard let task1 = await holder.task1, let task2 = await holder.task2 else {
             #expect(Bool(false), "Result tasks not created")
             return
         }
@@ -426,11 +436,18 @@ struct ClientTests {
         let request1 = Ping.request()  // Success
         let request2 = Ping.request()  // Error
 
-        var resultTasks: [Task<Ping.Result, Swift.Error>] = []
+        // Use an actor to safely capture the tasks from the closure
+        actor TasksHolder {
+            var tasks: [Task<Ping.Result, Swift.Error>] = []
+            func append(_ task: Task<Ping.Result, Swift.Error>) {
+                tasks.append(task)
+            }
+        }
+        let holder = TasksHolder()
 
         try await client.withBatch { batch in
-            resultTasks.append(try await batch.addRequest(request1))
-            resultTasks.append(try await batch.addRequest(request2))
+            await holder.append(try await batch.addRequest(request1))
+            await holder.append(try await batch.addRequest(request2))
         }
 
         // Check if batch message was sent (after initialize and initialized notification)
@@ -447,6 +464,7 @@ struct ClientTests {
         try await transport.queue(batch: [anyResponse1, anyResponse2])
 
         // Wait for results and verify
+        let resultTasks = await holder.tasks
         #expect(resultTasks.count == 2)
         guard resultTasks.count == 2 else {
             #expect(Bool(false), "Expected 2 result tasks")
