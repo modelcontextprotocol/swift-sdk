@@ -44,18 +44,22 @@ struct RoundtripTests {
                 tools: .init()
             )
         )
-        await server.withMethodHandler(ListTools.self) { _ in
+        await server.withRequestHandler(ListTools.self) { _, _ in
             return ListTools.Result(tools: [
                 Tool(
                     name: "add",
                     description: "Adds two numbers together",
                     inputSchema: [
-                        "a": ["type": "integer", "description": "The first number"],
-                        "a": ["type": "integer", "description": "The second number"],
+                        "type": "object",
+                        "properties": [
+                            "a": ["type": "integer", "description": "The first number"],
+                            "b": ["type": "integer", "description": "The second number"]
+                        ],
+                        "required": ["a", "b"]
                     ])
             ])
         }
-        await server.withMethodHandler(CallTool.self) { request in
+        await server.withRequestHandler(CallTool.self) { request, _ in
             guard request.name == "add" else {
                 return CallTool.Result(content: [.text("Invalid tool name")], isError: true)
             }
@@ -71,7 +75,7 @@ struct RoundtripTests {
         }
 
         // Add resource handlers to server
-        await server.withMethodHandler(ListResources.self) { _ in
+        await server.withRequestHandler(ListResources.self) { _, _ in
             return ListResources.Result(resources: [
                 Resource(
                     name: "Example Text",
@@ -88,7 +92,7 @@ struct RoundtripTests {
             ])
         }
 
-        await server.withMethodHandler(ReadResource.self) { request in
+        await server.withRequestHandler(ReadResource.self) { request, _ in
             guard request.uri == "test://example.txt" else {
                 return ReadResource.Result(contents: [.text("Resource not found", uri: request.uri)]
                 )

@@ -1,7 +1,7 @@
 import struct Foundation.UUID
 
 /// A unique identifier for a request.
-public enum ID: Hashable, Sendable {
+public enum RequestId: Hashable, Sendable {
     /// A string ID.
     case string(String)
 
@@ -9,14 +9,18 @@ public enum ID: Hashable, Sendable {
     case number(Int)
 
     /// Generates a random string ID.
-    public static var random: ID {
+    public static var random: RequestId {
         return .string(UUID().uuidString)
     }
 }
 
+/// Backwards compatibility alias for `RequestId`.
+@available(*, deprecated, renamed: "RequestId")
+public typealias ID = RequestId
+
 // MARK: - ExpressibleByStringLiteral
 
-extension ID: ExpressibleByStringLiteral {
+extension RequestId: ExpressibleByStringLiteral {
     public init(stringLiteral value: String) {
         self = .string(value)
     }
@@ -24,7 +28,7 @@ extension ID: ExpressibleByStringLiteral {
 
 // MARK: - ExpressibleByIntegerLiteral
 
-extension ID: ExpressibleByIntegerLiteral {
+extension RequestId: ExpressibleByIntegerLiteral {
     public init(integerLiteral value: Int) {
         self = .number(value)
     }
@@ -32,7 +36,7 @@ extension ID: ExpressibleByIntegerLiteral {
 
 // MARK: - CustomStringConvertible
 
-extension ID: CustomStringConvertible {
+extension RequestId: CustomStringConvertible {
     public var description: String {
         switch self {
         case .string(let str): return str
@@ -43,7 +47,7 @@ extension ID: CustomStringConvertible {
 
 // MARK: - Codable
 
-extension ID: Codable {
+extension RequestId: Codable {
     public init(from decoder: Decoder) throws {
         let container = try decoder.singleValueContainer()
         if let string = try? container.decode(String.self) {

@@ -39,7 +39,8 @@ struct ServerTests {
         try await server.start(transport: transport)
 
         // Wait for message processing and response
-        try await Task.sleep(for: .milliseconds(100))
+        let received = await transport.waitForSentMessageCount(1)
+        #expect(received, "Timed out waiting for initialize response")
 
         #expect(await transport.sentMessages.count == 1)
 
@@ -193,6 +194,52 @@ struct ServerTests {
             // Should contain both request IDs
             #expect(batchResponse.contains("\"id\":1"))
             #expect(batchResponse.contains("\"id\":2"))
+        }
+
+        await server.stop()
+        await transport.disconnect()
+    }
+
+    @Test("Invalid JSON-RPC message returns error")
+    func testInvalidJsonRpcMessageReturnsError() async throws {
+        let transport = MockTransport()
+        let server = Server(name: "TestServer", version: "1.0")
+
+        try await server.start(transport: transport)
+
+        // Initialize first
+        try await transport.queue(
+            request: Initialize.request(
+                .init(
+                    protocolVersion: Version.latest,
+                    capabilities: .init(),
+                    clientInfo: .init(name: "TestClient", version: "1.0")
+                )
+            )
+        )
+
+        // Wait for init response
+        let initReceived = await transport.waitForSentMessageCount(1)
+        #expect(initReceived, "Timed out waiting for init response")
+        await transport.clearMessages()
+
+        // Send invalid JSON-RPC message (missing jsonrpc field)
+        // This tests that the server properly validates incoming messages
+        let invalidMessage = #"{"method":"ping","id":"1"}"#
+        await transport.queueRaw(invalidMessage)
+
+        // Wait for error response with polling instead of fixed sleep
+        let errorReceived = await transport.waitForSentMessage { message in
+            message.contains("error")
+        }
+        #expect(errorReceived, "Timed out waiting for error response")
+
+        let messages = await transport.sentMessages
+        #expect(messages.count >= 1)
+
+        // Should get an error response
+        if let response = messages.first {
+            #expect(response.contains("error"))
         }
 
         await server.stop()

@@ -10,34 +10,34 @@ import struct Foundation.UUID
 struct IDTests {
     @Test("String ID initialization and encoding")
     func testStringID() throws {
-        let id: ID = "test-id"
+        let id: RequestId = "test-id"
         #expect(id.description == "test-id")
 
         let encoder = JSONEncoder()
         let decoder = JSONDecoder()
 
         let data = try encoder.encode(id)
-        let decoded = try decoder.decode(ID.self, from: data)
+        let decoded = try decoder.decode(RequestId.self, from: data)
         #expect(decoded == id)
     }
 
     @Test("Number ID initialization and encoding")
     func testNumberID() throws {
-        let id: ID = 42
+        let id: RequestId = 42
         #expect(id.description == "42")
 
         let encoder = JSONEncoder()
         let decoder = JSONDecoder()
 
         let data = try encoder.encode(id)
-        let decoded = try decoder.decode(ID.self, from: data)
+        let decoded = try decoder.decode(RequestId.self, from: data)
         #expect(decoded == id)
     }
 
     @Test("Random ID generation")
     func testRandomID() throws {
-        let id1 = ID.random
-        let id2 = ID.random
+        let id1 = RequestId.random
+        let id2 = RequestId.random
         #expect(id1 != id2, "Random IDs should be unique")
 
         if case .string(let str) = id1 {

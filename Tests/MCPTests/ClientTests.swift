@@ -790,4 +790,158 @@ struct ClientTests {
 
         await client.disconnect()
     }
+
+    @Test(
+        "Unexpected transport closure with pending requests",
+        .timeLimit(.minutes(1))
+    )
+    func testUnexpectedTransportClosureWithPendingRequests() async throws {
+        // Based on: mcp-python-sdk/tests/client/test_stdio.py::test_stdio_client_bad_path
+        let transport = MockTransport()
+        let client = Client(name: "TestClient", version: "1.0")
+
+        // Set up a task to handle the initialize response
+        let initTask = Task {
+            try await Task.sleep(for: .milliseconds(10))
+            if let lastMessage = await transport.sentMessages.last,
+                let data = lastMessage.data(using: .utf8),
+                let request = try? JSONDecoder().decode(Request<Initialize>.self, from: data)
+            {
+                let response = Initialize.response(
+                    id: request.id,
+                    result: .init(
+                        protocolVersion: Version.latest,
+                        capabilities: .init(),
+                        serverInfo: .init(name: "TestServer", version: "1.0"),
+                        instructions: nil
+                    )
+                )
+                try await transport.queue(response: response)
+            }
+        }
+
+        try await client.connect(transport: transport)
+        try await Task.sleep(for: .milliseconds(10))
+        initTask.cancel()
+
+        // Start a ping request in a separate task - we intentionally don't queue
+        // a response, so this request will remain pending
+        let pingTask = Task<Void, Swift.Error> {
+            try await client.ping()
+        }
+
+        // Give it time to send the request and register as pending
+        try await Task.sleep(for: .milliseconds(20))
+
+        // Verify the ping request was sent (Initialize + Initialized notification + Ping)
+        #expect(await transport.sentMessages.count >= 3)
+
+        // Simulate unexpected transport closure (e.g., server process exits)
+        // by disconnecting the transport directly without calling client.disconnect()
+        await transport.disconnect()
+
+        // Wait for the receive loop to detect the closed transport and clean up
+        try await Task.sleep(for: .milliseconds(50))
+
+        // The pending request should receive a connectionClosed error
+        do {
+            _ = try await pingTask.value
+            #expect(Bool(false), "Expected request to fail with connectionClosed error")
+        } catch let error as MCPError {
+            #expect(error.code == ErrorCode.connectionClosed, "Expected CONNECTION_CLOSED error code")
+            let errorMessage = error.errorDescription ?? ""
+            #expect(errorMessage.contains("Connection closed"))
+        } catch {
+            #expect(Bool(false), "Expected MCPError, got \(error)")
+        }
+
+        // Clean up
+        await client.disconnect()
+    }
+
+    @Test("Client rejects unsupported server protocol version")
+    func testClientRejectsUnsupportedProtocolVersion() async throws {
+        let transport = MockTransport()
+        let client = Client(name: "TestClient", version: "1.0")
+
+        // Set up a task to handle the initialize response with an unsupported version
+        let initTask = Task {
+            try await Task.sleep(for: .milliseconds(10))
+            if let lastMessage = await transport.sentMessages.last,
+                let data = lastMessage.data(using: .utf8),
+                let request = try? JSONDecoder().decode(Request<Initialize>.self, from: data)
+            {
+                // Respond with an unsupported protocol version
+                let response = Initialize.response(
+                    id: request.id,
+                    result: .init(
+                        protocolVersion: "2099-01-01",  // Future unsupported version
+                        capabilities: .init(),
+                        serverInfo: .init(name: "TestServer", version: "1.0"),
+                        instructions: nil
+                    )
+                )
+                try await transport.queue(response: response)
+            }
+        }
+
+        defer { initTask.cancel() }
+
+        // Connect should fail with an error about unsupported protocol version
+        do {
+            try await client.connect(transport: transport)
+            #expect(Bool(false), "Expected connection to fail due to unsupported protocol version")
+        } catch let error as MCPError {
+            // Should be an invalidRequest error about unsupported version
+            if case .invalidRequest(let message) = error {
+                #expect(message?.contains("unsupported protocol version") == true)
+                #expect(message?.contains("2099-01-01") == true)
+            } else {
+                #expect(Bool(false), "Expected invalidRequest error, got \(error)")
+            }
+        } catch {
+            #expect(Bool(false), "Expected MCPError, got \(error)")
+        }
+
+        // Client should have disconnected
+        #expect(await transport.isConnected == false)
+    }
+
+    @Test("Client accepts supported server protocol version")
+    func testClientAcceptsSupportedProtocolVersion() async throws {
+        let transport = MockTransport()
+        let client = Client(name: "TestClient", version: "1.0")
+
+        // Test with an older but supported version
+        let olderSupportedVersion = Version.v2024_11_05
+
+        // Set up a task to handle the initialize response
+        let initTask = Task {
+            try await Task.sleep(for: .milliseconds(10))
+            if let lastMessage = await transport.sentMessages.last,
+                let data = lastMessage.data(using: .utf8),
+                let request = try? JSONDecoder().decode(Request<Initialize>.self, from: data)
+            {
+                let response = Initialize.response(
+                    id: request.id,
+                    result: .init(
+                        protocolVersion: olderSupportedVersion,
+                        capabilities: .init(),
+                        serverInfo: .init(name: "TestServer", version: "1.0"),
+                        instructions: nil
+                    )
+                )
+                try await transport.queue(response: response)
+            }
+        }
+
+        defer { initTask.cancel() }
+
+        // Connect should succeed
+        let result = try await client.connect(transport: transport)
+        #expect(result.protocolVersion == olderSupportedVersion)
+        #expect(await transport.isConnected == true)
+
+        await client.disconnect()
+    }
 }

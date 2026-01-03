@@ -121,4 +121,49 @@ actor MockTransport: Transport {
         sentData.removeAll()
         dataToReceive.removeAll()
     }
+
+    /// Queue a raw JSON string for the server to receive
+    func queueRaw(_ jsonString: String) {
+        if let data = jsonString.data(using: .utf8) {
+            queue(data: data)
+        }
+    }
+
+    /// Wait until the sent message count reaches the expected value, with timeout.
+    /// - Parameters:
+    ///   - count: The expected number of sent messages
+    ///   - timeout: Maximum time to wait (default 2 seconds)
+    /// - Returns: `true` if the count was reached, `false` if timeout occurred
+    func waitForSentMessageCount(
+        _ count: Int,
+        timeout: Duration = .seconds(2)
+    ) async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while ContinuousClock.now < deadline {
+            if sentData.count >= count {
+                return true
+            }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return sentData.count >= count
+    }
+
+    /// Wait until a sent message matches the predicate, with timeout.
+    /// - Parameters:
+    ///   - timeout: Maximum time to wait (default 2 seconds)
+    ///   - predicate: Closure that returns true when the expected message is found
+    /// - Returns: `true` if a matching message was found, `false` if timeout occurred
+    func waitForSentMessage(
+        timeout: Duration = .seconds(2),
+        matching predicate: @escaping (String) -> Bool
+    ) async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while ContinuousClock.now < deadline {
+            if sentMessages.contains(where: predicate) {
+                return true
+            }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return sentMessages.contains(where: predicate)
+    }
 }

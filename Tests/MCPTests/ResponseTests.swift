@@ -23,7 +23,7 @@ struct ResponseTests {
 
     @Test("Success response initialization and encoding")
     func testSuccessResponse() throws {
-        let id: ID = "test-id"
+        let id: RequestId = "test-id"
         let result = TestMethod.Result(success: true)
         let response = Response<TestMethod>(id: id, result: result)
 
@@ -42,7 +42,7 @@ struct ResponseTests {
 
     @Test("Error response initialization and encoding")
     func testErrorResponse() throws {
-        let id: ID = "test-id"
+        let id: RequestId = "test-id"
         let error = MCPError.parseError(nil)
         let response = Response<TestMethod>(id: id, error: error)
 
@@ -53,10 +53,10 @@ struct ResponseTests {
         let decoded = try decoder.decode(Response<TestMethod>.self, from: data)
 
         if case .failure(let decodedError) = decoded.result {
-            #expect(decodedError.code == -32700)
-            #expect(
-                decodedError.localizedDescription
-                    == "Parse error: Invalid JSON: Parse error: Invalid JSON")
+            #expect(decodedError.code == ErrorCode.parseError)
+            // Roundtrip preserves the error: parseError(nil) encodes as "Invalid JSON",
+            // which decodes back to parseError(nil) since it matches the default message
+            #expect(decodedError.localizedDescription == "Parse error: Invalid JSON")
         } else {
             #expect(Bool(false), "Expected error result")
         }
@@ -64,7 +64,7 @@ struct ResponseTests {
 
     @Test("Error response with detail")
     func testErrorResponseWithDetail() throws {
-        let id: ID = "test-id"
+        let id: RequestId = "test-id"
         let error = MCPError.parseError("Invalid syntax")
         let response = Response<TestMethod>(id: id, error: error)
 
@@ -75,7 +75,7 @@ struct ResponseTests {
         let decoded = try decoder.decode(Response<TestMethod>.self, from: data)
 
         if case .failure(let decodedError) = decoded.result {
-            #expect(decodedError.code == -32700)
+            #expect(decodedError.code == ErrorCode.parseError)
             #expect(
                 decodedError.localizedDescription
                     == "Parse error: Invalid JSON: Invalid syntax")

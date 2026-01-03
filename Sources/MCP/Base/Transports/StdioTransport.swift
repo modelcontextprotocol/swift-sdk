@@ -20,7 +20,7 @@ import struct Foundation.Data
 #if canImport(Darwin) || canImport(Glibc) || canImport(Musl)
     /// An implementation of the MCP stdio transport protocol.
     ///
-    /// This transport implements the [stdio transport](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#stdio)
+    /// This transport implements the [stdio transport](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports#stdio)
     /// specification from the Model Context Protocol.
     ///
     /// The stdio transport works by:
@@ -133,6 +133,14 @@ import struct Foundation.Data
         /// This method runs in the background while the transport is connected,
         /// parsing complete messages delimited by newlines and yielding them
         /// to the message stream.
+        ///
+        /// - Note: This implementation uses synchronous `FileDescriptor.read()` with
+        ///   non-blocking mode and EAGAIN retry. This works but requires polling.
+        ///
+        /// - TODO: Consider refactoring to use proper async I/O (e.g., Dispatch I/O or
+        ///   DispatchSource for read/write events) to eliminate polling. This would
+        ///   remove the need for EAGAIN handling and improve efficiency. The same
+        ///   applies to the `send()` method's write loop.
         private func readLoop() async {
             let bufferSize = 4096
             var buffer = [UInt8](repeating: 0, count: bufferSize)
@@ -151,10 +159,15 @@ import struct Foundation.Data
 
                     pendingData.append(Data(buffer[..<bytesRead]))
 
-                    // Process complete messages
+                    // Process complete messages (newline-delimited)
                     while let newlineIndex = pendingData.firstIndex(of: UInt8(ascii: "\n")) {
-                        let messageData = pendingData[..<newlineIndex]
+                        var messageData = pendingData[..<newlineIndex]
                         pendingData = pendingData[(newlineIndex + 1)...]
+
+                        // Strip trailing carriage return for Windows-style line endings (CRLF)
+                        if messageData.last == UInt8(ascii: "\r") {
+                            messageData = messageData.dropLast()
+                        }
 
                         if !messageData.isEmpty {
                             logger.trace(

@@ -11,6 +11,22 @@ public struct Empty: NotRequired, Hashable, Codable, Sendable {
     public init() {}
 }
 
+/// Base notification parameters with optional metadata.
+///
+/// Used by notifications that have no additional parameters beyond `_meta`.
+public struct NotificationParams: NotRequired, Hashable, Codable, Sendable {
+    /// Reserved for additional metadata.
+    public var _meta: [String: Value]?
+
+    public init() {
+        self._meta = nil
+    }
+
+    public init(_meta: [String: Value]?) {
+        self._meta = _meta
+    }
+}
+
 extension Value: NotRequired {
     public init() {
         self = .null
@@ -37,30 +53,37 @@ struct AnyMethod: Method, Sendable {
 }
 
 extension Method where Parameters == Empty {
-    public static func request(id: ID = .random) -> Request<Self> {
+    public static func request(id: RequestId = .random) -> Request<Self> {
         Request(id: id, method: name, params: Empty())
     }
 }
 
+extension Method where Parameters: NotRequired {
+    /// Create a request with default parameters.
+    public static func request(id: RequestId = .random) -> Request<Self> {
+        Request(id: id, method: name, params: Parameters())
+    }
+}
+
 extension Method where Result == Empty {
-    public static func response(id: ID) -> Response<Self> {
+    public static func response(id: RequestId) -> Response<Self> {
         Response(id: id, result: Empty())
     }
 }
 
 extension Method {
     /// Create a request with the given parameters.
-    public static func request(id: ID = .random, _ parameters: Self.Parameters) -> Request<Self> {
+    public static func request(id: RequestId = .random, _ parameters: Self.Parameters) -> Request<Self> {
         Request(id: id, method: name, params: parameters)
     }
 
     /// Create a response with the given result.
-    public static func response(id: ID, result: Self.Result) -> Response<Self> {
+    public static func response(id: RequestId, result: Self.Result) -> Response<Self> {
         Response(id: id, result: result)
     }
 
     /// Create a response with the given error.
-    public static func response(id: ID, error: MCPError) -> Response<Self> {
+    public static func response(id: RequestId, error: MCPError) -> Response<Self> {
         Response(id: id, error: error)
     }
 }
@@ -70,13 +93,13 @@ extension Method {
 /// A request message.
 public struct Request<M: Method>: Hashable, Identifiable, Codable, Sendable {
     /// The request ID.
-    public let id: ID
+    public let id: RequestId
     /// The method name.
     public let method: String
     /// The request parameters.
     public let params: M.Parameters
 
-    init(id: ID = .random, method: String, params: M.Parameters) {
+    init(id: RequestId = .random, method: String, params: M.Parameters) {
         self.id = id
         self.method = method
         self.params = params
@@ -151,21 +174,21 @@ extension AnyRequest {
 
 /// A box for request handlers that can be type-erased
 class RequestHandlerBox: @unchecked Sendable {
-    func callAsFunction(_ request: AnyRequest) async throws -> AnyResponse {
+    func callAsFunction(_ request: AnyRequest, context: Server.RequestHandlerContext) async throws -> AnyResponse {
         fatalError("Must override")
     }
 }
 
 /// A typed request handler that can be used to handle requests of a specific type
 final class TypedRequestHandler<M: Method>: RequestHandlerBox, @unchecked Sendable {
-    private let _handle: @Sendable (Request<M>) async throws -> Response<M>
+    private let _handle: @Sendable (Request<M>, Server.RequestHandlerContext) async throws -> Response<M>
 
-    init(_ handler: @escaping @Sendable (Request<M>) async throws -> Response<M>) {
+    init(_ handler: @escaping @Sendable (Request<M>, Server.RequestHandlerContext) async throws -> Response<M>) {
         self._handle = handler
         super.init()
     }
 
-    override func callAsFunction(_ request: AnyRequest) async throws -> AnyResponse {
+    override func callAsFunction(_ request: AnyRequest, context: Server.RequestHandlerContext) async throws -> AnyResponse {
         let encoder = JSONEncoder()
         let decoder = JSONDecoder()
 
@@ -174,7 +197,7 @@ final class TypedRequestHandler<M: Method>: RequestHandlerBox, @unchecked Sendab
         let request = try decoder.decode(Request<M>.self, from: data)
 
         // Handle with concrete type
-        let response = try await _handle(request)
+        let response = try await _handle(request, context)
 
         // Convert result to AnyMethod response
         switch response.result {
@@ -193,16 +216,16 @@ final class TypedRequestHandler<M: Method>: RequestHandlerBox, @unchecked Sendab
 /// A response message.
 public struct Response<M: Method>: Hashable, Identifiable, Codable, Sendable {
     /// The response ID.
-    public let id: ID
+    public let id: RequestId
     /// The response result.
     public let result: Swift.Result<M.Result, MCPError>
 
-    public init(id: ID, result: M.Result) {
+    public init(id: RequestId, result: M.Result) {
         self.id = id
         self.result = .success(result)
     }
 
-    public init(id: ID, error: MCPError) {
+    public init(id: RequestId, error: MCPError) {
         self.id = id
         self.result = .failure(error)
     }
@@ -291,8 +314,17 @@ extension AnyNotification {
     }
 }
 
+/// Protocol for type-erased notification messages.
+///
+/// This protocol allows sending notification messages with parameters through
+/// a type-erased interface. `Message<N>` conforms to this protocol.
+public protocol NotificationMessageProtocol: Sendable, Encodable {
+    /// The notification method name.
+    var method: String { get }
+}
+
 /// A message that can be used to send notifications.
-public struct Message<N: Notification>: Hashable, Codable, Sendable {
+public struct Message<N: Notification>: NotificationMessageProtocol, Hashable, Codable, Sendable {
     /// The method name.
     public let method: String
     /// The notification parameters.
@@ -365,6 +397,13 @@ extension Notification where Parameters == Empty {
     }
 }
 
+extension Notification where Parameters == NotificationParams {
+    /// Create a message with default parameters (no metadata).
+    public static func message() -> Message<Self> {
+        Message(method: name, params: NotificationParams())
+    }
+}
+
 extension Notification {
     /// Create a message with the given parameters.
     public static func message(_ parameters: Parameters) -> Message<Self> {
@@ -394,5 +433,47 @@ final class TypedNotificationHandler<N: Notification>: NotificationHandlerBox,
         let typedNotification = try JSONDecoder().decode(Message<N>.self, from: data)
 
         try await _handle(typedNotification)
+    }
+}
+
+// MARK: - Client Request Handlers
+
+/// A box for client request handlers that can be type-erased
+class ClientRequestHandlerBox: @unchecked Sendable {
+    func callAsFunction(_ request: AnyRequest, context: Client.RequestHandlerContext) async throws -> AnyResponse {
+        fatalError("Must override")
+    }
+}
+
+/// A typed client request handler that can be used to handle requests of a specific type
+final class TypedClientRequestHandler<M: Method>: ClientRequestHandlerBox, @unchecked Sendable {
+    private let _handle: @Sendable (M.Parameters, Client.RequestHandlerContext) async throws -> M.Result
+
+    init(_ handler: @escaping @Sendable (M.Parameters, Client.RequestHandlerContext) async throws -> M.Result) {
+        self._handle = handler
+        super.init()
+    }
+
+    override func callAsFunction(_ request: AnyRequest, context: Client.RequestHandlerContext) async throws -> AnyResponse {
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+
+        // Create a concrete request from the type-erased one
+        let data = try encoder.encode(request)
+        let typedRequest = try decoder.decode(Request<M>.self, from: data)
+
+        // Handle with concrete type
+        do {
+            let result = try await _handle(typedRequest.params, context)
+
+            // Convert result to AnyMethod response
+            let resultData = try encoder.encode(result)
+            let resultValue = try decoder.decode(Value.self, from: resultData)
+            return Response(id: typedRequest.id, result: resultValue)
+        } catch let error as MCPError {
+            return Response(id: typedRequest.id, error: error)
+        } catch {
+            return Response(id: typedRequest.id, error: MCPError.internalError(error.localizedDescription))
+        }
     }
 }

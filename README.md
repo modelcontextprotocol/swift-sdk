@@ -428,33 +428,37 @@ Register tool handlers to respond to client tool calls:
 
 ```swift
 // Register a tool list handler
-await server.withMethodHandler(ListTools.self) { _ in
+await server.withRequestHandler(ListTools.self) { _ in
     let tools = [
         Tool(
             name: "weather",
             description: "Get current weather for a location",
-            inputSchema: .object([
-                "properties": .object([
-                    "location": .string("City name or coordinates"),
-                    "units": .string("Units of measurement, e.g., metric, imperial")
-                ])
-            ])
+            inputSchema: [
+                "type": "object",
+                "properties": [
+                    "location": ["type": "string", "description": "City name or coordinates"],
+                    "units": ["type": "string", "description": "Units of measurement (metric or imperial)"]
+                ],
+                "required": ["location"]
+            ]
         ),
         Tool(
             name: "calculator",
             description: "Perform calculations",
-            inputSchema: .object([
-                "properties": .object([
-                    "expression": .string("Mathematical expression to evaluate")
-                ])
-            ])
+            inputSchema: [
+                "type": "object",
+                "properties": [
+                    "expression": ["type": "string", "description": "Mathematical expression to evaluate"]
+                ],
+                "required": ["expression"]
+            ]
         )
     ]
     return .init(tools: tools)
 }
 
 // Register a tool call handler
-await server.withMethodHandler(CallTool.self) { params in
+await server.withRequestHandler(CallTool.self) { params in
     switch params.name {
     case "weather":
         let location = params.arguments?["location"]?.stringValue ?? "Unknown"
@@ -479,13 +483,116 @@ await server.withMethodHandler(CallTool.self) { params in
 }
 ```
 
+### Progress Notifications
+
+For long-running operations, servers can send progress notifications to keep clients informed. Clients include a `progressToken` in the request's `_meta` field, and servers use that token when sending progress updates.
+
+The `RequestHandlerContext` provides convenience methods for sending notifications:
+
+```swift
+// Register a tool call handler that reports progress
+await server.withRequestHandler(CallTool.self) { params, context in
+    switch params.name {
+    case "long-running-task":
+        // Extract the progress token from the request metadata
+        // Clients that want progress updates will include this in _meta.progressToken
+        let progressToken = params._meta?.progressToken
+
+        // Helper to send progress if client requested it
+        func reportProgress(_ progress: Double, _ message: String) async throws {
+            if let token = progressToken {
+                try await context.sendProgress(
+                    token: token,
+                    progress: progress,
+                    total: 100.0,
+                    message: message
+                )
+            }
+        }
+
+        try await reportProgress(0.0, "Starting task...")
+
+        // Perform first part of work
+        await performFirstStep()
+
+        try await reportProgress(50.0, "Halfway complete...")
+
+        // Perform second part of work
+        await performSecondStep()
+
+        try await reportProgress(100.0, "Task complete!")
+
+        return .init(content: [.text("Task completed successfully")], isError: false)
+
+    default:
+        return .init(content: [.text("Unknown tool")], isError: true)
+    }
+}
+```
+
+The `RequestHandlerContext` provides these convenience methods:
+
+| Method | Description |
+|--------|-------------|
+| `sendProgress(token:progress:total:message:)` | Send progress updates for long-running operations |
+| `sendLogMessage(level:logger:data:)` | Send log messages to the client |
+| `sendResourceListChanged()` | Notify client that available resources have changed |
+| `sendResourceUpdated(uri:)` | Notify client that a specific resource was updated |
+| `sendToolListChanged()` | Notify client that available tools have changed |
+| `sendPromptListChanged()` | Notify client that available prompts have changed |
+
+You can also use `sendMessage()` for full control over notification parameters:
+
+```swift
+try await context.sendMessage(ProgressNotification.message(.init(
+    progressToken: .integer(42),  // Tokens can be strings or integers
+    progress: 75.0,
+    total: 100.0,
+    message: "Processing item 3 of 4..."
+)))
+```
+
+#### Handling Progress Notifications (Client)
+
+Clients register handlers to receive progress notifications, and include a `progressToken` in requests where they want progress updates:
+
+```swift
+// Register a progress notification handler
+await client.onNotification(ProgressNotification.self) { message in
+    let params = message.params
+
+    // Match the token to know which request this progress is for
+    guard params.progressToken == .string("my-task-token") else { return }
+
+    // Calculate percentage if total is known
+    if let total = params.total, total > 0 {
+        let percentage = (params.progress / total) * 100
+        print("Progress: \(percentage)%")
+    }
+
+    // Show human-readable message if available
+    if let progressMessage = params.message {
+        print("Status: \(progressMessage)")
+    }
+}
+
+// Make a request with a progress token to receive updates
+let result = try await client.request(
+    CallTool.request(.init(
+        name: "long-running-task",
+        arguments: [:],
+        _meta: RequestMeta(progressToken: "my-task-token")
+    ))
+)
+```
+
 ### Resources
 
 Implement resource handlers for data access:
 
 ```swift
 // Register a resource list handler
-await server.withMethodHandler(ListResources.self) { params in
+await server.withRequestHandler(ListResources.self) { params in
     let resources = [
         Resource(
             name: "Knowledge Base Articles",
@@ -502,7 +609,7 @@ await server.withMethodHandler(ListResources.self) { params in
 }
 
 // Register a resource read handler
-await server.withMethodHandler(ReadResource.self) { params in
+await server.withRequestHandler(ReadResource.self) { params in
     switch params.uri {
     case "resource://knowledge-base/articles":
         return .init(contents: [Resource.Content.text("# Knowledge Base\n\nThis is the content of the knowledge base...", uri: params.uri)])
@@ -528,7 +635,7 @@ await server.withMethodHandler(ReadResource.self) { params in
 }
 
 // Register a resource subscribe handler
-await server.withMethodHandler(ResourceSubscribe.self) { params in
+await server.withRequestHandler(ResourceSubscribe.self) { params in
     // Store subscription for later notifications.
     // Client identity for multi-client scenarios needs to be managed by the server application,
     // potentially using information from the initialize handshake if the server handles one client post-init.
@@ -544,7 +651,7 @@ Implement prompt handlers:
 
 ```swift
 // Register a prompt list handler
-await server.withMethodHandler(ListPrompts.self) { params in
+await server.withRequestHandler(ListPrompts.self) { params in
     let prompts = [
         Prompt(
             name: "interview",
@@ -568,7 +675,7 @@ await server.withMethodHandler(ListPrompts.self) { params in
 }
 
 // Register a prompt get handler
-await server.withMethodHandler(GetPrompt.self) { params in
+await server.withRequestHandler(GetPrompt.self) { params in
     switch params.name {
     case "interview":
         let position = params.arguments?["position"]?.stringValue ?? "Software Engineer"
@@ -724,14 +831,14 @@ let server = Server(
 )
 
 // Add handlers directly to the server
-await server.withMethodHandler(ListTools.self) { _ in
+await server.withRequestHandler(ListTools.self) { _ in
     // Your implementation
     return .init(tools: [
         Tool(name: "example", description: "An example tool")
     ])
 }
 
-await server.withMethodHandler(CallTool.self) { params in
+await server.withRequestHandler(CallTool.self) { params in
     // Your implementation
     return .init(content: [.text("Tool result")], isError: false)
 }
