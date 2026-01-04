@@ -74,6 +74,9 @@ public actor HTTPClientTransport: Transport {
     /// Closure to modify requests before they are sent
     private let requestModifier: (URLRequest) -> URLRequest
 
+    /// OAuth provider for automatic token management (reserved for future OAuth implementation)
+    private let authProvider: (any OAuthClientProvider)?
+
     private var isConnected = false
     private let messageStream: AsyncThrowingStream<TransportMessage, Swift.Error>
     private let messageContinuation: AsyncThrowingStream<TransportMessage, Swift.Error>.Continuation
@@ -112,6 +115,10 @@ public actor HTTPClientTransport: Transport {
     ///   - sseInitializationTimeout: Maximum time to wait for session ID before proceeding with SSE (default: 10 seconds)
     ///   - reconnectionOptions: Configuration for reconnection behavior (default: .default)
     ///   - requestModifier: Optional closure to customize requests before they are sent (default: no modification)
+    ///   - authProvider: Optional OAuth provider for automatic token management.
+    ///     When provided, the transport will use the provider to obtain Bearer tokens
+    ///     and handle 401 responses. This parameter is reserved for future OAuth
+    ///     implementation and is not currently used.
     ///   - logger: Optional logger instance for transport events
     public init(
         endpoint: URL,
@@ -120,6 +127,7 @@ public actor HTTPClientTransport: Transport {
         sseInitializationTimeout: TimeInterval = 10,
         reconnectionOptions: HTTPReconnectionOptions = .default,
         requestModifier: @escaping (URLRequest) -> URLRequest = { $0 },
+        authProvider: (any OAuthClientProvider)? = nil,
         logger: Logger? = nil
     ) {
         self.init(
@@ -129,6 +137,7 @@ public actor HTTPClientTransport: Transport {
             sseInitializationTimeout: sseInitializationTimeout,
             reconnectionOptions: reconnectionOptions,
             requestModifier: requestModifier,
+            authProvider: authProvider,
             logger: logger
         )
     }
@@ -140,6 +149,7 @@ public actor HTTPClientTransport: Transport {
         sseInitializationTimeout: TimeInterval = 10,
         reconnectionOptions: HTTPReconnectionOptions = .default,
         requestModifier: @escaping (URLRequest) -> URLRequest = { $0 },
+        authProvider: (any OAuthClientProvider)? = nil,
         logger: Logger? = nil
     ) {
         self.endpoint = endpoint
@@ -148,6 +158,7 @@ public actor HTTPClientTransport: Transport {
         self.sseInitializationTimeout = sseInitializationTimeout
         self.reconnectionOptions = reconnectionOptions
         self.requestModifier = requestModifier
+        self.authProvider = authProvider
 
         // Create message stream
         var continuation: AsyncThrowingStream<TransportMessage, Swift.Error>.Continuation!
