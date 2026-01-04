@@ -3,6 +3,24 @@ import Foundation
 extension Client {
     // MARK: - Message Handling
 
+    /// Extract `_meta` from request parameters if present.
+    ///
+    /// Since `AnyMethod.Parameters` is `Value`, we need to extract `_meta` manually.
+    private func extractMeta(from params: Value) -> RequestMeta? {
+        guard case .object(let dict) = params,
+              let metaValue = dict["_meta"] else {
+            return nil
+        }
+        // Decode the _meta value as RequestMeta
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+        guard let data = try? encoder.encode(metaValue),
+              let meta = try? decoder.decode(RequestMeta.self, from: data) else {
+            return nil
+        }
+        return meta
+    }
+
     func handleResponse(_ response: Response<AnyMethod>) async {
         await logger?.trace(
             "Processing response",
@@ -255,9 +273,27 @@ extension Client {
             return
         }
 
+        // Create the request handler context
+        // This provides cancellation checking and notification sending to the handler
+        let requestMeta = extractMeta(from: request.params)
+        let context = RequestHandlerContext(
+            sendNotification: { [weak self] notification in
+                guard let self else {
+                    throw MCPError.internalError("Client was deallocated")
+                }
+                guard let connection = await self.connection else {
+                    throw MCPError.internalError("Cannot send notification - client not connected")
+                }
+                let notificationData = try self.encoder.encode(notification)
+                try await connection.send(notificationData)
+            },
+            requestId: request.id,
+            _meta: requestMeta
+        )
+
         // Execute the handler and send response
         do {
-            let response = try await handler(request)
+            let response = try await handler(request, context: context)
 
             // Check cancellation before sending response (per MCP spec:
             // "Receivers of a cancellation notification SHOULD... Not send a response

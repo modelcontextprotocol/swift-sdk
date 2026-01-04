@@ -102,6 +102,28 @@ extension Server {
         /// For HTTP transports with multiple concurrent clients, this identifies
         /// the specific session. Used for per-session features like log levels.
         let sessionId: String?
+        /// The request metadata from `_meta` field, if present.
+        ///
+        /// Contains the progress token and any additional metadata.
+        let meta: RequestMeta?
+    }
+
+    /// Extract `_meta` from request parameters if present.
+    ///
+    /// Since `AnyMethod.Parameters` is `Value`, we need to extract `_meta` manually.
+    private func extractMeta(from params: Value) -> RequestMeta? {
+        guard case .object(let dict) = params,
+              let metaValue = dict["_meta"] else {
+            return nil
+        }
+        // Decode the _meta value as RequestMeta
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+        guard let data = try? encoder.encode(metaValue),
+              let meta = try? decoder.decode(RequestMeta.self, from: data) else {
+            return nil
+        }
+        return meta
     }
 
     /// Wrapper for encoding type-erased notifications as JSON-RPC messages.
@@ -161,10 +183,12 @@ extension Server {
         // This ensures responses go to the correct client even if self.connection
         // changes while the handler is executing (e.g., another client connects).
         let capturedConnection = self.connection
+        let requestMeta = extractMeta(from: request.params)
         let context = RequestContext(
             capturedConnection: capturedConnection,
             requestId: request.id,
-            sessionId: await capturedConnection?.sessionId
+            sessionId: await capturedConnection?.sessionId,
+            meta: requestMeta
         )
 
         // Check if this is a pre-processed error request (empty method)
@@ -244,9 +268,61 @@ extension Server {
                 try await connection.send(data, relatedRequestId: context.requestId)
             },
             sessionId: context.sessionId,
+            requestId: context.requestId,
+            _meta: context.meta,
             shouldSendLogMessage: { [weak self, context] level in
                 guard let self else { return true }
                 return await self.shouldSendLogMessage(at: level, forSession: context.sessionId)
+            },
+            sendRequest: { [weak self, context] requestData in
+                guard let self else {
+                    throw MCPError.internalError("Server reference lost")
+                }
+                guard let connection = context.capturedConnection else {
+                    throw MCPError.internalError("Cannot send request - connection was nil at request time")
+                }
+
+                // Parse the request to get its ID
+                guard let jsonObject = try? JSONSerialization.jsonObject(with: requestData) as? [String: Any],
+                      let requestId = jsonObject["id"] else {
+                    throw MCPError.invalidParams("Could not parse request ID")
+                }
+
+                // Convert request ID to RequestId type
+                let typedRequestId: RequestId
+                if let numId = requestId as? Int {
+                    typedRequestId = .number(numId)
+                } else if let strId = requestId as? String {
+                    typedRequestId = .string(strId)
+                } else {
+                    throw MCPError.invalidParams("Invalid request ID type")
+                }
+
+                // Create stream for receiving the response
+                let (stream, continuation) = AsyncThrowingStream<Value, Swift.Error>.makeStream()
+
+                continuation.onTermination = { @Sendable [weak self] _ in
+                    Task { await self?.cleanUpPendingRequest(id: typedRequestId) }
+                }
+
+                // Register the pending request
+                await self.registerContextRequest(id: typedRequestId, continuation: continuation)
+
+                // Send the request using captured connection
+                do {
+                    try await connection.send(requestData, relatedRequestId: context.requestId)
+                } catch {
+                    await self.cleanUpPendingRequest(id: typedRequestId)
+                    continuation.finish(throwing: error)
+                    throw error
+                }
+
+                // Wait for response
+                for try await result in stream {
+                    return result
+                }
+
+                throw MCPError.internalError("No response received from client")
             }
         )
 

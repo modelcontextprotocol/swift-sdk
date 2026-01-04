@@ -411,7 +411,10 @@ struct ToolTests {
             sendMessage: { _ in },
             sendData: { _ in },
             sessionId: nil,
-            shouldSendLogMessage: { _ in true }
+            requestId: .number(1),
+            _meta: nil,
+            shouldSendLogMessage: { _ in true },
+            sendRequest: { _ in throw MCPError.internalError("Not implemented") }
         )
         let response = try await handler(anyRequest, context: dummyContext)
 

@@ -188,6 +188,33 @@ public actor Client {
         /// Use this to send notifications from within a request handler.
         let sendNotification: @Sendable (any NotificationMessageProtocol) async throws -> Void
 
+        /// The JSON-RPC ID of the request being handled.
+        ///
+        /// This can be useful for tracking, logging, or correlating messages.
+        /// It matches the TypeScript SDK's `extra.requestId`.
+        public let requestId: RequestId
+
+        /// The request metadata from the `_meta` field, if present.
+        ///
+        /// Contains metadata like the progress token for progress notifications.
+        /// This matches the TypeScript SDK's `extra._meta` and Python's `ctx.meta`.
+        ///
+        /// ## Example
+        ///
+        /// ```swift
+        /// client.withRequestHandler(CreateSamplingMessage.self) { params, context in
+        ///     if let progressToken = context._meta?.progressToken {
+        ///         try await context.sendProgressNotification(
+        ///             token: progressToken,
+        ///             progress: 50,
+        ///             total: 100
+        ///         )
+        ///     }
+        ///     return result
+        /// }
+        /// ```
+        public let _meta: RequestMeta?
+
         // MARK: - Convenience Methods
 
         /// Send a progress notification to the server.

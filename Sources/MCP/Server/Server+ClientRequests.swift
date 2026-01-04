@@ -52,6 +52,17 @@ extension Server {
         pendingRequests.removeValue(forKey: id)
     }
 
+    /// Register a pending request from a context's sendRequest call.
+    ///
+    /// This is used by RequestHandlerContext.sendRequest to register pending
+    /// requests that will be fulfilled when the client responds.
+    func registerContextRequest(
+        id: RequestId,
+        continuation: AsyncThrowingStream<Value, Swift.Error>.Continuation
+    ) {
+        pendingRequests[id] = AnyServerPendingRequest(continuation: continuation)
+    }
+
     // MARK: - In-Flight Request Tracking (Protocol-Level Cancellation)
 
     /// Track an in-flight request handler Task.

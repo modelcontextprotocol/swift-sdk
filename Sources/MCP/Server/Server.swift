@@ -5,7 +5,75 @@ import struct Foundation.Date
 import class Foundation.JSONDecoder
 import class Foundation.JSONEncoder
 
-/// Model Context Protocol server
+/// Model Context Protocol server.
+///
+/// ## Architecture: One Server per Client
+///
+/// The Swift SDK uses a **one-Server-per-client** architecture, where each client
+/// connection gets its own `Server` instance. This mirrors the TypeScript SDK's
+/// design and differs from Python's shared-Server model.
+///
+/// ### Comparison with Other SDKs
+///
+/// **Python SDK (shared Server):**
+/// ```
+/// ┌──────────────────────────────────────┐
+/// │           Server (ONE)               │
+/// │  - Handler registry (shared)         │
+/// │  - No connection state               │
+/// └──────────────────────────────────────┘
+///          │ server.run() creates ↓
+/// ┌─────────────┐  ┌─────────────┐
+/// │ Session A   │  │ Session B   │
+/// │ (Transport) │  │ (Transport) │
+/// └─────────────┘  └─────────────┘
+/// ```
+///
+/// **Swift & TypeScript SDKs (per-client Server):**
+/// ```
+/// ┌─────────────┐  ┌─────────────┐
+/// │  Server A   │  │  Server B   │
+/// │ (Handlers)  │  │ (Handlers)  │
+/// │ (Transport) │  │ (Transport) │
+/// └─────────────┘  └─────────────┘
+/// ```
+///
+/// ### Scalability Considerations
+///
+/// The per-client model is appropriate for MCP's typical use cases:
+/// - AI assistants connecting to tool servers (single-digit connections)
+/// - IDE plugins and developer tools (tens of connections)
+/// - Multi-user applications (hundreds of connections)
+///
+/// Memory overhead per Server instance is minimal (a few KB for handler references
+/// and state). For realistic MCP deployments, this scales well.
+///
+/// For high-connection scenarios (10,000+), consider:
+/// - Horizontal scaling with connection-time load balancing
+/// - MCP's stateless mode for true per-request distribution
+/// - The Python SDK's shared-Server pattern (requires architectural changes)
+///
+/// ### Design Rationale
+///
+/// The per-client model was chosen because it:
+/// 1. Matches TypeScript SDK's official examples and patterns
+/// 2. Provides complete isolation between client connections
+/// 3. Simplifies reasoning about connection state
+/// 4. Avoids complex session management code
+///
+/// For HTTP transports, each session creates its own `(Server, HTTPServerTransport)`
+/// pair, stored by session ID for request routing.
+///
+/// ## API Design: Context vs Server Methods
+///
+/// The `RequestHandlerContext` provides request-scoped capabilities:
+/// - `requestId`, `_meta` - Request identification and metadata
+/// - `sendNotification()` - Send notifications during handling
+/// - `elicit()`, `elicitUrl()` - Request user input (matches Python's `ctx.elicit()`)
+/// - `isCancelled` - Check for request cancellation
+///
+/// Sampling is done via `server.createMessage()` (matches TypeScript), not through
+/// the context. This design follows each reference SDK's conventions where appropriate.
 public actor Server {
     /// The server configuration
     public struct Configuration: Hashable, Codable, Sendable {
@@ -207,11 +275,62 @@ public actor Server {
         /// For simple transports (stdio, single-connection), this is `nil`.
         public let sessionId: String?
 
+        /// The JSON-RPC ID of the request being handled.
+        ///
+        /// This can be useful for tracking, logging, or correlating messages.
+        /// It matches the TypeScript SDK's `extra.requestId`.
+        public let requestId: RequestId
+
+        /// The request metadata from the `_meta` field, if present.
+        ///
+        /// Contains metadata like the progress token for progress notifications.
+        /// This matches the TypeScript SDK's `extra._meta` and Python's `ctx.meta`.
+        ///
+        /// ## Example
+        ///
+        /// ```swift
+        /// server.withRequestHandler(CallTool.self) { request, context in
+        ///     if let progressToken = context._meta?.progressToken {
+        ///         try await context.sendProgress(token: progressToken, progress: 50, total: 100)
+        ///     }
+        ///     return CallTool.Result(content: [.text("Done")])
+        /// }
+        /// ```
+        public let _meta: RequestMeta?
+
         /// Check if a log message at the given level should be sent.
         ///
         /// This respects the minimum log level set by the client via `logging/setLevel`.
         /// Messages below the threshold will be silently dropped.
         let shouldSendLogMessage: @Sendable (LoggingLevel) async -> Bool
+
+        /// Send a request to the client and wait for a response.
+        ///
+        /// This enables bidirectional communication from within a request handler,
+        /// allowing servers to request information from the client (e.g., elicitation,
+        /// sampling) during request processing.
+        ///
+        /// This matches the TypeScript SDK's `extra.sendRequest()` functionality.
+        ///
+        /// ## Example
+        ///
+        /// ```swift
+        /// server.withRequestHandler(CallTool.self) { request, context in
+        ///     // Request user input via elicitation
+        ///     let result = try await context.elicit(
+        ///         message: "Please confirm the operation",
+        ///         requestedSchema: ElicitationSchema(properties: [
+        ///             "confirm": .boolean(BooleanSchema(title: "Confirm"))
+        ///         ])
+        ///     )
+        ///
+        ///     if result.action == .accept {
+        ///         // Process confirmed action
+        ///     }
+        ///     return CallTool.Result(content: [.text("Done")])
+        /// }
+        /// ```
+        let sendRequest: @Sendable (Data) async throws -> Value
 
         // MARK: - Convenience Methods
 
@@ -324,6 +443,92 @@ public actor Server {
         /// - Parameter task: The task to send the status notification for.
         public func sendTaskStatus(task: MCPTask) async throws {
             try await sendMessage(TaskStatusNotification.message(.init(task: task)))
+        }
+
+        // MARK: - Bidirectional Requests
+
+        /// Request user input via form elicitation from the client.
+        ///
+        /// This enables servers to request structured input from users through
+        /// the client during request handling. The client presents a form based
+        /// on the provided schema and returns the user's response.
+        ///
+        /// This matches the TypeScript SDK's `extra.sendRequest({ method: 'elicitation/create', ... })`
+        /// and Python's `ctx.elicit()` functionality.
+        ///
+        /// ## Example
+        ///
+        /// ```swift
+        /// server.withRequestHandler(CallTool.self) { request, context in
+        ///     let result = try await context.elicit(
+        ///         message: "Please confirm the operation",
+        ///         requestedSchema: ElicitationSchema(properties: [
+        ///             "confirm": .boolean(BooleanSchema(title: "Confirm"))
+        ///         ])
+        ///     )
+        ///
+        ///     if result.action == .accept {
+        ///         // User confirmed
+        ///     }
+        ///     return CallTool.Result(content: [.text("Done")])
+        /// }
+        /// ```
+        ///
+        /// - Parameters:
+        ///   - message: The message to present to the user
+        ///   - requestedSchema: The schema defining the form fields
+        /// - Returns: The elicitation result from the client
+        /// - Throws: MCPError if the request fails
+        public func elicit(
+            message: String,
+            requestedSchema: ElicitationSchema
+        ) async throws -> ElicitResult {
+            let params = ElicitRequestFormParams(
+                mode: "form",
+                message: message,
+                requestedSchema: requestedSchema
+            )
+            let request = Elicit.request(id: .random, .form(params))
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+            let requestData = try encoder.encode(request)
+
+            let responseValue = try await sendRequest(requestData)
+            let decoder = JSONDecoder()
+            let responseData = try encoder.encode(responseValue)
+            return try decoder.decode(ElicitResult.self, from: responseData)
+        }
+
+        /// Request user interaction via URL-mode elicitation from the client.
+        ///
+        /// This enables servers to request out-of-band interactions through
+        /// external URLs (e.g., OAuth flows, credential collection).
+        ///
+        /// - Parameters:
+        ///   - message: Human-readable explanation of why the interaction is needed
+        ///   - url: The URL the user should navigate to
+        ///   - elicitationId: Unique identifier for tracking this elicitation
+        /// - Returns: The elicitation result from the client
+        /// - Throws: MCPError if the request fails
+        public func elicitUrl(
+            message: String,
+            url: String,
+            elicitationId: String
+        ) async throws -> ElicitResult {
+            let params = ElicitRequestURLParams(
+                message: message,
+                elicitationId: elicitationId,
+                url: url
+            )
+            let request = Elicit.request(id: .random, .url(params))
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+            let requestData = try encoder.encode(request)
+
+            let responseValue = try await sendRequest(requestData)
+            let decoder = JSONDecoder()
+            let responseData = try encoder.encode(responseValue)
+            return try decoder.decode(ElicitResult.self, from: responseData)
         }
 
         // MARK: - Cancellation Checking

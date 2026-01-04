@@ -80,14 +80,32 @@ extension Client {
     /// This enables bidirectional communication where the server can send requests
     /// to the client (e.g., sampling, roots, elicitation).
     ///
+    /// The handler receives a `RequestHandlerContext` that provides:
+    /// - `isCancelled` and `checkCancellation()` for responding to cancellation
+    /// - `sendProgressNotification()` for reporting progress back to the server
+    ///
+    /// ## Example
+    ///
+    /// ```swift
+    /// client.withRequestHandler(CreateSamplingMessage.self) { params, context in
+    ///     // Check for cancellation during long operations
+    ///     try context.checkCancellation()
+    ///
+    ///     // Process the request
+    ///     let result = try await processRequest(params)
+    ///
+    ///     return result
+    /// }
+    /// ```
+    ///
     /// - Parameters:
     ///   - type: The method type to handle
-    ///   - handler: The handler function that receives parameters and returns a result
+    ///   - handler: The handler function that receives parameters and context, returns a result
     /// - Returns: Self for chaining
     @discardableResult
     public func withRequestHandler<M: Method>(
         _ type: M.Type,
-        handler: @escaping @Sendable (M.Parameters) async throws -> M.Result
+        handler: @escaping @Sendable (M.Parameters, RequestHandlerContext) async throws -> M.Result
     ) -> Self {
         requestHandlers[M.name] = TypedClientRequestHandler<M>(handler)
         return self
@@ -111,7 +129,7 @@ extension Client {
             capabilities.roots != nil,
             "Cannot register roots handler: Client does not have roots capability"
         )
-        return withRequestHandler(ListRoots.self) { _ in
+        return withRequestHandler(ListRoots.self) { _, _ in
             ListRoots.Result(roots: try await handler())
         }
     }
@@ -129,7 +147,10 @@ extension Client {
     /// ## Example
     ///
     /// ```swift
-    /// client.withSamplingHandler { params in
+    /// client.withSamplingHandler { params, context in
+    ///     // Check for cancellation during long operations
+    ///     try context.checkCancellation()
+    ///
     ///     // Call your LLM with the messages
     ///     let response = try await llm.complete(
     ///         messages: params.messages,
@@ -146,12 +167,12 @@ extension Client {
     /// }
     /// ```
     ///
-    /// - Parameter handler: A closure that receives sampling parameters and returns the result.
+    /// - Parameter handler: A closure that receives sampling parameters and context, returns the result.
     /// - Returns: Self for chaining.
     /// - Precondition: `capabilities.sampling` must be non-nil.
     @discardableResult
     public func withSamplingHandler(
-        _ handler: @escaping @Sendable (ClientSamplingRequest.Parameters) async throws -> ClientSamplingRequest.Result
+        _ handler: @escaping @Sendable (ClientSamplingRequest.Parameters, RequestHandlerContext) async throws -> ClientSamplingRequest.Result
     ) -> Self {
         precondition(
             capabilities.sampling != nil,
@@ -167,12 +188,12 @@ extension Client {
     ///
     /// - Important: The client must have declared `elicitation` capability during initialization.
     ///
-    /// - Parameter handler: A closure that receives elicitation parameters and returns the result.
+    /// - Parameter handler: A closure that receives elicitation parameters and context, returns the result.
     /// - Returns: Self for chaining.
     /// - Precondition: `capabilities.elicitation` must be non-nil.
     @discardableResult
     public func withElicitationHandler(
-        _ handler: @escaping @Sendable (Elicit.Parameters) async throws -> Elicit.Result
+        _ handler: @escaping @Sendable (Elicit.Parameters, RequestHandlerContext) async throws -> Elicit.Result
     ) -> Self {
         precondition(
             capabilities.elicitation != nil,

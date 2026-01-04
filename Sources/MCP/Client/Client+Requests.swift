@@ -425,6 +425,61 @@ extension Client {
         pendingRequests.removeValue(forKey: id)
     }
 
+    // MARK: - Request Cancellation
+
+    /// Cancel an in-flight request by its ID.
+    ///
+    /// This method cancels a pending request and sends a `CancelledNotification` to the server.
+    /// Use this when you need to cancel a request that was sent earlier but hasn't completed yet.
+    ///
+    /// Per MCP spec: "When a party wants to cancel an in-progress request, it sends a
+    /// `notifications/cancelled` notification containing the ID of the request to cancel."
+    ///
+    /// ## Example
+    ///
+    /// ```swift
+    /// // Create a request with a known ID
+    /// let requestId = RequestId.string("my-request-123")
+    /// let request = CallTool.request(id: requestId, .init(name: "slow_operation"))
+    ///
+    /// // Start the request in a separate task
+    /// Task {
+    ///     do {
+    ///         let result = try await client.send(request)
+    ///         print("Result: \(result)")
+    ///     } catch let error as MCPError where error.code == MCPError.Code.requestCancelled {
+    ///         print("Request was cancelled")
+    ///     }
+    /// }
+    ///
+    /// // Later, cancel it by ID
+    /// try await client.cancelRequest(requestId, reason: "User cancelled")
+    /// ```
+    ///
+    /// - Parameters:
+    ///   - id: The ID of the request to cancel. This must match the ID used when sending the request.
+    ///   - reason: An optional human-readable reason for the cancellation, for logging/debugging.
+    /// - Throws: This method does not throw. Cancellation notifications are best-effort per the spec.
+    ///
+    /// - Note: If the request has already completed or is unknown, this is a no-op per the MCP spec.
+    /// - Note: The `initialize` request MUST NOT be cancelled per the MCP spec.
+    /// - Important: For task-augmented requests, use the `tasks/cancel` method instead.
+    public func cancelRequest(_ id: RequestId, reason: String? = nil) async {
+        // Remove and finish the pending request with cancellation error
+        if let pendingRequest = removePendingRequest(id: id) {
+            pendingRequest.resume(throwing: MCPError.requestCancelled(reason: reason))
+        }
+
+        // Clean up any progress-related state
+        if let progressToken = requestProgressTokens.removeValue(forKey: id) {
+            progressCallbacks.removeValue(forKey: progressToken)
+            timeoutControllers.removeValue(forKey: progressToken)
+        }
+
+        // Send cancellation notification to server (best-effort)
+        await sendCancellationNotification(requestId: id, reason: reason)
+    }
+
     /// Send a CancelledNotification to the server for a cancelled request.
     ///
     /// Per MCP spec: "When a party wants to cancel an in-progress request, it sends
