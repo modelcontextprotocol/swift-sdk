@@ -413,6 +413,9 @@ struct ToolTests {
             sessionId: nil,
             requestId: .number(1),
             _meta: nil,
+            authInfo: nil,
+            closeSSEStream: nil,
+            closeStandaloneSSEStream: nil,
             shouldSendLogMessage: { _ in true },
             sendRequest: { _ in throw MCPError.internalError("Not implemented") }
         )

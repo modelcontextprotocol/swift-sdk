@@ -597,8 +597,12 @@ public actor Client {
 
             do {
                 let stream = await connection.receive()
-                for try await data in stream {
+                for try await transportMessage in stream {
                     if Task.isCancelled { break }
+
+                    // Extract the raw data from the transport message
+                    // (Client doesn't use message context - authInfo and SSE closures are server-side only)
+                    let data = transportMessage.data
 
                     // Attempt to decode data
                     // Try decoding as a batch response first

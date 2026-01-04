@@ -24,7 +24,7 @@ public actor InMemoryTransport: Transport {
 
     // Message queues
     private var incomingMessages: [Data] = []
-    private var messageContinuation: AsyncThrowingStream<Data, Swift.Error>.Continuation?
+    private var messageContinuation: AsyncThrowingStream<TransportMessage, Swift.Error>.Continuation?
 
     /// Creates a new in-memory transport
     ///
@@ -168,7 +168,7 @@ public actor InMemoryTransport: Transport {
         logger.debug("Message received", metadata: ["size": "\(data.count)"])
 
         if let continuation = messageContinuation {
-            continuation.yield(data)
+            continuation.yield(TransportMessage(data: data))
         } else {
             // Queue message if stream not yet created
             incomingMessages.append(data)
@@ -177,14 +177,14 @@ public actor InMemoryTransport: Transport {
 
     /// Receives messages from the paired transport
     ///
-    /// - Returns: An AsyncThrowingStream of Data objects representing messages
-    public func receive() -> AsyncThrowingStream<Data, Swift.Error> {
-        return AsyncThrowingStream<Data, Swift.Error> { continuation in
+    /// - Returns: An AsyncThrowingStream of TransportMessage objects representing messages
+    public func receive() -> AsyncThrowingStream<TransportMessage, Swift.Error> {
+        return AsyncThrowingStream<TransportMessage, Swift.Error> { continuation in
             self.messageContinuation = continuation
 
             // Deliver any queued messages
             for message in self.incomingMessages {
-                continuation.yield(message)
+                continuation.yield(TransportMessage(data: message))
             }
             self.incomingMessages.removeAll()
 

@@ -188,7 +188,7 @@ import Testing
             var iterator = stream.makeAsyncIterator()
             let receivedData = try await iterator.next()
 
-            #expect(receivedData == responseData)
+            #expect(receivedData?.data == responseData)
         }
 
         @Test("Send and Receive Session ID", .httpClientTransportSetup)
@@ -1085,7 +1085,7 @@ import Testing
                 let expectedData = #"{"key":"value"}"#.data(using: .utf8)!
                 let receivedData = try await iterator.next()
 
-                #expect(receivedData == expectedData)
+                #expect(receivedData?.data == expectedData)
 
                 await transport.disconnect()
             }
@@ -1147,7 +1147,7 @@ import Testing
                 let expectedData = #"{"key":"value"}"#.data(using: .utf8)!
                 let receivedData = try await iterator.next()
 
-                #expect(receivedData == expectedData)
+                #expect(receivedData?.data == expectedData)
 
                 await transport.disconnect()
             }
@@ -1566,7 +1566,7 @@ import Testing
 
                 // Should only receive the actual message, not the priming event
                 let expectedData = #"{"result":"ok"}"#.data(using: .utf8)!
-                #expect(receivedData == expectedData)
+                #expect(receivedData?.data == expectedData)
 
                 await transport.disconnect()
             }
@@ -1715,19 +1715,19 @@ import Testing
                 // First: notification
                 let msg1 = try await iterator.next()
                 #expect(msg1 != nil)
-                let msg1String = String(data: msg1!, encoding: .utf8)!
+                let msg1String = String(data: msg1!.data, encoding: .utf8)!
                 #expect(msg1String.contains("notifications/progress"))
 
                 // Second: server request
                 let msg2 = try await iterator.next()
                 #expect(msg2 != nil)
-                let msg2String = String(data: msg2!, encoding: .utf8)!
+                let msg2String = String(data: msg2!.data, encoding: .utf8)!
                 #expect(msg2String.contains("sampling/createMessage"))
 
                 // Third: response
                 let msg3 = try await iterator.next()
                 #expect(msg3 != nil)
-                let msg3String = String(data: msg3!, encoding: .utf8)!
+                let msg3String = String(data: msg3!.data, encoding: .utf8)!
                 #expect(msg3String.contains("\"result\""))
 
                 // The lastReceivedEventId should be evt-3 (last event with ID)
@@ -1791,7 +1791,7 @@ import Testing
 
                 let msg = try await iterator.next()
                 #expect(msg != nil)
-                let msgString = String(data: msg!, encoding: .utf8)!
+                let msgString = String(data: msg!.data, encoding: .utf8)!
                 #expect(msgString.contains("\"error\""))
                 #expect(msgString.contains("\(ErrorCode.invalidRequest)"))
 
@@ -1860,7 +1860,7 @@ import Testing
 
                 let msg = try await iterator.next()
                 #expect(msg != nil)
-                let msgString = String(data: msg!, encoding: .utf8)!
+                let msgString = String(data: msg!.data, encoding: .utf8)!
 
                 // The ID should be remapped to "original-req-42"
                 #expect(msgString.contains("\"id\":\"original-req-42\""))
@@ -1926,7 +1926,7 @@ import Testing
 
                 let msg = try await iterator.next()
                 #expect(msg != nil)
-                let msgString = String(data: msg!, encoding: .utf8)!
+                let msgString = String(data: msg!.data, encoding: .utf8)!
 
                 // The ID should be remapped to 42 (numeric)
                 #expect(msgString.contains("\"id\":42"))
@@ -1991,7 +1991,7 @@ import Testing
 
                 let msg = try await iterator.next()
                 #expect(msg != nil)
-                let msgString = String(data: msg!, encoding: .utf8)!
+                let msgString = String(data: msg!.data, encoding: .utf8)!
 
                 // The ID should remain as "original-id"
                 #expect(msgString.contains("\"id\":\"original-id\""))
@@ -2058,7 +2058,7 @@ import Testing
 
                 let msg = try await iterator.next()
                 #expect(msg != nil)
-                let msgString = String(data: msg!, encoding: .utf8)!
+                let msgString = String(data: msg!.data, encoding: .utf8)!
 
                 // The ID should be remapped to "my-failed-request"
                 #expect(msgString.contains("\"id\":\"my-failed-request\""))
@@ -2126,21 +2126,21 @@ import Testing
                 // First: server request - ID should NOT be remapped
                 let msg1 = try await iterator.next()
                 #expect(msg1 != nil)
-                let msg1String = String(data: msg1!, encoding: .utf8)!
+                let msg1String = String(data: msg1!.data, encoding: .utf8)!
                 #expect(msg1String.contains("\"id\":\"server-req-1\""))  // Original ID preserved
                 #expect(msg1String.contains("sampling/createMessage"))
 
                 // Second: notification - no ID field, should pass through unchanged
                 let msg2 = try await iterator.next()
                 #expect(msg2 != nil)
-                let msg2String = String(data: msg2!, encoding: .utf8)!
+                let msg2String = String(data: msg2!.data, encoding: .utf8)!
                 #expect(msg2String.contains("notifications/progress"))
                 #expect(!msg2String.contains("my-original-request"))
 
                 // Third: response - ID SHOULD be remapped
                 let msg3 = try await iterator.next()
                 #expect(msg3 != nil)
-                let msg3String = String(data: msg3!, encoding: .utf8)!
+                let msg3String = String(data: msg3!.data, encoding: .utf8)!
                 #expect(msg3String.contains("\"id\":\"my-original-request\""))  // Remapped ID
                 #expect(!msg3String.contains("server-resp-id"))  // Original ID replaced
                 #expect(msg3String.contains("\"result\""))

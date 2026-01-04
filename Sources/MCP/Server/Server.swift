@@ -215,6 +215,15 @@ public actor Server {
     /// a long-running tool), it should use this context to ensure the notification is
     /// routed to the correct client, even if other clients have connected in the meantime.
     ///
+    /// This context provides:
+    /// - Request identification (`requestId`, `_meta`)
+    /// - Session tracking (`sessionId`)
+    /// - Authentication context (`authInfo`)
+    /// - Notification sending (`sendNotification`, `sendMessage`, `sendProgress`)
+    /// - Bidirectional requests (`elicit`, `elicitUrl`)
+    /// - Cancellation checking (`isCancelled`, `checkCancellation`)
+    /// - SSE stream management (`closeSSEStream`, `closeStandaloneSSEStream`)
+    ///
     /// Example:
     /// ```swift
     /// server.withRequestHandler(CallTool.self) { params, context in
@@ -297,6 +306,54 @@ public actor Server {
         /// }
         /// ```
         public let _meta: RequestMeta?
+
+        /// Authentication information for this request.
+        ///
+        /// Contains validated access token information when using HTTP transports
+        /// with OAuth or other token-based authentication.
+        ///
+        /// This matches the TypeScript SDK's `extra.authInfo`.
+        ///
+        /// ## Example
+        ///
+        /// ```swift
+        /// server.withRequestHandler(CallTool.self) { params, context in
+        ///     if let authInfo = context.authInfo {
+        ///         print("Authenticated as: \(authInfo.clientId)")
+        ///         print("Scopes: \(authInfo.scopes)")
+        ///
+        ///         // Check if token has required scope
+        ///         guard authInfo.scopes.contains("tools:execute") else {
+        ///             throw MCPError.invalidRequest("Missing required scope")
+        ///         }
+        ///     }
+        ///     return CallTool.Result(content: [.text("Done")])
+        /// }
+        /// ```
+        public let authInfo: AuthInfo?
+
+        /// Closes the SSE stream for this request, triggering client reconnection.
+        ///
+        /// Only available when using StreamableHTTPServerTransport with eventStore configured.
+        /// Use this to implement polling behavior during long-running operations -
+        /// the client will reconnect after the retry interval specified in the priming event.
+        ///
+        /// This matches the TypeScript SDK's `extra.closeSSEStream()` and
+        /// Python's `ctx.close_sse_stream()`.
+        ///
+        /// - Note: This is `nil` when not using an HTTP/SSE transport.
+        public let closeSSEStream: (@Sendable () async -> Void)?
+
+        /// Closes the standalone GET SSE stream, triggering client reconnection.
+        ///
+        /// Only available when using StreamableHTTPServerTransport with eventStore configured.
+        /// Use this to implement polling behavior for server-initiated notifications.
+        ///
+        /// This matches the TypeScript SDK's `extra.closeStandaloneSSEStream()` and
+        /// Python's `ctx.close_standalone_sse_stream()`.
+        ///
+        /// - Note: This is `nil` when not using an HTTP/SSE transport.
+        public let closeStandaloneSSEStream: (@Sendable () async -> Void)?
 
         /// Check if a log message at the given level should be sent.
         ///
@@ -747,8 +804,12 @@ public actor Server {
         task = Task {
             do {
                 let stream = await transport.receive()
-                for try await data in stream {
+                for try await transportMessage in stream {
                     if Task.isCancelled { break }  // Check cancellation inside loop
+
+                    // Extract the raw data and optional context from the transport message
+                    let data = transportMessage.data
+                    let messageContext = transportMessage.context
 
                     var requestID: RequestId?
                     do {
@@ -761,7 +822,7 @@ public actor Server {
                             Task { [weak self] in
                                 guard let self else { return }
                                 do {
-                                    try await self.handleBatch(batch)
+                                    try await self.handleBatch(batch, messageContext: messageContext)
                                 } catch {
                                     await self.logger?.error(
                                         "Error handling batch",
@@ -779,13 +840,13 @@ public actor Server {
                             // can await a response while the message loop continues processing
                             // incoming messages including that response.
                             let requestId = request.id
-                            let handlerTask = Task { [weak self] in
+                            let handlerTask = Task { [weak self, messageContext] in
                                 guard let self else { return }
                                 defer {
                                     Task { await self.removeInFlightRequest(requestId) }
                                 }
                                 do {
-                                    _ = try await self.handleRequest(request, sendResponse: true)
+                                    _ = try await self.handleRequest(request, sendResponse: true, messageContext: messageContext)
                                 } catch {
                                     // handleRequest already sends error responses, so this
                                     // only catches errors from send() itself

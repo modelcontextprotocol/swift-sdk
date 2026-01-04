@@ -335,7 +335,7 @@ import Testing
             #expect(received != nil)
 
             if let received = received {
-                #expect(received == message.data(using: .utf8)!)
+                #expect(received.data == message.data(using: .utf8)!)
             }
 
             await transport.disconnect()
@@ -450,8 +450,8 @@ import Testing
             let stream = await transport.receive()
             var receiveCount = 0
 
-            for try await data in stream {
-                if let receivedStr = String(data: data, encoding: .utf8) {
+            for try await transportMessage in stream {
+                if let receivedStr = String(data: transportMessage.data, encoding: .utf8) {
                     #expect(messages.contains(receivedStr))
                     receiveCount += 1
 
@@ -554,7 +554,7 @@ import Testing
             let received = try await iterator.next()
             #expect(received != nil)
             if let received = received {
-                #expect(received == message.data(using: .utf8)!)
+                #expect(received.data == message.data(using: .utf8)!)
             }
 
             await transport.disconnect()
@@ -583,7 +583,7 @@ import Testing
             let received = try await iterator.next()
             #expect(received != nil)
             if let received = received {
-                #expect(received.count == largeMessage.count)
+                #expect(received.data.count == largeMessage.count)
             }
 
             await transport.disconnect()

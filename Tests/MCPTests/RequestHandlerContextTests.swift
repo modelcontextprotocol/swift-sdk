@@ -414,6 +414,111 @@ struct ServerRequestHandlerContextTests {
     // convenience methods (tested above), matching Python's ctx.elicit() pattern. Sampling
     // is done via the server directly, matching TypeScript's pattern where extra.sendRequest()
     // is generic and server.createMessage() is the convenience method.
+
+    // MARK: - authInfo Tests
+
+    /// Test that context.authInfo is nil for non-HTTP transports.
+    /// Based on TypeScript SDK's `extra.authInfo` which is only populated for authenticated HTTP connections.
+    @Test("context.authInfo is nil for InMemoryTransport")
+    func testAuthInfoNilForInMemoryTransport() async throws {
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+
+        actor AuthInfoTracker {
+            var receivedAuthInfo: AuthInfo?
+            var wasChecked = false
+            func set(_ authInfo: AuthInfo?) {
+                receivedAuthInfo = authInfo
+                wasChecked = true
+            }
+        }
+        let tracker = AuthInfoTracker()
+
+        let server = Server(
+            name: "TestServer",
+            version: "1.0.0",
+            capabilities: .init(tools: .init())
+        )
+
+        await server.withRequestHandler(ListTools.self) { _, _ in
+            ListTools.Result(tools: [
+                Tool(name: "test_tool", description: "Test", inputSchema: [:])
+            ])
+        }
+
+        await server.withRequestHandler(CallTool.self) { _, context in
+            // Handler accesses context.authInfo - should be nil for InMemoryTransport
+            await tracker.set(context.authInfo)
+            return CallTool.Result(content: [.text("OK")])
+        }
+
+        let client = Client(name: "TestClient", version: "1.0.0")
+
+        try await server.start(transport: serverTransport)
+        _ = try await client.connect(transport: clientTransport)
+
+        _ = try await client.callTool(name: "test_tool", arguments: [:])
+
+        let wasChecked = await tracker.wasChecked
+        let receivedAuthInfo = await tracker.receivedAuthInfo
+        #expect(wasChecked, "Handler should have been called")
+        #expect(receivedAuthInfo == nil, "authInfo should be nil for InMemoryTransport")
+
+        await client.disconnect()
+    }
+
+    // MARK: - closeSSEStream Tests
+
+    /// Test that context.closeSSEStream is nil for non-HTTP transports.
+    /// Based on TypeScript SDK's `extra.closeSSEStream` which is only available for HTTP/SSE transports.
+    @Test("context.closeSSEStream is nil for InMemoryTransport")
+    func testCloseSSEStreamNilForInMemoryTransport() async throws {
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+
+        actor StreamClosureTracker {
+            var closeSSEStreamWasNil = false
+            var closeStandaloneSSEStreamWasNil = false
+            func set(closeSSE: Bool, closeStandalone: Bool) {
+                closeSSEStreamWasNil = closeSSE
+                closeStandaloneSSEStreamWasNil = closeStandalone
+            }
+        }
+        let tracker = StreamClosureTracker()
+
+        let server = Server(
+            name: "TestServer",
+            version: "1.0.0",
+            capabilities: .init(tools: .init())
+        )
+
+        await server.withRequestHandler(ListTools.self) { _, _ in
+            ListTools.Result(tools: [
+                Tool(name: "test_tool", description: "Test", inputSchema: [:])
+            ])
+        }
+
+        await server.withRequestHandler(CallTool.self) { _, context in
+            // Check that SSE stream closures are nil for InMemoryTransport
+            await tracker.set(
+                closeSSE: context.closeSSEStream == nil,
+                closeStandalone: context.closeStandaloneSSEStream == nil
+            )
+            return CallTool.Result(content: [.text("OK")])
+        }
+
+        let client = Client(name: "TestClient", version: "1.0.0")
+
+        try await server.start(transport: serverTransport)
+        _ = try await client.connect(transport: clientTransport)
+
+        _ = try await client.callTool(name: "test_tool", arguments: [:])
+
+        let closeSSEStreamWasNil = await tracker.closeSSEStreamWasNil
+        let closeStandaloneSSEStreamWasNil = await tracker.closeStandaloneSSEStreamWasNil
+        #expect(closeSSEStreamWasNil, "closeSSEStream should be nil for InMemoryTransport")
+        #expect(closeStandaloneSSEStreamWasNil, "closeStandaloneSSEStream should be nil for InMemoryTransport")
+
+        await client.disconnect()
+    }
 }
 
 // MARK: - Client RequestHandlerContext Tests

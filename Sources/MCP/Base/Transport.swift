@@ -2,6 +2,81 @@ import Logging
 
 import struct Foundation.Data
 
+// MARK: - Message Context Types
+
+/// Context information associated with a received message.
+///
+/// This is the Swift equivalent of TypeScript's `MessageExtraInfo`, which is passed
+/// via `onmessage(message, extra)`. It carries per-message context like authentication
+/// info and SSE stream management callbacks.
+///
+/// For simple transports (stdio, in-memory), context is typically `nil`.
+/// For HTTP transports, context includes authentication info and SSE controls.
+public struct MessageContext: Sendable {
+    /// Authentication information for this message's request.
+    ///
+    /// Contains validated access token information when using HTTP transports
+    /// with OAuth or other token-based authentication. Request handlers can
+    /// access this via `context.authInfo`.
+    public let authInfo: AuthInfo?
+
+    /// Closes the SSE stream for this request, triggering client reconnection.
+    ///
+    /// Only available when using HTTPServerTransport with eventStore configured.
+    /// Use this to implement polling behavior during long-running operations.
+    public let closeSSEStream: (@Sendable () async -> Void)?
+
+    /// Closes the standalone GET SSE stream, triggering client reconnection.
+    ///
+    /// Only available when using HTTPServerTransport with eventStore configured.
+    public let closeStandaloneSSEStream: (@Sendable () async -> Void)?
+
+    public init(
+        authInfo: AuthInfo? = nil,
+        closeSSEStream: (@Sendable () async -> Void)? = nil,
+        closeStandaloneSSEStream: (@Sendable () async -> Void)? = nil
+    ) {
+        self.authInfo = authInfo
+        self.closeSSEStream = closeSSEStream
+        self.closeStandaloneSSEStream = closeStandaloneSSEStream
+    }
+}
+
+/// A message received from a transport with optional context.
+///
+/// This is the Swift equivalent of TypeScript's `onmessage(message, extra)` pattern,
+/// adapted for Swift's `AsyncThrowingStream` approach. Each message carries its own
+/// context, eliminating race conditions that would occur if context were stored
+/// as mutable state on the transport.
+///
+/// ## Example
+///
+/// ```swift
+/// for try await message in transport.receive() {
+///     let data = message.data
+///     if let authInfo = message.context?.authInfo {
+///         // Handle authenticated request
+///     }
+/// }
+/// ```
+public struct TransportMessage: Sendable {
+    /// The raw message data (JSON-RPC message).
+    public let data: Data
+
+    /// Context associated with this message.
+    ///
+    /// Includes authentication info, SSE stream controls, and other per-message
+    /// context. For simple transports, this is `nil`.
+    public let context: MessageContext?
+
+    public init(data: Data, context: MessageContext? = nil) {
+        self.data = data
+        self.context = context
+    }
+}
+
+// MARK: - Transport Protocol
+
 /// Protocol defining the transport layer for MCP communication
 public protocol Transport: Actor {
     var logger: Logger { get }
@@ -36,8 +111,15 @@ public protocol Transport: Actor {
     ///   - relatedRequestId: The ID of the request this message relates to (for response routing)
     func send(_ data: Data, relatedRequestId: RequestId?) async throws
 
-    /// Receives data in an async sequence
-    func receive() -> AsyncThrowingStream<Data, Swift.Error>
+    /// Receives messages with optional context in an async sequence.
+    ///
+    /// Each message includes optional context (auth info, SSE closures, etc.)
+    /// that was associated with it at receive time. This pattern matches
+    /// TypeScript's `onmessage(message, extra)` callback approach.
+    ///
+    /// For simple transports, messages are yielded with `nil` context.
+    /// For HTTP transports, context includes authentication info and SSE controls.
+    func receive() -> AsyncThrowingStream<TransportMessage, Swift.Error>
 }
 
 // MARK: - Default Implementation

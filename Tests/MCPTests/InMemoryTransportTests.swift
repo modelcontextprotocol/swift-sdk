@@ -64,8 +64,8 @@ struct InMemoryTransportTests {
         // Start receiving on server
         let serverReceiveTask = Task {
             var messages: [Data] = []
-            for try await message in await serverTransport.receive() {
-                messages.append(message)
+            for try await transportMessage in await serverTransport.receive() {
+                messages.append(transportMessage.data)
                 if messages.count >= 3 {
                     break
                 }
@@ -105,8 +105,8 @@ struct InMemoryTransportTests {
         // Set up receivers
         let receive1Task = Task {
             var messages: [String] = []
-            for try await data in await transport1.receive() {
-                if let message = String(data: data, encoding: .utf8) {
+            for try await transportMessage in await transport1.receive() {
+                if let message = String(data: transportMessage.data, encoding: .utf8) {
                     messages.append(message)
                     if messages.count >= 2 {
                         break
@@ -118,8 +118,8 @@ struct InMemoryTransportTests {
 
         let receive2Task = Task {
             var messages: [String] = []
-            for try await data in await transport2.receive() {
-                if let message = String(data: data, encoding: .utf8) {
+            for try await transportMessage in await transport2.receive() {
+                if let message = String(data: transportMessage.data, encoding: .utf8) {
                     messages.append(message)
                     if messages.count >= 2 {
                         break
@@ -267,8 +267,8 @@ struct InMemoryTransportTests {
         let messages = await serverTransport.receive()
         var receivedMessages: [String] = []
 
-        for try await data in messages {
-            if let message = String(data: data, encoding: .utf8) {
+        for try await transportMessage in messages {
+            if let message = String(data: transportMessage.data, encoding: .utf8) {
                 receivedMessages.append(message)
                 if receivedMessages.count >= 3 {
                     break
@@ -323,8 +323,8 @@ struct InMemoryTransportTests {
 
         // Start receiving
         let receiveTask = Task {
-            for try await data in await serverTransport.receive() {
-                return data
+            for try await transportMessage in await serverTransport.receive() {
+                return transportMessage.data
             }
             return Data()
         }
@@ -351,8 +351,8 @@ struct InMemoryTransportTests {
         // Start receiving
         let receiveTask = Task {
             var messages: [String] = []
-            for try await data in await serverTransport.receive() {
-                if let message = String(data: data, encoding: .utf8) {
+            for try await transportMessage in await serverTransport.receive() {
+                if let message = String(data: transportMessage.data, encoding: .utf8) {
                     messages.append(message)
                     if messages.count >= 10 {
                         break

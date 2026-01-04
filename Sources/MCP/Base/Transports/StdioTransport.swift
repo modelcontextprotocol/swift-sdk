@@ -54,8 +54,8 @@ import struct Foundation.Data
         public nonisolated let logger: Logger
 
         private var isConnected = false
-        private let messageStream: AsyncThrowingStream<Data, Swift.Error>
-        private let messageContinuation: AsyncThrowingStream<Data, Swift.Error>.Continuation
+        private let messageStream: AsyncThrowingStream<TransportMessage, Swift.Error>
+        private let messageContinuation: AsyncThrowingStream<TransportMessage, Swift.Error>.Continuation
 
         /// Creates a new stdio transport with the specified file descriptors
         ///
@@ -77,7 +77,7 @@ import struct Foundation.Data
                     factory: { _ in SwiftLogNoOpLogHandler() })
 
             // Create message stream
-            var continuation: AsyncThrowingStream<Data, Swift.Error>.Continuation!
+            var continuation: AsyncThrowingStream<TransportMessage, Swift.Error>.Continuation!
             self.messageStream = AsyncThrowingStream { continuation = $0 }
             self.messageContinuation = continuation
         }
@@ -172,7 +172,7 @@ import struct Foundation.Data
                         if !messageData.isEmpty {
                             logger.trace(
                                 "Message received", metadata: ["size": "\(messageData.count)"])
-                            messageContinuation.yield(Data(messageData))
+                            messageContinuation.yield(TransportMessage(data: Data(messageData)))
                         }
                     }
                 } catch let error where MCPError.isResourceTemporarilyUnavailable(error) {
@@ -240,8 +240,8 @@ import struct Foundation.Data
         /// or batches containing multiple requests/notifications encoded as JSON arrays.
         /// Each message is guaranteed to be a complete JSON object or array.
         ///
-        /// - Returns: An AsyncThrowingStream of Data objects representing JSON-RPC messages
-        public func receive() -> AsyncThrowingStream<Data, Swift.Error> {
+        /// - Returns: An AsyncThrowingStream of TransportMessage objects representing JSON-RPC messages
+        public func receive() -> AsyncThrowingStream<TransportMessage, Swift.Error> {
             return messageStream
         }
     }

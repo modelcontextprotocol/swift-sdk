@@ -30,7 +30,7 @@ actor MockTransport: Transport {
     private var dataToReceive: [Data] = []
     private(set) var receivedMessages: [String] = []
 
-    private var dataStreamContinuation: AsyncThrowingStream<Data, Swift.Error>.Continuation?
+    private var dataStreamContinuation: AsyncThrowingStream<TransportMessage, Swift.Error>.Continuation?
 
     var shouldFailConnect = false
     var shouldFailSend = false
@@ -59,11 +59,11 @@ actor MockTransport: Transport {
         sentData.append(message)
     }
 
-    public func receive() -> AsyncThrowingStream<Data, Swift.Error> {
-        return AsyncThrowingStream<Data, Swift.Error> { continuation in
+    public func receive() -> AsyncThrowingStream<TransportMessage, Swift.Error> {
+        return AsyncThrowingStream<TransportMessage, Swift.Error> { continuation in
             dataStreamContinuation = continuation
             for message in dataToReceive {
-                continuation.yield(message)
+                continuation.yield(TransportMessage(data: message))
                 if let string = String(data: message, encoding: .utf8) {
                     receivedMessages.append(string)
                 }
@@ -82,7 +82,7 @@ actor MockTransport: Transport {
 
     func queue(data: Data) {
         if let continuation = dataStreamContinuation {
-            continuation.yield(data)
+            continuation.yield(TransportMessage(data: data))
         } else {
             dataToReceive.append(data)
         }

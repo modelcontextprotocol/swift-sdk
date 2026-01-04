@@ -34,7 +34,7 @@ struct TransportSwitchingTests {
         private(set) var sentMessages: [SentMessage] = []
 
         private var dataToReceive: [Data] = []
-        private var dataStreamContinuation: AsyncThrowingStream<Data, Swift.Error>.Continuation?
+        private var dataStreamContinuation: AsyncThrowingStream<TransportMessage, Swift.Error>.Continuation?
 
         let name: String
 
@@ -61,11 +61,11 @@ struct TransportSwitchingTests {
             sentMessages.append(SentMessage(data: data, relatedRequestId: relatedRequestId))
         }
 
-        public func receive() -> AsyncThrowingStream<Data, Swift.Error> {
-            return AsyncThrowingStream<Data, Swift.Error> { continuation in
+        public func receive() -> AsyncThrowingStream<TransportMessage, Swift.Error> {
+            return AsyncThrowingStream<TransportMessage, Swift.Error> { continuation in
                 dataStreamContinuation = continuation
                 for message in dataToReceive {
-                    continuation.yield(message)
+                    continuation.yield(TransportMessage(data: message))
                 }
                 dataToReceive.removeAll()
             }
@@ -73,7 +73,7 @@ struct TransportSwitchingTests {
 
         func queue(data: Data) {
             if let continuation = dataStreamContinuation {
-                continuation.yield(data)
+                continuation.yield(TransportMessage(data: data))
             } else {
                 dataToReceive.append(data)
             }

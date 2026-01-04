@@ -75,8 +75,8 @@ public actor HTTPClientTransport: Transport {
     private let requestModifier: (URLRequest) -> URLRequest
 
     private var isConnected = false
-    private let messageStream: AsyncThrowingStream<Data, Swift.Error>
-    private let messageContinuation: AsyncThrowingStream<Data, Swift.Error>.Continuation
+    private let messageStream: AsyncThrowingStream<TransportMessage, Swift.Error>
+    private let messageContinuation: AsyncThrowingStream<TransportMessage, Swift.Error>.Continuation
 
     /// Stream for signaling when session ID is set
     private var sessionIDSignalStream: AsyncStream<Void>?
@@ -150,7 +150,7 @@ public actor HTTPClientTransport: Transport {
         self.requestModifier = requestModifier
 
         // Create message stream
-        var continuation: AsyncThrowingStream<Data, Swift.Error>.Continuation!
+        var continuation: AsyncThrowingStream<TransportMessage, Swift.Error>.Continuation!
         self.messageStream = AsyncThrowingStream { continuation = $0 }
         self.messageContinuation = continuation
 
@@ -447,10 +447,10 @@ public actor HTTPClientTransport: Transport {
             // Process response based on content type
             if contentType.contains("text/event-stream") {
                 logger.warning("SSE responses aren't fully supported on Linux")
-                messageContinuation.yield(data)
+                messageContinuation.yield(TransportMessage(data: data))
             } else if contentType.contains("application/json") {
                 logger.trace("Received JSON response", metadata: ["size": "\(data.count)"])
-                messageContinuation.yield(data)
+                messageContinuation.yield(TransportMessage(data: data))
             } else if expectsContentType && !data.isEmpty {
                 // Per MCP spec: requests MUST receive application/json or text/event-stream
                 // Notifications expect 202 Accepted with no body, so unexpected content-type is ignored
@@ -495,7 +495,7 @@ public actor HTTPClientTransport: Transport {
                     buffer.append(byte)
                 }
                 logger.trace("Received JSON response", metadata: ["size": "\(buffer.count)"])
-                messageContinuation.yield(buffer)
+                messageContinuation.yield(TransportMessage(data: buffer))
             } else {
                 // Collect data to check if response has content
                 var buffer = Data()
@@ -572,14 +572,14 @@ public actor HTTPClientTransport: Transport {
 
     /// Receives data in an async sequence
     ///
-    /// This returns an AsyncThrowingStream that emits Data objects representing
+    /// This returns an AsyncThrowingStream that emits TransportMessage objects representing
     /// each JSON-RPC message received from the server. This includes:
     ///
     /// - Direct responses to client requests
     /// - Server-initiated messages delivered via SSE streams
     ///
-    /// - Returns: An AsyncThrowingStream of Data objects
-    public func receive() -> AsyncThrowingStream<Data, Swift.Error> {
+    /// - Returns: An AsyncThrowingStream of TransportMessage objects
+    public func receive() -> AsyncThrowingStream<TransportMessage, Swift.Error> {
         return messageStream
     }
 
@@ -875,7 +875,7 @@ public actor HTTPClientTransport: Transport {
                         if processed.isResponse {
                             receivedResponse = true
                         }
-                        messageContinuation.yield(processed.data)
+                        messageContinuation.yield(TransportMessage(data: processed.data))
                     }
                 }
 

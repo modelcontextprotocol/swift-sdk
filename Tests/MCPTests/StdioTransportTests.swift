@@ -59,12 +59,12 @@ struct StdioTransportTests {
         try writer.close()
 
         // Start receiving messages
-        let stream: AsyncThrowingStream<Data, Swift.Error> = await transport.receive()
+        let stream = await transport.receive()
         var iterator = stream.makeAsyncIterator()
 
         // Get first message
         let received = try await iterator.next()
-        #expect(received == #"{"key":"value"}"#.data(using: .utf8)!)
+        #expect(received?.data == #"{"key":"value"}"#.data(using: .utf8)!)
 
         await transport.disconnect()
     }
@@ -81,7 +81,7 @@ struct StdioTransportTests {
         try writer.writeAll(invalidJSON.data(using: .utf8)!)
         try writer.close()
 
-        let stream: AsyncThrowingStream<Data, Swift.Error> = await transport.receive()
+        let stream = await transport.receive()
         var iterator = stream.makeAsyncIterator()
 
         _ = try await iterator.next()
@@ -154,8 +154,8 @@ struct StdioTransportMultipleMessageTests {
         let stream = await transport.receive()
         var receivedMessages: [String] = []
 
-        for try await data in stream {
-            if let message = String(data: data, encoding: .utf8) {
+        for try await transportMessage in stream {
+            if let message = String(data: transportMessage.data, encoding: .utf8) {
                 receivedMessages.append(message)
             }
         }
@@ -226,7 +226,7 @@ struct StdioTransportMessageFramingTests {
 
         // Should receive the complete reassembled message
         let expectedMessage = #"{"jsonrpc":"2.0","id":1,"method":"ping"}"#
-        #expect(received == expectedMessage.data(using: .utf8)!)
+        #expect(received?.data == expectedMessage.data(using: .utf8)!)
 
         await transport.disconnect()
     }
@@ -248,8 +248,8 @@ struct StdioTransportMessageFramingTests {
         let stream = await transport.receive()
         var receivedMessages: [String] = []
 
-        for try await data in stream {
-            if let message = String(data: data, encoding: .utf8) {
+        for try await transportMessage in stream {
+            if let message = String(data: transportMessage.data, encoding: .utf8) {
                 receivedMessages.append(message)
             }
         }
@@ -277,8 +277,8 @@ struct StdioTransportMessageFramingTests {
         let stream = await transport.receive()
         var receivedMessages: [String] = []
 
-        for try await data in stream {
-            if let message = String(data: data, encoding: .utf8) {
+        for try await transportMessage in stream {
+            if let message = String(data: transportMessage.data, encoding: .utf8) {
                 receivedMessages.append(message)
             }
         }
@@ -309,7 +309,7 @@ struct StdioTransportMessageFramingTests {
         var iterator = stream.makeAsyncIterator()
         let received = try await iterator.next()
 
-        #expect(received == largeMessage.data(using: .utf8)!)
+        #expect(received?.data == largeMessage.data(using: .utf8)!)
 
         await transport.disconnect()
     }
@@ -337,7 +337,7 @@ struct StdioTransportBidirectionalTests {
         let stream = await transport.receive()
         var iterator = stream.makeAsyncIterator()
         let receivedRequest = try await iterator.next()
-        #expect(receivedRequest == request.data(using: .utf8)!)
+        #expect(receivedRequest?.data == request.data(using: .utf8)!)
 
         // Transport sends a response back
         let response = #"{"jsonrpc":"2.0","id":1,"result":{"status":"ok"}}"#
@@ -377,8 +377,8 @@ struct StdioTransportEOFHandlingTests {
         let stream = await transport.receive()
         var messages: [Data] = []
 
-        for try await data in stream {
-            messages.append(data)
+        for try await transportMessage in stream {
+            messages.append(transportMessage.data)
         }
 
         // Should have received exactly one message, then stream should end
@@ -406,8 +406,8 @@ struct StdioTransportEOFHandlingTests {
         let stream = await transport.receive()
         var messages: [Data] = []
 
-        for try await data in stream {
-            messages.append(data)
+        for try await transportMessage in stream {
+            messages.append(transportMessage.data)
         }
 
         // Should only receive the complete message, incomplete one is discarded

@@ -20,7 +20,7 @@ extension Server {
     }
 
     /// Process a batch of requests and/or notifications
-    func handleBatch(_ batch: Batch) async throws {
+    func handleBatch(_ batch: Batch, messageContext: MessageContext? = nil) async throws {
         // Capture the connection at batch start.
         // This ensures all batch responses go to the correct client.
         let capturedConnection = self.connection
@@ -49,7 +49,7 @@ extension Server {
                 switch item {
                     case .request(let request):
                         // For batched requests, collect responses instead of sending immediately
-                        if let response = try await handleRequest(request, sendResponse: false) {
+                        if let response = try await handleRequest(request, sendResponse: false, messageContext: messageContext) {
                             responses.append(response)
                         }
 
@@ -106,6 +106,18 @@ extension Server {
         ///
         /// Contains the progress token and any additional metadata.
         let meta: RequestMeta?
+        /// Authentication information, if available.
+        ///
+        /// Set by HTTP transports when OAuth or other authentication is in use.
+        let authInfo: AuthInfo?
+        /// Closure to close the SSE stream for this request.
+        ///
+        /// Only set by HTTP transports with SSE support.
+        let closeSSEStream: (@Sendable () async -> Void)?
+        /// Closure to close the standalone SSE stream.
+        ///
+        /// Only set by HTTP transports with SSE support.
+        let closeStandaloneSSEStream: (@Sendable () async -> Void)?
     }
 
     /// Extract `_meta` from request parameters if present.
@@ -175,8 +187,9 @@ extension Server {
     /// - Parameters:
     ///   - request: The request to handle
     ///   - sendResponse: Whether to send the response immediately (true) or return it (false)
+    ///   - messageContext: Optional context from the transport message (authInfo, SSE closures)
     /// - Returns: The response when sendResponse is false
-    func handleRequest(_ request: Request<AnyMethod>, sendResponse: Bool = true)
+    func handleRequest(_ request: Request<AnyMethod>, sendResponse: Bool = true, messageContext: MessageContext? = nil)
     async throws -> Response<AnyMethod>?
     {
         // Capture the connection and session ID at request time.
@@ -184,11 +197,21 @@ extension Server {
         // changes while the handler is executing (e.g., another client connects).
         let capturedConnection = self.connection
         let requestMeta = extractMeta(from: request.params)
+
+        // Extract context from transport message (set by HTTP transports with per-message context)
+        // This pattern aligns with TypeScript's onmessage(message, { authInfo, closeSSEStream, ... })
+        let authInfo = messageContext?.authInfo
+        let closeSSEStream = messageContext?.closeSSEStream
+        let closeStandaloneSSEStream = messageContext?.closeStandaloneSSEStream
+
         let context = RequestContext(
             capturedConnection: capturedConnection,
             requestId: request.id,
             sessionId: await capturedConnection?.sessionId,
-            meta: requestMeta
+            meta: requestMeta,
+            authInfo: authInfo,
+            closeSSEStream: closeSSEStream,
+            closeStandaloneSSEStream: closeStandaloneSSEStream
         )
 
         // Check if this is a pre-processed error request (empty method)
@@ -270,6 +293,9 @@ extension Server {
             sessionId: context.sessionId,
             requestId: context.requestId,
             _meta: context.meta,
+            authInfo: context.authInfo,
+            closeSSEStream: context.closeSSEStream,
+            closeStandaloneSSEStream: context.closeStandaloneSSEStream,
             shouldSendLogMessage: { [weak self, context] level in
                 guard let self else { return true }
                 return await self.shouldSendLogMessage(at: level, forSession: context.sessionId)

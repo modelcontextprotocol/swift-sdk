@@ -87,8 +87,8 @@ public actor HTTPServerTransport: Transport {
     private let standaloneSseStreamId = "_GET_stream"
 
     // Server receive stream (messages from HTTP clients go here)
-    private let serverStream: AsyncThrowingStream<Data, Swift.Error>
-    private let serverContinuation: AsyncThrowingStream<Data, Swift.Error>.Continuation
+    private let serverStream: AsyncThrowingStream<TransportMessage, Swift.Error>
+    private let serverContinuation: AsyncThrowingStream<TransportMessage, Swift.Error>.Continuation
 
     /// Closure called when the transport is closed
     public var onClose: (@Sendable () async -> Void)?
@@ -111,7 +111,7 @@ public actor HTTPServerTransport: Transport {
             )
 
         // Create server receive stream
-        var continuation: AsyncThrowingStream<Data, Swift.Error>.Continuation!
+        var continuation: AsyncThrowingStream<TransportMessage, Swift.Error>.Continuation!
         self.serverStream = AsyncThrowingStream { continuation = $0 }
         self.serverContinuation = continuation
     }
@@ -206,7 +206,7 @@ public actor HTTPServerTransport: Transport {
     }
 
     /// Returns the stream of messages from HTTP clients.
-    public func receive() -> AsyncThrowingStream<Data, Swift.Error> {
+    public func receive() -> AsyncThrowingStream<TransportMessage, Swift.Error> {
         return serverStream
     }
 
@@ -219,9 +219,11 @@ public actor HTTPServerTransport: Transport {
     /// - GET: Establish SSE stream for server-initiated notifications
     /// - DELETE: Terminate the session
     ///
-    /// - Parameter request: The incoming HTTP request
+    /// - Parameters:
+    ///   - request: The incoming HTTP request
+    ///   - authInfo: Authentication information for this request (from middleware)
     /// - Returns: An HTTP response
-    public func handleRequest(_ request: HTTPRequest) async -> HTTPResponse {
+    public func handleRequest(_ request: HTTPRequest, authInfo: AuthInfo? = nil) async -> HTTPResponse {
         // Check if transport has been terminated (applies to all modes)
         // Per spec: server MUST respond to requests after termination with 404 Not Found
         if terminated {
@@ -239,7 +241,7 @@ public actor HTTPServerTransport: Transport {
 
         switch request.method.uppercased() {
         case "POST":
-            return await handlePostRequest(request)
+            return await handlePostRequest(request, authInfo: authInfo)
         case "GET":
             return await handleGetRequest(request)
         case "DELETE":
@@ -256,7 +258,7 @@ public actor HTTPServerTransport: Transport {
 
     // MARK: - POST Request Handling
 
-    private func handlePostRequest(_ request: HTTPRequest) async -> HTTPResponse {
+    private func handlePostRequest(_ request: HTTPRequest, authInfo: AuthInfo?) async -> HTTPResponse {
         // Validate Accept header
         // Per spec: Client must accept both application/json and text/event-stream for SSE mode.
         // However, when JSON response mode is enabled, only application/json is required.
@@ -419,7 +421,9 @@ public actor HTTPServerTransport: Transport {
 
         if !hasRequests {
             // Only notifications - yield to server and return 202
-            serverContinuation.yield(body)
+            // Notifications don't need SSE closures since there's no response stream
+            let context = MessageContext(authInfo: authInfo)
+            serverContinuation.yield(TransportMessage(data: body, context: context))
             return HTTPResponse(statusCode: 202, headers: sessionHeaders())
         }
 
@@ -434,7 +438,7 @@ public actor HTTPServerTransport: Transport {
 
         // Check if using JSON response mode
         if options.enableJsonResponse {
-            return await handleJsonResponseMode(streamId: streamId, requestIds: requestIds, body: body)
+            return await handleJsonResponseMode(streamId: streamId, requestIds: requestIds, body: body, authInfo: authInfo)
         }
 
         // SSE streaming mode
@@ -443,14 +447,16 @@ public actor HTTPServerTransport: Transport {
             requestIds: requestIds,
             body: body,
             request: request,
-            messages: messages
+            messages: messages,
+            authInfo: authInfo
         )
     }
 
     private func handleJsonResponseMode(
         streamId: String,
         requestIds: [RequestId],
-        body: Data
+        body: Data,
+        authInfo: AuthInfo?
     ) async -> HTTPResponse {
         // Create stream for receiving the response
         let (stream, continuation) = AsyncThrowingStream<HTTPResponse, Swift.Error>.makeStream()
@@ -458,8 +464,9 @@ public actor HTTPServerTransport: Transport {
         let state = JsonStreamState(continuation: continuation)
         jsonStreamMapping[streamId] = state
 
-        // Yield the message to the server
-        serverContinuation.yield(body)
+        // JSON response mode doesn't have SSE streams to close
+        let context = MessageContext(authInfo: authInfo)
+        serverContinuation.yield(TransportMessage(data: body, context: context))
 
         // Wait for response - this is cancellation-aware unlike withCheckedContinuation
         do {
@@ -484,7 +491,8 @@ public actor HTTPServerTransport: Transport {
         requestIds: [RequestId],
         body: Data,
         request: HTTPRequest,
-        messages: [[String: Any]]
+        messages: [[String: Any]],
+        authInfo: AuthInfo?
     ) async -> HTTPResponse {
         let (stream, streamContinuation) = AsyncThrowingStream<Data, Swift.Error>.makeStream()
 
@@ -510,8 +518,30 @@ public actor HTTPServerTransport: Transport {
         // Write priming event if appropriate
         await writePrimingEvent(streamId: streamId, continuation: streamContinuation, protocolVersion: protocolVersion)
 
-        // Yield the message to the server
-        serverContinuation.yield(body)
+        // Create SSE closure for handlers to close this request's stream
+        // Use requestIds[0] for the primary request (batch requests share the same stream)
+        let closeSSEStreamClosure: (@Sendable () async -> Void)? = if let firstRequestId = requestIds.first {
+            { [weak self] in
+                await self?.closeSSEStream(for: firstRequestId)
+            }
+        } else {
+            nil
+        }
+
+        // Create closure for standalone SSE stream
+        let closeStandaloneSSEStreamClosure: @Sendable () async -> Void = { [weak self] in
+            await self?.closeStandaloneSSEStream()
+        }
+
+        // Create context with auth info and SSE closures
+        let context = MessageContext(
+            authInfo: authInfo,
+            closeSSEStream: closeSSEStreamClosure,
+            closeStandaloneSSEStream: closeStandaloneSSEStreamClosure
+        )
+
+        // Yield the message to the server with context
+        serverContinuation.yield(TransportMessage(data: body, context: context))
 
         var headers = sessionHeaders()
         headers[HTTPHeader.contentType] = "text/event-stream"

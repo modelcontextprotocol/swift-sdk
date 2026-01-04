@@ -239,8 +239,8 @@ import Logging
         private var reconnectAttempt = 0
         private var heartbeatTask: Task<Void, Never>?
         private var lastHeartbeatTime: Date?
-        private let messageStream: AsyncThrowingStream<Data, Swift.Error>
-        private let messageContinuation: AsyncThrowingStream<Data, Swift.Error>.Continuation
+        private let messageStream: AsyncThrowingStream<TransportMessage, Swift.Error>
+        private let messageContinuation: AsyncThrowingStream<TransportMessage, Swift.Error>.Continuation
 
         // Connection is marked nonisolated(unsafe) to allow access from closures
         private nonisolated(unsafe) var connection: NetworkConnectionProtocol
@@ -296,7 +296,7 @@ import Logging
             self.bufferConfig = bufferConfig
 
             // Create message stream
-            var continuation: AsyncThrowingStream<Data, Swift.Error>.Continuation!
+            var continuation: AsyncThrowingStream<TransportMessage, Swift.Error>.Continuation!
             self.messageStream = AsyncThrowingStream { continuation = $0 }
             self.messageContinuation = continuation
         }
@@ -513,11 +513,11 @@ import Logging
 
         /// Receives data in an async sequence
         ///
-        /// This returns an AsyncThrowingStream that emits Data objects representing
+        /// This returns an AsyncThrowingStream that emits TransportMessage objects representing
         /// each JSON-RPC message received from the network connection.
         ///
-        /// - Returns: An AsyncThrowingStream of Data objects
-        public func receive() -> AsyncThrowingStream<Data, Swift.Error> {
+        /// - Returns: An AsyncThrowingStream of TransportMessage objects
+        public func receive() -> AsyncThrowingStream<TransportMessage, Swift.Error> {
             return messageStream
         }
 
@@ -582,7 +582,7 @@ import Logging
                         if !messageData.isEmpty {
                             logger.debug(
                                 "Message received", metadata: ["size": "\(messageData.count)"])
-                            messageContinuation.yield(Data(messageData))
+                            messageContinuation.yield(TransportMessage(data: Data(messageData)))
                         }
                     }
                 } catch let error as NWError {
