@@ -179,43 +179,40 @@ public actor Client {
         // Start message handling loop
         task = Task {
             guard let connection = self.connection else { return }
-            repeat {
-                // Check for cancellation before starting the iteration
-                if Task.isCancelled { break }
 
-                do {
-                    let stream = await connection.receive()
-                    for try await data in stream {
-                        if Task.isCancelled { break }  // Check inside loop too
+            // Get the stream once - async streams can only be iterated once.
+            // Previously, receive() was called inside a repeat loop, which meant
+            // each iteration tried to create a new stream from an already-consumed one.
+            let stream = await connection.receive()
 
-                        // Attempt to decode data
-                        // Try decoding as a batch response first
-                        if let batchResponse = try? decoder.decode([AnyResponse].self, from: data) {
-                            await handleBatchResponse(batchResponse)
-                        } else if let response = try? decoder.decode(AnyResponse.self, from: data) {
-                            await handleResponse(response)
-                        } else if let message = try? decoder.decode(AnyMessage.self, from: data) {
-                            await handleMessage(message)
-                        } else {
-                            var metadata: Logger.Metadata = [:]
-                            if let string = String(data: data, encoding: .utf8) {
-                                metadata["message"] = .string(string)
-                            }
-                            await logger?.warning(
-                                "Unexpected message received by client (not single/batch response or notification)",
-                                metadata: metadata
-                            )
+            do {
+                for try await data in stream {
+                    if Task.isCancelled { break }
+
+                    // Attempt to decode data
+                    // Try decoding as a batch response first
+                    if let batchResponse = try? decoder.decode([AnyResponse].self, from: data) {
+                        await handleBatchResponse(batchResponse)
+                    } else if let response = try? decoder.decode(AnyResponse.self, from: data) {
+                        await handleResponse(response)
+                    } else if let message = try? decoder.decode(AnyMessage.self, from: data) {
+                        await handleMessage(message)
+                    } else {
+                        var metadata: Logger.Metadata = [:]
+                        if let string = String(data: data, encoding: .utf8) {
+                            metadata["message"] = .string(string)
                         }
+                        await logger?.warning(
+                            "Unexpected message received by client (not single/batch response or notification)",
+                            metadata: metadata
+                        )
                     }
-                } catch let error where MCPError.isResourceTemporarilyUnavailable(error) {
-                    try? await Task.sleep(for: .milliseconds(10))
-                    continue
-                } catch {
-                    await logger?.error(
-                        "Error in message handling loop", metadata: ["error": "\(error)"])
-                    break
                 }
-            } while true
+            } catch {
+                await logger?.error(
+                    "Error in message handling loop", metadata: ["error": "\(error)"])
+            }
+
             await self.logger?.debug("Client message handling loop task is terminating.")
         }
 
