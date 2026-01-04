@@ -90,7 +90,7 @@ extension Client {
         _ request: Request<M>,
         options: RequestOptions?
     ) async throws -> M.Result {
-        guard let connection = connection else {
+        guard let connection else {
             throw MCPError.internalError("Client connection not initialized")
         }
 
@@ -223,7 +223,7 @@ extension Client {
         options: RequestOptions?,
         onProgress: @escaping ProgressCallback
     ) async throws -> M.Result {
-        guard let connection = connection else {
+        guard let connection else {
             throw MCPError.internalError("Client connection not initialized")
         }
 
@@ -488,7 +488,7 @@ extension Client {
     /// This is called when a client Task waiting for a response is cancelled.
     /// The notification is sent on a best-effort basis - failures are logged but not thrown.
     func sendCancellationNotification(requestId: RequestId, reason: String?) async {
-        guard let connection = connection else {
+        guard let connection else {
             await logger?.debug(
                 "Cannot send cancellation notification - connection is nil",
                 metadata: ["requestId": "\(requestId)"]

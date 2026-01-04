@@ -957,6 +957,33 @@ struct HTTPServerTransportTests {
         #expect(TransportSecuritySettings.forBindAddress(host: "192.168.1.1", port: 8080) == nil)
     }
 
+    @Test("HTTPServerTransportOptions.forBindAddress auto-configures security")
+    func optionsForBindAddressAutoConfiguresSecurity() {
+        // For localhost, should auto-enable DNS rebinding protection
+        let localhostOptions = HTTPServerTransportOptions.forBindAddress(host: "127.0.0.1", port: 8080)
+        #expect(localhostOptions.security != nil)
+        #expect(localhostOptions.security?.enableDnsRebindingProtection == true)
+        #expect(localhostOptions.security?.allowedHosts.contains("127.0.0.1:8080") == true)
+
+        // For 0.0.0.0, should not auto-enable security
+        let wildcardOptions = HTTPServerTransportOptions.forBindAddress(host: "0.0.0.0", port: 8080)
+        #expect(wildcardOptions.security == nil)
+
+        // Should allow explicit security override
+        let customSecurity = TransportSecuritySettings(
+            enableDnsRebindingProtection: true,
+            allowedHosts: ["custom.local:8080"],
+            allowedOrigins: ["http://custom.local:8080"]
+        )
+        let overriddenOptions = HTTPServerTransportOptions.forBindAddress(
+            host: "127.0.0.1",
+            port: 8080,
+            security: customSecurity
+        )
+        #expect(overriddenOptions.security?.allowedHosts.contains("custom.local:8080") == true)
+        #expect(overriddenOptions.security?.allowedHosts.contains("127.0.0.1:8080") == false)
+    }
+
     @Test("DNS rebinding protection rejects invalid host on GET")
     func dnsRebindingProtectionRejectsInvalidHostOnGet() async throws {
         let transport = HTTPServerTransport(

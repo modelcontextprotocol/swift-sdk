@@ -3,104 +3,129 @@ import Foundation
 extension Client {
     // MARK: - Prompts
 
+    /// Get a prompt by name.
+    ///
+    /// - Parameters:
+    ///   - name: The name of the prompt to retrieve.
+    ///   - arguments: Optional arguments to pass to the prompt.
+    /// - Returns: The prompt result containing description and messages.
     public func getPrompt(name: String, arguments: [String: String]? = nil) async throws
-    -> (description: String?, messages: [Prompt.Message])
+        -> GetPrompt.Result
     {
         try validateServerCapability(\.prompts, "Prompts")
         let request = GetPrompt.request(.init(name: name, arguments: arguments))
-        let result = try await send(request)
-        return (description: result.description, messages: result.messages)
+        return try await send(request)
     }
 
-    public func listPrompts(cursor: String? = nil) async throws
-    -> (prompts: [Prompt], nextCursor: String?)
-    {
+    /// List available prompts from the server.
+    ///
+    /// - Parameter cursor: Optional cursor for pagination.
+    /// - Returns: The list result containing prompts and optional next cursor.
+    public func listPrompts(cursor: String? = nil) async throws -> ListPrompts.Result {
         try validateServerCapability(\.prompts, "Prompts")
         let request: Request<ListPrompts>
-        if let cursor = cursor {
+        if let cursor {
             request = ListPrompts.request(.init(cursor: cursor))
         } else {
             request = ListPrompts.request(.init())
         }
-        let result = try await send(request)
-        return (prompts: result.prompts, nextCursor: result.nextCursor)
+        return try await send(request)
     }
 
     // MARK: - Resources
 
-    public func readResource(uri: String) async throws -> [Resource.Content] {
+    /// Read a resource by URI.
+    ///
+    /// - Parameter uri: The URI of the resource to read.
+    /// - Returns: The read result containing resource contents.
+    public func readResource(uri: String) async throws -> ReadResource.Result {
         try validateServerCapability(\.resources, "Resources")
         let request = ReadResource.request(.init(uri: uri))
-        let result = try await send(request)
-        return result.contents
+        return try await send(request)
     }
 
-    public func listResources(cursor: String? = nil) async throws -> (
-        resources: [Resource], nextCursor: String?
-    ) {
+    /// List available resources from the server.
+    ///
+    /// - Parameter cursor: Optional cursor for pagination.
+    /// - Returns: The list result containing resources and optional next cursor.
+    public func listResources(cursor: String? = nil) async throws -> ListResources.Result {
         try validateServerCapability(\.resources, "Resources")
         let request: Request<ListResources>
-        if let cursor = cursor {
+        if let cursor {
             request = ListResources.request(.init(cursor: cursor))
         } else {
             request = ListResources.request(.init())
         }
-        let result = try await send(request)
-        return (resources: result.resources, nextCursor: result.nextCursor)
+        return try await send(request)
     }
 
+    /// Subscribe to updates for a resource.
+    ///
+    /// - Parameter uri: The URI of the resource to subscribe to.
     public func subscribeToResource(uri: String) async throws {
         try validateServerCapability(\.resources?.subscribe, "Resource subscription")
         let request = ResourceSubscribe.request(.init(uri: uri))
         _ = try await send(request)
     }
 
+    /// Unsubscribe from updates for a resource.
+    ///
+    /// - Parameter uri: The URI of the resource to unsubscribe from.
     public func unsubscribeFromResource(uri: String) async throws {
         try validateServerCapability(\.resources?.subscribe, "Resource subscription")
         let request = ResourceUnsubscribe.request(.init(uri: uri))
         _ = try await send(request)
     }
 
-    public func listResourceTemplates(cursor: String? = nil) async throws -> (
-        templates: [Resource.Template], nextCursor: String?
-    ) {
+    /// List available resource templates from the server.
+    ///
+    /// - Parameter cursor: Optional cursor for pagination.
+    /// - Returns: The list result containing templates and optional next cursor.
+    public func listResourceTemplates(cursor: String? = nil) async throws
+        -> ListResourceTemplates.Result
+    {
         try validateServerCapability(\.resources, "Resources")
         let request: Request<ListResourceTemplates>
-        if let cursor = cursor {
+        if let cursor {
             request = ListResourceTemplates.request(.init(cursor: cursor))
         } else {
             request = ListResourceTemplates.request(.init())
         }
-        let result = try await send(request)
-        return (templates: result.templates, nextCursor: result.nextCursor)
+        return try await send(request)
     }
 
     // MARK: - Tools
 
-    public func listTools(cursor: String? = nil) async throws -> (
-        tools: [Tool], nextCursor: String?
-    ) {
+    /// List available tools from the server.
+    ///
+    /// - Parameter cursor: Optional cursor for pagination.
+    /// - Returns: The list result containing tools and optional next cursor.
+    public func listTools(cursor: String? = nil) async throws -> ListTools.Result {
         try validateServerCapability(\.tools, "Tools")
         let request: Request<ListTools>
-        if let cursor = cursor {
+        if let cursor {
             request = ListTools.request(.init(cursor: cursor))
         } else {
             request = ListTools.request(.init())
         }
-        let result = try await send(request)
-        return (tools: result.tools, nextCursor: result.nextCursor)
+        return try await send(request)
     }
 
-    public func callTool(name: String, arguments: [String: Value]? = nil) async throws -> (
-        content: [Tool.Content], structuredContent: Value?, isError: Bool?
-    ) {
+    /// Call a tool by name.
+    ///
+    /// - Parameters:
+    ///   - name: The name of the tool to call.
+    ///   - arguments: Optional arguments to pass to the tool.
+    /// - Returns: The tool call result containing content, structured content, and error flag.
+    public func callTool(name: String, arguments: [String: Value]? = nil) async throws
+        -> CallTool.Result
+    {
         try validateServerCapability(\.tools, "Tools")
         let request = CallTool.request(.init(name: name, arguments: arguments))
-        let result = try await send(request)
         // TODO: Add client-side output validation against the tool's outputSchema.
         // TypeScript and Python SDKs cache tool outputSchemas from listTools() and
         // validate structuredContent when receiving tool results.
-        return (content: result.content, structuredContent: result.structuredContent, isError: result.isError)
+        return try await send(request)
     }
 
     // MARK: - Completions
@@ -114,16 +139,15 @@ extension Client {
     ///   - ref: A reference to the prompt or resource template to get completions for.
     ///   - argument: The argument being completed, including its name and partial value.
     ///   - context: Optional additional context with previously-resolved argument values.
-    /// - Returns: The completion suggestions from the server.
+    /// - Returns: The completion result from the server.
     public func complete(
         ref: CompletionReference,
         argument: CompletionArgument,
         context: CompletionContext? = nil
-    ) async throws -> CompletionSuggestions {
+    ) async throws -> Complete.Result {
         try validateServerCapability(\.completions, "Completions")
         let request = Complete.request(.init(ref: ref, argument: argument, context: context))
-        let result = try await send(request)
-        return result.completion
+        return try await send(request)
     }
 
     // MARK: - Logging

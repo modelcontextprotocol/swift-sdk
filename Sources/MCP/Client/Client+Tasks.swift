@@ -10,7 +10,7 @@ extension Client {
         return try await send(request)
     }
 
-    func listTasks(cursor: String? = nil) async throws -> (tasks: [MCPTask], nextCursor: String?) {
+    func listTasks(cursor: String? = nil) async throws -> ListTasks.Result {
         try validateServerCapability(\.tasks, "Tasks")
         let request: Request<ListTasks>
         if let cursor {
@@ -18,8 +18,7 @@ extension Client {
         } else {
             request = ListTasks.request(.init())
         }
-        let result = try await send(request)
-        return (tasks: result.tasks, nextCursor: result.nextCursor)
+        return try await send(request)
     }
 
     func cancelTask(taskId: String) async throws -> CancelTask.Result {
@@ -75,7 +74,7 @@ extension Client {
 
         // The server should return CreateTaskResult for task-augmented requests
         // We need to decode as CreateTaskResult instead of CallTool.Result
-        guard let connection = connection else {
+        guard let connection else {
             throw MCPError.internalError("Client connection not initialized")
         }
 
@@ -152,7 +151,7 @@ extension Client {
         name: String,
         arguments: [String: Value]? = nil,
         ttl: Int? = nil
-    ) async throws -> (content: [Tool.Content], isError: Bool?) {
+    ) async throws -> CallTool.Result {
         // Start the task
         let createResult = try await callToolAsTask(name: name, arguments: arguments, ttl: ttl)
         let taskId = createResult.task.taskId
@@ -169,8 +168,7 @@ extension Client {
         // Convert extraFields back to Value for decoding
         let resultValue = Value.object(extraFields)
         let resultData = try encoder.encode(resultValue)
-        let toolResult = try decoder.decode(CallTool.Result.self, from: resultData)
-        return (content: toolResult.content, isError: toolResult.isError)
+        return try decoder.decode(CallTool.Result.self, from: resultData)
     }
 
     func callToolStream(
@@ -241,7 +239,9 @@ extension Client {
                     continuation.yield(.error(error))
                     continuation.finish()
                 } catch {
-                    let mcpError = MCPError.internalError(error.localizedDescription)
+                    // Log full error for debugging, but sanitize for stream consumer
+                    await logger?.error("Task stream error", metadata: ["error": "\(error)"])
+                    let mcpError = MCPError.internalError("An internal error occurred")
                     continuation.yield(.error(mcpError))
                     continuation.finish()
                 }

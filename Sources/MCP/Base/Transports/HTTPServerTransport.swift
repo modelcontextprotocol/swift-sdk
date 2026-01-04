@@ -111,8 +111,8 @@ public actor HTTPServerTransport: Transport {
             )
 
         // Create server receive stream
-        var continuation: AsyncThrowingStream<TransportMessage, Swift.Error>.Continuation!
-        self.serverStream = AsyncThrowingStream { continuation = $0 }
+        let (stream, continuation) = AsyncThrowingStream<TransportMessage, Swift.Error>.makeStream()
+        self.serverStream = stream
         self.serverContinuation = continuation
     }
 
@@ -169,7 +169,7 @@ public actor HTTPServerTransport: Transport {
             return
         }
 
-        guard let requestId = requestId else { return }
+        guard let requestId else { return }
 
         // Get the stream for this request
         guard let streamId = requestToStreamMapping[requestId] else {
@@ -422,7 +422,8 @@ public actor HTTPServerTransport: Transport {
         if !hasRequests {
             // Only notifications - yield to server and return 202
             // Notifications don't need SSE closures since there's no response stream
-            let context = MessageContext(authInfo: authInfo)
+            let requestInfo = RequestInfo(headers: request.headers)
+            let context = MessageContext(authInfo: authInfo, requestInfo: requestInfo)
             serverContinuation.yield(TransportMessage(data: body, context: context))
             return HTTPResponse(statusCode: 202, headers: sessionHeaders())
         }
@@ -438,7 +439,7 @@ public actor HTTPServerTransport: Transport {
 
         // Check if using JSON response mode
         if options.enableJsonResponse {
-            return await handleJsonResponseMode(streamId: streamId, requestIds: requestIds, body: body, authInfo: authInfo)
+            return await handleJsonResponseMode(streamId: streamId, requestIds: requestIds, body: body, request: request, authInfo: authInfo)
         }
 
         // SSE streaming mode
@@ -456,6 +457,7 @@ public actor HTTPServerTransport: Transport {
         streamId: String,
         requestIds: [RequestId],
         body: Data,
+        request: HTTPRequest,
         authInfo: AuthInfo?
     ) async -> HTTPResponse {
         // Create stream for receiving the response
@@ -465,7 +467,8 @@ public actor HTTPServerTransport: Transport {
         jsonStreamMapping[streamId] = state
 
         // JSON response mode doesn't have SSE streams to close
-        let context = MessageContext(authInfo: authInfo)
+        let requestInfo = RequestInfo(headers: request.headers)
+        let context = MessageContext(authInfo: authInfo, requestInfo: requestInfo)
         serverContinuation.yield(TransportMessage(data: body, context: context))
 
         // Wait for response - this is cancellation-aware unlike withCheckedContinuation
@@ -533,9 +536,11 @@ public actor HTTPServerTransport: Transport {
             await self?.closeStandaloneSSEStream()
         }
 
-        // Create context with auth info and SSE closures
+        // Create context with auth info, request info, and SSE closures
+        let requestInfo = RequestInfo(headers: request.headers)
         let context = MessageContext(
             authInfo: authInfo,
+            requestInfo: requestInfo,
             closeSSEStream: closeSSEStreamClosure,
             closeStandaloneSSEStream: closeStandaloneSSEStreamClosure
         )
@@ -739,8 +744,7 @@ public actor HTTPServerTransport: Transport {
         }
 
         // Validate Host header (required when protection is enabled)
-        let hostHeader = request.header(HTTPHeader.host)
-        if hostHeader == nil {
+        guard let hostHeader = request.header(HTTPHeader.host) else {
             logger.warning("DNS rebinding protection: Missing Host header")
             // Use 421 Misdirected Request for Host header issues
             return createJsonErrorResponse(
@@ -751,13 +755,13 @@ public actor HTTPServerTransport: Transport {
         }
 
         let hostMatches = security.allowedHosts.contains { pattern in
-            matchesHostPattern(hostHeader!, pattern: pattern)
+            matchesHostPattern(hostHeader, pattern: pattern)
         }
 
         if !hostMatches {
             logger.warning(
                 "DNS rebinding protection: Host header rejected",
-                metadata: ["host": "\(hostHeader!)"]
+                metadata: ["host": "\(hostHeader)"]
             )
             // Use 421 Misdirected Request for Host header issues
             return createJsonErrorResponse(

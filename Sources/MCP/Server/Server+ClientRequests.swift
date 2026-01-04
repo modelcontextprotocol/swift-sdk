@@ -11,7 +11,7 @@ extension Server {
     /// - Parameter request: The request to send
     /// - Returns: The result from the client
     public func sendRequest<M: Method>(_ request: Request<M>) async throws -> M.Result {
-        guard let connection = connection else {
+        guard let connection else {
             throw MCPError.internalError("Server connection not initialized")
         }
 

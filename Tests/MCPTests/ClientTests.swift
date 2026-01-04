@@ -944,4 +944,261 @@ struct ClientTests {
 
         await client.disconnect()
     }
+
+    // MARK: - Initialization Request Tests
+    // Based on TypeScript SDK: should initialize with matching protocol version
+    // Based on Python SDK: test_client_session_initialize
+
+    @Test("Client sends latest protocol version in initialize request")
+    func testClientSendsLatestProtocolVersion() async throws {
+        // TypeScript SDK: should initialize with matching protocol version
+        // Python SDK: test_client_session_version_negotiation_success
+        // Verifies that the client sends the latest protocol version in its initialize request
+        let transport = MockTransport()
+        let client = Client(name: "TestClient", version: "1.0")
+
+        // Set up a task to handle the initialize response
+        let initTask = Task {
+            try await Task.sleep(for: .milliseconds(10))
+            if let lastMessage = await transport.sentMessages.last,
+                let data = lastMessage.data(using: .utf8),
+                let request = try? JSONDecoder().decode(Request<Initialize>.self, from: data)
+            {
+                // Verify the client sent the latest protocol version
+                #expect(request.params.protocolVersion == Version.latest)
+
+                let response = Initialize.response(
+                    id: request.id,
+                    result: .init(
+                        protocolVersion: Version.latest,
+                        capabilities: .init(),
+                        serverInfo: .init(name: "TestServer", version: "1.0"),
+                        instructions: nil
+                    )
+                )
+                try await transport.queue(response: response)
+            }
+        }
+
+        defer { initTask.cancel() }
+
+        let result = try await client.connect(transport: transport)
+        #expect(result.protocolVersion == Version.latest)
+
+        await client.disconnect()
+    }
+
+    @Test("Client info is correctly sent in initialize request")
+    func testClientInfoSentInInitializeRequest() async throws {
+        // Python SDK: test_client_session_custom_client_info, test_client_session_default_client_info
+        // Verifies that the client's name and version are correctly included in the initialize request
+        let transport = MockTransport()
+        let clientName = "CustomTestClient"
+        let clientVersion = "2.3.4"
+        let client = Client(name: clientName, version: clientVersion)
+
+        // Set up a task to handle the initialize response and verify client info
+        let initTask = Task {
+            try await Task.sleep(for: .milliseconds(10))
+            if let lastMessage = await transport.sentMessages.last,
+                let data = lastMessage.data(using: .utf8),
+                let request = try? JSONDecoder().decode(Request<Initialize>.self, from: data)
+            {
+                // Verify the client info in the request
+                #expect(request.params.clientInfo.name == clientName)
+                #expect(request.params.clientInfo.version == clientVersion)
+
+                let response = Initialize.response(
+                    id: request.id,
+                    result: .init(
+                        protocolVersion: Version.latest,
+                        capabilities: .init(),
+                        serverInfo: .init(name: "TestServer", version: "1.0"),
+                        instructions: nil
+                    )
+                )
+                try await transport.queue(response: response)
+            }
+        }
+
+        defer { initTask.cancel() }
+
+        try await client.connect(transport: transport)
+        await client.disconnect()
+    }
+
+    @Test("Client capabilities are sent in initialize request")
+    func testClientCapabilitiesSentInInitializeRequest() async throws {
+        // Python SDK: test_client_capabilities_default, test_client_capabilities_with_custom_callbacks
+        // Verifies that client capabilities are correctly included in the initialize request
+        let transport = MockTransport()
+        let client = Client(name: "TestClient", version: "1.0")
+
+        // Set client capabilities with roots and sampling
+        await client.setCapabilities(.init(
+            sampling: .init(),
+            roots: .init(listChanged: true)
+        ))
+
+        // Set up a task to handle the initialize response and verify capabilities
+        let initTask = Task {
+            try await Task.sleep(for: .milliseconds(10))
+            if let lastMessage = await transport.sentMessages.last,
+                let data = lastMessage.data(using: .utf8),
+                let request = try? JSONDecoder().decode(Request<Initialize>.self, from: data)
+            {
+                // Verify the client capabilities in the request
+                #expect(request.params.capabilities.sampling != nil)
+                #expect(request.params.capabilities.roots != nil)
+                #expect(request.params.capabilities.roots?.listChanged == true)
+
+                let response = Initialize.response(
+                    id: request.id,
+                    result: .init(
+                        protocolVersion: Version.latest,
+                        capabilities: .init(),
+                        serverInfo: .init(name: "TestServer", version: "1.0"),
+                        instructions: nil
+                    )
+                )
+                try await transport.queue(response: response)
+            }
+        }
+
+        defer { initTask.cancel() }
+
+        try await client.connect(transport: transport)
+        await client.disconnect()
+    }
+
+    @Test("Server capabilities accessible after initialization")
+    func testServerCapabilitiesAccessibleAfterInit() async throws {
+        // Python SDK: test_get_server_capabilities
+        // Verifies that getServerCapabilities() returns nil before connect and is populated after
+        let transport = MockTransport()
+        let client = Client(name: "TestClient", version: "1.0")
+
+        // Before connect, capabilities should be nil
+        #expect(await client.getServerCapabilities() == nil)
+
+        // Create server capabilities with various features
+        let serverCapabilities = Server.Capabilities(
+            logging: .init(),
+            prompts: .init(listChanged: true),
+            resources: .init(subscribe: true, listChanged: true),
+            tools: .init(listChanged: false)
+        )
+
+        // Set up a task to handle the initialize response
+        let initTask = Task {
+            try await Task.sleep(for: .milliseconds(10))
+            if let lastMessage = await transport.sentMessages.last,
+                let data = lastMessage.data(using: .utf8),
+                let request = try? JSONDecoder().decode(Request<Initialize>.self, from: data)
+            {
+                let response = Initialize.response(
+                    id: request.id,
+                    result: .init(
+                        protocolVersion: Version.latest,
+                        capabilities: serverCapabilities,
+                        serverInfo: .init(name: "TestServer", version: "1.0"),
+                        instructions: nil
+                    )
+                )
+                try await transport.queue(response: response)
+            }
+        }
+
+        defer { initTask.cancel() }
+
+        try await client.connect(transport: transport)
+
+        // After connect, capabilities should be populated
+        let capabilities = await client.getServerCapabilities()
+        #expect(capabilities != nil)
+        #expect(capabilities?.prompts?.listChanged == true)
+        #expect(capabilities?.resources?.subscribe == true)
+        #expect(capabilities?.resources?.listChanged == true)
+        #expect(capabilities?.tools?.listChanged == false)
+        #expect(capabilities?.logging != nil)
+
+        await client.disconnect()
+    }
+
+    @Test("Instructions from server accessible in initialize result")
+    func testInstructionsAccessibleFromInitializeResult() async throws {
+        // TypeScript SDK: should initialize with matching protocol version (checks getInstructions())
+        // Python SDK: test_client_session_initialize (checks result.instructions)
+        // Verifies that instructions from the server's response are accessible
+        let transport = MockTransport()
+        let client = Client(name: "TestClient", version: "1.0")
+        let serverInstructions = "These are the server instructions for the client."
+
+        // Set up a task to handle the initialize response with instructions
+        let initTask = Task {
+            try await Task.sleep(for: .milliseconds(10))
+            if let lastMessage = await transport.sentMessages.last,
+                let data = lastMessage.data(using: .utf8),
+                let request = try? JSONDecoder().decode(Request<Initialize>.self, from: data)
+            {
+                let response = Initialize.response(
+                    id: request.id,
+                    result: .init(
+                        protocolVersion: Version.latest,
+                        capabilities: .init(),
+                        serverInfo: .init(name: "TestServer", version: "1.0"),
+                        instructions: serverInstructions
+                    )
+                )
+                try await transport.queue(response: response)
+            }
+        }
+
+        defer { initTask.cancel() }
+
+        // The result from connect contains the instructions
+        let result = try await client.connect(transport: transport)
+        #expect(result.instructions == serverInstructions)
+
+        await client.disconnect()
+    }
+
+    @Test("Server info accessible in initialize result")
+    func testServerInfoAccessibleFromInitializeResult() async throws {
+        // TypeScript SDK: should connect new client to old, supported server version (checks getServerVersion())
+        // Python SDK: test_client_session_initialize (checks result.serverInfo)
+        // Verifies that server info from the response is accessible
+        let transport = MockTransport()
+        let client = Client(name: "TestClient", version: "1.0")
+        let serverName = "CustomMCPServer"
+        let serverVersion = "3.2.1"
+
+        // Set up a task to handle the initialize response
+        let initTask = Task {
+            try await Task.sleep(for: .milliseconds(10))
+            if let lastMessage = await transport.sentMessages.last,
+                let data = lastMessage.data(using: .utf8),
+                let request = try? JSONDecoder().decode(Request<Initialize>.self, from: data)
+            {
+                let response = Initialize.response(
+                    id: request.id,
+                    result: .init(
+                        protocolVersion: Version.latest,
+                        capabilities: .init(),
+                        serverInfo: .init(name: serverName, version: serverVersion),
+                        instructions: nil
+                    )
+                )
+                try await transport.queue(response: response)
+            }
+        }
+
+        defer { initTask.cancel() }
+
+        let result = try await client.connect(transport: transport)
+        #expect(result.serverInfo.name == serverName)
+        #expect(result.serverInfo.version == serverVersion)
+
+        await client.disconnect()
+    }
 }

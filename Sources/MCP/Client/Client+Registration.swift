@@ -118,19 +118,33 @@ extension Client {
     ///
     /// - Important: The client must have declared `roots` capability during initialization.
     ///
-    /// - Parameter handler: A closure that returns the list of available roots.
+    /// ## Example
+    ///
+    /// ```swift
+    /// client.withRootsHandler { context in
+    ///     // Access request context if needed
+    ///     print("Request ID: \(context.requestId)")
+    ///
+    ///     return [
+    ///         Root(uri: "file:///home/user/project", name: "Project"),
+    ///         Root(uri: "file:///home/user/docs", name: "Documents")
+    ///     ]
+    /// }
+    /// ```
+    ///
+    /// - Parameter handler: A closure that receives the request context and returns the list of available roots.
     /// - Returns: Self for chaining.
     /// - Precondition: `capabilities.roots` must be non-nil.
     @discardableResult
     public func withRootsHandler(
-        _ handler: @escaping @Sendable () async throws -> [Root]
+        _ handler: @escaping @Sendable (RequestHandlerContext) async throws -> [Root]
     ) -> Self {
         precondition(
             capabilities.roots != nil,
             "Cannot register roots handler: Client does not have roots capability"
         )
-        return withRequestHandler(ListRoots.self) { _, _ in
-            ListRoots.Result(roots: try await handler())
+        return withRequestHandler(ListRoots.self) { _, context in
+            ListRoots.Result(roots: try await handler(context))
         }
     }
 

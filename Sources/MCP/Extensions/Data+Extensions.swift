@@ -55,7 +55,7 @@ extension Data {
 
         // Process MIME type
         var mimeType = mediatype.isEmpty ? "text/plain" : String(mediatype)
-        if let charset = charset, !charset.isEmpty, mimeType.starts(with: "text/") {
+        if let charset, !charset.isEmpty, mimeType.starts(with: "text/") {
             mimeType += ";charset=\(charset)"
         }
 

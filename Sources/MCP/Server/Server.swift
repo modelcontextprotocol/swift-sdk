@@ -77,20 +77,35 @@ import class Foundation.JSONEncoder
 public actor Server {
     /// The server configuration
     public struct Configuration: Hashable, Codable, Sendable {
-        /// The default configuration.
-        public static let `default` = Configuration(strict: false)
-
-        /// The strict configuration.
-        public static let strict = Configuration(strict: true)
-
-        /// When strict mode is enabled, the server:
-        /// - Requires clients to send an initialize request before any other requests
-        /// - Rejects all requests from uninitialized clients with a protocol error
+        /// The default configuration (strict mode enabled).
         ///
-        /// While the MCP specification requires clients to initialize the connection
-        /// before sending other requests, some implementations may not follow this.
-        /// Disabling strict mode allows the server to be more lenient with non-compliant
-        /// clients, though this may lead to undefined behavior.
+        /// This matches Python SDK behavior where the server rejects non-ping requests
+        /// before initialization at the session level. TypeScript SDK only enforces this
+        /// at the HTTP transport level, not at the server/session level.
+        ///
+        /// We chose to align with Python because:
+        /// - Consistent behavior across all transports (stdio, HTTP, in-memory)
+        /// - More defensive - prevents misbehaving clients from accessing functionality before init
+        /// - Better aligns with MCP spec intent (clients "SHOULD NOT" send requests before init)
+        /// - Ping is still allowed for health checks
+        public static let `default` = Configuration(strict: true)
+
+        /// The lenient configuration (strict mode disabled).
+        ///
+        /// Use this for compatibility with non-compliant clients that send requests
+        /// before initialization. This matches TypeScript SDK's server-level behavior.
+        public static let lenient = Configuration(strict: false)
+
+        /// When strict mode is enabled (default), the server:
+        /// - Requires clients to send an initialize request before any other requests
+        /// - Allows ping requests before initialization (for health checks)
+        /// - Rejects all other requests from uninitialized clients with a protocol error
+        ///
+        /// The MCP specification says clients "SHOULD NOT" send requests other than
+        /// pings before initialization. Strict mode enforces this at the server level.
+        ///
+        /// Set to `false` for lenient behavior that allows requests before initialization.
+        /// This may be useful for non-compliant clients but can lead to undefined behavior.
         public var strict: Bool
     }
 
@@ -307,6 +322,27 @@ public actor Server {
         /// ```
         public let _meta: RequestMeta?
 
+        /// The task ID for task-augmented requests, if present.
+        ///
+        /// This is a convenience property that extracts the task ID from the
+        /// `_meta["io.modelcontextprotocol/related-task"]` field.
+        ///
+        /// This matches the TypeScript SDK's `extra.taskId`.
+        ///
+        /// ## Example
+        ///
+        /// ```swift
+        /// server.withRequestHandler(CallTool.self) { params, context in
+        ///     if let taskId = context.taskId {
+        ///         print("Handling request as part of task: \(taskId)")
+        ///     }
+        ///     return CallTool.Result(content: [.text("Done")])
+        /// }
+        /// ```
+        public var taskId: String? {
+            _meta?.relatedTaskId
+        }
+
         /// Authentication information for this request.
         ///
         /// Contains validated access token information when using HTTP transports
@@ -331,6 +367,28 @@ public actor Server {
         /// }
         /// ```
         public let authInfo: AuthInfo?
+
+        /// Information about the incoming HTTP request.
+        ///
+        /// Contains HTTP headers from the original request. Only available for
+        /// HTTP transports.
+        ///
+        /// This matches the TypeScript SDK's `extra.requestInfo`.
+        ///
+        /// ## Example
+        ///
+        /// ```swift
+        /// server.withRequestHandler(CallTool.self) { params, context in
+        ///     if let requestInfo = context.requestInfo {
+        ///         // Access custom headers
+        ///         if let apiVersion = requestInfo.header("X-API-Version") {
+        ///             print("Client API version: \(apiVersion)")
+        ///         }
+        ///     }
+        ///     return CallTool.Result(content: [.text("Done")])
+        /// }
+        /// ```
+        public let requestInfo: RequestInfo?
 
         /// Closes the SSE stream for this request, triggering client reconnection.
         ///
@@ -775,11 +833,22 @@ public actor Server {
     public init(
         name: String,
         version: String,
+        title: String? = nil,
+        description: String? = nil,
+        icons: [Icon]? = nil,
+        websiteUrl: String? = nil,
         instructions: String? = nil,
         capabilities: Server.Capabilities = .init(),
         configuration: Configuration = .default
     ) {
-        self.serverInfo = Server.Info(name: name, version: version)
+        self.serverInfo = Server.Info(
+            name: name,
+            version: version,
+            title: title,
+            description: description,
+            icons: icons,
+            websiteUrl: websiteUrl
+        )
         self.capabilities = capabilities
         self.configuration = configuration
         self.instructions = instructions
@@ -878,10 +947,11 @@ public actor Server {
                         // handles it internally. Message handling code won't throw EAGAIN.
                         await logger?.error(
                             "Error processing message", metadata: ["error": "\(error)"])
+                        // Sanitize non-MCP errors to avoid leaking internal details to clients
                         let response = AnyMethod.response(
                             id: requestID ?? .random,
                             error: error as? MCPError
-                                ?? MCPError.internalError(error.localizedDescription)
+                                ?? MCPError.internalError("An internal error occurred")
                         )
                         try? await send(response)
                     }
@@ -908,7 +978,7 @@ public actor Server {
 
         task?.cancel()
         task = nil
-        if let connection = connection {
+        if let connection {
             await connection.disconnect()
         }
         connection = nil
@@ -1011,7 +1081,7 @@ public actor Server {
     ) {
         // Initialize
         withRequestHandler(Initialize.self) { [weak self] params, _ in
-            guard let self = self else {
+            guard let self else {
                 throw MCPError.internalError("Server was deallocated")
             }
 

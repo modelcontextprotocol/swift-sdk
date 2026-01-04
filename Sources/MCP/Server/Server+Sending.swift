@@ -18,7 +18,7 @@ extension Server {
 
     /// Send a notification to connected clients
     public func notify<N: Notification>(_ notification: Message<N>) async throws {
-        guard let connection = connection else {
+        guard let connection else {
             throw MCPError.internalError("Server connection not initialized")
         }
 

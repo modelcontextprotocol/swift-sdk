@@ -518,7 +518,7 @@ struct CompletionTests {
         let receivedContext = await received.getContext()
         #expect(receivedContext != nil)
         #expect(receivedContext?.arguments?["previous"] == "value")
-        #expect(result.values == ["test-completion"])
+        #expect(result.completion.values == ["test-completion"])
 
         // Verify the ref and argument were received correctly
         let receivedRef = await received.getRef()
@@ -570,7 +570,7 @@ struct CompletionTests {
         )
 
         #expect(await received.wasContextNil())
-        #expect(result.values == ["no-context-completion"])
+        #expect(result.completion.values == ["no-context-completion"])
 
         await client.disconnect()
         await server.stop()
@@ -636,8 +636,8 @@ struct CompletionTests {
             ref: .resource(ResourceTemplateReference(uri: "db://{database}/{table}")),
             argument: CompletionArgument(name: "database", value: "")
         )
-        #expect(dbResult.values.contains("users_db"))
-        #expect(dbResult.values.contains("products_db"))
+        #expect(dbResult.completion.values.contains("users_db"))
+        #expect(dbResult.completion.values.contains("products_db"))
 
         // Then complete table with database context
         let tableResult = try await client.complete(
@@ -645,7 +645,7 @@ struct CompletionTests {
             argument: CompletionArgument(name: "table", value: ""),
             context: CompletionContext(arguments: ["database": "users_db"])
         )
-        #expect(tableResult.values == ["users", "sessions", "permissions"])
+        #expect(tableResult.completion.values == ["users", "sessions", "permissions"])
 
         // Different database gives different tables
         let tableResult2 = try await client.complete(
@@ -653,7 +653,7 @@ struct CompletionTests {
             argument: CompletionArgument(name: "table", value: ""),
             context: CompletionContext(arguments: ["database": "products_db"])
         )
-        #expect(tableResult2.values == ["products", "categories", "inventory"])
+        #expect(tableResult2.completion.values == ["products", "categories", "inventory"])
 
         await client.disconnect()
         await server.stop()
@@ -717,7 +717,7 @@ struct CompletionTests {
             argument: CompletionArgument(name: "table", value: ""),
             context: CompletionContext(arguments: ["database": "test_db"])
         )
-        #expect(result.values == ["users", "orders", "products"])
+        #expect(result.completion.values == ["users", "orders", "products"])
 
         await client.disconnect()
         await server.stop()
@@ -763,7 +763,7 @@ struct CompletionTests {
             argument: CompletionArgument(name: "language", value: "py")
         )
 
-        #expect(result.values == ["python"])
+        #expect(result.completion.values == ["python"])
 
         // Request completion with "j" prefix
         let result2 = try await client.complete(
@@ -771,9 +771,9 @@ struct CompletionTests {
             argument: CompletionArgument(name: "language", value: "j")
         )
 
-        #expect(result2.values.contains("javascript"))
-        #expect(result2.values.contains("java"))
-        #expect(result2.values.allSatisfy { $0.hasPrefix("j") })
+        #expect(result2.completion.values.contains("javascript"))
+        #expect(result2.completion.values.contains("java"))
+        #expect(result2.completion.values.allSatisfy { $0.hasPrefix("j") })
 
         await client.disconnect()
         await server.stop()
@@ -921,10 +921,10 @@ struct CompletionTests {
             argument: CompletionArgument(name: "repo", value: ""),
             context: CompletionContext(arguments: ["owner": "modelcontextprotocol"])
         )
-        #expect(result1.values.contains("python-sdk"))
-        #expect(result1.values.contains("typescript-sdk"))
-        #expect(result1.values.contains("specification"))
-        #expect(result1.total == 3)
+        #expect(result1.completion.values.contains("python-sdk"))
+        #expect(result1.completion.values.contains("typescript-sdk"))
+        #expect(result1.completion.values.contains("specification"))
+        #expect(result1.completion.total == 3)
 
         // Test with microsoft owner
         let result2 = try await client.complete(
@@ -932,16 +932,16 @@ struct CompletionTests {
             argument: CompletionArgument(name: "repo", value: ""),
             context: CompletionContext(arguments: ["owner": "microsoft"])
         )
-        #expect(result2.values.contains("vscode"))
-        #expect(result2.values.contains("typescript"))
-        #expect(result2.values.contains("playwright"))
+        #expect(result2.completion.values.contains("vscode"))
+        #expect(result2.completion.values.contains("typescript"))
+        #expect(result2.completion.values.contains("playwright"))
 
         // Test with no context
         let result3 = try await client.complete(
             ref: .resource(ResourceTemplateReference(uri: "github://repos/{owner}/{repo}")),
             argument: CompletionArgument(name: "repo", value: "")
         )
-        #expect(result3.values == ["repo1", "repo2", "repo3"])
+        #expect(result3.completion.values == ["repo1", "repo2", "repo3"])
 
         await client.disconnect()
         await server.stop()
@@ -1003,7 +1003,7 @@ struct CompletionTests {
             argument: CompletionArgument(name: "name", value: "A"),
             context: CompletionContext(arguments: ["department": "engineering"])
         )
-        #expect(result1.values == ["Alice"])
+        #expect(result1.completion.values == ["Alice"])
 
         // Test with sales department
         let result2 = try await client.complete(
@@ -1011,7 +1011,7 @@ struct CompletionTests {
             argument: CompletionArgument(name: "name", value: "D"),
             context: CompletionContext(arguments: ["department": "sales"])
         )
-        #expect(result2.values == ["David"])
+        #expect(result2.completion.values == ["David"])
 
         // Test with marketing department
         let result3 = try await client.complete(
@@ -1019,15 +1019,15 @@ struct CompletionTests {
             argument: CompletionArgument(name: "name", value: "G"),
             context: CompletionContext(arguments: ["department": "marketing"])
         )
-        #expect(result3.values == ["Grace"])
+        #expect(result3.completion.values == ["Grace"])
 
         // Test with no context
         let result4 = try await client.complete(
             ref: .prompt(PromptReference(name: "team-greeting")),
             argument: CompletionArgument(name: "name", value: "U")
         )
-        #expect(result4.values.contains("Unknown1"))
-        #expect(result4.values.contains("Unknown2"))
+        #expect(result4.completion.values.contains("Unknown1"))
+        #expect(result4.completion.values.contains("Unknown2"))
 
         await client.disconnect()
         await server.stop()

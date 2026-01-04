@@ -743,15 +743,15 @@ struct ResourceTests {
         #expect(templates.templates[1].uriTemplate == "users://{user_id}/profile")
 
         // Read a resource using a templated URI
-        let greetingContent = try await client.readResource(uri: "greeting://World")
-        #expect(greetingContent.count == 1)
-        #expect(greetingContent[0].text == "Hello, World!")
-        #expect(greetingContent[0].mimeType == "text/plain")
+        let greetingResult = try await client.readResource(uri: "greeting://World")
+        #expect(greetingResult.contents.count == 1)
+        #expect(greetingResult.contents[0].text == "Hello, World!")
+        #expect(greetingResult.contents[0].mimeType == "text/plain")
 
         // Read another templated resource
-        let profileContent = try await client.readResource(uri: "users://123/profile")
-        #expect(profileContent.count == 1)
-        #expect(profileContent[0].text == "Profile for user 123")
+        let profileResult = try await client.readResource(uri: "users://123/profile")
+        #expect(profileResult.contents.count == 1)
+        #expect(profileResult.contents[0].text == "Profile for user 123")
 
         await client.disconnect()
         await server.stop()
@@ -807,9 +807,9 @@ struct ResourceTests {
         #expect(resources.resources[1].mimeType == "application/json; charset=utf-8")
 
         // Read resource and verify MIME type is preserved
-        let content = try await client.readResource(uri: "ui://widget")
-        #expect(content.count == 1)
-        #expect(content[0].mimeType == "text/html;profile=mcp-app")
+        let readResult = try await client.readResource(uri: "ui://widget")
+        #expect(readResult.contents.count == 1)
+        #expect(readResult.contents[0].mimeType == "text/html;profile=mcp-app")
 
         await client.disconnect()
         await server.stop()

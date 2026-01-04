@@ -70,6 +70,16 @@ public struct AuthInfo: Hashable, Codable, Sendable {
     }
 }
 
+extension AuthInfo: CustomStringConvertible {
+    /// Redacts the token to prevent accidental exposure in logs.
+    ///
+    /// The token is still accessible via the `token` property for legitimate use,
+    /// but this prevents it from appearing in string interpolation or print statements.
+    public var description: String {
+        "AuthInfo(clientId: \(clientId), scopes: \(scopes), token: [REDACTED])"
+    }
+}
+
 // MARK: - Transport Options
 
 /// Configuration options for HTTPServerTransport
@@ -129,6 +139,71 @@ public struct HTTPServerTransportOptions: Sendable {
         self.eventStore = eventStore
         self.retryInterval = retryInterval
         self.security = security
+    }
+
+    /// Creates options with automatic security configuration based on bind address.
+    ///
+    /// This factory method follows the same convention as the TypeScript and Python SDKs:
+    /// - For localhost addresses (`127.0.0.1`, `localhost`, `::1`), DNS rebinding protection
+    ///   is automatically enabled with appropriate allowed hosts/origins.
+    /// - For other addresses (e.g., `0.0.0.0`), no automatic security is configured.
+    ///
+    /// ## Example
+    ///
+    /// ```swift
+    /// // Auto-configures DNS rebinding protection for localhost
+    /// let options = HTTPServerTransportOptions.forBindAddress(
+    ///     host: "127.0.0.1",
+    ///     port: 8080,
+    ///     sessionIdGenerator: { UUID().uuidString }
+    /// )
+    ///
+    /// // No automatic protection for 0.0.0.0 - configure manually if needed
+    /// let options = HTTPServerTransportOptions.forBindAddress(
+    ///     host: "0.0.0.0",
+    ///     port: 8080,
+    ///     security: TransportSecuritySettings(
+    ///         enableDnsRebindingProtection: true,
+    ///         allowedHosts: ["myserver.local:8080"],
+    ///         allowedOrigins: ["http://myserver.local:8080"]
+    ///     )
+    /// )
+    /// ```
+    ///
+    /// - Parameters:
+    ///   - host: The host address the server will bind to
+    ///   - port: The port number
+    ///   - sessionIdGenerator: Function that generates session IDs (nil for stateless mode)
+    ///   - onSessionInitialized: Called when a new session is initialized
+    ///   - onSessionClosed: Called when a session is closed
+    ///   - enableJsonResponse: If true, return JSON responses instead of SSE streams
+    ///   - eventStore: Event store for resumability support
+    ///   - retryInterval: Retry interval in milliseconds for SSE
+    ///   - security: Override the auto-configured security settings
+    /// - Returns: Configured transport options
+    public static func forBindAddress(
+        host: String,
+        port: Int,
+        sessionIdGenerator: (@Sendable () -> String)? = nil,
+        onSessionInitialized: (@Sendable (String) async -> Void)? = nil,
+        onSessionClosed: (@Sendable (String) async -> Void)? = nil,
+        enableJsonResponse: Bool = false,
+        eventStore: EventStore? = nil,
+        retryInterval: Int? = nil,
+        security: TransportSecuritySettings? = nil
+    ) -> HTTPServerTransportOptions {
+        // Auto-configure security for localhost if not explicitly provided
+        let effectiveSecurity = security ?? TransportSecuritySettings.forBindAddress(host: host, port: port)
+
+        return HTTPServerTransportOptions(
+            sessionIdGenerator: sessionIdGenerator,
+            onSessionInitialized: onSessionInitialized,
+            onSessionClosed: onSessionClosed,
+            enableJsonResponse: enableJsonResponse,
+            eventStore: eventStore,
+            retryInterval: retryInterval,
+            security: effectiveSecurity
+        )
     }
 }
 

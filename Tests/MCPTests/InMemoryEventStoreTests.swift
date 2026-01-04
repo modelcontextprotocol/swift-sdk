@@ -461,4 +461,213 @@ struct InMemoryEventStoreTests {
         streamCount = await store.streamCount
         #expect(streamCount == 1)
     }
+
+    // MARK: - Priming Events
+
+    @Test("Priming events (empty data) are stored but skipped during replay")
+    func primingEventsSkippedDuringReplay() async throws {
+        let store = InMemoryEventStore()
+
+        // Store a regular event
+        let msg1 = #"{"jsonrpc":"2.0","result":"first","id":"1"}"#.data(using: .utf8)!
+        let eventId1 = try await store.storeEvent(streamId: "stream", message: msg1)
+
+        // Store a priming event (empty data)
+        let primingEventId = try await store.storeEvent(streamId: "stream", message: Data())
+
+        // Store another regular event
+        let msg2 = #"{"jsonrpc":"2.0","result":"second","id":"2"}"#.data(using: .utf8)!
+        _ = try await store.storeEvent(streamId: "stream", message: msg2)
+
+        // All three events should be stored
+        let count = await store.eventCount
+        #expect(count == 3)
+
+        // Priming event should have a valid stream ID
+        let primingStreamId = await store.streamIdForEventId(primingEventId)
+        #expect(primingStreamId == "stream")
+
+        // Replay from first event - should only get the second regular event
+        // (priming event should be skipped)
+        actor MessageCollector {
+            var messages: [Data] = []
+            func add(_ msg: Data) { messages.append(msg) }
+            func get() -> [Data] { messages }
+        }
+        let collector = MessageCollector()
+
+        _ = try await store.replayEventsAfter(eventId1) { _, message in
+            await collector.add(message)
+        }
+
+        let replayedMessages = await collector.get()
+        #expect(replayedMessages.count == 1)  // Only the non-priming event
+        #expect(replayedMessages[0] == msg2)  // The second regular message
+    }
+
+    @Test("Replay events in strict chronological order")
+    func replayEventsInChronologicalOrder() async throws {
+        let store = InMemoryEventStore()
+
+        // Store events with explicit ordering in their content
+        var eventIds: [String] = []
+        for i in 0..<10 {
+            let message = #"{"order":\#(i)}"#.data(using: .utf8)!
+            let eventId = try await store.storeEvent(streamId: "stream", message: message)
+            eventIds.append(eventId)
+        }
+
+        // Replay from the first event
+        actor OrderCollector {
+            var orders: [Int] = []
+            func add(_ order: Int) { orders.append(order) }
+            func get() -> [Int] { orders }
+        }
+        let collector = OrderCollector()
+
+        _ = try await store.replayEventsAfter(eventIds[0]) { _, message in
+            if let json = try? JSONSerialization.jsonObject(with: message) as? [String: Any],
+                let order = json["order"] as? Int
+            {
+                await collector.add(order)
+            }
+        }
+
+        let replayedOrders = await collector.get()
+
+        // Should have events 1-9 (after event 0)
+        #expect(replayedOrders.count == 9)
+
+        // Verify strict chronological ordering
+        for i in 0..<replayedOrders.count {
+            #expect(replayedOrders[i] == i + 1)
+        }
+    }
+
+    @Test("Replay from most recent event returns empty")
+    func replayFromMostRecentEventReturnsEmpty() async throws {
+        let store = InMemoryEventStore()
+
+        // Store some events
+        var lastEventId: String = ""
+        for i in 0..<5 {
+            let message = #"{"id":"\#(i)"}"#.data(using: .utf8)!
+            lastEventId = try await store.storeEvent(streamId: "stream", message: message)
+        }
+
+        // Replay from the most recent event - nothing should be replayed
+        actor Counter {
+            var count = 0
+            func increment() { count += 1 }
+            func value() -> Int { count }
+        }
+        let counter = Counter()
+
+        let streamId = try await store.replayEventsAfter(lastEventId) { _, _ in
+            await counter.increment()
+        }
+
+        #expect(streamId == "stream")
+        let replayedCount = await counter.value()
+        #expect(replayedCount == 0)  // Nothing to replay after the most recent event
+    }
+
+    @Test("Replay returns correct stream ID")
+    func replayReturnsCorrectStreamId() async throws {
+        let store = InMemoryEventStore()
+
+        // Store events on different streams
+        let msg1 = Data("test".utf8)
+        let eventIdStream1 = try await store.storeEvent(streamId: "stream-alpha", message: msg1)
+        let eventIdStream2 = try await store.storeEvent(streamId: "stream-beta", message: msg1)
+
+        // Add more events to both streams
+        _ = try await store.storeEvent(streamId: "stream-alpha", message: msg1)
+        _ = try await store.storeEvent(streamId: "stream-beta", message: msg1)
+
+        // Replay from stream-alpha should return "stream-alpha"
+        let streamId1 = try await store.replayEventsAfter(eventIdStream1) { _, _ in }
+        #expect(streamId1 == "stream-alpha")
+
+        // Replay from stream-beta should return "stream-beta"
+        let streamId2 = try await store.replayEventsAfter(eventIdStream2) { _, _ in }
+        #expect(streamId2 == "stream-beta")
+    }
+
+    // MARK: - Edge Cases
+
+    @Test("Store and replay with special characters in stream ID")
+    func storeAndReplayWithSpecialStreamId() async throws {
+        let store = InMemoryEventStore()
+
+        // Test with various special characters that might be in a stream ID
+        let specialStreamId = "stream-with-dashes_and_underscores.and.dots"
+        let message = #"{"test":"value"}"#.data(using: .utf8)!
+
+        let eventId1 = try await store.storeEvent(streamId: specialStreamId, message: message)
+        _ = try await store.storeEvent(streamId: specialStreamId, message: message)
+
+        // Verify stream ID can be retrieved
+        let retrievedStreamId = await store.streamIdForEventId(eventId1)
+        #expect(retrievedStreamId == specialStreamId)
+
+        // Verify replay works
+        actor Counter {
+            var count = 0
+            func increment() { count += 1 }
+            func value() -> Int { count }
+        }
+        let counter = Counter()
+
+        let replayedStreamId = try await store.replayEventsAfter(eventId1) { _, _ in
+            await counter.increment()
+        }
+
+        #expect(replayedStreamId == specialStreamId)
+        #expect(await counter.value() == 1)
+    }
+
+    @Test("Multiple streams interleaved storage and replay")
+    func multipleStreamsInterleavedStorageAndReplay() async throws {
+        let store = InMemoryEventStore()
+
+        // Interleave storage across multiple streams
+        let msg1 = #"{"stream":"1","seq":1}"#.data(using: .utf8)!
+        let eventIdS1_1 = try await store.storeEvent(streamId: "stream-1", message: msg1)
+
+        let msg2 = #"{"stream":"2","seq":1}"#.data(using: .utf8)!
+        _ = try await store.storeEvent(streamId: "stream-2", message: msg2)
+
+        let msg3 = #"{"stream":"1","seq":2}"#.data(using: .utf8)!
+        _ = try await store.storeEvent(streamId: "stream-1", message: msg3)
+
+        let msg4 = #"{"stream":"2","seq":2}"#.data(using: .utf8)!
+        _ = try await store.storeEvent(streamId: "stream-2", message: msg4)
+
+        let msg5 = #"{"stream":"1","seq":3}"#.data(using: .utf8)!
+        _ = try await store.storeEvent(streamId: "stream-1", message: msg5)
+
+        // Replay from stream-1's first event
+        actor MessageCollector {
+            var sequences: [Int] = []
+            func add(_ seq: Int) { sequences.append(seq) }
+            func get() -> [Int] { sequences }
+        }
+        let collector = MessageCollector()
+
+        let streamId = try await store.replayEventsAfter(eventIdS1_1) { _, message in
+            if let json = try? JSONSerialization.jsonObject(with: message) as? [String: Any],
+                let stream = json["stream"] as? String,
+                let seq = json["seq"] as? Int
+            {
+                // Verify only stream-1 messages are replayed
+                #expect(stream == "1")
+                await collector.add(seq)
+            }
+        }
+
+        #expect(streamId == "stream-1")
+        let sequences = await collector.get()
+        #expect(sequences == [2, 3])  // Only stream-1 events after the first one
+    }
 }

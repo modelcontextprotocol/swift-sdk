@@ -115,11 +115,11 @@ extension Client {
     ///
     /// // Await the results after the batch is sent
     /// do {
-    ///     if let pingTask = pingTask {
+    ///     if let pingTask {
     ///         try await pingTask.value // Await ping result (throws if ping failed)
     ///         print("Ping successful")
     ///     }
-    ///     if let promptTask = promptTask {
+    ///     if let promptTask {
     ///         let promptResult = try await promptTask.value // Await prompt result
     ///         print("Prompt description: \(promptResult.description ?? "None")")
     ///     }
@@ -133,7 +133,7 @@ extension Client {
     /// - Throws: `MCPError.internalError` if the client is not connected.
     ///           Can also rethrow errors from the `body` closure or from sending the batch request.
     public func withBatch(body: @escaping (Batch) async throws -> Void) async throws {
-        guard let connection = connection else {
+        guard let connection else {
             throw MCPError.internalError("Client connection not initialized")
         }
 

@@ -196,4 +196,26 @@ extension TestPayloads {
             body: nil
         )
     }
+
+    /// Creates an HTTP request with a custom method (for testing unsupported methods).
+    static func customMethodRequest(
+        method: String,
+        body: String? = nil,
+        sessionId: String? = nil,
+        protocolVersion: String = defaultVersion
+    ) -> HTTPRequest {
+        var headers = [
+            HTTPHeader.accept: "application/json, text/event-stream",
+            HTTPHeader.contentType: "application/json",
+            HTTPHeader.protocolVersion: protocolVersion,
+        ]
+        if let sessionId {
+            headers[HTTPHeader.sessionId] = sessionId
+        }
+        return HTTPRequest(
+            method: method,
+            headers: headers,
+            body: body?.data(using: .utf8)
+        )
+    }
 }

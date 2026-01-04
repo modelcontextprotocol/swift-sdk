@@ -22,9 +22,9 @@ public actor InMemoryTransport: Transport {
     private var isConnected = false
     private var pairedTransport: InMemoryTransport?
 
-    // Message queues
-    private var incomingMessages: [Data] = []
-    private var messageContinuation: AsyncThrowingStream<TransportMessage, Swift.Error>.Continuation?
+    // Message stream
+    private let messageStream: AsyncThrowingStream<TransportMessage, Swift.Error>
+    private let messageContinuation: AsyncThrowingStream<TransportMessage, Swift.Error>.Continuation
 
     /// Creates a new in-memory transport
     ///
@@ -36,6 +36,11 @@ public actor InMemoryTransport: Transport {
                 label: "mcp.transport.in-memory",
                 factory: { _ in SwiftLogNoOpLogHandler() }
             )
+
+        // Create message stream
+        let (stream, continuation) = AsyncThrowingStream<TransportMessage, Swift.Error>.makeStream()
+        self.messageStream = stream
+        self.messageContinuation = continuation
     }
 
     /// Creates a connected pair of in-memory transports
@@ -115,8 +120,7 @@ public actor InMemoryTransport: Transport {
         guard isConnected else { return }
 
         isConnected = false
-        messageContinuation?.finish()
-        messageContinuation = nil
+        messageContinuation.finish()
 
         // Notify paired transport of disconnection
         if let paired = pairedTransport {
@@ -129,8 +133,7 @@ public actor InMemoryTransport: Transport {
     /// Handles disconnection from the paired transport
     private func handlePeerDisconnection() {
         if isConnected {
-            messageContinuation?.finish(throwing: MCPError.connectionClosed)
-            messageContinuation = nil
+            messageContinuation.finish(throwing: MCPError.connectionClosed)
             isConnected = false
             logger.info("Peer transport disconnected")
         }
@@ -166,32 +169,13 @@ public actor InMemoryTransport: Transport {
         }
 
         logger.debug("Message received", metadata: ["size": "\(data.count)"])
-
-        if let continuation = messageContinuation {
-            continuation.yield(TransportMessage(data: data))
-        } else {
-            // Queue message if stream not yet created
-            incomingMessages.append(data)
-        }
+        messageContinuation.yield(TransportMessage(data: data))
     }
 
     /// Receives messages from the paired transport
     ///
     /// - Returns: An AsyncThrowingStream of TransportMessage objects representing messages
     public func receive() -> AsyncThrowingStream<TransportMessage, Swift.Error> {
-        return AsyncThrowingStream<TransportMessage, Swift.Error> { continuation in
-            self.messageContinuation = continuation
-
-            // Deliver any queued messages
-            for message in self.incomingMessages {
-                continuation.yield(TransportMessage(data: message))
-            }
-            self.incomingMessages.removeAll()
-
-            // Check if already disconnected
-            if !self.isConnected {
-                continuation.finish()
-            }
-        }
+        return messageStream
     }
 }

@@ -26,6 +26,32 @@ public struct RequestMeta: Hashable, Codable, Sendable {
         self.additionalFields = additionalFields
     }
 
+    // MARK: - Convenience Accessors
+
+    /// The related task ID, if present.
+    ///
+    /// Extracts the task ID from `_meta["io.modelcontextprotocol/related-task"].taskId`.
+    /// This matches the TypeScript SDK's `_meta[RELATED_TASK_META_KEY]?.taskId`.
+    ///
+    /// ## Example
+    ///
+    /// ```swift
+    /// if let taskId = context._meta?.relatedTaskId {
+    ///     print("Request is part of task: \(taskId)")
+    /// }
+    /// ```
+    ///
+    /// - Note: For the full `RelatedTaskMetadata` struct, use the experimental tasks API.
+    public var relatedTaskId: String? {
+        guard let metaValue = additionalFields?["io.modelcontextprotocol/related-task"],
+              case .object(let dict) = metaValue,
+              let taskIdValue = dict["taskId"],
+              let taskId = taskIdValue.stringValue else {
+            return nil
+        }
+        return taskId
+    }
+
     private enum CodingKeys: String, CodingKey {
         case progressToken
     }

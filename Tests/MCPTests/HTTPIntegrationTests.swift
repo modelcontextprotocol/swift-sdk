@@ -533,4 +533,128 @@ struct HTTPIntegrationTests {
         let trackedSessionId = await tracker.get()
         #expect(trackedSessionId == "callback-test-session")
     }
+
+    // MARK: - Method Not Allowed Tests
+
+    /// Tests that unsupported HTTP methods (PUT, PATCH) are rejected with 405.
+    ///
+    /// Based on Python SDK's `test_method_not_allowed`:
+    /// - PUT method should be rejected
+    /// - PATCH method should be rejected
+    @Test("Reject unsupported HTTP methods with 405")
+    func rejectUnsupportedHttpMethods() async throws {
+        let transport = HTTPServerTransport(
+            options: .init(sessionIdGenerator: { "method-test-session" })
+        )
+        try await transport.connect()
+
+        // Initialize first to get a valid session
+        let initRequest = TestPayloads.postRequest(body: Self.initializeMessage)
+        let initResponse = await transport.handleRequest(initRequest)
+        #expect(initResponse.statusCode == 200)
+
+        // Test PUT method
+        let putRequest = TestPayloads.customMethodRequest(
+            method: "PUT",
+            body: Self.initializeMessage,
+            sessionId: "method-test-session"
+        )
+        let putResponse = await transport.handleRequest(putRequest)
+        #expect(putResponse.statusCode == 405, "PUT method should be rejected with 405 Method Not Allowed")
+
+        // Test PATCH method
+        let patchRequest = TestPayloads.customMethodRequest(
+            method: "PATCH",
+            body: Self.initializeMessage,
+            sessionId: "method-test-session"
+        )
+        let patchResponse = await transport.handleRequest(patchRequest)
+        #expect(patchResponse.statusCode == 405, "PATCH method should be rejected with 405 Method Not Allowed")
+    }
+
+    // MARK: - Session Termination Tests
+
+    /// Tests that requests to a terminated session fail with appropriate error.
+    ///
+    /// Based on Python SDK's `test_session_termination`:
+    /// 1. Initialize session
+    /// 2. Terminate session with DELETE
+    /// 3. Subsequent requests should fail with 404 "Session terminated"
+    @Test("Requests to terminated session fail with 404")
+    func requestsToTerminatedSessionFail() async throws {
+        let transport = HTTPServerTransport(
+            options: .init(sessionIdGenerator: { "terminated-session" })
+        )
+        try await transport.connect()
+
+        // Initialize the session
+        let initRequest = TestPayloads.postRequest(body: Self.initializeMessage)
+        let initResponse = await transport.handleRequest(initRequest)
+        #expect(initResponse.statusCode == 200)
+
+        // Make a successful request to confirm session is working
+        let pingRequest = TestPayloads.postRequest(
+            body: TestPayloads.pingRequest(),
+            sessionId: "terminated-session"
+        )
+        let pingResponse = await transport.handleRequest(pingRequest)
+        #expect(pingResponse.statusCode == 200)
+
+        // Terminate the session with DELETE
+        let deleteRequest = TestPayloads.deleteRequest(sessionId: "terminated-session")
+        let deleteResponse = await transport.handleRequest(deleteRequest)
+        #expect(deleteResponse.statusCode == 200)
+
+        // Attempt to use the terminated session - should fail
+        let afterDeleteRequest = TestPayloads.postRequest(
+            body: TestPayloads.pingRequest(),
+            sessionId: "terminated-session"
+        )
+        let afterDeleteResponse = await transport.handleRequest(afterDeleteRequest)
+        #expect(afterDeleteResponse.statusCode == 404, "Request to terminated session should return 404")
+
+        // Verify the error message mentions session termination
+        if let body = afterDeleteResponse.body, let text = String(data: body, encoding: .utf8) {
+            #expect(
+                text.lowercased().contains("terminated") || text.lowercased().contains("session"),
+                "Error message should indicate session termination"
+            )
+        }
+    }
+
+    // MARK: - Backwards Compatibility Tests
+
+    /// Tests that server accepts requests without protocol version header for backwards compatibility.
+    ///
+    /// Based on Python SDK's `test_server_backwards_compatibility_no_protocol_version`:
+    /// Older clients may not send the mcp-protocol-version header, and the server
+    /// should still accept their requests.
+    @Test("Backwards compatibility - accept requests without protocol version header")
+    func backwardsCompatibilityNoProtocolVersion() async throws {
+        let transport = HTTPServerTransport(
+            options: .init(sessionIdGenerator: { "compat-session" })
+        )
+        try await transport.connect()
+
+        // Initialize the session (with protocol version)
+        let initRequest = TestPayloads.postRequest(body: Self.initializeMessage)
+        let initResponse = await transport.handleRequest(initRequest)
+        #expect(initResponse.statusCode == 200)
+
+        // Make a request WITHOUT the protocol version header
+        let requestWithoutVersion = HTTPRequest(
+            method: "POST",
+            headers: [
+                HTTPHeader.accept: "application/json, text/event-stream",
+                HTTPHeader.contentType: "application/json",
+                HTTPHeader.sessionId: "compat-session",
+                // Note: NO protocolVersion header
+            ],
+            body: TestPayloads.pingRequest().data(using: .utf8)
+        )
+        let response = await transport.handleRequest(requestWithoutVersion)
+
+        // Should succeed for backwards compatibility
+        #expect(response.statusCode == 200, "Server should accept requests without protocol version header for backwards compatibility")
+    }
 }

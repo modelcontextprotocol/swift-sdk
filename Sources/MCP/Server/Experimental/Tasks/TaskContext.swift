@@ -163,10 +163,16 @@ public actor TaskContext {
 
     /// Fail the task with an Error.
     ///
+    /// For security, non-MCP errors are sanitized to avoid leaking internal details.
+    /// Use ``fail(error:)-swift.method`` with a string message if you need to send
+    /// specific error information to clients.
+    ///
     /// - Parameter error: The error that caused the failure
     /// - Throws: Error if the task cannot be updated
     public func fail(error: any Error) async throws {
-        try await fail(error: error.localizedDescription)
+        // Sanitize non-MCP errors to avoid leaking internal details to clients
+        let message = (error as? MCPError)?.message ?? "An internal error occurred"
+        try await fail(error: message)
     }
 
     /// Cancel the task.

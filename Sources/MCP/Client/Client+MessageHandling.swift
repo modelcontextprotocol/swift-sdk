@@ -323,9 +323,10 @@ extension Client {
                     "method": "\(request.method)",
                     "error": "\(error)",
                 ])
+            // Error already logged above - sanitize for response
             let errorResponse = AnyMethod.response(
                 id: request.id,
-                error: (error as? MCPError) ?? MCPError.internalError(error.localizedDescription)
+                error: (error as? MCPError) ?? MCPError.internalError("An internal error occurred")
             )
             await sendResponse(errorResponse)
         }
@@ -412,7 +413,9 @@ extension Client {
         } catch let error as MCPError {
             return Response(id: request.id, error: error)
         } catch {
-            return Response(id: request.id, error: MCPError.internalError(error.localizedDescription))
+            // Log full error for debugging, but sanitize for response
+            await logger?.error("Task handler error", metadata: ["error": "\(error)"])
+            return Response(id: request.id, error: MCPError.internalError("An internal error occurred"))
         }
 
         // Not a task-augmented request
@@ -421,7 +424,7 @@ extension Client {
 
     /// Send a response back to the server.
     func sendResponse(_ response: Response<AnyMethod>) async {
-        guard let connection = connection else {
+        guard let connection else {
             await logger?.warning("Cannot send response - client not connected")
             return
         }

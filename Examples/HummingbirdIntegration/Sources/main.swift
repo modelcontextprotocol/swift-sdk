@@ -31,6 +31,12 @@ import Hummingbird
 import Logging
 import MCP
 
+// MARK: - Configuration
+
+/// Server bind address - using localhost enables automatic DNS rebinding protection
+let serverHost = "localhost"
+let serverPort = 3000
+
 // MARK: - Server Setup
 
 /// Create the MCP server (ONE instance for all clients)
@@ -141,8 +147,11 @@ func handlePost(request: Request, context: MCPRequestContext) async throws -> Re
         let newSessionId = UUID().uuidString
 
         // Create new transport with session callbacks
+        // Using forBindAddress auto-configures DNS rebinding protection for localhost
         let newTransport = HTTPServerTransport(
-            options: .init(
+            options: .forBindAddress(
+                host: serverHost,
+                port: serverPort,
                 sessionIdGenerator: { newSessionId },
                 onSessionInitialized: { sessionId in
                     logger.info("Session initialized: \(sessionId)")
@@ -322,10 +331,10 @@ struct HummingbirdMCPExample {
         // Create and run application
         let app = Application(
             router: router,
-            configuration: .init(address: .hostname("localhost", port: 3000))
+            configuration: .init(address: .hostname(serverHost, port: serverPort))
         )
 
-        logger.info("Starting MCP server on http://localhost:3000/mcp")
+        logger.info("Starting MCP server on http://\(serverHost):\(serverPort)/mcp")
         logger.info("Available tools: echo, add")
 
         try await app.run()

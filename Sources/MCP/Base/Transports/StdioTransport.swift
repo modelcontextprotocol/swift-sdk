@@ -77,8 +77,8 @@ import struct Foundation.Data
                     factory: { _ in SwiftLogNoOpLogHandler() })
 
             // Create message stream
-            var continuation: AsyncThrowingStream<TransportMessage, Swift.Error>.Continuation!
-            self.messageStream = AsyncThrowingStream { continuation = $0 }
+            let (stream, continuation) = AsyncThrowingStream<TransportMessage, Swift.Error>.makeStream()
+            self.messageStream = stream
             self.messageContinuation = continuation
         }
 

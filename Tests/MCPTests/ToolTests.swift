@@ -414,6 +414,7 @@ struct ToolTests {
             requestId: .number(1),
             _meta: nil,
             authInfo: nil,
+            requestInfo: nil,
             closeSSEStream: nil,
             closeStandaloneSSEStream: nil,
             shouldSendLogMessage: { _ in true },

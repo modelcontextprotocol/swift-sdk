@@ -29,6 +29,12 @@ import Foundation
 import MCP
 import Vapor
 
+// MARK: - Configuration
+
+/// Server bind address - using localhost enables automatic DNS rebinding protection
+let serverHost = "localhost"
+let serverPort = 8080
+
 // MARK: - Server Setup
 
 /// Create the MCP server (ONE instance for all clients)
@@ -124,8 +130,11 @@ func handlePost(_ req: Vapor.Request) async throws -> Vapor.Response {
         let newSessionId = UUID().uuidString
 
         // Create new transport with session callbacks
+        // Using forBindAddress auto-configures DNS rebinding protection for localhost
         let newTransport = HTTPServerTransport(
-            options: .init(
+            options: .forBindAddress(
+                host: serverHost,
+                port: serverPort,
                 sessionIdGenerator: { newSessionId },
                 onSessionInitialized: { sessionId in
                     req.logger.info("Session initialized: \(sessionId)")
@@ -270,7 +279,7 @@ struct VaporMCPExample {
             "OK"
         }
 
-        app.logger.info("Starting MCP server on http://localhost:8080/mcp")
+        app.logger.info("Starting MCP server on http://\(serverHost):\(serverPort)/mcp")
         app.logger.info("Available tools: echo, add")
 
         try await app.execute()

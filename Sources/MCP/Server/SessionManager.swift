@@ -91,6 +91,10 @@ public actor SessionManager {
 
     /// Stores a transport for a session ID.
     ///
+    /// - Important: If ``maxSessions`` is configured, check ``canAddSession()`` before
+    ///   calling this method for new sessions. This method does not enforce capacity limits,
+    ///   allowing flexibility in how applications handle capacity (reject, queue, evict oldest, etc.).
+    ///
     /// - Parameters:
     ///   - transport: The transport to store
     ///   - sessionId: The session ID

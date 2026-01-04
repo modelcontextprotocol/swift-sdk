@@ -147,9 +147,9 @@ struct RoundtripTests {
         }
 
         let listToolsTask = Task {
-            let (tools, _) = try await client.listTools()
-            #expect(tools.count == 1)
-            #expect(tools[0].name == "add")
+            let result = try await client.listTools()
+            #expect(result.tools.count == 1)
+            #expect(result.tools[0].name == "add")
         }
 
         let callToolTask = Task {
@@ -188,8 +188,8 @@ struct RoundtripTests {
         // Test reading a resource
         let readResourceTask = Task {
             let result = try await client.readResource(uri: "test://example.txt")
-            #expect(result.count == 1)
-            #expect(result[0] == .text("Hello, World!", uri: "test://example.txt"))
+            #expect(result.contents.count == 1)
+            #expect(result.contents[0] == .text("Hello, World!", uri: "test://example.txt"))
         }
 
         try await withThrowingTaskGroup(of: Void.self) { group in

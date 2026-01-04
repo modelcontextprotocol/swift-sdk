@@ -75,6 +75,41 @@ struct PrimingEventsTests {
         return receivedData
     }
 
+    /// Initialize the server via HTTP and wait for the initialize response.
+    ///
+    /// Per MCP spec lifecycle, clients must wait for the initialize response before
+    /// sending other requests. This helper sends the initialize request and reads
+    /// from the SSE stream until the response arrives, ensuring the Server has
+    /// fully processed the initialization.
+    ///
+    /// Note: When an event store is configured with protocol version >= 2025-11-25,
+    /// a priming event (with empty data) is sent first. This helper reads enough
+    /// chunks to receive the actual initialize response.
+    func initializeAndWaitForResponse(
+        transport: HTTPServerTransport,
+        protocolVersion: String = Version.latest
+    ) async throws {
+        let initRequest = TestPayloads.initializeRequest(protocolVersion: protocolVersion)
+        let initResponse = await transport.handleRequest(
+            TestPayloads.postRequest(body: initRequest, protocolVersion: protocolVersion)
+        )
+
+        guard initResponse.statusCode == 200 else {
+            throw MCPError.internalError("Initialize failed with status \(initResponse.statusCode)")
+        }
+
+        // Wait for the actual initialize response on the SSE stream
+        // This ensures the Server has processed the initialize request
+        // Read up to 2 chunks to handle priming events (which come first with empty data)
+        if let stream = initResponse.stream {
+            let data = try await readFromStream(stream, maxChunks: 2, timeout: .seconds(2))
+            let text = String(data: data, encoding: .utf8) ?? ""
+            guard text.contains("serverInfo") || text.contains("protocolVersion") else {
+                throw MCPError.internalError("Did not receive initialize response: \(text)")
+            }
+        }
+    }
+
     /// Creates a configured MCP Server with tools for testing
     func createTestServer() -> Server {
         let server = Server(
@@ -144,11 +179,9 @@ struct PrimingEventsTests {
         )
         try await server.start(transport: transport)
 
-        // Initialize with latest supported version (2025-03-26)
+        // Initialize and wait for the response (per MCP spec lifecycle)
         // Note: Priming events require >= 2025-11-25 which is not yet supported
-        let initRequest = TestPayloads.initializeRequest(protocolVersion: Version.v2025_03_26)
-        let initResponse = await transport.handleRequest(TestPayloads.postRequest(body: initRequest, protocolVersion: Version.v2025_03_26))
-        #expect(initResponse.statusCode == 200)
+        try await initializeAndWaitForResponse(transport: transport, protocolVersion: Version.v2025_03_26)
 
         // Send a tool call request
         let toolCallRequest = """
@@ -156,7 +189,7 @@ struct PrimingEventsTests {
             """
         let response = await transport.handleRequest(TestPayloads.postRequest(body: toolCallRequest, sessionId: sessionId, protocolVersion: Version.v2025_03_26))
 
-        #expect(response.statusCode == 200)
+        #expect(response.statusCode == 200, "Expected 200 but got \(response.statusCode)")
 
         if let stream = response.stream {
             let data = try await readFromStream(stream, maxChunks: 2)
@@ -164,10 +197,10 @@ struct PrimingEventsTests {
 
             // Priming events have empty data - current versions won't have them
             #expect(!text.contains("data: \n\n"), "Should NOT have empty priming event for current protocol versions")
-            #expect(text.contains("Hello, Test!") || text.contains("result"), "Should contain tool result")
+            #expect(text.contains("Hello, Test!") || text.contains("result"), "Should contain tool result. Actual: \(text)")
         } else if let body = response.body {
             let text = String(data: body, encoding: .utf8) ?? ""
-            #expect(text.contains("Hello, Test!") || text.contains("result"), "Should contain tool result")
+            #expect(text.contains("Hello, Test!") || text.contains("result"), "Should contain tool result. Actual: \(text)")
         }
     }
 
@@ -189,9 +222,8 @@ struct PrimingEventsTests {
         )
         try await server.start(transport: transport)
 
-        // Initialize
-        let initRequest = TestPayloads.initializeRequest()
-        _ = await transport.handleRequest(TestPayloads.postRequest(body: initRequest))
+        // Initialize and wait for the response (per MCP spec lifecycle)
+        try await initializeAndWaitForResponse(transport: transport)
 
         // Send a tool call request
         let toolCallRequest = """
@@ -234,9 +266,8 @@ struct PrimingEventsTests {
         )
         try await server.start(transport: transport)
 
-        // Initialize with OLD protocol version (< 2025-11-25)
-        let initRequest = TestPayloads.initializeRequest()
-        _ = await transport.handleRequest(TestPayloads.postRequest(body: initRequest, protocolVersion: Version.v2024_11_05))
+        // Initialize with OLD protocol version (< 2025-11-25) and wait for response
+        try await initializeAndWaitForResponse(transport: transport, protocolVersion: Version.v2024_11_05)
 
         // Send a tool call request
         let toolCallRequest = """
@@ -276,9 +307,8 @@ struct PrimingEventsTests {
         )
         try await server.start(transport: transport)
 
-        // Initialize
-        let initRequest = TestPayloads.initializeRequest()
-        _ = await transport.handleRequest(TestPayloads.postRequest(body: initRequest))
+        // Initialize and wait for the response (per MCP spec lifecycle)
+        try await initializeAndWaitForResponse(transport: transport)
 
         // Send a tool call request
         let toolCallRequest = """
@@ -330,7 +360,7 @@ struct PrimingEventsTests {
             ])
         }
 
-        await server.withRequestHandler(CallTool.self) { request, context in
+        await server.withRequestHandler(CallTool.self) { request, _ in
             if request.name == "slow-tool" {
                 // Simulate slow operation
                 try? await Task.sleep(for: .milliseconds(500))
@@ -341,9 +371,8 @@ struct PrimingEventsTests {
 
         try await server.start(transport: transport)
 
-        // Initialize
-        let initRequest = TestPayloads.initializeRequest()
-        _ = await transport.handleRequest(TestPayloads.postRequest(body: initRequest))
+        // Initialize and wait for the response (per MCP spec lifecycle)
+        try await initializeAndWaitForResponse(transport: transport)
 
         // The closeSSEStream method exists and is callable
         // We can't fully test the stream closure without complex async coordination

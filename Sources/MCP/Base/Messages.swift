@@ -131,9 +131,18 @@ extension Request {
 
         if M.Parameters.self is NotRequired.Type {
             // For NotRequired parameters, use decodeIfPresent or init()
-            params =
-                (try container.decodeIfPresent(M.Parameters.self, forKey: .params)
-                    ?? (M.Parameters.self as! NotRequired.Type).init() as! M.Parameters)
+            if let decoded = try container.decodeIfPresent(M.Parameters.self, forKey: .params) {
+                params = decoded
+            } else if let notRequiredType = M.Parameters.self as? NotRequired.Type,
+                let defaultValue = notRequiredType.init() as? M.Parameters
+            {
+                params = defaultValue
+            } else {
+                throw DecodingError.dataCorrupted(
+                    DecodingError.Context(
+                        codingPath: container.codingPath,
+                        debugDescription: "Failed to create default NotRequired parameters"))
+            }
         } else if let value = try? container.decode(M.Parameters.self, forKey: .params) {
             // If params exists and can be decoded, use it
             params = value
@@ -142,8 +151,8 @@ extension Request {
         {
             // If params is missing or explicitly null, use Empty for Empty parameters
             // or throw for non-Empty parameters
-            if M.Parameters.self == Empty.self {
-                params = Empty() as! M.Parameters
+            if let emptyValue = Empty() as? M.Parameters {
+                params = emptyValue
             } else {
                 throw DecodingError.dataCorrupted(
                     DecodingError.Context(
@@ -172,14 +181,22 @@ extension AnyRequest {
     }
 }
 
-/// A box for request handlers that can be type-erased
+/// A box for request handlers that can be type-erased.
+///
+/// This class uses `@unchecked Sendable` because Swift cannot automatically infer
+/// `Sendable` for non-final classes. However, this is safe because:
+/// - The only subclass (`TypedRequestHandler`) stores only an immutable `@Sendable` closure
+/// - No mutable state exists in either class after initialization
+/// - The closure is `let` and marked `@Sendable`
 class RequestHandlerBox: @unchecked Sendable {
     func callAsFunction(_ request: AnyRequest, context: Server.RequestHandlerContext) async throws -> AnyResponse {
         fatalError("Must override")
     }
 }
 
-/// A typed request handler that can be used to handle requests of a specific type
+/// A typed request handler that can be used to handle requests of a specific type.
+///
+/// See `RequestHandlerBox` for why `@unchecked Sendable` is safe here.
 final class TypedRequestHandler<M: Method>: RequestHandlerBox, @unchecked Sendable {
     private let _handle: @Sendable (Request<M>, Server.RequestHandlerContext) async throws -> Response<M>
 
@@ -359,9 +376,18 @@ public struct Message<N: Notification>: NotificationMessageProtocol, Hashable, C
 
         if N.Parameters.self is NotRequired.Type {
             // For NotRequired parameters, use decodeIfPresent or init()
-            params =
-                (try container.decodeIfPresent(N.Parameters.self, forKey: .params)
-                    ?? (N.Parameters.self as! NotRequired.Type).init() as! N.Parameters)
+            if let decoded = try container.decodeIfPresent(N.Parameters.self, forKey: .params) {
+                params = decoded
+            } else if let notRequiredType = N.Parameters.self as? NotRequired.Type,
+                let defaultValue = notRequiredType.init() as? N.Parameters
+            {
+                params = defaultValue
+            } else {
+                throw DecodingError.dataCorrupted(
+                    DecodingError.Context(
+                        codingPath: container.codingPath,
+                        debugDescription: "Failed to create default NotRequired parameters"))
+            }
         } else if let value = try? container.decode(N.Parameters.self, forKey: .params) {
             // If params exists and can be decoded, use it
             params = value
@@ -370,8 +396,8 @@ public struct Message<N: Notification>: NotificationMessageProtocol, Hashable, C
         {
             // If params is missing or explicitly null, use Empty for Empty parameters
             // or throw for non-Empty parameters
-            if N.Parameters.self == Empty.self {
-                params = Empty() as! N.Parameters
+            if let emptyValue = Empty() as? N.Parameters {
+                params = emptyValue
             } else {
                 throw DecodingError.dataCorrupted(
                     DecodingError.Context(
@@ -411,12 +437,20 @@ extension Notification {
     }
 }
 
-/// A box for notification handlers that can be type-erased
+/// A box for notification handlers that can be type-erased.
+///
+/// This class uses `@unchecked Sendable` because Swift cannot automatically infer
+/// `Sendable` for non-final classes. However, this is safe because:
+/// - The only subclass (`TypedNotificationHandler`) stores only an immutable `@Sendable` closure
+/// - No mutable state exists in either class after initialization
+/// - The closure is `let` and marked `@Sendable`
 class NotificationHandlerBox: @unchecked Sendable {
     func callAsFunction(_ notification: Message<AnyNotification>) async throws {}
 }
 
-/// A typed notification handler that can be used to handle notifications of a specific type
+/// A typed notification handler that can be used to handle notifications of a specific type.
+///
+/// See `NotificationHandlerBox` for why `@unchecked Sendable` is safe here.
 final class TypedNotificationHandler<N: Notification>: NotificationHandlerBox,
     @unchecked Sendable
 {
@@ -438,14 +472,22 @@ final class TypedNotificationHandler<N: Notification>: NotificationHandlerBox,
 
 // MARK: - Client Request Handlers
 
-/// A box for client request handlers that can be type-erased
+/// A box for client request handlers that can be type-erased.
+///
+/// This class uses `@unchecked Sendable` because Swift cannot automatically infer
+/// `Sendable` for non-final classes. However, this is safe because:
+/// - The only subclass (`TypedClientRequestHandler`) stores only an immutable `@Sendable` closure
+/// - No mutable state exists in either class after initialization
+/// - The closure is `let` and marked `@Sendable`
 class ClientRequestHandlerBox: @unchecked Sendable {
     func callAsFunction(_ request: AnyRequest, context: Client.RequestHandlerContext) async throws -> AnyResponse {
         fatalError("Must override")
     }
 }
 
-/// A typed client request handler that can be used to handle requests of a specific type
+/// A typed client request handler that can be used to handle requests of a specific type.
+///
+/// See `ClientRequestHandlerBox` for why `@unchecked Sendable` is safe here.
 final class TypedClientRequestHandler<M: Method>: ClientRequestHandlerBox, @unchecked Sendable {
     private let _handle: @Sendable (M.Parameters, Client.RequestHandlerContext) async throws -> M.Result
 
@@ -473,7 +515,8 @@ final class TypedClientRequestHandler<M: Method>: ClientRequestHandlerBox, @unch
         } catch let error as MCPError {
             return Response(id: typedRequest.id, error: error)
         } catch {
-            return Response(id: typedRequest.id, error: MCPError.internalError(error.localizedDescription))
+            // Sanitize non-MCP errors to avoid leaking internal details
+            return Response(id: typedRequest.id, error: MCPError.internalError("An internal error occurred"))
         }
     }
 }

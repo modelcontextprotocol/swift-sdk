@@ -831,9 +831,9 @@ struct InMemoryTaskStoreTests {
         _ = try await store.createTask(metadata: TaskMetadata(), taskId: "task-2")
         _ = try await store.createTask(metadata: TaskMetadata(), taskId: "task-3")
 
-        let (tasks, _) = await store.listTasks(cursor: nil)
+        let result = await store.listTasks(cursor: nil)
 
-        #expect(tasks.count == 3)
+        #expect(result.tasks.count == 3)
     }
 
     @Test("listTasks pagination works correctly")
@@ -846,19 +846,19 @@ struct InMemoryTaskStoreTests {
         }
 
         // First page
-        let (page1, cursor1) = await store.listTasks(cursor: nil)
-        #expect(page1.count == 2)
-        #expect(cursor1 != nil)
+        let page1Result = await store.listTasks(cursor: nil)
+        #expect(page1Result.tasks.count == 2)
+        #expect(page1Result.nextCursor != nil)
 
         // Second page
-        let (page2, cursor2) = await store.listTasks(cursor: cursor1)
-        #expect(page2.count == 2)
-        #expect(cursor2 != nil)
+        let page2Result = await store.listTasks(cursor: page1Result.nextCursor)
+        #expect(page2Result.tasks.count == 2)
+        #expect(page2Result.nextCursor != nil)
 
         // Third page
-        let (page3, cursor3) = await store.listTasks(cursor: cursor2)
-        #expect(page3.count == 1)
-        #expect(cursor3 == nil)
+        let page3Result = await store.listTasks(cursor: page2Result.nextCursor)
+        #expect(page3Result.tasks.count == 1)
+        #expect(page3Result.nextCursor == nil)
     }
 
     @Test("deleteTask removes task")

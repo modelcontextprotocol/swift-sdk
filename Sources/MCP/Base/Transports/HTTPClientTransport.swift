@@ -25,7 +25,15 @@ import Logging
 /// - Regular HTTP (`streaming=false`): Simple request/response pattern
 /// - Streaming HTTP with SSE (`streaming=true`): Enables server-to-client push messages
 ///
-/// - Important: Server-Sent Events (SSE) functionality is not supported on Linux platforms.
+/// ## Linux Platform Limitations
+///
+/// SSE functionality is unavailable on Linux because `URLSession.AsyncBytes` is not yet
+/// implemented in swift-corelibs-foundation (see [swift#57548](https://github.com/swiftlang/swift/issues/57548)).
+///
+/// **What works:** HTTP POST requests and JSON responses (tool calls, resource reads, prompts).
+///
+/// **What doesn't work:** Server-initiated push notifications, streaming responses, and
+/// stream resumability. On Linux, set `streaming: false` to avoid warnings.
 ///
 /// ## Example Usage
 ///
@@ -161,8 +169,8 @@ public actor HTTPClientTransport: Transport {
         self.authProvider = authProvider
 
         // Create message stream
-        var continuation: AsyncThrowingStream<TransportMessage, Swift.Error>.Continuation!
-        self.messageStream = AsyncThrowingStream { continuation = $0 }
+        let (stream, continuation) = AsyncThrowingStream<TransportMessage, Swift.Error>.makeStream()
+        self.messageStream = stream
         self.messageContinuation = continuation
 
         self.logger =

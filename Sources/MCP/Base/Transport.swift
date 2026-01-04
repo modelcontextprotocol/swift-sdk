@@ -4,6 +4,50 @@ import struct Foundation.Data
 
 // MARK: - Message Context Types
 
+/// Information about the incoming HTTP request.
+///
+/// This is the Swift equivalent of TypeScript's `RequestInfo` interface, which
+/// provides access to HTTP request headers for request handlers.
+///
+/// ## Example
+///
+/// ```swift
+/// server.withRequestHandler(CallTool.self) { params, context in
+///     if let requestInfo = context.requestInfo {
+///         // Access custom headers
+///         if let customHeader = requestInfo.headers["X-Custom-Header"] {
+///             print("Custom header: \(customHeader)")
+///         }
+///     }
+///     return CallTool.Result(content: [.text("Done")])
+/// }
+/// ```
+public struct RequestInfo: Hashable, Sendable {
+    /// The HTTP headers from the request.
+    ///
+    /// Header names are preserved as provided by the HTTP framework.
+    /// Use case-insensitive comparison when looking up headers.
+    public let headers: [String: String]
+
+    public init(headers: [String: String]) {
+        self.headers = headers
+    }
+
+    /// Get a header value (case-insensitive lookup).
+    ///
+    /// - Parameter name: The header name to look up
+    /// - Returns: The header value, or nil if not found
+    public func header(_ name: String) -> String? {
+        let lowercased = name.lowercased()
+        for (key, value) in headers {
+            if key.lowercased() == lowercased {
+                return value
+            }
+        }
+        return nil
+    }
+}
+
 /// Context information associated with a received message.
 ///
 /// This is the Swift equivalent of TypeScript's `MessageExtraInfo`, which is passed
@@ -20,6 +64,15 @@ public struct MessageContext: Sendable {
     /// access this via `context.authInfo`.
     public let authInfo: AuthInfo?
 
+    /// Information about the incoming HTTP request.
+    ///
+    /// Contains HTTP headers from the original request. Only available for
+    /// HTTP transports. Request handlers can access this via `context.requestInfo`.
+    ///
+    /// This matches TypeScript SDK's `extra.requestInfo` and allows handlers
+    /// to inspect custom headers for authentication, client identification, etc.
+    public let requestInfo: RequestInfo?
+
     /// Closes the SSE stream for this request, triggering client reconnection.
     ///
     /// Only available when using HTTPServerTransport with eventStore configured.
@@ -33,10 +86,12 @@ public struct MessageContext: Sendable {
 
     public init(
         authInfo: AuthInfo? = nil,
+        requestInfo: RequestInfo? = nil,
         closeSSEStream: (@Sendable () async -> Void)? = nil,
         closeStandaloneSSEStream: (@Sendable () async -> Void)? = nil
     ) {
         self.authInfo = authInfo
+        self.requestInfo = requestInfo
         self.closeSSEStream = closeSSEStream
         self.closeStandaloneSSEStream = closeStandaloneSSEStream
     }

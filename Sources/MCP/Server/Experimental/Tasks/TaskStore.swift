@@ -51,8 +51,8 @@ public protocol TaskStore: Sendable {
     /// List tasks with pagination.
     ///
     /// - Parameter cursor: Optional cursor for pagination
-    /// - Returns: Tuple of (tasks, nextCursor). nextCursor is nil if no more pages.
-    func listTasks(cursor: String?) async -> (tasks: [MCPTask], nextCursor: String?)
+    /// - Returns: The list result containing tasks and optional next cursor.
+    func listTasks(cursor: String?) async -> ListTasks.Result
 
     /// Delete a task.
     ///
@@ -243,7 +243,7 @@ public actor InMemoryTaskStore: TaskStore {
         tasks[taskId]?.result
     }
 
-    public func listTasks(cursor: String?) async -> (tasks: [MCPTask], nextCursor: String?) {
+    public func listTasks(cursor: String?) async -> ListTasks.Result {
         cleanUpExpired()
 
         let allTaskIds = Array(tasks.keys).sorted()
@@ -264,7 +264,7 @@ public actor InMemoryTaskStore: TaskStore {
             nil
         }
 
-        return (tasks: pageTasks, nextCursor: nextCursor)
+        return ListTasks.Result(tasks: pageTasks, nextCursor: nextCursor)
     }
 
     public func deleteTask(taskId: String) async -> Bool {
@@ -293,6 +293,8 @@ public actor InMemoryTaskStore: TaskStore {
         let waiterId = UUID()
 
         try await withTaskCancellationHandler {
+            // Check early to avoid creating a waiter that will be immediately cancelled
+            try Task.checkCancellation()
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
                 waiters[taskId, default: []].append(Waiter(id: waiterId, continuation: continuation))
             }

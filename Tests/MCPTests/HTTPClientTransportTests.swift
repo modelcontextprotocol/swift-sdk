@@ -1675,21 +1675,6 @@ import Testing
                     logger: nil
                 )
 
-                // Set up handler for initial POST
-                await MockURLProtocol.requestHandlerStorage.setHandler {
-                    [testEndpoint] (request: URLRequest) in
-                    let response = HTTPURLResponse(
-                        url: testEndpoint, statusCode: 200, httpVersion: "HTTP/1.1",
-                        headerFields: [
-                            HTTPHeader.contentType: "text/plain",
-                            HTTPHeader.sessionId: "test-session-notifications",
-                        ])!
-                    return (response, Data())
-                }
-
-                try await transport.connect()
-                try await transport.send(Data())
-
                 // SSE stream with:
                 // 1. A notification (has method, no id) - should NOT stop reconnection
                 // 2. A server request (has method AND id) - should NOT stop reconnection
@@ -1698,17 +1683,33 @@ import Testing
                 let sseWithMixedMessages = "id: evt-1\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{\"progress\":50}}\n\nid: evt-2\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"sampling/createMessage\",\"id\":\"server-req-1\",\"params\":{}}\n\nid: evt-3\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"status\":\"ok\"}}\n\n"
                 let sseData = sseWithMixedMessages.data(using: .utf8)!
 
+                // Set up a combined handler for both POST and SSE GET requests
+                // This avoids the race condition where the SSE GET fires before the handler is set
                 await MockURLProtocol.requestHandlerStorage.setHandler {
                     [testEndpoint, sseData] (request: URLRequest) in
-                    let response = HTTPURLResponse(
-                        url: testEndpoint, statusCode: 200, httpVersion: "HTTP/1.1",
-                        headerFields: [HTTPHeader.contentType: "text/event-stream"])!
-                    return (response, sseData)
+                    if request.httpMethod == "GET" {
+                        // SSE request
+                        let response = HTTPURLResponse(
+                            url: testEndpoint, statusCode: 200, httpVersion: "HTTP/1.1",
+                            headerFields: [HTTPHeader.contentType: "text/event-stream"])!
+                        return (response, sseData)
+                    } else {
+                        // Initial POST request
+                        let response = HTTPURLResponse(
+                            url: testEndpoint, statusCode: 200, httpVersion: "HTTP/1.1",
+                            headerFields: [
+                                HTTPHeader.contentType: "text/plain",
+                                HTTPHeader.sessionId: "test-session-notifications",
+                            ])!
+                        return (response, Data())
+                    }
                 }
 
-                try await Task.sleep(for: .milliseconds(200))
+                try await transport.connect()
+                try await transport.send(Data())
 
                 // Verify all three messages were received
+                // The iterator.next() calls will wait for messages to be available
                 let stream = await transport.receive()
                 var iterator = stream.makeAsyncIterator()
 

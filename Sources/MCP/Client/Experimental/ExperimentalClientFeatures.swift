@@ -97,9 +97,9 @@ public struct ExperimentalClientTasks: Sendable {
     /// List all tasks.
     ///
     /// - Parameter cursor: Optional pagination cursor
-    /// - Returns: Tuple of (tasks, nextCursor). nextCursor is nil if no more pages.
+    /// - Returns: The list result containing tasks and optional next cursor.
     /// - Throws: MCPError if the server doesn't support tasks
-    public func listTasks(cursor: String? = nil) async throws -> (tasks: [MCPTask], nextCursor: String?) {
+    public func listTasks(cursor: String? = nil) async throws -> ListTasks.Result {
         try await client.listTasks(cursor: cursor)
     }
 
@@ -277,13 +277,13 @@ public struct ExperimentalClientTasks: Sendable {
     ///   - name: The name of the tool to call
     ///   - arguments: Optional arguments for the tool
     ///   - ttl: Optional time-to-live in milliseconds for the task result
-    /// - Returns: The tool result (same as `callTool()`)
+    /// - Returns: The tool call result.
     /// - Throws: MCPError if the request fails or the task fails
     public func callToolAsTaskAndWait(
         name: String,
         arguments: [String: Value]? = nil,
         ttl: Int? = nil
-    ) async throws -> (content: [Tool.Content], isError: Bool?) {
+    ) async throws -> CallTool.Result {
         try await client.callToolAsTaskAndWait(name: name, arguments: arguments, ttl: ttl)
     }
 

@@ -215,6 +215,30 @@ public actor Client {
         /// ```
         public let _meta: RequestMeta?
 
+        /// The task ID for task-augmented requests, if present.
+        ///
+        /// This is a convenience property that extracts the task ID from the
+        /// `_meta["io.modelcontextprotocol/related-task"]` field. When a server
+        /// sends a task-augmented elicitation or sampling request, this property
+        /// will contain the associated task ID.
+        ///
+        /// This matches the TypeScript SDK's `extra.taskId` and aligns with
+        /// `Server.RequestHandlerContext.taskId`.
+        ///
+        /// ## Example
+        ///
+        /// ```swift
+        /// client.withElicitationHandler { params, context in
+        ///     if let taskId = context.taskId {
+        ///         print("Handling elicitation for task: \(taskId)")
+        ///     }
+        ///     return ElicitResult(action: .accept, content: [:])
+        /// }
+        /// ```
+        public var taskId: String? {
+            _meta?.relatedTaskId
+        }
+
         // MARK: - Convenience Methods
 
         /// Send a progress notification to the server.
@@ -536,9 +560,20 @@ public actor Client {
     public init(
         name: String,
         version: String,
+        title: String? = nil,
+        description: String? = nil,
+        icons: [Icon]? = nil,
+        websiteUrl: String? = nil,
         configuration: Configuration = .default
     ) {
-        self.clientInfo = Client.Info(name: name, version: version)
+        self.clientInfo = Client.Info(
+            name: name,
+            version: version,
+            title: title,
+            description: description,
+            icons: icons,
+            websiteUrl: websiteUrl
+        )
         self.capabilities = Capabilities()
         self.configuration = configuration
     }

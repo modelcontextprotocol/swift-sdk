@@ -246,8 +246,7 @@ extension Server {
 
         // tasks/list - List all tasks
         withRequestHandler(ListTasks.self) { params, _ in
-            let (tasks, nextCursor) = await taskSupport.store.listTasks(cursor: params.cursor)
-            return ListTasks.Result(tasks: tasks, nextCursor: nextCursor)
+            await taskSupport.store.listTasks(cursor: params.cursor)
         }
 
         // tasks/cancel - Cancel a running task

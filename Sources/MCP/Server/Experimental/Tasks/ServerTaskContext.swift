@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 // MARK: - Server Task Context
 
@@ -39,9 +40,19 @@ import Foundation
 ///     return CallTool.Result(content: [.text("Done!")])
 /// }
 /// ```
-public final class ServerTaskContext: @unchecked Sendable {
-    /// The task this context is for.
-    public private(set) var task: MCPTask
+public final class ServerTaskContext: Sendable {
+    /// Mutable state protected by a lock.
+    ///
+    /// This state may be accessed concurrently - for example, the task handler
+    /// reads `isCancelled` while another context calls `requestCancellation()`.
+    private struct State: Sendable {
+        var task: MCPTask
+        var isCancelled: Bool = false
+        var requestIdCounter: Int = 0
+    }
+
+    /// Lock-protected mutable state.
+    private let state: OSAllocatedUnfairLock<State>
 
     /// The task store for persistence.
     private let store: any TaskStore
@@ -55,17 +66,20 @@ public final class ServerTaskContext: @unchecked Sendable {
     /// Server reference for task-augmented requests (elicitAsTask, createMessageAsTask).
     private let server: Server?
 
-    /// Counter for generating request IDs.
-    private var requestIdCounter: Int = 0
-
-    /// Whether cancellation has been requested.
-    private var _isCancelled = false
+    /// The task this context is for.
+    public var task: MCPTask {
+        state.withLock { $0.task }
+    }
 
     /// Check if cancellation has been requested.
-    public var isCancelled: Bool { _isCancelled }
+    public var isCancelled: Bool {
+        state.withLock { $0.isCancelled }
+    }
 
     /// The task ID.
-    public var taskId: String { task.taskId }
+    public var taskId: String {
+        state.withLock { $0.task.taskId }
+    }
 
     /// Create a server task context.
     ///
@@ -82,7 +96,7 @@ public final class ServerTaskContext: @unchecked Sendable {
         clientCapabilities: Client.Capabilities? = nil,
         server: Server? = nil
     ) {
-        self.task = task
+        self.state = OSAllocatedUnfairLock(initialState: State(task: task))
         self.store = store
         self.queue = queue
         self.clientCapabilities = clientCapabilities
@@ -91,8 +105,11 @@ public final class ServerTaskContext: @unchecked Sendable {
 
     /// Generate a unique request ID for queued requests.
     private func nextRequestId() -> RequestId {
-        requestIdCounter += 1
-        return .string("task-\(taskId)-req-\(requestIdCounter)")
+        let counter = state.withLock { state -> Int in
+            state.requestIdCounter += 1
+            return state.requestIdCounter
+        }
+        return .string("task-\(taskId)-req-\(counter)")
     }
 
     /// Request cancellation of the task.
@@ -100,7 +117,7 @@ public final class ServerTaskContext: @unchecked Sendable {
     /// This sets the `isCancelled` flag but doesn't immediately stop execution.
     /// Task handlers should check this flag periodically and exit gracefully.
     public func requestCancellation() {
-        _isCancelled = true
+        state.withLock { $0.isCancelled = true }
     }
 
     /// Update the task status with a message.
@@ -118,7 +135,7 @@ public final class ServerTaskContext: @unchecked Sendable {
             status: .working,
             statusMessage: message
         )
-        task = updatedTask
+        state.withLock { $0.task = updatedTask }
         if notify {
             await sendStatusNotification()
         }
@@ -139,7 +156,7 @@ public final class ServerTaskContext: @unchecked Sendable {
             status: .inputRequired,
             statusMessage: message
         )
-        task = updatedTask
+        state.withLock { $0.task = updatedTask }
         if notify {
             await sendStatusNotification()
         }
@@ -160,7 +177,7 @@ public final class ServerTaskContext: @unchecked Sendable {
             status: .completed,
             statusMessage: nil
         )
-        task = updatedTask
+        state.withLock { $0.task = updatedTask }
         if notify {
             await sendStatusNotification()
         }
@@ -196,7 +213,7 @@ public final class ServerTaskContext: @unchecked Sendable {
             status: .failed,
             statusMessage: error
         )
-        task = updatedTask
+        state.withLock { $0.task = updatedTask }
         if notify {
             await sendStatusNotification()
         }
@@ -204,12 +221,18 @@ public final class ServerTaskContext: @unchecked Sendable {
 
     /// Fail the task with an Error.
     ///
+    /// For security, non-MCP errors are sanitized to avoid leaking internal details.
+    /// Use ``fail(error:notify:)-6k8lh`` with a string message if you need to send
+    /// specific error information to clients.
+    ///
     /// - Parameters:
     ///   - error: The error that caused the failure
     ///   - notify: Whether to send a `TaskStatusNotification` to the client (default: true)
     /// - Throws: Error if the task cannot be updated
     public func fail(error: any Error, notify: Bool = true) async throws {
-        try await fail(error: error.localizedDescription, notify: notify)
+        // Sanitize non-MCP errors to avoid leaking internal details to clients
+        let message = (error as? MCPError)?.message ?? "An internal error occurred"
+        try await fail(error: message, notify: notify)
     }
 
     /// Send a task status notification to the client.

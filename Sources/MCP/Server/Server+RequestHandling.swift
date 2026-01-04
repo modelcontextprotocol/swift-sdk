@@ -60,8 +60,13 @@ extension Server {
             } catch {
                 // Only add errors to response for requests (notifications don't have responses)
                 if case .request(let request) = item {
+                    // Log full error for debugging, but sanitize for client response.
+                    // Only log non-MCP errors since MCP errors are expected/user-facing.
+                    if !(error is MCPError) {
+                        await logger?.error("Error handling batch item", metadata: ["error": "\(error)"])
+                    }
                     let mcpError =
-                    error as? MCPError ?? MCPError.internalError(error.localizedDescription)
+                        error as? MCPError ?? MCPError.internalError("An internal error occurred")
                     responses.append(AnyMethod.response(id: request.id, error: mcpError))
                 }
             }
@@ -110,6 +115,11 @@ extension Server {
         ///
         /// Set by HTTP transports when OAuth or other authentication is in use.
         let authInfo: AuthInfo?
+        /// Information about the incoming HTTP request.
+        ///
+        /// Contains HTTP headers from the original request. Only available for
+        /// HTTP transports. This matches TypeScript SDK's `extra.requestInfo`.
+        let requestInfo: RequestInfo?
         /// Closure to close the SSE stream for this request.
         ///
         /// Only set by HTTP transports with SSE support.
@@ -199,8 +209,9 @@ extension Server {
         let requestMeta = extractMeta(from: request.params)
 
         // Extract context from transport message (set by HTTP transports with per-message context)
-        // This pattern aligns with TypeScript's onmessage(message, { authInfo, closeSSEStream, ... })
+        // This pattern aligns with TypeScript's onmessage(message, { authInfo, requestInfo, closeSSEStream, ... })
         let authInfo = messageContext?.authInfo
+        let requestInfo = messageContext?.requestInfo
         let closeSSEStream = messageContext?.closeSSEStream
         let closeStandaloneSSEStream = messageContext?.closeStandaloneSSEStream
 
@@ -210,6 +221,7 @@ extension Server {
             sessionId: await capturedConnection?.sessionId,
             meta: requestMeta,
             authInfo: authInfo,
+            requestInfo: requestInfo,
             closeSSEStream: closeSSEStream,
             closeStandaloneSSEStream: closeStandaloneSSEStream
         )
@@ -230,14 +242,26 @@ extension Server {
                 "id": "\(request.id)",
             ])
 
+        // Check initialization state for strict mode (matches Python SDK behavior).
+        // We chose to align with Python (block at Server level) rather than TypeScript
+        // (block only at HTTP transport level) for consistent behavior across all transports.
         if configuration.strict {
-            // The client SHOULD NOT send requests other than pings
-            // before the server has responded to the initialize request.
             switch request.method {
-                case Initialize.name, Ping.name:
-                    break
-                default:
-                    try checkInitialized()
+            case Initialize.name, Ping.name:
+                // Always allow initialize and ping requests
+                break
+            default:
+                guard isInitialized else {
+                    let error = MCPError.invalidRequest("Server is not initialized")
+                    let response = AnyMethod.response(id: request.id, error: error)
+
+                    if sendResponse {
+                        try await send(response, using: context)
+                        return nil
+                    }
+
+                    return response
+                }
             }
         }
 
@@ -294,6 +318,7 @@ extension Server {
             requestId: context.requestId,
             _meta: context.meta,
             authInfo: context.authInfo,
+            requestInfo: context.requestInfo,
             closeSSEStream: context.closeSSEStream,
             closeStandaloneSSEStream: context.closeStandaloneSSEStream,
             shouldSendLogMessage: { [weak self, context] level in
@@ -383,7 +408,11 @@ extension Server {
                 return nil
             }
 
-            let mcpError = error as? MCPError ?? MCPError.internalError(error.localizedDescription)
+            // Log full error for debugging, but sanitize for client response
+            if !(error is MCPError) {
+                await logger?.error("Request handler error", metadata: ["error": "\(error)"])
+            }
+            let mcpError = error as? MCPError ?? MCPError.internalError("An internal error occurred")
             let response: Response<AnyMethod> = AnyMethod.response(id: request.id, error: mcpError)
 
             if sendResponse {
@@ -400,10 +429,14 @@ extension Server {
             "Processing notification",
             metadata: ["method": "\(message.method)"])
 
+        // Check initialization state for strict mode (matches Python SDK behavior).
+        // For notifications (unlike requests), we log and ignore since no response is expected.
         if configuration.strict {
-            // Check initialization state unless this is an initialized notification
-            if message.method != InitializedNotification.name {
-                try checkInitialized()
+            if message.method != InitializedNotification.name && !isInitialized {
+                await logger?.warning(
+                    "Ignoring notification before initialization",
+                    metadata: ["method": "\(message.method)"])
+                return
             }
         }
 

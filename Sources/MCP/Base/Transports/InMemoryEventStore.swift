@@ -45,6 +45,8 @@ import Foundation
 ///
 /// - **Not persistent**: Events are lost when the process restarts
 /// - **Single process**: Cannot be shared across multiple server instances
+/// - **Unbounded stream count**: While events per stream are limited, the number of streams
+///   is unbounded. Use middleware or infrastructure-level controls to limit connections.
 ///
 /// For production deployments, implement `EventStore` with a persistent backend like
 /// Redis, PostgreSQL, or another appropriate storage system.

@@ -242,7 +242,16 @@ import Logging
         private let messageStream: AsyncThrowingStream<TransportMessage, Swift.Error>
         private let messageContinuation: AsyncThrowingStream<TransportMessage, Swift.Error>.Continuation
 
-        // Connection is marked nonisolated(unsafe) to allow access from closures
+        /// The underlying network connection.
+        ///
+        /// This property uses `nonisolated(unsafe)` because `NWConnection` is not `Sendable`,
+        /// but its callback-based APIs (`stateUpdateHandler`, `send`, `receive`) run on `.main`
+        /// queue and need to access the connection from outside actor isolation.
+        ///
+        /// This is safe because:
+        /// - The connection reference is never reassigned after initialization
+        /// - `NWConnection` is designed to be thread-safe when used with a consistent queue
+        /// - All callbacks are dispatched to `.main` queue via `connection.start(queue: .main)`
         private nonisolated(unsafe) var connection: NetworkConnectionProtocol
 
         /// Logger instance for transport-related events
@@ -296,8 +305,8 @@ import Logging
             self.bufferConfig = bufferConfig
 
             // Create message stream
-            var continuation: AsyncThrowingStream<TransportMessage, Swift.Error>.Continuation!
-            self.messageStream = AsyncThrowingStream { continuation = $0 }
+            let (stream, continuation) = AsyncThrowingStream<TransportMessage, Swift.Error>.makeStream()
+            self.messageStream = stream
             self.messageContinuation = continuation
         }
 
@@ -382,7 +391,7 @@ import Logging
 
             // Start a new heartbeat task
             heartbeatTask = Task { [weak self] in
-                guard let self = self else { return }
+                guard let self else { return }
 
                 // Initial delay before starting heartbeats
                 try? await Task.sleep(for: .seconds(1))
@@ -413,7 +422,7 @@ import Logging
             // Try to send the heartbeat (without the newline delimiter used for normal messages)
             try await withCheckedThrowingContinuation {
                 [weak self] (continuation: CheckedContinuation<Void, Swift.Error>) in
-                guard let self = self else {
+                guard let self else {
                     continuation.resume(throwing: MCPError.internalError("Transport deallocated"))
                     return
                 }
@@ -423,7 +432,7 @@ import Logging
                     contentContext: .defaultMessage,
                     isComplete: true,
                     completion: .contentProcessed { [weak self] error in
-                        if let error = error {
+                        if let error {
                             continuation.resume(throwing: error)
                         } else {
                             Task { [weak self] in
@@ -475,7 +484,7 @@ import Logging
 
             try await withCheckedThrowingContinuation {
                 [weak self] (continuation: CheckedContinuation<Void, Swift.Error>) in
-                guard let self = self else {
+                guard let self else {
                     continuation.resume(throwing: MCPError.internalError("Transport deallocated"))
                     return
                 }
@@ -485,9 +494,9 @@ import Logging
                     contentContext: .defaultMessage,
                     isComplete: true,
                     completion: .contentProcessed { [weak self] error in
-                        guard let self = self else { return }
+                        guard let self else { return }
 
-                        if let error = error {
+                        if let error {
                             self.logger.error("Send error: \(error)")
 
                             // Schedule reconnection attempt if connection lost
@@ -686,7 +695,7 @@ import Logging
         private func receiveData() async throws -> Data {
             try await withCheckedThrowingContinuation {
                 [weak self] (continuation: CheckedContinuation<Data, Swift.Error>) in
-                guard let self = self else {
+                guard let self else {
                     continuation.resume(throwing: MCPError.internalError("Transport deallocated"))
                     return
                 }
@@ -694,9 +703,9 @@ import Logging
                 let maxLength = bufferConfig.maxReceiveBufferSize ?? Int.max
                 connection.receive(minimumIncompleteLength: 1, maximumLength: maxLength) {
                     [weak self] content, _, isComplete, error in
-                    if let error = error {
+                    if let error {
                         continuation.resume(throwing: MCPError.transportError(error))
-                    } else if let content = content {
+                    } else if let content {
                         continuation.resume(returning: content)
                     } else if isComplete {
                         self?.logger.trace("Connection completed by peer")
