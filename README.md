@@ -883,7 +883,7 @@ see the [GitHub Releases page](https://github.com/modelcontextprotocol/swift-sdk
 
 ## License
 
-This project is licensed under the MIT License.
+This project is licensed under Apache 2.0 for new contributions, with existing code under MIT. See the [LICENSE](LICENSE) file for details.
 
 [mcp]: https://modelcontextprotocol.io
 [mcp-spec-2025-03-26]: https://modelcontextprotocol.io/specification/2025-03-26
