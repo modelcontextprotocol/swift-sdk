@@ -48,12 +48,15 @@ import Logging
     /// // Initialize the transport with the connection
     /// let transport = NetworkTransport(connection: connection)
     ///
+    /// // For large messages (e.g., images), configure unlimited buffer size
+    /// let largeBufferTransport = NetworkTransport(
+    ///     connection: connection,
+    ///     bufferConfig: .unlimited
+    /// )
+    ///
     /// // Use the transport with an MCP client
     /// let client = Client(name: "MyApp", version: "1.0.0")
     /// try await client.connect(transport: transport)
-    ///
-    /// // Initialize the connection
-    /// let result = try await client.initialize()
     /// ```
     public actor NetworkTransport: Transport {
         /// Represents a heartbeat message for connection health monitoring.
@@ -210,6 +213,26 @@ import Logging
             }
         }
 
+        /// Configuration for buffer behavior.
+        public struct BufferConfiguration: Hashable, Sendable {
+            /// Maximum buffer size for receiving data chunks.
+            /// Set to nil for unlimited (uses system default).
+            public let maxReceiveBufferSize: Int?
+
+            /// Creates a new buffer configuration.
+            ///
+            /// - Parameter maxReceiveBufferSize: Maximum buffer size in bytes (default: 10MB, nil for unlimited)
+            public init(maxReceiveBufferSize: Int? = 10 * 1024 * 1024) {
+                self.maxReceiveBufferSize = maxReceiveBufferSize
+            }
+
+            /// Default buffer configuration with 10MB limit.
+            public static let `default` = BufferConfiguration()
+
+            /// Configuration with no buffer size limit.
+            public static let unlimited = BufferConfiguration(maxReceiveBufferSize: nil)
+        }
+
         // State tracking
         private var isConnected = false
         private var isStopping = false
@@ -231,6 +254,7 @@ import Logging
         // Configuration
         private let heartbeatConfig: HeartbeatConfiguration
         private let reconnectionConfig: ReconnectionConfiguration
+        private let bufferConfig: BufferConfiguration
 
         /// Creates a new NetworkTransport with the specified NWConnection
         ///
@@ -239,17 +263,20 @@ import Logging
         ///   - logger: Optional logger instance for transport events
         ///   - reconnectionConfig: Configuration for reconnection behavior (default: .default)
         ///   - heartbeatConfig: Configuration for heartbeat behavior (default: .default)
+        ///   - bufferConfig: Configuration for buffer behavior (default: .default)
         public init(
             connection: NWConnection,
             logger: Logger? = nil,
             heartbeatConfig: HeartbeatConfiguration = .default,
-            reconnectionConfig: ReconnectionConfiguration = .default
+            reconnectionConfig: ReconnectionConfiguration = .default,
+            bufferConfig: BufferConfiguration = .default
         ) {
             self.init(
                 connection,
                 logger: logger,
                 heartbeatConfig: heartbeatConfig,
-                reconnectionConfig: reconnectionConfig
+                reconnectionConfig: reconnectionConfig,
+                bufferConfig: bufferConfig
             )
         }
 
@@ -257,7 +284,8 @@ import Logging
             _ connection: NetworkConnectionProtocol,
             logger: Logger? = nil,
             heartbeatConfig: HeartbeatConfiguration = .default,
-            reconnectionConfig: ReconnectionConfiguration = .default
+            reconnectionConfig: ReconnectionConfiguration = .default,
+            bufferConfig: BufferConfiguration = .default
         ) {
             self.connection = connection
             self.logger =
@@ -268,6 +296,7 @@ import Logging
                 )
             self.reconnectionConfig = reconnectionConfig
             self.heartbeatConfig = heartbeatConfig
+            self.bufferConfig = bufferConfig
 
             // Create message stream
             var continuation: AsyncThrowingStream<Data, Swift.Error>.Continuation!
@@ -339,7 +368,7 @@ import Logging
 
                 // Reset reconnect attempt counter on successful connection
                 reconnectAttempt = 0
-                logger.info("Network transport connected successfully")
+                logger.debug("Network transport connected successfully")
                 continuation.resume()
 
                 // Start the receive loop after connection is established
@@ -411,7 +440,7 @@ import Logging
                     })
             }
 
-            logger.debug("Heartbeat sent")
+            logger.trace("Heartbeat sent")
         }
 
         /// Handles connection failure
@@ -469,7 +498,7 @@ import Logging
             {
                 // Try to reconnect with exponential backoff
                 reconnectAttempt += 1
-                logger.info(
+                logger.debug(
                     "Attempting reconnection after \(context) (\(reconnectAttempt)/\(reconnectionConfig.maxAttempts))..."
                 )
 
@@ -512,7 +541,7 @@ import Logging
 
             connection.cancel()
             messageContinuation.finish()
-            logger.info("Network transport disconnected")
+            logger.debug("Network transport disconnected")
         }
 
         /// Sends data through the network connection
@@ -629,7 +658,7 @@ import Logging
 
                             // Check connection state
                             if connection.state != .ready {
-                                logger.info("Connection no longer ready, exiting receive loop")
+                                logger.warning("Connection no longer ready, exiting receive loop")
                                 break
                             }
                         }
@@ -641,11 +670,11 @@ import Logging
 
                     // Check if this is a heartbeat message
                     if Heartbeat.isHeartbeat(newData) {
-                        logger.debug("Received heartbeat from peer")
+                        logger.trace("Received heartbeat from peer")
 
                         // Extract timestamp if available
                         if let heartbeat = Heartbeat.from(data: newData) {
-                            logger.debug("Heartbeat timestamp: \(heartbeat.timestamp)")
+                            logger.trace("Heartbeat timestamp: \(heartbeat.timestamp)")
                         }
 
                         // Reset the counter since we got valid data
@@ -679,7 +708,7 @@ import Logging
                                 && reconnectAttempt < reconnectionConfig.maxAttempts
                             {
                                 reconnectAttempt += 1
-                                logger.info(
+                                logger.warning(
                                     "Network connection lost, attempting reconnection (\(reconnectAttempt)/\(reconnectionConfig.maxAttempts))..."
                                 )
 
@@ -730,7 +759,7 @@ import Logging
                         {
                             // Similar reconnection logic for other errors
                             reconnectAttempt += 1
-                            logger.info(
+                            logger.warning(
                                 "Error during receive, attempting reconnection (\(reconnectAttempt)/\(reconnectionConfig.maxAttempts))..."
                             )
 
@@ -776,7 +805,8 @@ import Logging
                     return
                 }
 
-                connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) {
+                let maxLength = bufferConfig.maxReceiveBufferSize ?? Int.max
+                connection.receive(minimumIncompleteLength: 1, maximumLength: maxLength) {
                     content, _, isComplete, error in
                     Task { @MainActor in
                         if !receiveContinuationResumed {
@@ -786,7 +816,7 @@ import Logging
                             } else if let content = content {
                                 continuation.resume(returning: content)
                             } else if isComplete {
-                                self.logger.debug("Connection completed by peer")
+                                self.logger.trace("Connection completed by peer")
                                 continuation.resume(throwing: MCPError.connectionClosed)
                             } else {
                                 // EOF: Resume with empty data instead of throwing an error

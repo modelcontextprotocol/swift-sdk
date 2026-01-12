@@ -32,17 +32,19 @@ import Logging
 /// ```swift
 /// import MCP
 ///
-/// // Create a streaming HTTP transport
+/// // Create a streaming HTTP transport with bearer token authentication
 /// let transport = HTTPClientTransport(
-///     endpoint: URL(string: "http://localhost:8080")!,
+///     endpoint: URL(string: "https://api.example.com/mcp")!,
+///     requestModifier: { request in
+///         var modifiedRequest = request
+///         modifiedRequest.addValue("Bearer your-token-here", forHTTPHeaderField: "Authorization")
+///         return modifiedRequest
+///     }
 /// )
 ///
 /// // Initialize the client with streaming transport
 /// let client = Client(name: "MyApp", version: "1.0.0")
 /// try await client.connect(transport: transport)
-///
-/// // Initialize the connection
-/// let result = try await client.initialize()
 ///
 /// // The transport will automatically handle SSE events
 /// // and deliver them through the client's notification handlers
@@ -63,6 +65,9 @@ public actor HTTPClientTransport: Transport {
     /// Maximum time to wait for a session ID before proceeding with SSE connection
     public let sseInitializationTimeout: TimeInterval
 
+    /// Closure to modify requests before they are sent
+    private let requestModifier: (URLRequest) -> URLRequest
+
     private var isConnected = false
     private let messageStream: AsyncThrowingStream<Data, Swift.Error>
     private let messageContinuation: AsyncThrowingStream<Data, Swift.Error>.Continuation
@@ -77,12 +82,14 @@ public actor HTTPClientTransport: Transport {
     ///   - configuration: URLSession configuration to use for HTTP requests
     ///   - streaming: Whether to enable SSE streaming mode (default: true)
     ///   - sseInitializationTimeout: Maximum time to wait for session ID before proceeding with SSE (default: 10 seconds)
+    ///   - requestModifier: Optional closure to customize requests before they are sent (default: no modification)
     ///   - logger: Optional logger instance for transport events
     public init(
         endpoint: URL,
         configuration: URLSessionConfiguration = .default,
         streaming: Bool = true,
         sseInitializationTimeout: TimeInterval = 10,
+        requestModifier: @escaping (URLRequest) -> URLRequest = { $0 },
         logger: Logger? = nil
     ) {
         self.init(
@@ -90,6 +97,7 @@ public actor HTTPClientTransport: Transport {
             session: URLSession(configuration: configuration),
             streaming: streaming,
             sseInitializationTimeout: sseInitializationTimeout,
+            requestModifier: requestModifier,
             logger: logger
         )
     }
@@ -99,12 +107,14 @@ public actor HTTPClientTransport: Transport {
         session: URLSession,
         streaming: Bool = false,
         sseInitializationTimeout: TimeInterval = 10,
+        requestModifier: @escaping (URLRequest) -> URLRequest = { $0 },
         logger: Logger? = nil
     ) {
         self.endpoint = endpoint
         self.session = session
         self.streaming = streaming
         self.sseInitializationTimeout = sseInitializationTimeout
+        self.requestModifier = requestModifier
 
         // Create message stream
         var continuation: AsyncThrowingStream<Data, Swift.Error>.Continuation!
@@ -134,7 +144,7 @@ public actor HTTPClientTransport: Transport {
         if let continuation = self.initialSessionIDContinuation {
             continuation.resume()
             self.initialSessionIDContinuation = nil  // Consume the continuation
-            logger.debug("Initial session ID signal triggered for SSE task.")
+            logger.trace("Initial session ID signal triggered for SSE task.")
         }
     }
 
@@ -155,7 +165,7 @@ public actor HTTPClientTransport: Transport {
             streamingTask = Task { await startListeningForServerEvents() }
         }
 
-        logger.info("HTTP transport connected")
+        logger.debug("HTTP transport connected")
     }
 
     /// Disconnects from the transport
@@ -183,7 +193,7 @@ public actor HTTPClientTransport: Transport {
         initialSessionIDContinuation?.resume()
         initialSessionIDContinuation = nil
 
-        logger.info("HTTP clienttransport disconnected")
+        logger.debug("HTTP clienttransport disconnected")
     }
 
     /// Sends data through an HTTP POST request
@@ -213,6 +223,9 @@ public actor HTTPClientTransport: Transport {
         if let sessionID = sessionID {
             request.addValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
         }
+
+        // Apply request modifier
+        request = requestModifier(request)
 
         #if os(Linux)
             // Linux implementation using data(for:) instead of bytes(for:)
@@ -254,7 +267,7 @@ public actor HTTPClientTransport: Transport {
                 logger.warning("SSE responses aren't fully supported on Linux")
                 messageContinuation.yield(data)
             } else if contentType.contains("application/json") {
-                logger.debug("Received JSON response", metadata: ["size": "\(data.count)"])
+                logger.trace("Received JSON response", metadata: ["size": "\(data.count)"])
                 messageContinuation.yield(data)
             } else {
                 logger.warning("Unexpected content type: \(contentType)")
@@ -288,7 +301,7 @@ public actor HTTPClientTransport: Transport {
 
             if contentType.contains("text/event-stream") {
                 // For SSE, processing happens via the stream
-                logger.debug("Received SSE response, processing in streaming task")
+                logger.trace("Received SSE response, processing in streaming task")
                 try await self.processSSE(stream)
             } else if contentType.contains("application/json") {
                 // For JSON responses, collect and deliver the data
@@ -296,7 +309,7 @@ public actor HTTPClientTransport: Transport {
                 for try await byte in stream {
                     buffer.append(byte)
                 }
-                logger.debug("Received JSON response", metadata: ["size": "\(buffer.count)"])
+                logger.trace("Received JSON response", metadata: ["size": "\(buffer.count)"])
                 messageContinuation.yield(buffer)
             } else {
                 logger.warning("Unexpected content type: \(contentType)")
@@ -393,7 +406,7 @@ public actor HTTPClientTransport: Transport {
 
             // Wait for the initial session ID signal, but only if sessionID isn't already set
             if self.sessionID == nil, let signalTask = self.initialSessionIDSignalTask {
-                logger.debug("SSE streaming task waiting for initial sessionID signal...")
+                logger.trace("SSE streaming task waiting for initial sessionID signal...")
 
                 // Race the signalTask against a timeout
                 let timeoutTask = Task {
@@ -432,18 +445,18 @@ public actor HTTPClientTransport: Transport {
                 timeoutTask.cancel()
 
                 if signalReceived {
-                    logger.debug("SSE streaming task proceeding after initial sessionID signal.")
+                    logger.trace("SSE streaming task proceeding after initial sessionID signal.")
                 } else {
                     logger.warning(
                         "Timeout waiting for initial sessionID signal. SSE stream will proceed (sessionID might be nil)."
                     )
                 }
             } else if self.sessionID != nil {
-                logger.debug(
+                logger.trace(
                     "Initial sessionID already available. Proceeding with SSE streaming task immediately."
                 )
             } else {
-                logger.info(
+                logger.trace(
                     "Proceeding with SSE connection attempt; sessionID is nil. This might be expected for stateless servers or if initialize hasn't provided one yet."
                 )
             }
@@ -482,6 +495,9 @@ public actor HTTPClientTransport: Transport {
             if let sessionID = sessionID {
                 request.addValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
             }
+
+            // Apply request modifier
+            request = requestModifier(request)
 
             logger.debug("Starting SSE connection")
 
@@ -528,7 +544,7 @@ public actor HTTPClientTransport: Transport {
                     // Check if task has been cancelled
                     if Task.isCancelled { break }
 
-                    logger.debug(
+                    logger.trace(
                         "SSE event received",
                         metadata: [
                             "type": "\(event.event ?? "message")",

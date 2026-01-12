@@ -99,10 +99,9 @@ struct RoundtripTests {
         let client = Client(name: "TestClient", version: "1.0")
 
         try await server.start(transport: serverTransport)
-        try await client.connect(transport: clientTransport)
 
         let initTask = Task {
-            let result = try await client.initialize()
+            let result = try await client.connect(transport: clientTransport)
 
             #expect(result.serverInfo.name == "TestServer")
             #expect(result.serverInfo.version == "1.0.0")

@@ -25,7 +25,7 @@ Add the following to your `Package.swift` file:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", from: "0.8.2")
+    .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", from: "0.10.0")
 ]
 ```
 
@@ -54,16 +54,18 @@ let client = Client(name: "MyApp", version: "1.0.0")
 
 // Create a transport and connect
 let transport = StdioTransport()
-try await client.connect(transport: transport)
-
-// Initialize the connection
-let result = try await client.initialize()
+let result = try await client.connect(transport: transport)
 
 // Check server capabilities
 if result.capabilities.tools != nil {
     // Server supports tools (implicitly including tool calling if the 'tools' capability object is present)
 }
 ```
+
+> [!NOTE]
+> The `Client.connect(transport:)` method returns the initialization result.
+> This return value is discardable, 
+> so you can ignore it if you don't need to check server capabilities.
 
 ### Transport Options for Clients
 
@@ -96,7 +98,7 @@ Tools represent functions that can be called by the client:
 
 ```swift
 // List available tools
-let tools = try await client.listTools()
+let (tools, cursor) = try await client.listTools()
 print("Available tools: \(tools.map { $0.name }.joined(separator: ", "))")
 
 // Call a tool with arguments
@@ -189,13 +191,96 @@ for message in messages {
 }
 ```
 
+### Sampling
+
+Sampling allows servers to request LLM completions through the client, 
+enabling agentic behaviors while maintaining human-in-the-loop control. 
+Clients register a handler to process incoming sampling requests from servers.
+
+> [!TIP]
+> Sampling requests flow from **server to client**, 
+> not client to server. 
+> This enables servers to request AI assistance 
+> while clients maintain control over model access and user approval.
+
+```swift
+// Register a sampling handler in the client
+await client.withSamplingHandler { parameters in
+    // Review the sampling request (human-in-the-loop step 1)
+    print("Server requests completion for: \(parameters.messages)")
+    
+    // Optionally modify the request based on user input
+    var messages = parameters.messages
+    if let systemPrompt = parameters.systemPrompt {
+        print("System prompt: \(systemPrompt)")
+    }
+    
+    // Sample from your LLM (this is where you'd call your AI service)
+    let completion = try await callYourLLMService(
+        messages: messages,
+        maxTokens: parameters.maxTokens,
+        temperature: parameters.temperature
+    )
+    
+    // Review the completion (human-in-the-loop step 2)
+    print("LLM generated: \(completion)")
+    // User can approve, modify, or reject the completion here
+    
+    // Return the result to the server
+    return CreateSamplingMessage.Result(
+        model: "your-model-name",
+        stopReason: .endTurn,
+        role: .assistant,
+        content: .text(completion)
+    )
+}
+```
+
+The sampling flow follows these steps:
+
+```mermaid
+sequenceDiagram
+    participant S as MCP Server
+    participant C as MCP Client
+    participant U as User/Human
+    participant L as LLM Service
+
+    Note over S,L: Server-initiated sampling request
+    S->>C: sampling/createMessage request
+    Note right of S: Server needs AI assistance<br/>for decision or content
+
+    Note over C,U: Human-in-the-loop review #1
+    C->>U: Show sampling request
+    U->>U: Review & optionally modify<br/>messages, system prompt
+    U->>C: Approve request
+
+    Note over C,L: Client handles LLM interaction
+    C->>L: Send messages to LLM
+    L->>C: Return completion
+
+    Note over C,U: Human-in-the-loop review #2
+    C->>U: Show LLM completion
+    U->>U: Review & optionally modify<br/>or reject completion
+    U->>C: Approve completion
+
+    Note over C,S: Return result to server
+    C->>S: sampling/createMessage response
+    Note left of C: Contains model used,<br/>stop reason, final content
+
+    Note over S: Server continues with<br/>AI-assisted result
+```
+
+This human-in-the-loop design ensures that users 
+maintain control over what the LLM sees and generates, 
+even when servers initiate the requests.
+
 ### Error Handling
 
 Handle common client errors:
 
 ```swift
 do {
-    let result = try await client.initialize()
+    try await client.connect(transport: transport)
     // Success
 } catch let error as MCPError {
     print("MCP Error: \(error.localizedDescription)")
@@ -250,7 +335,7 @@ Improve performance by sending multiple requests in a single batch:
 
 ```swift
 // Array to hold tool call tasks
-var toolTasks: [Task<CallTool.Result, Error>] = []
+var toolTasks: [Task<CallTool.Result, Swift.Error>] = []
 
 // Send a batch of requests
 try await client.withBatch { batch in
@@ -258,7 +343,7 @@ try await client.withBatch { batch in
     for i in 0..<10 {
         toolTasks.append(
             try await batch.addRequest(
-                CallTool.request(.init(name: "square", arguments: ["n": i]))
+                CallTool.request(.init(name: "square", arguments: ["n": Value(i)]))
             )
         )
     }
@@ -319,7 +404,7 @@ The server component allows your application to host model capabilities and resp
 ```swift
 import MCP
 
-// Initialize the server with capabilities
+// Create a server with given capabilities
 let server = Server(
     name: "MyModelServer",
     version: "1.0.0",
@@ -343,21 +428,25 @@ Register tool handlers to respond to client tool calls:
 
 ```swift
 // Register a tool list handler
-server.withMethodHandler(ListTools.self) { _ in
+await server.withMethodHandler(ListTools.self) { _ in
     let tools = [
         Tool(
             name: "weather",
             description: "Get current weather for a location",
             inputSchema: .object([
-                "location": .string("City name or coordinates"),
-                "units": .string("Units of measurement, e.g., metric, imperial")
+                "properties": .object([
+                    "location": .string("City name or coordinates"),
+                    "units": .string("Units of measurement, e.g., metric, imperial")
+                ])
             ])
         ),
         Tool(
             name: "calculator",
             description: "Perform calculations",
             inputSchema: .object([
-                "expression": .string("Mathematical expression to evaluate")
+                "properties": .object([
+                    "expression": .string("Mathematical expression to evaluate")
+                ])
             ])
         )
     ]
@@ -365,7 +454,7 @@ server.withMethodHandler(ListTools.self) { _ in
 }
 
 // Register a tool call handler
-server.withMethodHandler(CallTool.self) { params in
+await server.withMethodHandler(CallTool.self) { params in
     switch params.name {
     case "weather":
         let location = params.arguments?["location"]?.stringValue ?? "Unknown"
@@ -396,16 +485,16 @@ Implement resource handlers for data access:
 
 ```swift
 // Register a resource list handler
-server.withMethodHandler(ListResources.self) { params in
+await server.withMethodHandler(ListResources.self) { params in
     let resources = [
         Resource(
-            uri: "resource://knowledge-base/articles",
             name: "Knowledge Base Articles",
+            uri: "resource://knowledge-base/articles",
             description: "Collection of support articles and documentation"
         ),
         Resource(
-            uri: "resource://system/status",
             name: "System Status",
+            uri: "resource://system/status",
             description: "Current system operational status"
         )
     ]
@@ -413,7 +502,7 @@ server.withMethodHandler(ListResources.self) { params in
 }
 
 // Register a resource read handler
-server.withMethodHandler(ReadResource.self) { params in
+await server.withMethodHandler(ReadResource.self) { params in
     switch params.uri {
     case "resource://knowledge-base/articles":
         return .init(contents: [Resource.Content.text("# Knowledge Base\n\nThis is the content of the knowledge base...", uri: params.uri)])
@@ -439,7 +528,7 @@ server.withMethodHandler(ReadResource.self) { params in
 }
 
 // Register a resource subscribe handler
-server.withMethodHandler(SubscribeToResource.self) { params in
+await server.withMethodHandler(ResourceSubscribe.self) { params in
     // Store subscription for later notifications.
     // Client identity for multi-client scenarios needs to be managed by the server application,
     // potentially using information from the initialize handshake if the server handles one client post-init.
@@ -455,7 +544,7 @@ Implement prompt handlers:
 
 ```swift
 // Register a prompt list handler
-server.withMethodHandler(ListPrompts.self) { params in
+await server.withMethodHandler(ListPrompts.self) { params in
     let prompts = [
         Prompt(
             name: "interview",
@@ -479,7 +568,7 @@ server.withMethodHandler(ListPrompts.self) { params in
 }
 
 // Register a prompt get handler
-server.withMethodHandler(GetPrompt.self) { params in
+await server.withMethodHandler(GetPrompt.self) { params in
     switch params.name {
     case "interview":
         let position = params.arguments?["position"]?.stringValue ?? "Software Engineer"
@@ -488,9 +577,9 @@ server.withMethodHandler(GetPrompt.self) { params in
 
         let description = "Job interview for \(position) position at \(company)"
         let messages: [Prompt.Message] = [
-            .init(role: .user, content: .text(text: "You are an interviewer for the \(position) position at \(company).")),
-            .init(role: .user, content: .text(text: "Hello, I'm \(interviewee) and I'm here for the \(position) interview.")),
-            .init(role: .assistant, content: .text(text: "Hi \(interviewee), welcome to \(company)! I'd like to start by asking about your background and experience."))
+            .user("You are an interviewer for the \(position) position at \(company)."),
+            .user("Hello, I'm \(interviewee) and I'm here for the \(position) interview."),
+            .assistant("Hi \(interviewee), welcome to \(company)! I'd like to start by asking about your background and experience.")
         ]
 
         return .init(description: description, messages: messages)
@@ -503,6 +592,49 @@ server.withMethodHandler(GetPrompt.self) { params in
     }
 }
 ```
+
+### Sampling
+
+Servers can request LLM completions from clients through sampling. This enables agentic behaviors where servers can ask for AI assistance while maintaining human oversight.
+
+> [!NOTE]
+> The current implementation provides the correct API design for sampling, but requires bidirectional communication support in the transport layer. This feature will be fully functional when bidirectional transport support is added.
+
+```swift
+// Enable sampling capability in server
+let server = Server(
+    name: "MyModelServer",
+    version: "1.0.0",
+    capabilities: .init(
+        sampling: .init(),  // Enable sampling capability
+        tools: .init(listChanged: true)
+    )
+)
+
+// Request sampling from the client (conceptual - requires bidirectional transport)
+do {
+    let result = try await server.requestSampling(
+        messages: [
+            .user("Analyze this data and suggest next steps")
+        ],
+        systemPrompt: "You are a helpful data analyst",
+        temperature: 0.7,
+        maxTokens: 150
+    )
+    
+    // Use the LLM completion in your server logic
+    print("LLM suggested: \(result.content)")
+    
+} catch {
+    print("Sampling request failed: \(error)")
+}
+```
+
+Sampling enables powerful agentic workflows:
+- **Decision-making**: Ask the LLM to choose between options
+- **Content generation**: Request drafts for user approval
+- **Data analysis**: Get AI insights on complex data
+- **Multi-step reasoning**: Chain AI completions with tool calls
 
 #### Initialize Hook
 
@@ -517,8 +649,8 @@ try await server.start(transport: transport) { clientInfo, clientCapabilities in
     }
 
     // You can also inspect client capabilities
-    if clientCapabilities.tools == nil {
-        print("Client does not support tools")
+    if clientCapabilities.sampling == nil {
+        print("Client does not support sampling")
     }
 
     // Perform any server-side setup based on client info
@@ -588,19 +720,18 @@ let server = Server(
         prompts: .init(listChanged: true),
         resources: .init(subscribe: true, listChanged: true),
         tools: .init(listChanged: true)
-    ),
-    logger: logger
+    )
 )
 
 // Add handlers directly to the server
-server.withMethodHandler(ListTools.self) { _ in
+await server.withMethodHandler(ListTools.self) { _ in
     // Your implementation
     return .init(tools: [
         Tool(name: "example", description: "An example tool")
     ])
 }
 
-server.withMethodHandler(CallTool.self) { params in
+await server.withMethodHandler(CallTool.self) { params in
     // Your implementation
     return .init(content: [.text("Tool result")], isError: false)
 }
@@ -645,6 +776,7 @@ The Swift SDK provides multiple built-in transports:
 |-----------|-------------|-----------|----------|
 | [`StdioTransport`](/Sources/MCP/Base/Transports/StdioTransport.swift) | Implements [stdio transport](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#stdio) using standard input/output streams | Apple platforms, Linux with glibc | Local subprocesses, CLI tools |
 | [`HTTPClientTransport`](/Sources/MCP/Base/Transports/HTTPClientTransport.swift) | Implements [Streamable HTTP transport](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#streamable-http) using Foundation's URL Loading System | All platforms with Foundation | Remote servers, web applications |
+| [`InMemoryTransport`](/Sources/MCP/Base/Transports/InMemoryTransport.swift) | Custom in-memory transport for direct communication within the same process | All platforms | Testing, debugging, same-process client-server communication |
 | [`NetworkTransport`](/Sources/MCP/Base/Transports/NetworkTransport.swift) | Custom transport using Apple's Network framework for TCP/UDP connections | Apple platforms only | Low-level networking, custom protocols |
 
 ### Custom Transport Implementation
@@ -658,13 +790,13 @@ import Foundation
 public actor MyCustomTransport: Transport {
     public nonisolated let logger: Logger
     private var isConnected = false
-    private let messageStream: AsyncThrowingStream<Data, Error>
-    private let messageContinuation: AsyncThrowingStream<Data, Error>.Continuation
+    private let messageStream: AsyncThrowingStream<Data, any Swift.Error>
+    private let messageContinuation: AsyncThrowingStream<Data, any Swift.Error>.Continuation
 
     public init(logger: Logger? = nil) {
         self.logger = logger ?? Logger(label: "my.custom.transport")
 
-        var continuation: AsyncThrowingStream<Data, Error>.Continuation!
+        var continuation: AsyncThrowingStream<Data, any Swift.Error>.Continuation!
         self.messageStream = AsyncThrowingStream { continuation = $0 }
         self.messageContinuation = continuation
     }
@@ -684,7 +816,7 @@ public actor MyCustomTransport: Transport {
         // Implement your message sending logic
     }
 
-    public func receive() -> AsyncThrowingStream<Data, Error> {
+    public func receive() -> AsyncThrowingStream<Data, any Swift.Error> {
         return messageStream
     }
 }
@@ -701,15 +833,13 @@ The Swift SDK has the following platform requirements:
 | watchOS | 9.0+ |
 | tvOS | 16.0+ |
 | visionOS | 1.0+ |
-| Linux | Distributions with `glibc` |
+| Linux | Distributions with `glibc` or `musl`, including Ubuntu, Debian, Fedora, and Alpine Linux |
 
 While the core library works on any platform supporting Swift 6
 (including Linux and Windows),
 running a client or server requires a compatible transport.
 
-We're actively working to expand platform support:
-- [Alpine Linux support](https://github.com/modelcontextprotocol/swift-sdk/pull/64)
-- [Windows support](https://github.com/modelcontextprotocol/swift-sdk/pull/64)
+We're working to add [Windows support](https://github.com/modelcontextprotocol/swift-sdk/pull/64).
 
 ## Debugging and Logging
 
@@ -730,7 +860,7 @@ LoggingSystem.bootstrap { label in
 let logger = Logger(label: "com.example.mcp")
 
 // Pass to client/server
-let client = Client(name: "MyApp", version: "1.0.0", logger: logger)
+let client = Client(name: "MyApp", version: "1.0.0")
 
 // Pass to transport
 let transport = StdioTransport(logger: logger)

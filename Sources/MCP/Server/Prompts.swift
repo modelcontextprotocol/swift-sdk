@@ -53,13 +53,33 @@ public struct Prompt: Hashable, Codable, Sendable {
         /// The message content
         public let content: Content
 
+        /// Creates a message with the specified role and content
+        @available(
+            *, deprecated, message: "Use static factory methods .user(_:) or .assistant(_:) instead"
+        )
         public init(role: Role, content: Content) {
             self.role = role
             self.content = content
         }
 
+        /// Private initializer for convenience methods to avoid deprecation warnings
+        private init(_role role: Role, _content content: Content) {
+            self.role = role
+            self.content = content
+        }
+
+        /// Creates a user message with the specified content
+        public static func user(_ content: Content) -> Message {
+            return Message(_role: .user, _content: content)
+        }
+
+        /// Creates an assistant message with the specified content
+        public static func assistant(_ content: Content) -> Message {
+            return Message(_role: .assistant, _content: content)
+        }
+
         /// Content types for messages
-        public enum Content: Hashable, Codable, Sendable {
+        public enum Content: Hashable, Sendable {
             /// Text content
             case text(text: String)
             /// Image content
@@ -68,64 +88,6 @@ public struct Prompt: Hashable, Codable, Sendable {
             case audio(data: String, mimeType: String)
             /// Embedded resource content
             case resource(uri: String, mimeType: String, text: String?, blob: String?)
-
-            private enum CodingKeys: String, CodingKey {
-                case type, text, data, mimeType, uri, blob
-            }
-
-            public func encode(to encoder: Encoder) throws {
-                var container = encoder.container(keyedBy: CodingKeys.self)
-
-                switch self {
-                case .text(let text):
-                    try container.encode("text", forKey: .type)
-                    try container.encode(text, forKey: .text)
-                case .image(let data, let mimeType):
-                    try container.encode("image", forKey: .type)
-                    try container.encode(data, forKey: .data)
-                    try container.encode(mimeType, forKey: .mimeType)
-                case .audio(let data, let mimeType):
-                    try container.encode("audio", forKey: .type)
-                    try container.encode(data, forKey: .data)
-                    try container.encode(mimeType, forKey: .mimeType)
-                case .resource(let uri, let mimeType, let text, let blob):
-                    try container.encode("resource", forKey: .type)
-                    try container.encode(uri, forKey: .uri)
-                    try container.encode(mimeType, forKey: .mimeType)
-                    try container.encodeIfPresent(text, forKey: .text)
-                    try container.encodeIfPresent(blob, forKey: .blob)
-                }
-            }
-
-            public init(from decoder: Decoder) throws {
-                let container = try decoder.container(keyedBy: CodingKeys.self)
-                let type = try container.decode(String.self, forKey: .type)
-
-                switch type {
-                case "text":
-                    let text = try container.decode(String.self, forKey: .text)
-                    self = .text(text: text)
-                case "image":
-                    let data = try container.decode(String.self, forKey: .data)
-                    let mimeType = try container.decode(String.self, forKey: .mimeType)
-                    self = .image(data: data, mimeType: mimeType)
-                case "audio":
-                    let data = try container.decode(String.self, forKey: .data)
-                    let mimeType = try container.decode(String.self, forKey: .mimeType)
-                    self = .audio(data: data, mimeType: mimeType)
-                case "resource":
-                    let uri = try container.decode(String.self, forKey: .uri)
-                    let mimeType = try container.decode(String.self, forKey: .mimeType)
-                    let text = try container.decodeIfPresent(String.self, forKey: .text)
-                    let blob = try container.decodeIfPresent(String.self, forKey: .blob)
-                    self = .resource(uri: uri, mimeType: mimeType, text: text, blob: blob)
-                default:
-                    throw DecodingError.dataCorruptedError(
-                        forKey: .type,
-                        in: container,
-                        debugDescription: "Unknown content type")
-                }
-            }
         }
     }
 
@@ -153,6 +115,84 @@ public struct Prompt: Hashable, Codable, Sendable {
             _ = try container.decode(String.self, forKey: .type)
             name = try container.decode(String.self, forKey: .name)
         }
+    }
+}
+
+// MARK: - Codable
+
+extension Prompt.Message.Content: Codable {
+    private enum CodingKeys: String, CodingKey {
+        case type, text, data, mimeType, uri, blob
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+
+        switch self {
+        case .text(let text):
+            try container.encode("text", forKey: .type)
+            try container.encode(text, forKey: .text)
+        case .image(let data, let mimeType):
+            try container.encode("image", forKey: .type)
+            try container.encode(data, forKey: .data)
+            try container.encode(mimeType, forKey: .mimeType)
+        case .audio(let data, let mimeType):
+            try container.encode("audio", forKey: .type)
+            try container.encode(data, forKey: .data)
+            try container.encode(mimeType, forKey: .mimeType)
+        case .resource(let uri, let mimeType, let text, let blob):
+            try container.encode("resource", forKey: .type)
+            try container.encode(uri, forKey: .uri)
+            try container.encode(mimeType, forKey: .mimeType)
+            try container.encodeIfPresent(text, forKey: .text)
+            try container.encodeIfPresent(blob, forKey: .blob)
+        }
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let type = try container.decode(String.self, forKey: .type)
+
+        switch type {
+        case "text":
+            let text = try container.decode(String.self, forKey: .text)
+            self = .text(text: text)
+        case "image":
+            let data = try container.decode(String.self, forKey: .data)
+            let mimeType = try container.decode(String.self, forKey: .mimeType)
+            self = .image(data: data, mimeType: mimeType)
+        case "audio":
+            let data = try container.decode(String.self, forKey: .data)
+            let mimeType = try container.decode(String.self, forKey: .mimeType)
+            self = .audio(data: data, mimeType: mimeType)
+        case "resource":
+            let uri = try container.decode(String.self, forKey: .uri)
+            let mimeType = try container.decode(String.self, forKey: .mimeType)
+            let text = try container.decodeIfPresent(String.self, forKey: .text)
+            let blob = try container.decodeIfPresent(String.self, forKey: .blob)
+            self = .resource(uri: uri, mimeType: mimeType, text: text, blob: blob)
+        default:
+            throw DecodingError.dataCorruptedError(
+                forKey: .type,
+                in: container,
+                debugDescription: "Unknown content type")
+        }
+    }
+}
+
+// MARK: - ExpressibleByStringLiteral
+
+extension Prompt.Message.Content: ExpressibleByStringLiteral {
+    public init(stringLiteral value: String) {
+        self = .text(text: value)
+    }
+}
+
+// MARK: - ExpressibleByStringInterpolation
+
+extension Prompt.Message.Content: ExpressibleByStringInterpolation {
+    public init(stringInterpolation: DefaultStringInterpolation) {
+        self = .text(text: String(stringInterpolation: stringInterpolation))
     }
 }
 

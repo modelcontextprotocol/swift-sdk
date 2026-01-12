@@ -20,7 +20,7 @@ extension Value: NotRequired {
 // MARK: -
 
 /// A method that can be used to send requests and receive responses.
-public protocol Method {
+public protocol Method: Sendable {
     /// The parameters of the method.
     associatedtype Parameters: Codable, Hashable, Sendable = Empty
     /// The result of the method.
