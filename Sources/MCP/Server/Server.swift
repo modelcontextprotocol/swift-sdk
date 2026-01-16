@@ -130,7 +130,7 @@ public actor Server {
     ///
     /// Example:
     /// ```swift
-    /// server.withRequestHandler(CallTool.self) { params, context in
+    /// server.withMethodHandler(CallTool.self) { params, context in
     ///     // Send progress notification using convenience method
     ///     try await context.sendProgress(
     ///         token: progressToken,
@@ -202,7 +202,7 @@ public actor Server {
         /// ## Example
         ///
         /// ```swift
-        /// server.withRequestHandler(CallTool.self) { request, context in
+        /// server.withMethodHandler(CallTool.self) { request, context in
         ///     if let progressToken = context._meta?.progressToken {
         ///         try await context.sendProgress(token: progressToken, progress: 50, total: 100)
         ///     }
@@ -221,7 +221,7 @@ public actor Server {
         /// ## Example
         ///
         /// ```swift
-        /// server.withRequestHandler(CallTool.self) { params, context in
+        /// server.withMethodHandler(CallTool.self) { params, context in
         ///     if let taskId = context.taskId {
         ///         print("Handling request as part of task: \(taskId)")
         ///     }
@@ -242,7 +242,7 @@ public actor Server {
         /// ## Example
         ///
         /// ```swift
-        /// server.withRequestHandler(CallTool.self) { params, context in
+        /// server.withMethodHandler(CallTool.self) { params, context in
         ///     if let authInfo = context.authInfo {
         ///         print("Authenticated as: \(authInfo.clientId)")
         ///         print("Scopes: \(authInfo.scopes)")
@@ -267,7 +267,7 @@ public actor Server {
         /// ## Example
         ///
         /// ```swift
-        /// server.withRequestHandler(CallTool.self) { params, context in
+        /// server.withMethodHandler(CallTool.self) { params, context in
         ///     if let requestInfo = context.requestInfo {
         ///         // Access custom headers
         ///         if let apiVersion = requestInfo.header("X-API-Version") {
@@ -290,7 +290,7 @@ public actor Server {
         /// ## Example
         ///
         /// ```swift
-        /// server.withRequestHandler(CallTool.self) { request, context in
+        /// server.withMethodHandler(CallTool.self) { request, context in
         ///     // Request user input via elicitation
         ///     let result = try await context.elicit(
         ///         message: "Please confirm the operation",
@@ -379,7 +379,7 @@ public actor Server {
         /// ## Example
         ///
         /// ```swift
-        /// server.withRequestHandler(CallTool.self) { params, context in
+        /// server.withMethodHandler(CallTool.self) { params, context in
         ///     for item in largeDataset {
         ///         // Check cancellation periodically
         ///         guard !context.isCancelled else {
@@ -405,7 +405,7 @@ public actor Server {
         /// ## Example
         ///
         /// ```swift
-        /// server.withRequestHandler(CallTool.self) { params, context in
+        /// server.withMethodHandler(CallTool.self) { params, context in
         ///     for item in largeDataset {
         ///         try context.checkCancellation()  // Throws if cancelled
         ///         try await process(item)
