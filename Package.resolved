@@ -1,10 +1,10 @@
 {
-  "originHash" : "08de61941b7919a65e36c0e34f8c1c41995469b86a39122158b75b4a68c4527d",
+  "originHash" : "371f3dfcfa1201fc8d50e924ad31f9ebc4f90242924df1275958ac79df15dc12",
   "pins" : [
     {
       "identity" : "eventsource",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/loopwork-ai/eventsource.git",
+      "location" : "https://github.com/mattt/eventsource.git",
       "state" : {
         "revision" : "e83f076811f32757305b8bf69ac92d05626ffdd7",
         "version" : "1.1.0"

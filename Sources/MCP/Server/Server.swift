@@ -112,6 +112,313 @@ public actor Server {
             self.tools = tools
         }
     }
+    
+    /// Context provided to request handlers for sending notifications during execution.
+    ///
+    /// When a request handler needs to send notifications (e.g., progress updates during
+    /// a long-running tool), it should use this context to ensure the notification is
+    /// routed to the correct client, even if other clients have connected in the meantime.
+    ///
+    /// This context provides:
+    /// - Request identification (`requestId`, `_meta`)
+    /// - Session tracking (`sessionId`)
+    /// - Authentication context (`authInfo`)
+    /// - Notification sending (`sendNotification`, `sendMessage`, `sendProgress`)
+    /// - Bidirectional requests (`elicit`, `elicitUrl`)
+    /// - Cancellation checking (`isCancelled`, `checkCancellation`)
+    /// - SSE stream management (`closeSSEStream`, `closeStandaloneSSEStream`)
+    ///
+    /// Example:
+    /// ```swift
+    /// server.withRequestHandler(CallTool.self) { params, context in
+    ///     // Send progress notification using convenience method
+    ///     try await context.sendProgress(
+    ///         token: progressToken,
+    ///         progress: 50.0,
+    ///         total: 100.0,
+    ///         message: "Processing..."
+    ///     )
+    ///     // ... do work ...
+    ///     return result
+    /// }
+    /// ```
+    public struct RequestHandlerContext: Sendable {
+        /// Send a notification without parameters to the client that initiated this request.
+        ///
+        /// The notification will be routed to the correct client even if other clients
+        /// have connected since the request was received.
+        ///
+        /// - Parameter notification: The notification to send (for notifications without parameters)
+        public let sendNotification: @Sendable (any Notification) async throws -> Void
+        
+        /// Send a notification message with parameters to the client that initiated this request.
+        ///
+        /// Use this method to send notifications that have parameters, such as `ProgressNotification`
+        /// or `LogMessageNotification`.
+        ///
+        /// Example:
+        /// ```swift
+        /// try await context.sendMessage(ProgressNotification.message(.init(
+        ///     progressToken: token,
+        ///     progress: 50.0,
+        ///     total: 100.0,
+        ///     message: "Halfway done"
+        /// )))
+        /// ```
+        ///
+        /// - Parameter message: The notification message to send
+        public let sendMessage: @Sendable (any NotificationMessageProtocol) async throws -> Void
+        
+        /// Send raw data to the client that initiated this request.
+        ///
+        /// This is used internally for sending queued task messages (such as elicitation
+        /// or sampling requests that were queued during task execution).
+        ///
+        /// - Important: This is an internal API primarily used by the task system.
+        ///
+        /// - Parameter data: The raw JSON data to send
+        public let sendData: @Sendable (Data) async throws -> Void
+        
+        /// The session identifier for the client that initiated this request.
+        ///
+        /// For HTTP transports with multiple concurrent clients, each client session
+        /// has a unique identifier. This can be used for per-session features like
+        /// independent log levels.
+        ///
+        /// For simple transports (stdio, single-connection), this is `nil`.
+        public let sessionId: String?
+        
+        /// The JSON-RPC ID of the request being handled.
+        ///
+        /// This can be useful for tracking, logging, or correlating messages.
+        /// It matches the TypeScript SDK's `extra.requestId`.
+        public let requestId: ID
+        
+        /// The request metadata from the `_meta` field, if present.
+        ///
+        /// Contains metadata like the progress token for progress notifications.
+        /// This matches the TypeScript SDK's `extra._meta` and Python's `ctx.meta`.
+        ///
+        /// ## Example
+        ///
+        /// ```swift
+        /// server.withRequestHandler(CallTool.self) { request, context in
+        ///     if let progressToken = context._meta?.progressToken {
+        ///         try await context.sendProgress(token: progressToken, progress: 50, total: 100)
+        ///     }
+        ///     return CallTool.Result(content: [.text("Done")])
+        /// }
+        /// ```
+        public let _meta: RequestMeta?
+        
+        /// The task ID for task-augmented requests, if present.
+        ///
+        /// This is a convenience property that extracts the task ID from the
+        /// `_meta["io.modelcontextprotocol/related-task"]` field.
+        ///
+        /// This matches the TypeScript SDK's `extra.taskId`.
+        ///
+        /// ## Example
+        ///
+        /// ```swift
+        /// server.withRequestHandler(CallTool.self) { params, context in
+        ///     if let taskId = context.taskId {
+        ///         print("Handling request as part of task: \(taskId)")
+        ///     }
+        ///     return CallTool.Result(content: [.text("Done")])
+        /// }
+        /// ```
+        public var taskId: String? {
+            _meta?.relatedTaskId
+        }
+        
+        /// Authentication information for this request.
+        ///
+        /// Contains validated access token information when using HTTP transports
+        /// with OAuth or other token-based authentication.
+        ///
+        /// This matches the TypeScript SDK's `extra.authInfo`.
+        ///
+        /// ## Example
+        ///
+        /// ```swift
+        /// server.withRequestHandler(CallTool.self) { params, context in
+        ///     if let authInfo = context.authInfo {
+        ///         print("Authenticated as: \(authInfo.clientId)")
+        ///         print("Scopes: \(authInfo.scopes)")
+        ///
+        ///         // Check if token has required scope
+        ///         guard authInfo.scopes.contains("tools:execute") else {
+        ///             throw MCPError.invalidRequest("Missing required scope")
+        ///         }
+        ///     }
+        ///     return CallTool.Result(content: [.text("Done")])
+        /// }
+        /// ```
+        public let authInfo: AuthInfo?
+        
+        /// Information about the incoming HTTP request.
+        ///
+        /// Contains HTTP headers from the original request. Only available for
+        /// HTTP transports.
+        ///
+        /// This matches the TypeScript SDK's `extra.requestInfo`.
+        ///
+        /// ## Example
+        ///
+        /// ```swift
+        /// server.withRequestHandler(CallTool.self) { params, context in
+        ///     if let requestInfo = context.requestInfo {
+        ///         // Access custom headers
+        ///         if let apiVersion = requestInfo.header("X-API-Version") {
+        ///             print("Client API version: \(apiVersion)")
+        ///         }
+        ///     }
+        ///     return CallTool.Result(content: [.text("Done")])
+        /// }
+        /// ```
+        public let requestInfo: RequestInfo?
+        
+        /// Send a request to the client and wait for a response.
+        ///
+        /// This enables bidirectional communication from within a request handler,
+        /// allowing servers to request information from the client (e.g., elicitation,
+        /// sampling) during request processing.
+        ///
+        /// This matches the TypeScript SDK's `extra.sendRequest()` functionality.
+        ///
+        /// ## Example
+        ///
+        /// ```swift
+        /// server.withRequestHandler(CallTool.self) { request, context in
+        ///     // Request user input via elicitation
+        ///     let result = try await context.elicit(
+        ///         message: "Please confirm the operation",
+        ///         requestedSchema: ElicitationSchema(properties: [
+        ///             "confirm": .boolean(BooleanSchema(title: "Confirm"))
+        ///         ])
+        ///     )
+        ///
+        ///     if result.action == .accept {
+        ///         // Process confirmed action
+        ///     }
+        ///     return CallTool.Result(content: [.text("Done")])
+        /// }
+        /// ```
+        let sendRequest: @Sendable (Data) async throws -> Value
+        
+        // MARK: - Convenience Methods
+        
+        /// Send a progress notification to the client.
+        ///
+        /// Use this to report progress on long-running operations.
+        ///
+        /// - Parameters:
+        ///   - token: The progress token from the request's `_meta.progressToken`
+        ///   - progress: The current progress value (should increase monotonically)
+        ///   - total: The total progress value, if known
+        ///   - message: An optional human-readable message describing current progress
+        public func sendProgress(
+            token: ProgressToken,
+            progress: Double,
+            total: Double? = nil,
+            message: String? = nil
+        ) async throws {
+            try await sendMessage(ProgressNotification.message(.init(
+                progressToken: token,
+                progress: progress,
+                total: total,
+                message: message
+            )))
+        }
+        
+        /// Send a resource list changed notification to the client.
+        ///
+        /// Call this when the list of available resources has changed.
+        public func sendResourceListChanged() async throws {
+            try await sendNotification(ResourceListChangedNotification())
+        }
+        
+        /// Send a resource updated notification to the client.
+        ///
+        /// Call this when a specific resource's content has been updated.
+        ///
+        /// - Parameter uri: The URI of the resource that was updated
+        public func sendResourceUpdated(uri: String) async throws {
+            try await sendMessage(ResourceUpdatedNotification.message(.init(uri: uri)))
+        }
+        
+        /// Send a tool list changed notification to the client.
+        ///
+        /// Call this when the list of available tools has changed.
+        public func sendToolListChanged() async throws {
+            try await sendNotification(ToolListChangedNotification())
+        }
+        
+        /// Send a prompt list changed notification to the client.
+        ///
+        /// Call this when the list of available prompts has changed.
+        public func sendPromptListChanged() async throws {
+            try await sendNotification(PromptListChangedNotification())
+        }
+        
+        // MARK: - Cancellation Checking
+        
+        /// Whether the request has been cancelled.
+        ///
+        /// Check this property periodically during long-running operations
+        /// to respond to cancellation requests from the client.
+        ///
+        /// This returns `true` when:
+        /// - The client sends a `CancelledNotification` for this request
+        /// - The server is shutting down
+        ///
+        /// When cancelled, the handler should clean up resources and return
+        /// or throw an error. Per MCP spec, responses are not sent for cancelled requests.
+        ///
+        /// ## Example
+        ///
+        /// ```swift
+        /// server.withRequestHandler(CallTool.self) { params, context in
+        ///     for item in largeDataset {
+        ///         // Check cancellation periodically
+        ///         guard !context.isCancelled else {
+        ///             throw CancellationError()
+        ///         }
+        ///         try await process(item)
+        ///     }
+        ///     return CallTool.Result(content: [.text("Done")])
+        /// }
+        /// ```
+        public var isCancelled: Bool {
+            Task.isCancelled
+        }
+        
+        /// Check if the request has been cancelled and throw if so.
+        ///
+        /// Call this method periodically during long-running operations.
+        /// If the request has been cancelled, this throws `CancellationError`.
+        ///
+        /// This is equivalent to checking `isCancelled` and throwing manually,
+        /// but provides a more idiomatic Swift concurrency pattern.
+        ///
+        /// ## Example
+        ///
+        /// ```swift
+        /// server.withRequestHandler(CallTool.self) { params, context in
+        ///     for item in largeDataset {
+        ///         try context.checkCancellation()  // Throws if cancelled
+        ///         try await process(item)
+        ///     }
+        ///     return CallTool.Result(content: [.text("Done")])
+        /// }
+        /// ```
+        ///
+        /// - Throws: `CancellationError` if the request has been cancelled.
+        public func checkCancellation() throws {
+            try Task.checkCancellation()
+        }
+    }
 
     /// Server information
     private let serverInfo: Server.Info

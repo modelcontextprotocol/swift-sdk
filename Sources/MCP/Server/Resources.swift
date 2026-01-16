@@ -93,6 +93,106 @@ public struct Resource: Hashable, Codable, Sendable {
 }
 
 // MARK: -
+/// A resource link returned in tool results, referencing a resource that can be read.
+///
+/// Resource links differ from embedded resources in that they don't include
+/// the actual content - they're references to resources that can be read later.
+///
+/// Note: Resource links returned by tools are not guaranteed to appear
+/// in the results of `resources/list` requests.
+///
+/// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/schema#resourcelink
+public struct ResourceLink: Hashable, Codable, Sendable {
+    /// The resource name (intended for programmatic or logical use)
+    public var name: String
+    /// A human-readable title for the resource, intended for UI display.
+    public var title: String?
+    /// The resource URI
+    public var uri: String
+    /// The resource description
+    public var description: String?
+    /// The resource MIME type
+    public var mimeType: String?
+    /// The size of the raw resource content, in bytes, if known.
+    public var size: Int?
+    /// Optional annotations for the client.
+    public var annotations: Annotations?
+    /// Optional icons representing this resource.
+    public var icons: [Icon]?
+    /// Reserved for clients and servers to attach additional metadata.
+    public var _meta: [String: Value]?
+
+    public init(
+        name: String,
+        title: String? = nil,
+        uri: String,
+        description: String? = nil,
+        mimeType: String? = nil,
+        size: Int? = nil,
+        annotations: Annotations? = nil,
+        icons: [Icon]? = nil,
+        _meta: [String: Value]? = nil
+    ) {
+        self.name = name
+        self.title = title
+        self.uri = uri
+        self.description = description
+        self.mimeType = mimeType
+        self.size = size
+        self.annotations = annotations
+        self.icons = icons
+        self._meta = _meta
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case type
+        case name
+        case title
+        case uri
+        case description
+        case mimeType
+        case size
+        case annotations
+        case icons
+        case _meta
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        // Verify type is "resource_link"
+        let type = try container.decodeIfPresent(String.self, forKey: .type)
+        if let type, type != "resource_link" {
+            throw DecodingError.dataCorruptedError(
+                forKey: .type, in: container,
+                debugDescription: "Expected type 'resource_link', got '\(type)'")
+        }
+        name = try container.decode(String.self, forKey: .name)
+        title = try container.decodeIfPresent(String.self, forKey: .title)
+        uri = try container.decode(String.self, forKey: .uri)
+        description = try container.decodeIfPresent(String.self, forKey: .description)
+        mimeType = try container.decodeIfPresent(String.self, forKey: .mimeType)
+        size = try container.decodeIfPresent(Int.self, forKey: .size)
+        annotations = try container.decodeIfPresent(Annotations.self, forKey: .annotations)
+        icons = try container.decodeIfPresent([Icon].self, forKey: .icons)
+        _meta = try container.decodeIfPresent([String: Value].self, forKey: ._meta)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode("resource_link", forKey: .type)
+        try container.encode(name, forKey: .name)
+        try container.encodeIfPresent(title, forKey: .title)
+        try container.encode(uri, forKey: .uri)
+        try container.encodeIfPresent(description, forKey: .description)
+        try container.encodeIfPresent(mimeType, forKey: .mimeType)
+        try container.encodeIfPresent(size, forKey: .size)
+        try container.encodeIfPresent(annotations, forKey: .annotations)
+        try container.encodeIfPresent(icons, forKey: .icons)
+        try container.encodeIfPresent(_meta, forKey: ._meta)
+    }
+}
+
+// MARK: -
 
 /// To discover available resources, clients send a `resources/list` request.
 /// - SeeAlso: https://spec.modelcontextprotocol.io/specification/2024-11-05/server/resources/#listing-resources

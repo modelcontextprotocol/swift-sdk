@@ -77,6 +77,173 @@ public actor Client {
             self.roots = roots
         }
     }
+    
+    /// Context provided to client request handlers.
+    ///
+    /// This context is passed to handlers for server→client requests (e.g., sampling,
+    /// elicitation, roots) and provides:
+    /// - Cancellation checking via `isCancelled` and `checkCancellation()`
+    /// - Notification sending to the server
+    /// - Progress reporting convenience methods
+    ///
+    /// ## Example
+    ///
+    /// ```swift
+    /// client.withRequestHandler(CreateSamplingMessage.self) { params, context in
+    ///     // Check for cancellation periodically
+    ///     try context.checkCancellation()
+    ///
+    ///     // Report progress back to server
+    ///     try await context.sendProgressNotification(
+    ///         token: progressToken,
+    ///         progress: 50.0,
+    ///         total: 100.0,
+    ///         message: "Processing..."
+    ///     )
+    ///
+    ///     return result
+    /// }
+    /// ```
+    public struct RequestHandlerContext: Sendable {
+        /// Send a notification to the server.
+        ///
+        /// Use this to send notifications from within a request handler.
+        let sendNotification: @Sendable (any NotificationMessageProtocol) async throws -> Void
+        
+        /// The JSON-RPC ID of the request being handled.
+        ///
+        /// This can be useful for tracking, logging, or correlating messages.
+        /// It matches the TypeScript SDK's `extra.requestId`.
+        public let requestId: ID
+        
+        /// The request metadata from the `_meta` field, if present.
+        ///
+        /// Contains metadata like the progress token for progress notifications.
+        /// This matches the TypeScript SDK's `extra._meta` and Python's `ctx.meta`.
+        ///
+        /// ## Example
+        ///
+        /// ```swift
+        /// client.withRequestHandler(CreateSamplingMessage.self) { params, context in
+        ///     if let progressToken = context._meta?.progressToken {
+        ///         try await context.sendProgressNotification(
+        ///             token: progressToken,
+        ///             progress: 50,
+        ///             total: 100
+        ///         )
+        ///     }
+        ///     return result
+        /// }
+        /// ```
+        public let _meta: RequestMeta?
+        
+        /// The task ID for task-augmented requests, if present.
+        ///
+        /// This is a convenience property that extracts the task ID from the
+        /// `_meta["io.modelcontextprotocol/related-task"]` field. When a server
+        /// sends a task-augmented elicitation or sampling request, this property
+        /// will contain the associated task ID.
+        ///
+        /// This matches the TypeScript SDK's `extra.taskId` and aligns with
+        /// `Server.RequestHandlerContext.taskId`.
+        ///
+        /// ## Example
+        ///
+        /// ```swift
+        /// client.withElicitationHandler { params, context in
+        ///     if let taskId = context.taskId {
+        ///         print("Handling elicitation for task: \(taskId)")
+        ///     }
+        ///     return ElicitResult(action: .accept, content: [:])
+        /// }
+        /// ```
+        public var taskId: String? {
+            _meta?.relatedTaskId
+        }
+        
+        // MARK: - Convenience Methods
+        
+        /// Send a progress notification to the server.
+        ///
+        /// Use this to report progress on long-running operations initiated by
+        /// server→client requests.
+        ///
+        /// - Parameters:
+        ///   - token: The progress token from the request's `_meta.progressToken`
+        ///   - progress: The current progress value (should increase monotonically)
+        ///   - total: The total progress value, if known
+        ///   - message: An optional human-readable message describing current progress
+        public func sendProgressNotification(
+            token: ProgressToken,
+            progress: Double,
+            total: Double? = nil,
+            message: String? = nil
+        ) async throws {
+            try await sendNotification(ProgressNotification.message(.init(
+                progressToken: token,
+                progress: progress,
+                total: total,
+                message: message
+            )))
+        }
+        
+        // MARK: - Cancellation Checking
+        
+        /// Whether the request has been cancelled.
+        ///
+        /// Check this property periodically during long-running operations
+        /// to respond to cancellation requests from the server.
+        ///
+        /// This returns `true` when:
+        /// - The server sends a `CancelledNotification` for this request
+        /// - The client is disconnecting
+        ///
+        /// When cancelled, the handler should clean up resources and return
+        /// or throw an error. Per MCP spec, responses are not sent for cancelled requests.
+        ///
+        /// ## Example
+        ///
+        /// ```swift
+        /// client.withRequestHandler(CreateSamplingMessage.self) { params, context in
+        ///     for chunk in largeInput {
+        ///         // Check cancellation periodically
+        ///         guard !context.isCancelled else {
+        ///             throw CancellationError()
+        ///         }
+        ///         try await process(chunk)
+        ///     }
+        ///     return result
+        /// }
+        /// ```
+        public var isCancelled: Bool {
+            Task.isCancelled
+        }
+        
+        /// Check if the request has been cancelled and throw if so.
+        ///
+        /// Call this method periodically during long-running operations.
+        /// If the request has been cancelled, this throws `CancellationError`.
+        ///
+        /// This is equivalent to checking `isCancelled` and throwing manually,
+        /// but provides a more idiomatic Swift concurrency pattern.
+        ///
+        /// ## Example
+        ///
+        /// ```swift
+        /// client.withRequestHandler(CreateSamplingMessage.self) { params, context in
+        ///     for chunk in largeInput {
+        ///         try context.checkCancellation()  // Throws if cancelled
+        ///         try await process(chunk)
+        ///     }
+        ///     return result
+        /// }
+        /// ```
+        ///
+        /// - Throws: `CancellationError` if the request has been cancelled.
+        public func checkCancellation() throws {
+            try Task.checkCancellation()
+        }
+    }
 
     /// The connection to the server
     private var connection: (any Transport)?
@@ -150,13 +317,137 @@ public actor Client {
             _resume(.failure(error))
         }
     }
-
+    
     /// A dictionary of type-erased pending requests, keyed by request ID
     private var pendingRequests: [ID: AnyPendingRequest] = [:]
+    /// Progress callbacks for requests, keyed by progress token.
+    /// Used to invoke callbacks when progress notifications are received.
+    private var progressCallbacks: [ProgressToken: ProgressCallback] = [:]
+    /// Timeout controllers for requests with progress-aware timeouts.
+    /// Used to reset timeouts when progress notifications are received.
+    private var timeoutControllers: [ProgressToken: TimeoutController] = [:]
+    /// Mapping from request ID to progress token.
+    /// Used to detect task-augmented responses and keep progress handlers alive.
+    private var requestProgressTokens: [ID: ProgressToken] = [:]
+    /// Mapping from task ID to progress token.
+    /// Keeps progress handlers alive for task-augmented requests until the task completes.
+    /// Per MCP spec 2025-11-25: "For task-augmented requests, the progressToken provided
+    /// in the original request MUST continue to be used for progress notifications
+    /// throughout the task's lifetime, even after the CreateTaskResult has been returned."
+    private var taskProgressTokens: [String: ProgressToken] = [:]
     // Add reusable JSON encoder/decoder
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
-
+    
+    /// Controls timeout behavior for a single request, supporting reset on progress.
+    ///
+    /// This actor manages the timeout state for requests that use `resetTimeoutOnProgress`.
+    /// When progress is received, calling `signalProgress()` resets the timeout clock.
+    actor TimeoutController {
+        /// The per-interval timeout duration.
+        let timeout: Duration
+        /// Whether to reset timeout when progress is received.
+        let resetOnProgress: Bool
+        /// Maximum total time to wait regardless of progress.
+        let maxTotalTimeout: Duration?
+        /// The start time of the request (for maxTotalTimeout tracking).
+        let startTime: ContinuousClock.Instant
+        /// The current deadline (updated when progress is received).
+        private var deadline: ContinuousClock.Instant
+        /// Whether the controller has been cancelled.
+        private var isCancelled = false
+        /// Continuation for signaling progress.
+        private var progressContinuation: AsyncStream<Void>.Continuation?
+        
+        init(timeout: Duration, resetOnProgress: Bool, maxTotalTimeout: Duration?) {
+            self.timeout = timeout
+            self.resetOnProgress = resetOnProgress
+            self.maxTotalTimeout = maxTotalTimeout
+            self.startTime = ContinuousClock.now
+            self.deadline = ContinuousClock.now.advanced(by: timeout)
+        }
+        
+        /// Signal that progress was received, resetting the timeout.
+        func signalProgress() {
+            guard resetOnProgress, !isCancelled else { return }
+            deadline = ContinuousClock.now.advanced(by: timeout)
+            progressContinuation?.yield()
+        }
+        
+        /// Cancel the timeout controller.
+        func cancel() {
+            isCancelled = true
+            progressContinuation?.finish()
+        }
+        
+        /// Wait until the timeout expires.
+        ///
+        /// If `resetOnProgress` is true, the timeout resets each time `signalProgress()` is called.
+        /// If `maxTotalTimeout` is set, the wait will end when that limit is exceeded.
+        ///
+        /// - Throws: `MCPError.requestTimeout` when the timeout expires.
+        func waitForTimeout() async throws {
+            let clock = ContinuousClock()
+            
+            // Create a stream for progress signals
+            let (progressStream, continuation) = AsyncStream<Void>.makeStream()
+            self.progressContinuation = continuation
+            
+            while !isCancelled {
+                // Check maxTotalTimeout
+                if let maxTotal = maxTotalTimeout {
+                    let elapsed = clock.now - startTime
+                    if elapsed >= maxTotal {
+                        throw MCPError.requestTimeout(
+                            timeout: maxTotal,
+                            message: "Request exceeded maximum total timeout"
+                        )
+                    }
+                }
+                
+                // Calculate time until deadline
+                let now = clock.now
+                let timeUntilDeadline = deadline - now
+                
+                if timeUntilDeadline <= .zero {
+                    throw MCPError.requestTimeout(
+                        timeout: timeout,
+                        message: "Request timed out"
+                    )
+                }
+                
+                // Wait for either timeout or progress signal
+                do {
+                    try await withThrowingTaskGroup(of: Void.self) { group in
+                        // Timeout task
+                        group.addTask {
+                            try await Task.sleep(for: timeUntilDeadline)
+                        }
+                        
+                        // Progress signal task (if reset is enabled)
+                        if resetOnProgress {
+                            group.addTask {
+                                for await _ in progressStream {
+                                    // Progress received, exit to recalculate deadline
+                                    return
+                                }
+                            }
+                        }
+                        
+                        // Wait for whichever completes first
+                        _ = try await group.next()
+                        group.cancelAll()
+                    }
+                } catch is CancellationError {
+                    return // Task was cancelled, exit gracefully
+                }
+                
+                // If we get here after a progress signal, loop to recalculate deadline
+                // If we get here after timeout, the next iteration will throw
+            }
+        }
+    }
+    
     public init(
         name: String,
         version: String,

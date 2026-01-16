@@ -291,8 +291,18 @@ extension AnyNotification {
     }
 }
 
+
+/// Protocol for type-erased notification messages.
+///
+/// This protocol allows sending notification messages with parameters through
+/// a type-erased interface. `Message<N>` conforms to this protocol.
+public protocol NotificationMessageProtocol: Sendable, Encodable {
+    /// The notification method name.
+    var method: String { get }
+}
+
 /// A message that can be used to send notifications.
-public struct Message<N: Notification>: Hashable, Codable, Sendable {
+public struct Message<N: Notification>: NotificationMessageProtocol, Hashable, Codable, Sendable {
     /// The method name.
     public let method: String
     /// The notification parameters.
