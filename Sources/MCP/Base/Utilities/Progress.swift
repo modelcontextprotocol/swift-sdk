@@ -92,92 +92,58 @@ public enum ProgressToken: Hashable, Codable, Sendable {
 ///
 /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/progress
 public struct RequestMeta: Hashable, Codable, Sendable {
+    /// The underlying fields dictionary.
+    public var fields: [String: Value]
+
     /// The progress token for receiving progress notifications.
     ///
     /// If specified, the caller is requesting out-of-band progress notifications
     /// for this request. The value of this parameter is an opaque token that will
     /// be attached to any subsequent notifications. The receiver is not obligated
     /// to provide these notifications.
-    public var progressToken: ProgressToken?
-
-    /// Additional metadata fields.
-    ///
-    /// This allows for extension with custom metadata fields.
-    public var additionalFields: [String: Value]?
-
-    /// Creates an empty request metadata.
-    public init() {
-        self.progressToken = nil
-        self.additionalFields = nil
+    public var progressToken: ProgressToken? {
+        get {
+            guard let value = fields["progressToken"] else { return nil }
+            if let stringValue = value.stringValue {
+                return .string(stringValue)
+            } else if let intValue = value.intValue {
+                return .integer(intValue)
+            }
+            return nil
+        }
+        set {
+            if let token = newValue {
+                switch token {
+                case .string(let s):
+                    fields["progressToken"] = .string(s)
+                case .integer(let i):
+                    fields["progressToken"] = .int(i)
+                }
+            } else {
+                fields.removeValue(forKey: "progressToken")
+            }
+        }
     }
 
-    /// Creates request metadata with a progress token.
-    ///
-    /// - Parameter progressToken: The progress token for receiving progress notifications.
-    public init(progressToken: ProgressToken?) {
-        self.progressToken = progressToken
-        self.additionalFields = nil
-    }
-
-    /// Creates request metadata with a progress token and additional fields.
+    /// Creates request metadata.
     ///
     /// - Parameters:
-    ///   - progressToken: The progress token for receiving progress notifications.
-    ///   - additionalFields: Additional metadata fields.
-    public init(progressToken: ProgressToken?, additionalFields: [String: Value]?) {
+    ///   - progressToken: Optional progress token for receiving progress notifications.
+    ///     If specified, the caller is requesting out-of-band progress notifications for this request.
+    ///   - additionalFields: Optional dictionary of additional metadata fields.
+    ///     These fields will be included in the `_meta` object alongside the progress token.
+    public init(progressToken: ProgressToken? = nil, additionalFields: [String: Value] = [:]) {
+        self.fields = additionalFields
         self.progressToken = progressToken
-        self.additionalFields = additionalFields
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case progressToken
     }
 
     public init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        progressToken = try container.decodeIfPresent(ProgressToken.self, forKey: .progressToken)
-
-        // Decode additional fields
-        let dynamicContainer = try decoder.container(keyedBy: DynamicCodingKey.self)
-        var additional: [String: Value] = [:]
-        for key in dynamicContainer.allKeys {
-            if key.stringValue != CodingKeys.progressToken.rawValue {
-                if let value = try? dynamicContainer.decode(Value.self, forKey: key) {
-                    additional[key.stringValue] = value
-                }
-            }
-        }
-        additionalFields = additional.isEmpty ? nil : additional
+        let container = try decoder.singleValueContainer()
+        self.fields = try container.decode([String: Value].self)
     }
 
     public func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encodeIfPresent(progressToken, forKey: .progressToken)
-
-        // Encode additional fields
-        if let additional = additionalFields {
-            var dynamicContainer = encoder.container(keyedBy: DynamicCodingKey.self)
-            for (key, value) in additional {
-                if key != CodingKeys.progressToken.rawValue {
-                    try dynamicContainer.encode(value, forKey: DynamicCodingKey(stringValue: key)!)
-                }
-            }
-        }
-    }
-}
-
-/// A dynamic coding key for encoding/decoding arbitrary string keys.
-private struct DynamicCodingKey: CodingKey {
-    var stringValue: String
-    var intValue: Int?
-
-    init?(stringValue: String) {
-        self.stringValue = stringValue
-        self.intValue = nil
-    }
-
-    init?(intValue: Int) {
-        self.stringValue = String(intValue)
-        self.intValue = intValue
+        var container = encoder.singleValueContainer()
+        try container.encode(fields)
     }
 }

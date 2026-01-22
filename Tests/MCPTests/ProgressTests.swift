@@ -79,7 +79,7 @@ struct ProgressTests {
         let meta = RequestMeta()
 
         #expect(meta.progressToken == nil)
-        #expect(meta.additionalFields == nil)
+        #expect(meta.fields.isEmpty)
     }
 
     @Test("RequestMeta with progress token")
@@ -88,7 +88,16 @@ struct ProgressTests {
         let meta = RequestMeta(progressToken: token)
 
         #expect(meta.progressToken == token)
-        #expect(meta.additionalFields == nil)
+        #expect(meta.fields["progressToken"] == .string("my-token"))
+    }
+
+    @Test("RequestMeta with integer progress token")
+    func testRequestMetaWithIntegerProgressToken() throws {
+        let token = ProgressToken.integer(42)
+        let meta = RequestMeta(progressToken: token)
+
+        #expect(meta.progressToken == token)
+        #expect(meta.fields["progressToken"] == .int(42))
     }
 
     @Test("RequestMeta encoding with progress token")
@@ -129,6 +138,35 @@ struct ProgressTests {
 
         #expect(jsonString.contains("progressToken"))
         #expect(jsonString.contains("test-token"))
+    }
+
+    @Test("RequestMeta with additional fields")
+    func testRequestMetaWithAdditionalFields() throws {
+        let meta = RequestMeta(
+            progressToken: .string("token"),
+            additionalFields: ["customField": .string("customValue")]
+        )
+
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+
+        let data = try encoder.encode(meta)
+        let decoded = try decoder.decode(RequestMeta.self, from: data)
+
+        #expect(decoded.progressToken == .string("token"))
+        #expect(decoded.fields["customField"] == .string("customValue"))
+    }
+
+    @Test("RequestMeta with only additional fields")
+    func testRequestMetaWithOnlyAdditionalFields() throws {
+        let meta = RequestMeta(additionalFields: [
+            "customKey": .int(123),
+            "anotherKey": .string("value")
+        ])
+
+        #expect(meta.progressToken == nil)
+        #expect(meta.fields["customKey"] == .int(123))
+        #expect(meta.fields["anotherKey"] == .string("value"))
     }
 
 
