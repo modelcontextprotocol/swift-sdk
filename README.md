@@ -112,6 +112,28 @@ let (content, isError) = try await client.callTool(
     ]
 )
 
+// Call a tool with progress tracking
+let progressToken = ProgressToken.unique()
+
+// Register a notification handler to receive progress updates
+await client.onNotification(ProgressNotification.self) { message in
+    let params = message.params
+    // Filter by your progress token
+    if params.progressToken == progressToken {
+        print("Progress: \(params.progress)/\(params.total ?? 0)")
+        if let message = params.message {
+            print("Status: \(message)")
+        }
+    }
+}
+
+// Make the request with the progress token
+let (progressContent, progressError) = try await client.callTool(
+    name: "long-running-tool",
+    arguments: ["input": "value"],
+    meta: RequestMeta(progressToken: progressToken)
+)
+
 // Handle tool content
 for item in content {
     switch item {

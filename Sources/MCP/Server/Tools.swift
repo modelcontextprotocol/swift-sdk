@@ -336,17 +336,47 @@ public enum ListTools: Method {
 }
 
 /// To call a tool, clients send a `tools/call` request.
-/// - SeeAlso: https://spec.modelcontextprotocol.io/specification/2025-06-18/server/tools/#calling-tools
+/// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/server/tools/#calling-tools
 public enum CallTool: Method {
     public static let name = "tools/call"
 
     public struct Parameters: Hashable, Codable, Sendable {
+        /// Optional request metadata including progress token.
+        ///
+        /// If `progressToken` is specified, the caller is requesting out-of-band
+        /// progress notifications for this request.
+        public let _meta: RequestMeta?
+
+        /// The name of the tool to call.
         public let name: String
+
+        /// Arguments to use for the tool call.
         public let arguments: [String: Value]?
 
-        public init(name: String, arguments: [String: Value]? = nil) {
+        public init(name: String, arguments: [String: Value]? = nil, meta: RequestMeta? = nil) {
+            self._meta = meta
             self.name = name
             self.arguments = arguments
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case _meta
+            case name
+            case arguments
+        }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            _meta = try container.decodeIfPresent(RequestMeta.self, forKey: ._meta)
+            name = try container.decode(String.self, forKey: .name)
+            arguments = try container.decodeIfPresent([String: Value].self, forKey: .arguments)
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encodeIfPresent(_meta, forKey: ._meta)
+            try container.encode(name, forKey: .name)
+            try container.encodeIfPresent(arguments, forKey: .arguments)
         }
     }
 

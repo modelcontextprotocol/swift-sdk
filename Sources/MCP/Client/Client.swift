@@ -623,11 +623,25 @@ public actor Client {
         return (tools: result.tools, nextCursor: result.nextCursor)
     }
 
-    public func callTool(name: String, arguments: [String: Value]? = nil) async throws -> (
+    /// Call a tool on the server.
+    ///
+    /// - Parameters:
+    ///   - name: The name of the tool to call.
+    ///   - arguments: Arguments to use for the tool call.
+    ///   - meta: Optional request metadata including progress token. If `progressToken` is specified,
+    ///           the caller is requesting out-of-band progress notifications for this request.
+    ///           Use `onNotification(ProgressNotification.self)` to receive progress updates.
+    /// - Returns: A tuple containing the tool's content response and an optional error flag.
+    /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/server/tools/#calling-tools
+    public func callTool(
+        name: String,
+        arguments: [String: Value]? = nil,
+        meta: RequestMeta? = nil
+    ) async throws -> (
         content: [Tool.Content], isError: Bool?
     ) {
         try validateServerCapability(\.tools, "Tools")
-        let request = CallTool.request(.init(name: name, arguments: arguments))
+        let request = CallTool.request(.init(name: name, arguments: arguments, meta: meta))
         let result = try await send(request)
         return (content: result.content, isError: result.isError)
     }
