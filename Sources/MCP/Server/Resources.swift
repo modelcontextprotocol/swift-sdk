@@ -6,7 +6,7 @@ import Foundation
 /// such as files, database schemas, or application-specific information.
 /// Each resource is uniquely identified by a URI.
 ///
-/// - SeeAlso: https://spec.modelcontextprotocol.io/specification/2025-06-18/server/resources/
+/// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/server/resources/
 public struct Resource: Hashable, Codable, Sendable {
     /// The resource name
     public var name: String
@@ -20,6 +20,8 @@ public struct Resource: Hashable, Codable, Sendable {
     public var mimeType: String?
     /// The resource metadata
     public var metadata: [String: String]?
+    /// Optional set of sized icons that the client can display in a user interface
+    public var icons: [Icon]?
     /// Metadata fields for the resource (see spec for _meta usage)
     public var _meta: [String: Value]?
 
@@ -30,7 +32,8 @@ public struct Resource: Hashable, Codable, Sendable {
         description: String? = nil,
         mimeType: String? = nil,
         metadata: [String: String]? = nil,
-        _meta: [String: Value]? = nil
+        _meta: [String: Value]? = nil,
+        icons: [Icon]? = nil
     ) {
         self.name = name
         self.title = title
@@ -39,6 +42,7 @@ public struct Resource: Hashable, Codable, Sendable {
         self.mimeType = mimeType
         self.metadata = metadata
         self._meta = _meta
+        self.icons = icons
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -48,6 +52,7 @@ public struct Resource: Hashable, Codable, Sendable {
         case description
         case mimeType
         case metadata
+        case icons
     }
 
     public init(from decoder: Decoder) throws {
@@ -58,6 +63,8 @@ public struct Resource: Hashable, Codable, Sendable {
         description = try container.decodeIfPresent(String.self, forKey: .description)
         mimeType = try container.decodeIfPresent(String.self, forKey: .mimeType)
         metadata = try container.decodeIfPresent([String: String].self, forKey: .metadata)
+        icons = try container.decodeIfPresent([Icon].self, forKey: .icons)
+
         let metaContainer = try decoder.container(keyedBy: DynamicCodingKey.self)
         _meta = try decodeMeta(from: metaContainer)
     }
@@ -70,6 +77,8 @@ public struct Resource: Hashable, Codable, Sendable {
         try container.encodeIfPresent(description, forKey: .description)
         try container.encodeIfPresent(mimeType, forKey: .mimeType)
         try container.encodeIfPresent(metadata, forKey: .metadata)
+        try container.encodeIfPresent(icons, forKey: .icons)
+
         var metaContainer = encoder.container(keyedBy: DynamicCodingKey.self)
         try encodeMeta(_meta, to: &metaContainer)
     }
@@ -178,19 +187,23 @@ public struct Resource: Hashable, Codable, Sendable {
         public var description: String?
         /// The resource MIME type
         public var mimeType: String?
+        /// Optional set of sized icons that the client can display in a user interface
+        public var icons: [Icon]?
 
         public init(
             uriTemplate: String,
             name: String,
             title: String? = nil,
             description: String? = nil,
-            mimeType: String? = nil
+            mimeType: String? = nil,
+            icons: [Icon]? = nil
         ) {
             self.uriTemplate = uriTemplate
             self.name = name
             self.title = title
             self.description = description
             self.mimeType = mimeType
+            self.icons = icons
         }
     }
 

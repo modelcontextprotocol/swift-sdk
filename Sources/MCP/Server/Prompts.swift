@@ -7,7 +7,7 @@ import Foundation
 /// Clients can discover available prompts, retrieve their contents,
 /// and provide arguments to customize them.
 ///
-/// - SeeAlso: https://spec.modelcontextprotocol.io/specification/2024-11-05/server/prompts/
+/// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/server/prompts/
 public struct Prompt: Hashable, Codable, Sendable {
     /// The prompt name
     public let name: String
@@ -17,6 +17,8 @@ public struct Prompt: Hashable, Codable, Sendable {
     public let description: String?
     /// The prompt arguments
     public let arguments: [Argument]?
+    /// Optional set of sized icons that the client can display in a user interface
+    public var icons: [Icon]?
     /// Optional metadata about this prompt
     public var _meta: [String: Value]?
 
@@ -25,17 +27,19 @@ public struct Prompt: Hashable, Codable, Sendable {
         title: String? = nil,
         description: String? = nil,
         arguments: [Argument]? = nil,
+        icons: [Icon]? = nil,
         meta: [String: Value]? = nil
     ) {
         self.name = name
         self.title = title
         self.description = description
         self.arguments = arguments
+        self.icons = icons
         self._meta = meta
     }
 
     private enum CodingKeys: String, CodingKey {
-        case name, title, description, arguments
+        case name, title, description, arguments, icons
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -44,6 +48,7 @@ public struct Prompt: Hashable, Codable, Sendable {
         try container.encodeIfPresent(title, forKey: .title)
         try container.encodeIfPresent(description, forKey: .description)
         try container.encodeIfPresent(arguments, forKey: .arguments)
+        try container.encodeIfPresent(icons, forKey: . icons)
 
         var dynamicContainer = encoder.container(keyedBy: DynamicCodingKey.self)
         try encodeMeta(_meta, to: &dynamicContainer)
@@ -55,6 +60,7 @@ public struct Prompt: Hashable, Codable, Sendable {
         title = try container.decodeIfPresent(String.self, forKey: .title)
         description = try container.decodeIfPresent(String.self, forKey: .description)
         arguments = try container.decodeIfPresent([Argument].self, forKey: .arguments)
+        icons = try container.decodeIfPresent([Icon].self, forKey: . icons)
 
         let dynamicContainer = try decoder.container(keyedBy: DynamicCodingKey.self)
         _meta = try decodeMeta(from: dynamicContainer)

@@ -7,7 +7,7 @@ import Foundation
 /// Each tool is uniquely identified by a name and includes metadata
 /// describing its schema.
 ///
-/// - SeeAlso: https://modelcontextprotocol.io/specification/2025-06-18/server/tools
+/// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/server/tools/
 public struct Tool: Hashable, Codable, Sendable {
     /// The tool name
     public let name: String
@@ -17,6 +17,8 @@ public struct Tool: Hashable, Codable, Sendable {
     public let description: String?
     /// The tool input schema
     public let inputSchema: Value
+    /// Optional set of sized icons that the client can display in a user interface
+    public var icons: [Icon]?
     /// The tool output schema, defining expected output structure
     public let outputSchema: Value?
     /// Metadata fields for the tool (see spec for _meta usage)
@@ -88,7 +90,7 @@ public struct Tool: Hashable, Codable, Sendable {
     /// Annotations that provide display-facing and operational information
     public var annotations: Annotations
 
-    /// Initialize a tool with a name, description, input schema, and annotations
+    /// Initialize a tool with a name, description, input schema, annotations, and optional icons
     public init(
         name: String,
         title: String? = nil,
@@ -96,6 +98,7 @@ public struct Tool: Hashable, Codable, Sendable {
         inputSchema: Value,
         annotations: Annotations = nil,
         outputSchema: Value? = nil,
+        icons: [Icon]? = nil,
         _meta: [String: Value]? = nil
     ) {
         self.name = name
@@ -105,6 +108,7 @@ public struct Tool: Hashable, Codable, Sendable {
         self.outputSchema = outputSchema
         self.annotations = annotations
         self._meta = _meta
+        self.icons = icons
     }
 
     /// Content types that can be returned by a tool
@@ -232,6 +236,7 @@ public struct Tool: Hashable, Codable, Sendable {
         case inputSchema
         case outputSchema
         case annotations
+        case icons
     }
 
     public init(from decoder: Decoder) throws {
@@ -243,6 +248,7 @@ public struct Tool: Hashable, Codable, Sendable {
         outputSchema = try container.decodeIfPresent(Value.self, forKey: .outputSchema)
         annotations =
             try container.decodeIfPresent(Tool.Annotations.self, forKey: .annotations) ?? .init()
+        icons = try container.decodeIfPresent([Icon].self, forKey: .icons)
         let metaContainer = try decoder.container(keyedBy: DynamicCodingKey.self)
         _meta = try decodeMeta(from: metaContainer)
     }
@@ -257,6 +263,7 @@ public struct Tool: Hashable, Codable, Sendable {
         if !annotations.isEmpty {
             try container.encode(annotations, forKey: .annotations)
         }
+        try container.encodeIfPresent(icons, forKey: .icons)
         var metaContainer = encoder.container(keyedBy: DynamicCodingKey.self)
         try encodeMeta(_meta, to: &metaContainer)
     }

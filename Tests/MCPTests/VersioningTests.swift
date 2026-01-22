@@ -41,7 +41,7 @@ struct VersioningTests {
 
     @Test("Server's supported versions correctly defined")
     func testServerSupportedVersions() {
-        #expect(Version.supported.contains("2025-06-18"))
+        #expect(Version.supported.contains("2025-11-25"))
         #expect(Version.supported.contains("2025-03-26"))
         #expect(Version.supported.contains("2024-11-05"))
         #expect(Version.supported.count == 3)
@@ -49,6 +49,13 @@ struct VersioningTests {
 
     @Test("Server's latest version is correct")
     func testServerLatestVersion() {
-        #expect(Version.latest == "2025-06-18")
+        #expect(Version.latest == "2025-11-25")
+    }
+
+    @Test("Client requests new 2025-11-25 version")
+    func testClientRequests2025_11_25Version() {
+        let clientVersion = "2025-11-25"
+        let negotiatedVersion = Version.negotiate(clientRequestedVersion: clientVersion)
+        #expect(negotiatedVersion == "2025-11-25")
     }
 }
