@@ -76,7 +76,7 @@ struct ProgressTests {
 
     @Test("RequestMeta empty initialization")
     func testRequestMetaEmptyInit() throws {
-        let meta = RequestMeta()
+        let meta = Metadata()
 
         #expect(meta.progressToken == nil)
         #expect(meta.fields.isEmpty)
@@ -85,7 +85,7 @@ struct ProgressTests {
     @Test("RequestMeta with progress token")
     func testRequestMetaWithProgressToken() throws {
         let token = ProgressToken.string("my-token")
-        let meta = RequestMeta(progressToken: token)
+        let meta = Metadata(progressToken: token)
 
         #expect(meta.progressToken == token)
         #expect(meta.fields["progressToken"] == .string("my-token"))
@@ -94,7 +94,7 @@ struct ProgressTests {
     @Test("RequestMeta with integer progress token")
     func testRequestMetaWithIntegerProgressToken() throws {
         let token = ProgressToken.integer(42)
-        let meta = RequestMeta(progressToken: token)
+        let meta = Metadata(progressToken: token)
 
         #expect(meta.progressToken == token)
         #expect(meta.fields["progressToken"] == .int(42))
@@ -103,26 +103,26 @@ struct ProgressTests {
     @Test("RequestMeta encoding with progress token")
     func testRequestMetaEncodingWithProgressToken() throws {
         let token = ProgressToken.string("my-token")
-        let meta = RequestMeta(progressToken: token)
+        let meta = Metadata(progressToken: token)
 
         let encoder = JSONEncoder()
         let decoder = JSONDecoder()
 
         let data = try encoder.encode(meta)
-        let decoded = try decoder.decode(RequestMeta.self, from: data)
+        let decoded = try decoder.decode(Metadata.self, from: data)
 
         #expect(decoded.progressToken == token)
     }
 
     @Test("RequestMeta encoding without progress token")
     func testRequestMetaEncodingWithoutProgressToken() throws {
-        let meta = RequestMeta()
+        let meta = Metadata()
 
         let encoder = JSONEncoder()
         let decoder = JSONDecoder()
 
         let data = try encoder.encode(meta)
-        let decoded = try decoder.decode(RequestMeta.self, from: data)
+        let decoded = try decoder.decode(Metadata.self, from: data)
 
         #expect(decoded.progressToken == nil)
     }
@@ -130,7 +130,7 @@ struct ProgressTests {
     @Test("RequestMeta JSON representation with progress token")
     func testRequestMetaJSONWithProgressToken() throws {
         let token = ProgressToken.string("test-token")
-        let meta = RequestMeta(progressToken: token)
+        let meta = Metadata(progressToken: token)
 
         let encoder = JSONEncoder()
         let data = try encoder.encode(meta)
@@ -142,7 +142,7 @@ struct ProgressTests {
 
     @Test("RequestMeta with additional fields")
     func testRequestMetaWithAdditionalFields() throws {
-        let meta = RequestMeta(
+        let meta = Metadata(
             progressToken: .string("token"),
             additionalFields: ["customField": .string("customValue")]
         )
@@ -151,7 +151,7 @@ struct ProgressTests {
         let decoder = JSONDecoder()
 
         let data = try encoder.encode(meta)
-        let decoded = try decoder.decode(RequestMeta.self, from: data)
+        let decoded = try decoder.decode(Metadata.self, from: data)
 
         #expect(decoded.progressToken == .string("token"))
         #expect(decoded.fields["customField"] == .string("customValue"))
@@ -159,7 +159,7 @@ struct ProgressTests {
 
     @Test("RequestMeta with only additional fields")
     func testRequestMetaWithOnlyAdditionalFields() throws {
-        let meta = RequestMeta(additionalFields: [
+        let meta = Metadata(additionalFields: [
             "customKey": .int(123),
             "anotherKey": .string("value")
         ])
@@ -259,7 +259,7 @@ struct ProgressTests {
     @Test("CallTool parameters with progress token")
     func testCallToolParametersWithProgressToken() throws {
         let token = ProgressToken.string("call-tool-token")
-        let meta = RequestMeta(progressToken: token)
+        let meta = Metadata(progressToken: token)
         let params = CallTool.Parameters(name: "test_tool", arguments: ["key": "value"], meta: meta)
 
         let encoder = JSONEncoder()
@@ -282,7 +282,7 @@ struct ProgressTests {
     @Test("CallTool request encoding with progress token")
     func testCallToolRequestEncodingWithProgressToken() throws {
         let token = ProgressToken.string("request-token")
-        let meta = RequestMeta(progressToken: token)
+        let meta = Metadata(progressToken: token)
         let request = CallTool.request(.init(name: "my_tool", arguments: ["arg": 42], meta: meta))
 
         let encoder = JSONEncoder()
@@ -380,7 +380,7 @@ struct ProgressTests {
 
         try await server.start(transport: pair.server)
         try await client.connect(transport: pair.client)
-        let result = try await client.callTool(name: "random", meta: RequestMeta(progressToken: token))
+        let result = try await client.callTool(name: "random", meta: Metadata(progressToken: token))
 
         #expect(progresses == [20, 40, 60, 80, 100])
         #expect(result.0 == expectedToolCallResult.content)

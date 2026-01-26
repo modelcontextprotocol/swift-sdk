@@ -91,7 +91,11 @@ public enum ProgressToken: Hashable, Codable, Sendable {
 /// which can contain a progress token for receiving progress notifications.
 ///
 /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/progress
-public struct RequestMeta: Hashable, Codable, Sendable {
+public struct Metadata: Hashable, Codable, Sendable {
+    public subscript(_ key: String) -> Value? {
+        fields[key]
+    }
+
     /// The underlying fields dictionary.
     public var fields: [String: Value]
 

@@ -348,11 +348,10 @@ struct ClientTests {
         nonisolated(unsafe) var resultTask1: Task<Ping.Result, Swift.Error>?
         nonisolated(unsafe) var resultTask2: Task<Ping.Result, Swift.Error>?
 
-        let batchBody: @Sendable (Client.Batch) async throws -> Void = { batch in
-            await taskCollector.append(try await batch.addRequest(request1))
-            await taskCollector.append(try await batch.addRequest(request2))
+        try await client.withBatch { batch in
+            resultTask1 = try await batch.addRequest(request1)
+            resultTask2 = try await batch.addRequest(request2)
         }
-        try await client.withBatch(body: batchBody)
 
         // Check if batch message was sent (after initialize and initialized notification)
         let sentMessages = await transport.sentMessages
@@ -381,15 +380,11 @@ struct ClientTests {
         // Queue the batch response
         try await transport.queue(batch: [anyResponse1, anyResponse2])
 
-        let resultTasks = await taskCollector.snapshot()
-        #expect(resultTasks.count == 2)
-        guard resultTasks.count == 2 else {
+        // Wait for results and verify
+        guard let task1 = resultTask1, let task2 = resultTask2 else {
             #expect(Bool(false), "Result tasks not created")
             return
         }
-
-        let task1 = resultTasks[0]
-        let task2 = resultTasks[1]
 
         _ = try await task1.value  // Should succeed
         _ = try await task2.value  // Should succeed

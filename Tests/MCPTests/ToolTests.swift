@@ -259,7 +259,7 @@ struct ToolTests {
         let content = Tool.Content.image(
             data: "base64data",
             mimeType: "image/png",
-            metadata: ["width": "100", "height": "100"]
+            metadata: .init(additionalFields: ["width": "100", "height": "100"])
         )
         let encoder = JSONEncoder()
         let decoder = JSONDecoder()

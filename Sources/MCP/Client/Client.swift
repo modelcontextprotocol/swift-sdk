@@ -636,7 +636,7 @@ public actor Client {
     public func callTool(
         name: String,
         arguments: [String: Value]? = nil,
-        meta: RequestMeta? = nil
+        meta: Metadata? = nil
     ) async throws -> (
         content: [Tool.Content], isError: Bool?
     ) {

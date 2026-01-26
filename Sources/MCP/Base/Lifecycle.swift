@@ -46,27 +46,24 @@ public enum Initialize: Method {
         public let capabilities: Server.Capabilities
         public let serverInfo: Server.Info
         public let instructions: String?
-        public var _meta: [String: Value]?
-        public var extraFields: [String: Value]?
+        public var _meta: Metadata?
 
         public init(
             protocolVersion: String,
             capabilities: Server.Capabilities,
             serverInfo: Server.Info,
             instructions: String? = nil,
-            _meta: [String: Value]? = nil,
-            extraFields: [String: Value]? = nil
+            _meta: Metadata? = nil,
         ) {
             self.protocolVersion = protocolVersion
             self.capabilities = capabilities
             self.serverInfo = serverInfo
             self.instructions = instructions
             self._meta = _meta
-            self.extraFields = extraFields
         }
 
         private enum CodingKeys: String, CodingKey, CaseIterable {
-            case protocolVersion, capabilities, serverInfo, instructions
+            case protocolVersion, capabilities, serverInfo, instructions, _meta
         }
 
         public func encode(to encoder: Encoder) throws {
@@ -75,12 +72,7 @@ public enum Initialize: Method {
             try container.encode(capabilities, forKey: .capabilities)
             try container.encode(serverInfo, forKey: .serverInfo)
             try container.encodeIfPresent(instructions, forKey: .instructions)
-
-            var dynamicContainer = encoder.container(keyedBy: DynamicCodingKey.self)
-            try encodeMeta(_meta, to: &dynamicContainer)
-            try encodeExtraFields(
-                extraFields, to: &dynamicContainer,
-                excluding: Set(CodingKeys.allCases.map(\.rawValue)))
+            try container.encodeIfPresent(_meta, forKey: ._meta)
         }
 
         public init(from decoder: Decoder) throws {
@@ -89,11 +81,7 @@ public enum Initialize: Method {
             capabilities = try container.decode(Server.Capabilities.self, forKey: .capabilities)
             serverInfo = try container.decode(Server.Info.self, forKey: .serverInfo)
             instructions = try container.decodeIfPresent(String.self, forKey: .instructions)
-
-            let dynamicContainer = try decoder.container(keyedBy: DynamicCodingKey.self)
-            _meta = try decodeMeta(from: dynamicContainer)
-            extraFields = try decodeExtraFields(
-                from: dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
+            _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
         }
     }
 }

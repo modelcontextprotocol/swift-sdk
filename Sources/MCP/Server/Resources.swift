@@ -23,7 +23,7 @@ public struct Resource: Hashable, Codable, Sendable {
     /// Optional set of sized icons that the client can display in a user interface
     public var icons: [Icon]?
     /// Metadata fields for the resource (see spec for _meta usage)
-    public var _meta: [String: Value]?
+    public var _meta: Metadata?
 
     public init(
         name: String,
@@ -32,8 +32,8 @@ public struct Resource: Hashable, Codable, Sendable {
         description: String? = nil,
         mimeType: String? = nil,
         metadata: [String: String]? = nil,
-        _meta: [String: Value]? = nil,
-        icons: [Icon]? = nil
+        icons: [Icon]? = nil,
+        _meta: Metadata? = nil,
     ) {
         self.name = name
         self.title = title
@@ -41,8 +41,8 @@ public struct Resource: Hashable, Codable, Sendable {
         self.description = description
         self.mimeType = mimeType
         self.metadata = metadata
-        self._meta = _meta
         self.icons = icons
+        self._meta = _meta
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -53,6 +53,7 @@ public struct Resource: Hashable, Codable, Sendable {
         case mimeType
         case metadata
         case icons
+        case _meta
     }
 
     public init(from decoder: Decoder) throws {
@@ -64,9 +65,7 @@ public struct Resource: Hashable, Codable, Sendable {
         mimeType = try container.decodeIfPresent(String.self, forKey: .mimeType)
         metadata = try container.decodeIfPresent([String: String].self, forKey: .metadata)
         icons = try container.decodeIfPresent([Icon].self, forKey: .icons)
-
-        let metaContainer = try decoder.container(keyedBy: DynamicCodingKey.self)
-        _meta = try decodeMeta(from: metaContainer)
+        _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -78,9 +77,7 @@ public struct Resource: Hashable, Codable, Sendable {
         try container.encodeIfPresent(mimeType, forKey: .mimeType)
         try container.encodeIfPresent(metadata, forKey: .metadata)
         try container.encodeIfPresent(icons, forKey: .icons)
-
-        var metaContainer = encoder.container(keyedBy: DynamicCodingKey.self)
-        try encodeMeta(_meta, to: &metaContainer)
+        try container.encodeIfPresent(_meta, forKey: ._meta)
     }
 
     /// Content of a resource.
@@ -94,13 +91,13 @@ public struct Resource: Hashable, Codable, Sendable {
         /// The resource binary content
         public let blob: String?
         /// Metadata fields (see spec for _meta usage)
-        public var _meta: [String: Value]?
+        public var _meta: Metadata?
 
         public static func text(
             _ content: String,
             uri: String,
             mimeType: String? = nil,
-            _meta: [String: Value]? = nil
+            _meta: Metadata? = nil
         ) -> Self {
             .init(uri: uri, mimeType: mimeType, text: content, _meta: _meta)
         }
@@ -109,7 +106,7 @@ public struct Resource: Hashable, Codable, Sendable {
             _ data: Data,
             uri: String,
             mimeType: String? = nil,
-            _meta: [String: Value]? = nil
+            _meta: Metadata? = nil
         ) -> Self {
             .init(
                 uri: uri,
@@ -123,7 +120,7 @@ public struct Resource: Hashable, Codable, Sendable {
             uri: String,
             mimeType: String? = nil,
             text: String? = nil,
-            _meta: [String: Value]? = nil
+            _meta: Metadata? = nil
         ) {
             self.uri = uri
             self.mimeType = mimeType
@@ -136,7 +133,7 @@ public struct Resource: Hashable, Codable, Sendable {
             uri: String,
             mimeType: String? = nil,
             blob: String,
-            _meta: [String: Value]? = nil
+            _meta: Metadata? = nil
         ) {
             self.uri = uri
             self.mimeType = mimeType
@@ -150,6 +147,7 @@ public struct Resource: Hashable, Codable, Sendable {
             case mimeType
             case text
             case blob
+            case _meta
         }
 
         public init(from decoder: Decoder) throws {
@@ -158,8 +156,7 @@ public struct Resource: Hashable, Codable, Sendable {
             mimeType = try container.decodeIfPresent(String.self, forKey: .mimeType)
             text = try container.decodeIfPresent(String.self, forKey: .text)
             blob = try container.decodeIfPresent(String.self, forKey: .blob)
-            let metaContainer = try decoder.container(keyedBy: DynamicCodingKey.self)
-            _meta = try decodeMeta(from: metaContainer)
+            _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
         }
 
         public func encode(to encoder: Encoder) throws {
@@ -168,10 +165,7 @@ public struct Resource: Hashable, Codable, Sendable {
             try container.encodeIfPresent(mimeType, forKey: .mimeType)
             try container.encodeIfPresent(text, forKey: .text)
             try container.encodeIfPresent(blob, forKey: .blob)
-
-            // Encode _meta
-            var metaContainer = encoder.container(keyedBy: DynamicCodingKey.self)
-            try encodeMeta(_meta, to: &metaContainer)
+            try container.encodeIfPresent(_meta, forKey: ._meta)
         }
     }
 
@@ -258,46 +252,34 @@ public enum ListResources: Method {
     public struct Result: Hashable, Codable, Sendable {
         public let resources: [Resource]
         public let nextCursor: String?
-        public var _meta: [String: Value]?
-        public var extraFields: [String: Value]?
+        public var _meta: Metadata?
 
         public init(
             resources: [Resource],
             nextCursor: String? = nil,
-            _meta: [String: Value]? = nil,
-            extraFields: [String: Value]? = nil
+            _meta: Metadata? = nil
         ) {
             self.resources = resources
             self.nextCursor = nextCursor
             self._meta = _meta
-            self.extraFields = extraFields
         }
 
         private enum CodingKeys: String, CodingKey, CaseIterable {
-            case resources, nextCursor
+            case resources, nextCursor, _meta
         }
 
         public func encode(to encoder: Encoder) throws {
             var container = encoder.container(keyedBy: CodingKeys.self)
             try container.encode(resources, forKey: .resources)
             try container.encodeIfPresent(nextCursor, forKey: .nextCursor)
-
-            var dynamicContainer = encoder.container(keyedBy: DynamicCodingKey.self)
-            try encodeMeta(_meta, to: &dynamicContainer)
-            try encodeExtraFields(
-                extraFields, to: &dynamicContainer,
-                excluding: Set(CodingKeys.allCases.map(\.rawValue)))
+            try container.encodeIfPresent(_meta, forKey: ._meta)
         }
 
         public init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             resources = try container.decode([Resource].self, forKey: .resources)
             nextCursor = try container.decodeIfPresent(String.self, forKey: .nextCursor)
-
-            let dynamicContainer = try decoder.container(keyedBy: DynamicCodingKey.self)
-            _meta = try decodeMeta(from: dynamicContainer)
-            extraFields = try decodeExtraFields(
-                from: dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
+            _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
         }
     }
 }
@@ -318,43 +300,30 @@ public enum ReadResource: Method {
     public struct Result: Hashable, Codable, Sendable {
         public let contents: [Resource.Content]
         /// Optional metadata about this result
-        public var _meta: [String: Value]?
-        /// Extra fields for this result (index signature)
-        public var extraFields: [String: Value]?
+        public var _meta: Metadata?
 
         public init(
             contents: [Resource.Content],
-            _meta: [String: Value]? = nil,
-            extraFields: [String: Value]? = nil
+            _meta: Metadata? = nil
         ) {
             self.contents = contents
             self._meta = _meta
-            self.extraFields = extraFields
         }
 
         private enum CodingKeys: String, CodingKey, CaseIterable {
-            case contents
+            case contents, _meta
         }
 
         public func encode(to encoder: Encoder) throws {
             var container = encoder.container(keyedBy: CodingKeys.self)
             try container.encode(contents, forKey: .contents)
-
-            var dynamicContainer = encoder.container(keyedBy: DynamicCodingKey.self)
-            try encodeMeta(_meta, to: &dynamicContainer)
-            try encodeExtraFields(
-                extraFields, to: &dynamicContainer,
-                excluding: Set(CodingKeys.allCases.map(\.rawValue)))
+            try container.encodeIfPresent(_meta, forKey: ._meta)
         }
 
         public init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             contents = try container.decode([Resource.Content].self, forKey: .contents)
-
-            let dynamicContainer = try decoder.container(keyedBy: DynamicCodingKey.self)
-            _meta = try decodeMeta(from: dynamicContainer)
-            extraFields = try decodeExtraFields(
-                from: dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
+            _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
         }
     }
 }
@@ -380,48 +349,36 @@ public enum ListResourceTemplates: Method {
         public let templates: [Resource.Template]
         public let nextCursor: String?
         /// Optional metadata about this result
-        public var _meta: [String: Value]?
-        /// Extra fields for this result (index signature)
-        public var extraFields: [String: Value]?
+        public var _meta: Metadata?
 
         public init(
             templates: [Resource.Template],
             nextCursor: String? = nil,
-            _meta: [String: Value]? = nil,
-            extraFields: [String: Value]? = nil
+            _meta: Metadata? = nil
         ) {
             self.templates = templates
             self.nextCursor = nextCursor
             self._meta = _meta
-            self.extraFields = extraFields
         }
 
         private enum CodingKeys: String, CodingKey, CaseIterable {
             case templates = "resourceTemplates"
             case nextCursor
+            case _meta
         }
 
         public func encode(to encoder: Encoder) throws {
             var container = encoder.container(keyedBy: CodingKeys.self)
             try container.encode(templates, forKey: .templates)
             try container.encodeIfPresent(nextCursor, forKey: .nextCursor)
-
-            var dynamicContainer = encoder.container(keyedBy: DynamicCodingKey.self)
-            try encodeMeta(_meta, to: &dynamicContainer)
-            try encodeExtraFields(
-                extraFields, to: &dynamicContainer,
-                excluding: Set(CodingKeys.allCases.map(\.rawValue)))
+            try container.encodeIfPresent(_meta, forKey: ._meta)
         }
 
         public init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             templates = try container.decode([Resource.Template].self, forKey: .templates)
             nextCursor = try container.decodeIfPresent(String.self, forKey: .nextCursor)
-
-            let dynamicContainer = try decoder.container(keyedBy: DynamicCodingKey.self)
-            _meta = try decodeMeta(from: dynamicContainer)
-            extraFields = try decodeExtraFields(
-                from: dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
+            _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
         }
     }
 }
