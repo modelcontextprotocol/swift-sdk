@@ -9,20 +9,24 @@ struct PromptTests {
     func testPromptInitialization() throws {
         let argument = Prompt.Argument(
             name: "test_arg",
+            title: "Test Argument Title",
             description: "A test argument",
             required: true
         )
 
         let prompt = Prompt(
             name: "test_prompt",
+            title: "Test Prompt Title",
             description: "A test prompt",
             arguments: [argument]
         )
 
         #expect(prompt.name == "test_prompt")
+        #expect(prompt.title == "Test Prompt Title")
         #expect(prompt.description == "A test prompt")
         #expect(prompt.arguments?.count == 1)
         #expect(prompt.arguments?[0].name == "test_arg")
+        #expect(prompt.arguments?[0].title == "Test Argument Title")
         #expect(prompt.arguments?[0].description == "A test argument")
         #expect(prompt.arguments?[0].required == true)
     }
@@ -104,8 +108,9 @@ struct PromptTests {
 
     @Test("Prompt Reference validation")
     func testPromptReference() throws {
-        let reference = Prompt.Reference(name: "test_prompt")
+        let reference = Prompt.Reference(name: "test_prompt", title: "Test Prompt Title")
         #expect(reference.name == "test_prompt")
+        #expect(reference.title == "Test Prompt Title")
 
         let encoder = JSONEncoder()
         let decoder = JSONDecoder()
@@ -114,6 +119,7 @@ struct PromptTests {
         let decoded = try decoder.decode(Prompt.Reference.self, from: data)
 
         #expect(decoded.name == "test_prompt")
+        #expect(decoded.title == "Test Prompt Title")
     }
 
     @Test("GetPrompt parameters validation")

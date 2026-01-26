@@ -34,11 +34,14 @@ public actor Client {
     public struct Info: Hashable, Codable, Sendable {
         /// The client name
         public var name: String
+        /// A human-readable title for display purposes
+        public var title: String?
         /// The client version
         public var version: String
 
-        public init(name: String, version: String) {
+        public init(name: String, version: String, title: String? = nil) {
             self.name = name
+            self.title = title
             self.version = version
         }
     }
@@ -60,8 +63,15 @@ public actor Client {
             public init() {}
         }
 
+        /// The elicitation capabilities
+        public struct Elicitation: Hashable, Codable, Sendable {
+            public init() {}
+        }
+
         /// Whether the client supports sampling
         public var sampling: Sampling?
+        /// Whether the client supports elicitation
+        public var elicitation: Elicitation?
         /// Experimental features supported by the client
         public var experimental: [String: String]?
         /// Whether the client supports roots
@@ -69,10 +79,12 @@ public actor Client {
 
         public init(
             sampling: Sampling? = nil,
+            elicitation: Elicitation? = nil,
             experimental: [String: String]? = nil,
             roots: Capabilities.Roots? = nil
         ) {
             self.sampling = sampling
+            self.elicitation = elicitation
             self.experimental = experimental
             self.roots = roots
         }
@@ -91,6 +103,8 @@ public actor Client {
     private let clientInfo: Client.Info
     /// The client name
     public nonisolated var name: String { clientInfo.name }
+    /// A human-readable client title
+    public nonisolated var title: String? { clientInfo.title }
     /// The client version
     public nonisolated var version: String { clientInfo.version }
 
@@ -160,9 +174,10 @@ public actor Client {
     public init(
         name: String,
         version: String,
+        title: String? = nil,
         configuration: Configuration = .default
     ) {
-        self.clientInfo = Client.Info(name: name, version: version)
+        self.clientInfo = Client.Info(name: name, version: version, title: title)
         self.capabilities = Capabilities()
         self.configuration = configuration
     }
@@ -636,7 +651,8 @@ public actor Client {
     /// - SeeAlso: https://modelcontextprotocol.io/docs/concepts/sampling#how-sampling-works
     @discardableResult
     public func withSamplingHandler(
-        _ handler: @escaping @Sendable (CreateSamplingMessage.Parameters) async throws ->
+        _ handler:
+            @escaping @Sendable (CreateSamplingMessage.Parameters) async throws ->
             CreateSamplingMessage.Result
     ) -> Self {
         // Note: This would require extending the client architecture to handle incoming requests from servers.
@@ -653,6 +669,28 @@ public actor Client {
         // This would register the handler similar to how servers register method handlers:
         // methodHandlers[CreateSamplingMessage.name] = TypedRequestHandler(handler)
 
+        return self
+    }
+
+    // MARK: - Elicitation
+
+    /// Register a handler for elicitation requests from servers
+    ///
+    /// The elicitation flow lets servers collect structured input from users during
+    /// ongoing interactions. Clients remain in control by mediating the prompt,
+    /// collecting the response, and returning the chosen action to the server.
+    ///
+    /// - Parameter handler: A closure that processes elicitation requests and returns user actions
+    /// - Returns: Self for method chaining
+    /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-06-18/client/elicitation
+    @discardableResult
+    public func withElicitationHandler(
+        _ handler:
+            @escaping @Sendable (CreateElicitation.Parameters) async throws ->
+            CreateElicitation.Result
+    ) -> Self {
+        // Supporting server-initiated requests requires bidirectional transports.
+        // Once available, this handler will be wired into the request routing path.
         return self
     }
 

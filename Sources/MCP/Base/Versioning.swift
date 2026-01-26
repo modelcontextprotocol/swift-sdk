@@ -4,10 +4,11 @@ import Foundation
 /// following the format YYYY-MM-DD, to indicate
 /// the last date backwards incompatible changes were made.
 ///
-/// - SeeAlso: https://spec.modelcontextprotocol.io/specification/2025-03-26/
+/// - SeeAlso: https://spec.modelcontextprotocol.io/specification/2025-06-18/
 public enum Version {
     /// All protocol versions supported by this implementation, ordered from newest to oldest.
     static let supported: Set<String> = [
+        "2025-06-18",
         "2025-03-26",
         "2024-11-05",
     ]
