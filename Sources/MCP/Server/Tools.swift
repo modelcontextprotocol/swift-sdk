@@ -7,14 +7,20 @@ import Foundation
 /// Each tool is uniquely identified by a name and includes metadata
 /// describing its schema.
 ///
-/// - SeeAlso: https://spec.modelcontextprotocol.io/specification/2024-11-05/server/tools/
+/// - SeeAlso: https://modelcontextprotocol.io/specification/2025-06-18/server/tools
 public struct Tool: Hashable, Codable, Sendable {
     /// The tool name
     public let name: String
+    /// The human-readable name of the tool for display purposes.
+    public let title: String?
     /// The tool description
     public let description: String?
     /// The tool input schema
     public let inputSchema: Value
+    /// The tool output schema, defining expected output structure
+    public let outputSchema: Value?
+    /// Metadata fields for the tool (see spec for _meta usage)
+    public var _meta: [String: Value]?
 
     /// Annotations that provide display-facing and operational information for a Tool.
     ///
@@ -85,14 +91,20 @@ public struct Tool: Hashable, Codable, Sendable {
     /// Initialize a tool with a name, description, input schema, and annotations
     public init(
         name: String,
+        title: String? = nil,
         description: String?,
         inputSchema: Value,
-        annotations: Annotations = nil
+        annotations: Annotations = nil,
+        outputSchema: Value? = nil,
+        _meta: [String: Value]? = nil
     ) {
         self.name = name
+        self.title = title
         self.description = description
         self.inputSchema = inputSchema
+        self.outputSchema = outputSchema
         self.annotations = annotations
+        self._meta = _meta
     }
 
     /// Content types that can be returned by a tool
@@ -104,15 +116,29 @@ public struct Tool: Hashable, Codable, Sendable {
         /// Audio content
         case audio(data: String, mimeType: String)
         /// Embedded resource content
-        case resource(uri: String, mimeType: String, text: String?)
+        case resource(
+            uri: String, mimeType: String, text: String?, title: String? = nil,
+            annotations: Resource.Annotations? = nil
+        )
+        /// Resource link
+        case resourceLink(
+            uri: String, name: String, title: String? = nil, description: String? = nil,
+            mimeType: String? = nil,
+            annotations: Resource.Annotations? = nil
+        )
 
         private enum CodingKeys: String, CodingKey {
             case type
             case text
             case image
             case resource
+            case resourceLink
             case audio
             case uri
+            case name
+            case title
+            case description
+            case annotations
             case mimeType
             case data
             case metadata
@@ -138,9 +164,25 @@ public struct Tool: Hashable, Codable, Sendable {
                 self = .audio(data: data, mimeType: mimeType)
             case "resource":
                 let uri = try container.decode(String.self, forKey: .uri)
+                let title = try container.decodeIfPresent(String.self, forKey: .title)
                 let mimeType = try container.decode(String.self, forKey: .mimeType)
                 let text = try container.decodeIfPresent(String.self, forKey: .text)
-                self = .resource(uri: uri, mimeType: mimeType, text: text)
+                let annotations = try container.decodeIfPresent(
+                    Resource.Annotations.self, forKey: .annotations)
+                self = .resource(
+                    uri: uri, mimeType: mimeType, text: text, title: title, annotations: annotations
+                )
+            case "resourceLink":
+                let uri = try container.decode(String.self, forKey: .uri)
+                let name = try container.decode(String.self, forKey: .name)
+                let title = try container.decodeIfPresent(String.self, forKey: .title)
+                let description = try container.decodeIfPresent(String.self, forKey: .description)
+                let mimeType = try container.decodeIfPresent(String.self, forKey: .mimeType)
+                let annotations = try container.decodeIfPresent(
+                    Resource.Annotations.self, forKey: .annotations)
+                self = .resourceLink(
+                    uri: uri, name: name, title: title, description: description,
+                    mimeType: mimeType, annotations: annotations)
             default:
                 throw DecodingError.dataCorruptedError(
                     forKey: .type, in: container, debugDescription: "Unknown tool content type")
@@ -163,46 +205,67 @@ public struct Tool: Hashable, Codable, Sendable {
                 try container.encode("audio", forKey: .type)
                 try container.encode(data, forKey: .data)
                 try container.encode(mimeType, forKey: .mimeType)
-            case .resource(let uri, let mimeType, let text):
+            case .resource(let uri, let mimeType, let text, let title, let annotations):
                 try container.encode("resource", forKey: .type)
                 try container.encode(uri, forKey: .uri)
                 try container.encode(mimeType, forKey: .mimeType)
                 try container.encodeIfPresent(text, forKey: .text)
+                try container.encodeIfPresent(title, forKey: .title)
+                try container.encodeIfPresent(annotations, forKey: .annotations)
+            case .resourceLink(
+                let uri, let name, let title, let description, let mimeType, let annotations):
+                try container.encode("resourceLink", forKey: .type)
+                try container.encode(uri, forKey: .uri)
+                try container.encode(name, forKey: .name)
+                try container.encodeIfPresent(title, forKey: .title)
+                try container.encodeIfPresent(description, forKey: .description)
+                try container.encodeIfPresent(mimeType, forKey: .mimeType)
+                try container.encodeIfPresent(annotations, forKey: .annotations)
             }
         }
     }
 
     private enum CodingKeys: String, CodingKey {
         case name
+        case title
         case description
         case inputSchema
+        case outputSchema
         case annotations
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         name = try container.decode(String.self, forKey: .name)
+        title = try container.decodeIfPresent(String.self, forKey: .title)
         description = try container.decodeIfPresent(String.self, forKey: .description)
         inputSchema = try container.decode(Value.self, forKey: .inputSchema)
+        outputSchema = try container.decodeIfPresent(Value.self, forKey: .outputSchema)
         annotations =
             try container.decodeIfPresent(Tool.Annotations.self, forKey: .annotations) ?? .init()
+        let metaContainer = try decoder.container(keyedBy: DynamicCodingKey.self)
+        _meta = try decodeMeta(from: metaContainer)
     }
 
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(name, forKey: .name)
+        try container.encodeIfPresent(title, forKey: .title)
         try container.encode(description, forKey: .description)
         try container.encode(inputSchema, forKey: .inputSchema)
+        try container.encodeIfPresent(outputSchema, forKey: .outputSchema)
         if !annotations.isEmpty {
             try container.encode(annotations, forKey: .annotations)
         }
+        var metaContainer = encoder.container(keyedBy: DynamicCodingKey.self)
+        try encodeMeta(_meta, to: &metaContainer)
     }
 }
 
 // MARK: -
 
 /// To discover available tools, clients send a `tools/list` request.
-/// - SeeAlso: https://spec.modelcontextprotocol.io/specification/2024-11-05/server/tools/#listing-tools
+/// - SeeAlso: https://spec.modelcontextprotocol.io/specification/2025-06-18/server/tools/#listing-tools
 public enum ListTools: Method {
     public static let name = "tools/list"
 
@@ -221,16 +284,52 @@ public enum ListTools: Method {
     public struct Result: Hashable, Codable, Sendable {
         public let tools: [Tool]
         public let nextCursor: String?
+        public var _meta: [String: Value]?
+        public var extraFields: [String: Value]?
 
-        public init(tools: [Tool], nextCursor: String? = nil) {
+        public init(
+            tools: [Tool],
+            nextCursor: String? = nil,
+            _meta: [String: Value]? = nil,
+            extraFields: [String: Value]? = nil
+        ) {
             self.tools = tools
             self.nextCursor = nextCursor
+            self._meta = _meta
+            self.extraFields = extraFields
+        }
+
+        private enum CodingKeys: String, CodingKey, CaseIterable {
+            case tools, nextCursor
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(tools, forKey: .tools)
+            try container.encodeIfPresent(nextCursor, forKey: .nextCursor)
+
+            var dynamicContainer = encoder.container(keyedBy: DynamicCodingKey.self)
+            try encodeMeta(_meta, to: &dynamicContainer)
+            try encodeExtraFields(
+                extraFields, to: &dynamicContainer,
+                excluding: Set(CodingKeys.allCases.map(\.rawValue)))
+        }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            tools = try container.decode([Tool].self, forKey: .tools)
+            nextCursor = try container.decodeIfPresent(String.self, forKey: .nextCursor)
+
+            let dynamicContainer = try decoder.container(keyedBy: DynamicCodingKey.self)
+            _meta = try decodeMeta(from: dynamicContainer)
+            extraFields = try decodeExtraFields(
+                from: dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
         }
     }
 }
 
 /// To call a tool, clients send a `tools/call` request.
-/// - SeeAlso: https://spec.modelcontextprotocol.io/specification/2024-11-05/server/tools/#calling-tools
+/// - SeeAlso: https://spec.modelcontextprotocol.io/specification/2025-06-18/server/tools/#calling-tools
 public enum CallTool: Method {
     public static let name = "tools/call"
 
@@ -246,17 +345,78 @@ public enum CallTool: Method {
 
     public struct Result: Hashable, Codable, Sendable {
         public let content: [Tool.Content]
+        public let structuredContent: Value?
         public let isError: Bool?
+        /// Optional metadata about this result
+        public var _meta: [String: Value]?
+        /// Extra fields for this result (index signature)
+        public var extraFields: [String: Value]?
 
-        public init(content: [Tool.Content], isError: Bool? = nil) {
+        public init(
+            content: [Tool.Content] = [],
+            structuredContent: Value? = nil,
+            isError: Bool? = nil,
+            _meta: [String: Value]? = nil,
+            extraFields: [String: Value]? = nil
+        ) {
             self.content = content
+            self.structuredContent = structuredContent
             self.isError = isError
+            self._meta = _meta
+            self.extraFields = extraFields
+        }
+
+        public init<Output: Codable>(
+            content: [Tool.Content] = [],
+            structuredContent: Output,
+            isError: Bool? = nil,
+            _meta: [String: Value]? = nil,
+            extraFields: [String: Value]? = nil
+        ) throws {
+            let encoded = try Value(structuredContent)
+            self.init(
+                content: content,
+                structuredContent: Optional.some(encoded),
+                isError: isError,
+                _meta: _meta,
+                extraFields: extraFields
+            )
+        }
+
+        private enum CodingKeys: String, CodingKey, CaseIterable {
+            case content, structuredContent, isError
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(content, forKey: .content)
+            try container.encodeIfPresent(structuredContent, forKey: .structuredContent)
+            try container.encodeIfPresent(isError, forKey: .isError)
+
+            var dynamicContainer = encoder.container(keyedBy: DynamicCodingKey.self)
+            try encodeMeta(_meta, to: &dynamicContainer)
+            try encodeExtraFields(
+                extraFields, to: &dynamicContainer,
+                excluding: Set(CodingKeys.allCases.map(\.rawValue)))
+        }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            content = try container.decode([Tool.Content].self, forKey: .content)
+            structuredContent = try container.decodeIfPresent(
+                Value.self, forKey: .structuredContent)
+            isError = try container.decodeIfPresent(Bool.self, forKey: .isError)
+
+            let dynamicContainer = try decoder.container(keyedBy: DynamicCodingKey.self)
+            _meta = try decodeMeta(from: dynamicContainer)
+            extraFields = try decodeExtraFields(
+                from: dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
         }
     }
 }
 
 /// When the list of available tools changes, servers that declared the listChanged capability SHOULD send a notification:
-/// - SeeAlso: https://spec.modelcontextprotocol.io/specification/2024-11-05/server/tools/#list-changed-notification
+/// - SeeAlso: https://spec.modelcontextprotocol.io/specification/2025-06-18/server/tools/#list-changed-notification
 public struct ToolListChangedNotification: Notification {
     public static let name: String = "notifications/tools/list_changed"
 }

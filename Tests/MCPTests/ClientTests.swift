@@ -345,13 +345,13 @@ struct ClientTests {
 
         let request1 = Ping.request()
         let request2 = Ping.request()
-        var resultTask1: Task<Ping.Result, Swift.Error>?
-        var resultTask2: Task<Ping.Result, Swift.Error>?
+        let taskCollector = TaskCollector<Task<Ping.Result, Swift.Error>>()
 
-        try await client.withBatch { batch in
-            resultTask1 = try await batch.addRequest(request1)
-            resultTask2 = try await batch.addRequest(request2)
+        let batchBody: @Sendable (Client.Batch) async throws -> Void = { batch in
+            await taskCollector.append(try await batch.addRequest(request1))
+            await taskCollector.append(try await batch.addRequest(request2))
         }
+        try await client.withBatch(body: batchBody)
 
         // Check if batch message was sent (after initialize and initialized notification)
         let sentMessages = await transport.sentMessages
@@ -380,11 +380,15 @@ struct ClientTests {
         // Queue the batch response
         try await transport.queue(batch: [anyResponse1, anyResponse2])
 
-        // Wait for results and verify
-        guard let task1 = resultTask1, let task2 = resultTask2 else {
+        let resultTasks = await taskCollector.snapshot()
+        #expect(resultTasks.count == 2)
+        guard resultTasks.count == 2 else {
             #expect(Bool(false), "Result tasks not created")
             return
         }
+
+        let task1 = resultTasks[0]
+        let task2 = resultTasks[1]
 
         _ = try await task1.value  // Should succeed
         _ = try await task2.value  // Should succeed
@@ -426,12 +430,13 @@ struct ClientTests {
         let request1 = Ping.request()  // Success
         let request2 = Ping.request()  // Error
 
-        var resultTasks: [Task<Ping.Result, Swift.Error>] = []
+        let taskCollector = TaskCollector<Task<Ping.Result, Swift.Error>>()
 
-        try await client.withBatch { batch in
-            resultTasks.append(try await batch.addRequest(request1))
-            resultTasks.append(try await batch.addRequest(request2))
+        let mixedBody: @Sendable (Client.Batch) async throws -> Void = { batch in
+            await taskCollector.append(try await batch.addRequest(request1))
+            await taskCollector.append(try await batch.addRequest(request2))
         }
+        try await client.withBatch(body: mixedBody)
 
         // Check if batch message was sent (after initialize and initialized notification)
         #expect(await transport.sentMessages.count == 3)  // Initialize request + Initialized notification + Batch
@@ -447,6 +452,7 @@ struct ClientTests {
         try await transport.queue(batch: [anyResponse1, anyResponse2])
 
         // Wait for results and verify
+        let resultTasks = await taskCollector.snapshot()
         #expect(resultTasks.count == 2)
         guard resultTasks.count == 2 else {
             #expect(Bool(false), "Expected 2 result tasks")
@@ -504,9 +510,10 @@ struct ClientTests {
         initTask.cancel()
 
         // Call withBatch but don't add any requests
-        try await client.withBatch { _ in
+        let emptyBody: @Sendable (Client.Batch) async throws -> Void = { _ in
             // No requests added
         }
+        try await client.withBatch(body: emptyBody)
 
         // Check that only initialize message and initialized notification were sent
         #expect(await transport.sentMessages.count == 2)  // Initialize request + Initialized notification

@@ -11,7 +11,7 @@ import Logging
 
 /// An implementation of the MCP Streamable HTTP transport protocol for clients.
 ///
-/// This transport implements the [Streamable HTTP transport](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#streamable-http)
+/// This transport implements the [Streamable HTTP transport](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#streamable-http)
 /// specification from the Model Context Protocol.
 ///
 /// It supports:

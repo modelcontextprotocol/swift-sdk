@@ -11,28 +11,74 @@ import Foundation
 public struct Prompt: Hashable, Codable, Sendable {
     /// The prompt name
     public let name: String
+    /// A human-readable prompt title
+    public let title: String?
     /// The prompt description
     public let description: String?
     /// The prompt arguments
     public let arguments: [Argument]?
+    /// Optional metadata about this prompt
+    public var _meta: [String: Value]?
 
-    public init(name: String, description: String? = nil, arguments: [Argument]? = nil) {
+    public init(
+        name: String,
+        title: String? = nil,
+        description: String? = nil,
+        arguments: [Argument]? = nil,
+        meta: [String: Value]? = nil
+    ) {
         self.name = name
+        self.title = title
         self.description = description
         self.arguments = arguments
+        self._meta = meta
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case name, title, description, arguments
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(name, forKey: .name)
+        try container.encodeIfPresent(title, forKey: .title)
+        try container.encodeIfPresent(description, forKey: .description)
+        try container.encodeIfPresent(arguments, forKey: .arguments)
+
+        var dynamicContainer = encoder.container(keyedBy: DynamicCodingKey.self)
+        try encodeMeta(_meta, to: &dynamicContainer)
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        name = try container.decode(String.self, forKey: .name)
+        title = try container.decodeIfPresent(String.self, forKey: .title)
+        description = try container.decodeIfPresent(String.self, forKey: .description)
+        arguments = try container.decodeIfPresent([Argument].self, forKey: .arguments)
+
+        let dynamicContainer = try decoder.container(keyedBy: DynamicCodingKey.self)
+        _meta = try decodeMeta(from: dynamicContainer)
     }
 
     /// An argument for a prompt
     public struct Argument: Hashable, Codable, Sendable {
         /// The argument name
         public let name: String
+        /// A human-readable argument title
+        public let title: String?
         /// The argument description
         public let description: String?
         /// Whether the argument is required
         public let required: Bool?
 
-        public init(name: String, description: String? = nil, required: Bool? = nil) {
+        public init(
+            name: String,
+            title: String? = nil,
+            description: String? = nil,
+            required: Bool? = nil
+        ) {
             self.name = name
+            self.title = title
             self.description = description
             self.required = required
         }
@@ -95,25 +141,30 @@ public struct Prompt: Hashable, Codable, Sendable {
     public struct Reference: Hashable, Codable, Sendable {
         /// The prompt reference name
         public let name: String
+        /// A human-readable prompt title
+        public let title: String?
 
-        public init(name: String) {
+        public init(name: String, title: String? = nil) {
             self.name = name
+            self.title = title
         }
 
         private enum CodingKeys: String, CodingKey {
-            case type, name
+            case type, name, title
         }
 
         public func encode(to encoder: Encoder) throws {
             var container = encoder.container(keyedBy: CodingKeys.self)
             try container.encode("ref/prompt", forKey: .type)
             try container.encode(name, forKey: .name)
+            try container.encodeIfPresent(title, forKey: .title)
         }
 
         public init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             _ = try container.decode(String.self, forKey: .type)
             name = try container.decode(String.self, forKey: .name)
+            title = try container.decodeIfPresent(String.self, forKey: .title)
         }
     }
 }
@@ -216,12 +267,48 @@ public enum ListPrompts: Method {
     }
 
     public struct Result: Hashable, Codable, Sendable {
-        public let prompts: [Prompt]
-        public let nextCursor: String?
+        let prompts: [Prompt]
+        let nextCursor: String?
+        var _meta: [String: Value]?
+        var extraFields: [String: Value]?
 
-        public init(prompts: [Prompt], nextCursor: String? = nil) {
+        public init(
+            prompts: [Prompt],
+            nextCursor: String? = nil,
+            _meta: [String: Value]? = nil,
+            extraFields: [String: Value]? = nil
+        ) {
             self.prompts = prompts
             self.nextCursor = nextCursor
+            self._meta = _meta
+            self.extraFields = extraFields
+        }
+
+        private enum CodingKeys: String, CodingKey, CaseIterable {
+            case prompts, nextCursor
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(prompts, forKey: .prompts)
+            try container.encodeIfPresent(nextCursor, forKey: .nextCursor)
+
+            var dynamicContainer = encoder.container(keyedBy: DynamicCodingKey.self)
+            try encodeMeta(_meta, to: &dynamicContainer)
+            try encodeExtraFields(
+                extraFields, to: &dynamicContainer,
+                excluding: Set(CodingKeys.allCases.map(\.rawValue)))
+        }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            prompts = try container.decode([Prompt].self, forKey: .prompts)
+            nextCursor = try container.decodeIfPresent(String.self, forKey: .nextCursor)
+
+            let dynamicContainer = try decoder.container(keyedBy: DynamicCodingKey.self)
+            _meta = try decodeMeta(from: dynamicContainer)
+            extraFields = try decodeExtraFields(
+                from: dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
         }
     }
 }
@@ -245,10 +332,48 @@ public enum GetPrompt: Method {
     public struct Result: Hashable, Codable, Sendable {
         public let description: String?
         public let messages: [Prompt.Message]
+        /// Optional metadata about this result
+        public var _meta: [String: Value]?
+        /// Extra fields for this result (index signature)
+        public var extraFields: [String: Value]?
 
-        public init(description: String?, messages: [Prompt.Message]) {
+        public init(
+            description: String? = nil,
+            messages: [Prompt.Message],
+            _meta: [String: Value]? = nil,
+            extraFields: [String: Value]? = nil
+        ) {
             self.description = description
             self.messages = messages
+            self._meta = _meta
+            self.extraFields = extraFields
+        }
+
+        private enum CodingKeys: String, CodingKey, CaseIterable {
+            case description, messages
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encodeIfPresent(description, forKey: .description)
+            try container.encode(messages, forKey: .messages)
+
+            var dynamicContainer = encoder.container(keyedBy: DynamicCodingKey.self)
+            try encodeMeta(_meta, to: &dynamicContainer)
+            try encodeExtraFields(
+                extraFields, to: &dynamicContainer,
+                excluding: Set(CodingKeys.allCases.map(\.rawValue)))
+        }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            description = try container.decodeIfPresent(String.self, forKey: .description)
+            messages = try container.decode([Prompt.Message].self, forKey: .messages)
+
+            let dynamicContainer = try decoder.container(keyedBy: DynamicCodingKey.self)
+            _meta = try decodeMeta(from: dynamicContainer)
+            extraFields = try decodeExtraFields(
+                from: dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
         }
     }
 }

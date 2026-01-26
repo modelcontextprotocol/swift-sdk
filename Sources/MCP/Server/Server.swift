@@ -30,11 +30,14 @@ public actor Server {
     public struct Info: Hashable, Codable, Sendable {
         /// The server name
         public let name: String
+        /// A human-readable server title for display
+        public let title: String?
         /// The server version
         public let version: String
 
-        public init(name: String, version: String) {
+        public init(name: String, version: String, title: String? = nil) {
             self.name = name
+            self.title = title
             self.version = version
         }
     }
@@ -126,20 +129,21 @@ public actor Server {
 
     /// The server name
     public nonisolated var name: String { serverInfo.name }
+    /// A human-readable server title
+    public nonisolated var title: String? { serverInfo.title }
     /// The server version
     public nonisolated var version: String { serverInfo.version }
     /// Instructions describing how to use the server and its features
     ///
-    /// This can be used by clients to improve the LLM's understanding of 
-    /// available tools, resources, etc. 
-    /// It can be thought of like a "hint" to the model. 
+    /// This can be used by clients to improve the LLM's understanding of
+    /// available tools, resources, etc.
+    /// It can be thought of like a "hint" to the model.
     /// For example, this information MAY be added to the system prompt.
     public nonisolated let instructions: String?
     /// The server capabilities
     public var capabilities: Capabilities
     /// The server configuration
     public var configuration: Configuration
-    
 
     /// Request handlers
     private var methodHandlers: [String: RequestHandlerBox] = [:]
@@ -162,11 +166,12 @@ public actor Server {
     public init(
         name: String,
         version: String,
+        title: String? = nil,
         instructions: String? = nil,
         capabilities: Server.Capabilities = .init(),
         configuration: Configuration = .default
     ) {
-        self.serverInfo = Server.Info(name: name, version: version)
+        self.serverInfo = Server.Info(name: name, version: version, title: title)
         self.capabilities = capabilities
         self.configuration = configuration
         self.instructions = instructions
