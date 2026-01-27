@@ -395,6 +395,43 @@ do {
 > [!NOTE]
 > `Server` automatically handles batch requests from MCP clients.
 
+#### Progress Notifications
+
+MCP supports optional progress tracking for long-running operations through notifications. Either side can send progress notifications to provide updates about operation status.
+
+For example, a client might wish to update its loading UI whenever the server sends a progress notification for a particular `CallTool` request:
+
+```swift
+let callToolProgressToken = "abc-123"
+
+// Register notification handler before invoking callTool
+await client.onNotification(ProgressNotification.self) { message in
+    // Access progress notifications for a particular request by filtering for that request's progressToken
+    guard message.params.progressToken == callToolProgressToken else { return }
+
+    if let progressTotal = message.params.total {
+        let percentProgress = message.params.progress / progressTotal
+        // update loading UI with percent progress
+    }
+
+    if let progressMessage = message.params.message {
+        // update loading UI with human-readable progress information
+    }
+}
+
+// Call a tool with a progressToken specified in the _meta arguments
+try await client.callTool(
+    name: "content-recommender",
+    arguments: [
+        "prompt": "The cutest Samoyed accounts across all social media",
+        "_meta": [
+            "progressToken": callToolProgressToken
+        ]
+    ]
+) 
+```
+
+
 ## Server Usage
 
 The server component allows your application to host model capabilities and respond to client requests.
