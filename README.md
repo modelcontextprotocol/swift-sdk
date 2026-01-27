@@ -101,8 +101,8 @@ Tools represent functions that can be called by the client:
 let (tools, cursor) = try await client.listTools()
 print("Available tools: \(tools.map { $0.name }.joined(separator: ", "))")
 
-// Call a tool with arguments
-let (content, isError) = try await client.callTool(
+// Call a tool with arguments and get the result
+let context = try await client.callTool(
     name: "image-generator",
     arguments: [
         "prompt": "A serene mountain landscape at sunset",
@@ -111,6 +111,9 @@ let (content, isError) = try await client.callTool(
         "height": 768
     ]
 )
+let result = try await context.value
+let content = result.content
+let isError = result.isError
 
 // Call a tool with progress tracking
 let progressToken = ProgressToken.unique()
@@ -128,11 +131,14 @@ await client.onNotification(ProgressNotification.self) { message in
 }
 
 // Make the request with the progress token
-let (progressContent, progressError) = try await client.callTool(
+let progressContext = try await client.callTool(
     name: "long-running-tool",
     arguments: ["input": "value"],
     meta: RequestMeta(progressToken: progressToken)
 )
+let progressResult = try await progressContext.value
+let progressContent = progressResult.content
+let progressError = progressResult.isError
 
 // Handle tool content
 for item in content {
@@ -155,6 +161,52 @@ for item in content {
     }
 }
 ```
+
+### Request Cancellation
+
+MCP supports cancellation of in-progress requests according to the [MCP 2025-11-25 specification](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/cancellation). All request methods return a `RequestContext` that provides both the request ID and a convenient value accessor:
+
+```swift
+// Send a request and get a context for cancellation
+let context = try await client.callTool(
+    name: "long-running-analysis",
+    arguments: ["data": largeDataset]
+)
+
+// You can cancel the request at any time
+try await client.cancelRequest(context.requestID, reason: "User cancelled")
+
+// Await the result (will throw CancellationError if cancelled)
+do {
+    let result = try await context.value
+    print("Result: \(result.content)")
+} catch is CancellationError {
+    print("Request was cancelled")
+}
+```
+
+For low-level request sending:
+
+```swift
+// Send any request type
+let request = CallTool.request(.init(name: "myTool", arguments: [:]))
+let context: RequestContext<CallTool.Result> = try await client.send(request)
+
+// Cancel when needed
+try await client.cancelRequest(context.requestID, reason: "Operation timeout")
+
+// Get the result
+let result = try await context.value
+```
+
+**Cancellation Behavior:**
+
+- Cancellation is **advisory** - servers SHOULD stop processing but MAY ignore if the request is completed or cannot be cancelled
+- Cancelled requests don't send responses (per MCP specification)
+- The client automatically handles incoming `CancelledNotification` from servers
+- Race conditions (cancellation after completion) are handled gracefully
+
+For more details, see the [MCP Cancellation Specification](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/cancellation).
 
 ### Resources
 

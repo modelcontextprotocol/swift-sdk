@@ -149,7 +149,8 @@ struct RoundtripTests {
         }
 
         let callToolTask = Task {
-            let result = try await client.callTool(name: "add", arguments: ["a": 1, "b": 2])
+            let context = try await client.callTool(name: "add", arguments: ["a": 1, "b": 2])
+            let result = try await context.value
             #expect(result.isError == nil)
             #expect(result.content == [.text("3")])
         }

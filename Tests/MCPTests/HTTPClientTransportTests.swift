@@ -667,7 +667,8 @@ import Testing
                 #expect(initResult.capabilities.tools != nil)
 
                 // Step 2: Call a tool
-                let toolResult = try await client.callTool(name: "calculator")
+                let toolContext = try await client.callTool(name: "calculator")
+                let toolResult = try await toolContext.value
                 #expect(toolResult.content.count == 1)
                 if case let .text(text) = toolResult.content[0] {
                     #expect(text == "42")
