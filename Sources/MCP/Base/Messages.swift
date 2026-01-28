@@ -258,7 +258,7 @@ public struct Response<M: Method>: Hashable, Identifiable, Codable, Sendable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(jsonrpc, forKey: .jsonrpc)
         try container.encode(id, forKey: .id)
-        try container.encode(_meta, forKey: ._meta)
+        try container.encodeIfPresent(_meta, forKey: ._meta)
 
         switch result {
         case .success(let result):
