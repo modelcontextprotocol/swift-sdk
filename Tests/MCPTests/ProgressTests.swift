@@ -380,7 +380,7 @@ struct ProgressTests {
 
         try await server.start(transport: pair.server)
         try await client.connect(transport: pair.client)
-        let context = try await client.callTool(name: "random", meta: Metadata(progressToken: token))
+        let context: RequestContext<CallTool.Result> = try await client.callTool(name: "random", meta: Metadata(progressToken: token))
         let result = try await context.value
 
         #expect(progresses == [20, 40, 60, 80, 100])

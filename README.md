@@ -102,7 +102,7 @@ let (tools, cursor) = try await client.listTools()
 print("Available tools: \(tools.map { $0.name }.joined(separator: ", "))")
 
 // Call a tool with arguments and get the result
-let context = try await client.callTool(
+let (content, isError) = try await client.callTool(
     name: "image-generator",
     arguments: [
         "prompt": "A serene mountain landscape at sunset",
@@ -111,6 +111,22 @@ let context = try await client.callTool(
         "height": 768
     ]
 )
+
+// Call a tool with cancellation support using the RequestContext overload
+let context: RequestContext<CallTool.Result> = try client.callTool(
+    name: "image-generator",
+    arguments: [
+        "prompt": "A serene mountain landscape at sunset",
+        "style": "photorealistic",
+        "width": 1024,
+        "height": 768
+    ]
+)
+
+// Cancel if needed
+try await client.cancelRequest(context.requestID, reason: "User cancelled")
+
+// Get the result
 let result = try await context.value
 let content = result.content
 let isError = result.isError
@@ -131,14 +147,11 @@ await client.onNotification(ProgressNotification.self) { message in
 }
 
 // Make the request with the progress token
-let progressContext = try await client.callTool(
+let (progressContent, progressError) = try await client.callTool(
     name: "long-running-tool",
     arguments: ["input": "value"],
     meta: RequestMeta(progressToken: progressToken)
 )
-let progressResult = try await progressContext.value
-let progressContent = progressResult.content
-let progressError = progressResult.isError
 
 // Handle tool content
 for item in content {
@@ -164,11 +177,15 @@ for item in content {
 
 ### Request Cancellation
 
-MCP supports cancellation of in-progress requests according to the [MCP 2025-11-25 specification](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/cancellation). All request methods return a `RequestContext` that provides both the request ID and a convenient value accessor:
+MCP supports cancellation of in-progress requests according to the [MCP 2025-11-25 specification](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/cancellation). There are multiple ways to work with cancellation depending on your needs:
+
+#### Option 1: Convenience Methods with RequestContext Overload
+
+For common operations like tool calls, use the overloaded method that returns `RequestContext`:
 
 ```swift
-// Send a request and get a context for cancellation
-let context = try await client.callTool(
+// Call a tool and get a context for cancellation
+let context = try client.callTool(
     name: "long-running-analysis",
     arguments: ["data": largeDataset]
 )
@@ -185,18 +202,34 @@ do {
 }
 ```
 
-For low-level request sending:
+#### Option 2: Direct send() for Maximum Flexibility
+
+For full control or custom requests, use `send()` directly:
 
 ```swift
-// Send any request type
-let request = CallTool.request(.init(name: "myTool", arguments: [:]))
-let context: RequestContext<CallTool.Result> = try await client.send(request)
+// Create any request type
+let request = CallTool.request(.init(
+    name: "long-running-analysis",
+    arguments: ["data": largeDataset]
+))
+
+// Send and get a context for cancellation tracking
+let context: RequestContext<CallTool.Result> = try client.send(request)
 
 // Cancel when needed
-try await client.cancelRequest(context.requestID, reason: "Operation timeout")
+try await client.cancelRequest(context.requestID, reason: "Timeout")
 
 // Get the result
 let result = try await context.value
+```
+
+#### Option 3: Simple async/await (No Cancellation)
+
+For simple cases where cancellation isn't needed:
+
+```swift
+// Just await the result directly
+let (content, isError) = try await client.callTool(name: "myTool", arguments: [:])
 ```
 
 **Cancellation Behavior:**
