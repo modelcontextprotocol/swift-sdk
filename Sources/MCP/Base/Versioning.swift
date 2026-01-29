@@ -9,6 +9,7 @@ public enum Version {
     /// All protocol versions supported by this implementation, ordered from newest to oldest.
     static let supported: Set<String> = [
         "2025-11-25",
+        "2025-06-18",
         "2025-03-26",
         "2024-11-05",
     ]
