@@ -212,16 +212,16 @@ public struct Resource: Hashable, Codable, Sendable {
         }
 
         /// An array indicating the intended audience(s) for this resource. For example, `[.user, .assistant]` indicates content useful for both.
-        public let audience: [Audience]
-        /// A number from 0.0 to 1.0 indicating the importance of this resource. A value of 1 means “most important” (effectively required), while 0 means “least important”.
+        public let audience: [Audience]?
+        /// A number from 0.0 to 1.0 indicating the importance of this resource. A value of 1 means "most important" (effectively required), while 0 means "least important".
         public let priority: Double?
         /// An ISO 8601 formatted timestamp indicating when the resource was last modified (e.g., "2025-01-12T15:00:58Z").
-        public let lastModified: String
+        public let lastModified: String?
 
         public init(
-            audience: [Audience],
+            audience: [Audience]? = nil,
             priority: Double? = nil,
-            lastModified: String
+            lastModified: String? = nil
         ) {
             self.audience = audience
             self.priority = priority
