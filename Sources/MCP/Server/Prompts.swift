@@ -341,7 +341,7 @@ public enum GetPrompt: Method {
             var container = encoder.container(keyedBy: CodingKeys.self)
             try container.encodeIfPresent(description, forKey: .description)
             try container.encode(messages, forKey: .messages)
-            try container.encode(_meta, forKey: ._meta)
+            try container.encodeIfPresent(_meta, forKey: ._meta)
         }
 
         public init(from decoder: Decoder) throws {
