@@ -14,6 +14,9 @@ public enum Version {
         "2024-11-05",
     ]
 
+    /// All protocol versions supported by this implementation (public accessor).
+    public static let allSupported: Set<String> = supported
+
     /// The latest protocol version supported by this implementation.
     public static let latest = supported.max()!
 
