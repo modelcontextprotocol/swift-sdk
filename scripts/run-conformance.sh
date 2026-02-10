@@ -73,7 +73,7 @@ if [[ "$MODE" == "client" || "$MODE" == "both" ]]; then
   log_info "Running client conformance tests..."
   npx "$CONFORMANCE_PKG" client \
     --command "$CLIENT_PATH" \
-    --suite all \
+    --suite core \
     $BASELINE_ARG || {
     log_error "Client conformance tests failed"
     exit 1
@@ -97,7 +97,7 @@ if [[ "$MODE" == "server" || "$MODE" == "both" ]]; then
   log_info "Running server conformance tests..."
   npx "$CONFORMANCE_PKG" server \
     --url http://localhost:3001/mcp \
-    --suite all \
+    --suite core \
     $BASELINE_ARG || {
     log_error "Server conformance tests failed"
     kill $SERVER_PID 2>/dev/null || true

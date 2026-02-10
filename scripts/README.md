@@ -82,13 +82,15 @@ To see detailed test output:
 # Run tests manually with npx
 swift build
 CLIENT_PATH="$(swift build --show-bin-path)/mcp-everything-client"
-npx @modelcontextprotocol/conformance client --command "$CLIENT_PATH" --suite all
-npx @modelcontextprotocol/conformance server --url http://localhost:3000/mcp --suite all
+npx @modelcontextprotocol/conformance client --command "$CLIENT_PATH" --suite core
+npx @modelcontextprotocol/conformance server --url http://localhost:3001/mcp --suite core
 ```
 
 Available test suites:
+- `core`: Core MCP functionality (recommended)
 - `all`: Run all conformance tests
-- `core`: Core MCP functionality
 - `extensions`: Optional MCP extensions
-- `auth`: Authentication and authorization tests
+- `backcompat`: Backwards compatibility tests
+- `auth`: Authentication tests
 - `metadata`: Metadata handling tests
+- `sep-835`: SEP-835 specific tests

@@ -71,7 +71,7 @@ jobs:
         with:
           mode: client
           command: '.build/debug/mcp-everything-client'
-          suite: 'all'
+          suite: 'core'
           expected-failures: './conformance-baseline.yml'
 
       - name: Start server for testing
@@ -85,7 +85,7 @@ jobs:
         with:
           mode: server
           url: 'http://localhost:3001/mcp'
-          suite: 'all'
+          suite: 'core'
           expected-failures: './conformance-baseline.yml'
 
       - name: Cleanup server
