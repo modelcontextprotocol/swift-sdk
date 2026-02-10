@@ -43,6 +43,58 @@ jobs:
       - name: Run tests
         run: swift test -v
 
+  conformance:
+    timeout-minutes: 10
+    runs-on: macos-latest
+    name: MCP Conformance Tests
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Swift
+        uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: 6.1.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build Swift executables
+        run: |
+          swift build --product mcp-everything-client
+          swift build --product mcp-everything-server
+
+      - name: Run client conformance tests
+        uses: modelcontextprotocol/conformance@v0.1.11
+        with:
+          mode: client
+          command: '.build/debug/mcp-everything-client'
+          suite: 'all'
+          expected-failures: './conformance-baseline.yml'
+
+      - name: Start server for testing
+        run: |
+          .build/debug/mcp-everything-server &
+          echo "SERVER_PID=$!" >> $GITHUB_ENV
+          sleep 3
+
+      - name: Run server conformance tests
+        uses: modelcontextprotocol/conformance@v0.1.11
+        with:
+          mode: server
+          url: 'http://localhost:3001/mcp'
+          suite: 'all'
+          expected-failures: './conformance-baseline.yml'
+
+      - name: Cleanup server
+        if: always()
+        run: |
+          if [ -n "$SERVER_PID" ]; then
+            kill $SERVER_PID 2>/dev/null || true
+          fi
+
   static-linux-sdk-build:
     name: Linux Static SDK Build (${{ matrix.swift-version }} - ${{ matrix.os }})
     strategy:
