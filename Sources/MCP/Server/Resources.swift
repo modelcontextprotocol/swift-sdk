@@ -403,6 +403,18 @@ public enum ResourceSubscribe: Method {
     public typealias Result = Empty
 }
 
+/// Sent from the client to request cancellation of resources/updated notifications from the server. This should follow a previous resources/subscribe request.
+/// - SeeAlso: https://modelcontextprotocol.io/specification/2025-06-18/schema#unsubscriberequest
+public enum ResourceUnsubscribe: Method {
+    public static let name: String = "resources/unsubscribe"
+
+    public struct Parameters: Hashable, Codable, Sendable {
+        public let uri: String
+    }
+
+    public typealias Result = Empty
+}
+
 /// When a resource changes, servers that declared the updated capability SHOULD send a notification to subscribed clients.
 /// - SeeAlso: https://spec.modelcontextprotocol.io/specification/2025-06-18/server/resources/#subscriptions
 public struct ResourceUpdatedNotification: Notification {

@@ -202,7 +202,8 @@ public actor Server {
         try await transport.connect()
 
         await logger?.debug(
-            "Server started", metadata: ["name": "\(name)", "version": "\(version)"])
+            "Server started", metadata: ["name": "\(name)", "version": "\(version)"]
+        )
 
         // Start message handling loop
         task = Task {

@@ -45,7 +45,7 @@ public struct HTTPValidationContext: Sendable {
         httpMethod: String,
         sessionID: String? = nil,
         isInitializationRequest: Bool = false,
-        supportedProtocolVersions: Set<String> = Version.allSupported
+        supportedProtocolVersions: Set<String> = Version.supported
     ) {
         self.httpMethod = httpMethod
         self.sessionID = sessionID
@@ -334,18 +334,38 @@ public struct OriginValidator: HTTPRequestValidator {
     }
 }
 
-// MARK: - Validation Pipeline Runner
+// MARK: - Validation Pipeline Protocol
 
-/// Runs a sequence of validators, returning the first error response or `nil` if all pass.
-func runValidationPipeline(
-    _ validators: [any HTTPRequestValidator],
-    request: HTTPRequest,
-    context: HTTPValidationContext
-) -> HTTPResponse? {
-    for validator in validators {
-        if let errorResponse = validator.validate(request, context: context) {
-            return errorResponse
-        }
+/// Runs a validation pipeline against an HTTP request.
+///
+/// Implementations execute a sequence of validators and return the first error,
+/// or `nil` if all validations pass.
+public protocol HTTPRequestValidationPipeline: Sendable {
+    /// Validates the request using the configured pipeline.
+    /// Returns an error response if validation fails, or `nil` if the request is valid.
+    func validate(_ request: HTTPRequest, context: HTTPValidationContext) -> HTTPResponse?
+}
+
+// MARK: - Standard Validation Pipeline
+
+/// Standard implementation of `HTTPRequestValidationPipeline` that runs validators in sequence.
+///
+/// The first validator that returns a non-nil error response short-circuits the pipeline.
+public struct StandardValidationPipeline: HTTPRequestValidationPipeline {
+    private let validators: [any HTTPRequestValidator]
+
+    /// Creates a pipeline with the given validators.
+    /// Validators are executed in the order provided.
+    public init(validators: [any HTTPRequestValidator]) {
+        self.validators = validators
     }
-    return nil
+
+    public func validate(_ request: HTTPRequest, context: HTTPValidationContext) -> HTTPResponse? {
+        for validator in validators {
+            if let errorResponse = validator.validate(request, context: context) {
+                return errorResponse
+            }
+        }
+        return nil
+    }
 }

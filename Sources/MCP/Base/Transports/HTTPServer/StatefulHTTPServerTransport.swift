@@ -13,9 +13,7 @@ import Logging
 /// ## Usage
 ///
 /// ```swift
-/// let transport = StatefulHTTPServerTransport(
-///     sessionIDGenerator: { UUID().uuidString }
-/// )
+/// let transport = StatefulHTTPServerTransport()  // Uses UUID by default
 ///
 /// // Start the MCP server with this transport
 /// try await server.start(transport: transport)
@@ -36,8 +34,8 @@ public actor StatefulHTTPServerTransport: Transport {
 
     // MARK: - Dependencies
 
-    private let sessionIDGenerator: @Sendable () -> String
-    private let validators: [any HTTPRequestValidator]
+    private let sessionIDGenerator: any SessionIDGenerator
+    private let validationPipeline: any HTTPRequestValidationPipeline
     private let retryInterval: Int?
 
     // MARK: - State
@@ -81,28 +79,29 @@ public actor StatefulHTTPServerTransport: Transport {
     /// Creates a new stateful HTTP server transport.
     ///
     /// - Parameters:
-    ///   - sessionIDGenerator: Closure that generates session IDs. The IDs MUST contain
+    ///   - sessionIDGenerator: Generator for session IDs. The IDs MUST contain
     ///     only visible ASCII characters (0x21-0x7E) per the MCP specification.
-    ///   - validators: Custom validator pipeline. If `nil`, uses sensible defaults:
-    ///     `[OriginValidator.localhost(), AcceptHeaderValidator(.sseRequired), ContentTypeValidator(),
-    ///      ProtocolVersionValidator(), SessionValidator()]`.
+    ///     Defaults to ``UUIDSessionIDGenerator``.
+    ///   - validationPipeline: Custom validation pipeline. If `nil`, uses sensible defaults:
+    ///     origin validation (localhost), Accept header (SSE required), Content-Type,
+    ///     protocol version, and session validation.
     ///   - retryInterval: Retry interval in milliseconds for SSE priming events.
     ///     Controls how long clients wait before attempting to reconnect.
     ///   - logger: Optional logger. If `nil`, a no-op logger is used.
     public init(
-        sessionIDGenerator: @Sendable @escaping () -> String,
-        validators: [any HTTPRequestValidator]? = nil,
+        sessionIDGenerator: any SessionIDGenerator = UUIDSessionIDGenerator(),
+        validationPipeline: (any HTTPRequestValidationPipeline)? = nil,
         retryInterval: Int? = nil,
         logger: Logger? = nil
     ) {
         self.sessionIDGenerator = sessionIDGenerator
-        self.validators = validators ?? [
+        self.validationPipeline = validationPipeline ?? StandardValidationPipeline(validators: [
             OriginValidator.localhost(),
             AcceptHeaderValidator(mode: .sseRequired),
             ContentTypeValidator(),
             ProtocolVersionValidator(),
             SessionValidator(),
-        ]
+        ])
         self.retryInterval = retryInterval
         self.logger = logger ?? Logger(
             label: "mcp.transport.http.server.stateful",
@@ -213,11 +212,11 @@ public actor StatefulHTTPServerTransport: Transport {
             httpMethod: "POST",
             sessionID: sessionID,
             isInitializationRequest: messageKind.isInitializeRequest,
-            supportedProtocolVersions: Version.allSupported
+            supportedProtocolVersions: Version.supported
         )
 
         // Run validation pipeline
-        if let errorResponse = runValidationPipeline(validators, request: request, context: context) {
+        if let errorResponse = validationPipeline.validate(request, context: context) {
             return errorResponse
         }
 
@@ -240,7 +239,7 @@ public actor StatefulHTTPServerTransport: Transport {
 
     private func handleInitializationRequest(_ body: Data, request: HTTPRequest) -> HTTPResponse {
         // Generate session ID
-        let newSessionID = sessionIDGenerator()
+        let newSessionID = sessionIDGenerator.generateSessionID()
 
         // Validate session ID contains only visible ASCII (0x21-0x7E)
         guard isValidSessionID(newSessionID) else {
@@ -302,11 +301,11 @@ public actor StatefulHTTPServerTransport: Transport {
             httpMethod: "GET",
             sessionID: sessionID,
             isInitializationRequest: false,
-            supportedProtocolVersions: Version.allSupported
+            supportedProtocolVersions: Version.supported
         )
 
         // Run validation pipeline
-        if let errorResponse = runValidationPipeline(validators, request: request, context: context) {
+        if let errorResponse = validationPipeline.validate(request, context: context) {
             return errorResponse
         }
 
@@ -355,7 +354,7 @@ public actor StatefulHTTPServerTransport: Transport {
             httpMethod: "DELETE",
             sessionID: sessionID,
             isInitializationRequest: false,
-            supportedProtocolVersions: Version.allSupported
+            supportedProtocolVersions: Version.supported
         )
 
         // Only run session validation for DELETE (not all validators)

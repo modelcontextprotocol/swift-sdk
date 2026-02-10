@@ -1,10 +1,36 @@
 import Foundation
 
+// MARK: - Session ID Generator
+
+/// Generates unique session identifiers for stateful HTTP server transports.
+///
+/// Conform to this protocol to provide custom session ID generation logic.
+/// Session IDs **MUST** contain only visible ASCII characters (0x21–0x7E)
+/// per the MCP specification.
+///
+/// A default implementation using UUID is provided via ``UUIDSessionIDGenerator``.
+public protocol SessionIDGenerator: Sendable {
+    /// Generates a new unique session identifier.
+    func generateSessionID() -> String
+}
+
+/// Default session ID generator that produces UUID strings.
+///
+/// UUID strings consist of hexadecimal characters and hyphens,
+/// which are all within the valid ASCII range (0x21–0x7E).
+public struct UUIDSessionIDGenerator: SessionIDGenerator {
+    public init() {}
+
+    public func generateSessionID() -> String {
+        UUID().uuidString
+    }
+}
+
 // MARK: - HTTP Request
 
 /// A framework-agnostic HTTP request representation.
 ///
-/// This type decouples the transport from any specific HTTP framework (Vapor, Hummingbird, etc.).
+/// This type decouples the transport from any specific HTTP framework.
 /// The HTTP framework adapter converts its native request type into this before passing to the transport.
 public struct HTTPRequest: Sendable {
     /// The HTTP method (e.g., "GET", "POST", "DELETE").
@@ -76,12 +102,12 @@ public enum HTTPResponse: Sendable {
 
     public var headers: [String: String] {
         switch self {
-        case .accepted(let h), .ok(let h), .data(_, let h), .stream(_, let h):
-            return h
+        case .accepted(let headers), .ok(let headers), .data(_, let headers), .stream(_, let headers):
+            return headers
         case .error(_, _, let sessionID):
-            var h: [String: String] = [HTTPHeaderName.contentType: ContentType.json]
-            if let sessionID { h[HTTPHeaderName.sessionID] = sessionID }
-            return h
+            var headers: [String: String] = [HTTPHeaderName.contentType: ContentType.json]
+            if let sessionID { headers[HTTPHeaderName.sessionID] = sessionID }
+            return headers
         }
     }
 
@@ -180,14 +206,14 @@ struct SSEEvent: Sendable {
 /// Used by transports to determine where to route outgoing messages:
 /// - Responses are routed to the originating request's stream
 /// - Notifications and server requests are routed to the standalone GET stream
-enum JSONRPCMessageKind {
+package enum JSONRPCMessageKind {
     case request(id: String, method: String)
     case notification(method: String)
     case response(id: String)
 
     /// Attempts to classify raw JSON-RPC data.
     /// Returns `nil` if the data cannot be parsed or classified.
-    init?(data: Data) {
+    package init?(data: Data) {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return nil
         }
@@ -215,7 +241,7 @@ enum JSONRPCMessageKind {
     }
 
     /// Whether this message is an `initialize` request.
-    var isInitializeRequest: Bool {
+    package var isInitializeRequest: Bool {
         if case .request(_, let method) = self {
             return method == "initialize"
         }

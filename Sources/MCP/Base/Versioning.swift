@@ -7,15 +7,12 @@ import Foundation
 /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/
 public enum Version {
     /// All protocol versions supported by this implementation, ordered from newest to oldest.
-    static let supported: Set<String> = [
+    public static let supported: Set<String> = [
         "2025-11-25",
         "2025-06-18",
         "2025-03-26",
         "2024-11-05",
     ]
-
-    /// All protocol versions supported by this implementation (public accessor).
-    public static let allSupported: Set<String> = supported
 
     /// The latest protocol version supported by this implementation.
     public static let latest = supported.max()!

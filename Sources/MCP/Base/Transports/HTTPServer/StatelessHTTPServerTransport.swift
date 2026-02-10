@@ -34,7 +34,7 @@ public actor StatelessHTTPServerTransport: Transport {
 
     // MARK: - Dependencies
 
-    private let validators: [any HTTPRequestValidator]
+    private let validationPipeline: any HTTPRequestValidationPipeline
 
     // MARK: - State
 
@@ -57,20 +57,20 @@ public actor StatelessHTTPServerTransport: Transport {
     /// Creates a new stateless HTTP server transport.
     ///
     /// - Parameters:
-    ///   - validators: Custom validator pipeline. If `nil`, uses sensible defaults:
-    ///     `[OriginValidator.localhost(), AcceptHeaderValidator(.jsonOnly), ContentTypeValidator(),
-    ///      ProtocolVersionValidator()]`.
+    ///   - validationPipeline: Custom validation pipeline. If `nil`, uses sensible defaults:
+    ///     origin validation (localhost), Accept header (JSON only), Content-Type,
+    ///     and protocol version validation.
     ///   - logger: Optional logger. If `nil`, a no-op logger is used.
     public init(
-        validators: [any HTTPRequestValidator]? = nil,
+        validationPipeline: (any HTTPRequestValidationPipeline)? = nil,
         logger: Logger? = nil
     ) {
-        self.validators = validators ?? [
+        self.validationPipeline = validationPipeline ?? StandardValidationPipeline(validators: [
             OriginValidator.localhost(),
             AcceptHeaderValidator(mode: .jsonOnly),
             ContentTypeValidator(),
             ProtocolVersionValidator(),
-        ]
+        ])
         self.logger = logger ?? Logger(
             label: "mcp.transport.http.server.stateless",
             factory: { _ in SwiftLogNoOpLogHandler() }
@@ -190,11 +190,11 @@ public actor StatelessHTTPServerTransport: Transport {
             httpMethod: "POST",
             sessionID: nil,
             isInitializationRequest: messageKind.isInitializeRequest,
-            supportedProtocolVersions: Version.allSupported
+            supportedProtocolVersions: Version.supported
         )
 
         // Run validation pipeline
-        if let errorResponse = runValidationPipeline(validators, request: request, context: context) {
+        if let errorResponse = validationPipeline.validate(request, context: context) {
             return errorResponse
         }
 
