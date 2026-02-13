@@ -223,28 +223,24 @@ public enum CreateSamplingMessage: Method {
         /// The completion content
         public let content: Sampling.Message.Content
         /// Optional metadata about this result
-        public var _meta: [String: Value]?
-        /// Extra fields for this result (index signature)
-        public var extraFields: [String: Value]?
+        public var _meta: Metadata?
 
         public init(
             model: String,
             stopReason: Sampling.StopReason? = nil,
             role: Sampling.Message.Role,
             content: Sampling.Message.Content,
-            _meta: [String: Value]? = nil,
-            extraFields: [String: Value]? = nil
+            _meta: Metadata? = nil
         ) {
             self.model = model
             self.stopReason = stopReason
             self.role = role
             self.content = content
             self._meta = _meta
-            self.extraFields = extraFields
         }
 
         private enum CodingKeys: String, CodingKey, CaseIterable {
-            case model, stopReason, role, content
+            case model, stopReason, role, content, _meta
         }
 
         public func encode(to encoder: Encoder) throws {
@@ -253,12 +249,7 @@ public enum CreateSamplingMessage: Method {
             try container.encodeIfPresent(stopReason, forKey: .stopReason)
             try container.encode(role, forKey: .role)
             try container.encode(content, forKey: .content)
-
-            var dynamicContainer = encoder.container(keyedBy: DynamicCodingKey.self)
-            try encodeMeta(_meta, to: &dynamicContainer)
-            try encodeExtraFields(
-                extraFields, to: &dynamicContainer,
-                excluding: Set(CodingKeys.allCases.map(\.rawValue)))
+            try container.encodeIfPresent(_meta, forKey: ._meta)
         }
 
         public init(from decoder: Decoder) throws {
@@ -268,11 +259,7 @@ public enum CreateSamplingMessage: Method {
                 Sampling.StopReason.self, forKey: .stopReason)
             role = try container.decode(Sampling.Message.Role.self, forKey: .role)
             content = try container.decode(Sampling.Message.Content.self, forKey: .content)
-
-            let dynamicContainer = try decoder.container(keyedBy: DynamicCodingKey.self)
-            _meta = try decodeMeta(from: dynamicContainer)
-            extraFields = try decodeExtraFields(
-                from: dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
+            _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
         }
     }
 }

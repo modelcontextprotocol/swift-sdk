@@ -7,7 +7,7 @@ Official Swift SDK for the [Model Context Protocol][mcp] (MCP).
 The Model Context Protocol (MCP) defines a standardized way
 for applications to communicate with AI and ML models.
 This Swift SDK implements both client and server components
-according to the [2025-06-18][mcp-spec-2025-06-18] (latest) version 
+according to the [2025-11-25][mcp-spec-2025-11-25] (latest) version
 of the MCP specification.
 
 ## Requirements
@@ -60,6 +60,14 @@ let result = try await client.connect(transport: transport)
 if result.capabilities.tools != nil {
     // Server supports tools (implicitly including tool calling if the 'tools' capability object is present)
 }
+
+if result.capabilities.logging != nil {
+    // Server supports sending log messages
+}
+
+if result.capabilities.completions != nil {
+    // Server supports argument autocompletion
+}
 ```
 
 > [!NOTE]
@@ -101,7 +109,7 @@ Tools represent functions that can be called by the client:
 let (tools, cursor) = try await client.listTools()
 print("Available tools: \(tools.map { $0.name }.joined(separator: ", "))")
 
-// Call a tool with arguments
+// Call a tool with arguments and get the result
 let (content, isError) = try await client.callTool(
     name: "image-generator",
     arguments: [
@@ -110,6 +118,47 @@ let (content, isError) = try await client.callTool(
         "width": 1024,
         "height": 768
     ]
+)
+
+// Call a tool with cancellation support using the RequestContext overload
+let context: RequestContext<CallTool.Result> = try client.callTool(
+    name: "image-generator",
+    arguments: [
+        "prompt": "A serene mountain landscape at sunset",
+        "style": "photorealistic",
+        "width": 1024,
+        "height": 768
+    ]
+)
+
+// Cancel if needed
+try await client.cancelRequest(context.requestID, reason: "User cancelled")
+
+// Get the result
+let result = try await context.value
+let content = result.content
+let isError = result.isError
+
+// Call a tool with progress tracking
+let progressToken = ProgressToken.unique()
+
+// Register a notification handler to receive progress updates
+await client.onNotification(ProgressNotification.self) { message in
+    let params = message.params
+    // Filter by your progress token
+    if params.progressToken == progressToken {
+        print("Progress: \(params.progress)/\(params.total ?? 0)")
+        if let message = params.message {
+            print("Status: \(message)")
+        }
+    }
+}
+
+// Make the request with the progress token
+let (progressContent, progressError) = try await client.callTool(
+    name: "long-running-tool",
+    arguments: ["input": "value"],
+    meta: RequestMeta(progressToken: progressToken)
 )
 
 // Handle tool content
@@ -133,6 +182,72 @@ for item in content {
     }
 }
 ```
+
+### Request Cancellation
+
+MCP supports cancellation of in-progress requests according to the [MCP 2025-11-25 specification](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/cancellation). There are multiple ways to work with cancellation depending on your needs:
+
+#### Option 1: Convenience Methods with RequestContext Overload
+
+For common operations like tool calls, use the overloaded method that returns `RequestContext`:
+
+```swift
+// Call a tool and get a context for cancellation
+let context = try client.callTool(
+    name: "long-running-analysis",
+    arguments: ["data": largeDataset]
+)
+
+// You can cancel the request at any time
+try await client.cancelRequest(context.requestID, reason: "User cancelled")
+
+// Await the result (will throw CancellationError if cancelled)
+do {
+    let result = try await context.value
+    print("Result: \(result.content)")
+} catch is CancellationError {
+    print("Request was cancelled")
+}
+```
+
+#### Option 2: Direct send() for Maximum Flexibility
+
+For full control or custom requests, use `send()` directly:
+
+```swift
+// Create any request type
+let request = CallTool.request(.init(
+    name: "long-running-analysis",
+    arguments: ["data": largeDataset]
+))
+
+// Send and get a context for cancellation tracking
+let context: RequestContext<CallTool.Result> = try client.send(request)
+
+// Cancel when needed
+try await client.cancelRequest(context.requestID, reason: "Timeout")
+
+// Get the result
+let result = try await context.value
+```
+
+#### Option 3: Simple async/await (No Cancellation)
+
+For simple cases where cancellation isn't needed:
+
+```swift
+// Just await the result directly
+let (content, isError) = try await client.callTool(name: "myTool", arguments: [:])
+```
+
+**Cancellation Behavior:**
+
+- Cancellation is **advisory** - servers SHOULD stop processing but MAY ignore if the request is completed or cannot be cancelled
+- Cancelled requests don't send responses (per MCP specification)
+- The client automatically handles incoming `CancelledNotification` from servers
+- Race conditions (cancellation after completion) are handled gracefully
+
+For more details, see the [MCP Cancellation Specification](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/cancellation).
 
 ### Resources
 
@@ -189,6 +304,61 @@ for message in messages {
         print("\(message.role): \(text)")
     }
 }
+```
+
+### Completions
+
+Completions allow servers to provide autocompletion suggestions for prompt and resource template arguments as users type:
+
+```swift
+// Request completions for a prompt argument
+let completion = try await client.complete(
+    promptName: "code_review",
+    argumentName: "language",
+    argumentValue: "py"
+)
+
+// Display suggestions to the user
+for value in completion.values {
+    print("Suggestion: \(value)")
+}
+
+if completion.hasMore == true {
+    print("More suggestions available (total: \(completion.total ?? 0))")
+}
+```
+
+You can also provide context with already-resolved arguments:
+
+```swift
+// First, user selects a language
+let languageCompletion = try await client.complete(
+    promptName: "code_review",
+    argumentName: "language",
+    argumentValue: "py"
+)
+// User selects "python"
+
+// Then get framework suggestions based on the selected language
+let frameworkCompletion = try await client.complete(
+    promptName: "code_review",
+    argumentName: "framework",
+    argumentValue: "fla",
+    context: ["language": .string("python")]
+)
+// Returns: ["flask"]
+```
+
+Completions work for resource templates as well:
+
+```swift
+// Get path completions for a resource URI template
+let pathCompletion = try await client.complete(
+    resourceURI: "file:///{path}",
+    argumentName: "path",
+    argumentValue: "/usr/"
+)
+// Returns: ["/usr/bin", "/usr/lib", "/usr/local"]
 ```
 
 ### Sampling
@@ -370,6 +540,42 @@ Common use cases for elicitation:
 - **Configuration**: Collect preferences or settings during operation
 - **Missing information**: Request additional details not provided initially
 
+### Logging
+
+Clients can control server logging levels and receive structured log messages:
+
+```swift
+// Set the minimum logging level
+try await client.setLoggingLevel(.warning)
+
+// Register a handler for log messages from the server
+await client.onNotification(LogMessageNotification.self) { message in
+    let level = message.params.level        // LogLevel (debug, info, warning, etc.)
+    let logger = message.params.logger      // Optional logger name
+    let data = message.params.data          // Arbitrary JSON data
+
+    // Display log message based on level
+    switch level {
+    case .error, .critical, .alert, .emergency:
+        print("❌ [\(logger ?? "server")] \(data)")
+    case .warning:
+        print("⚠️ [\(logger ?? "server")] \(data)")
+    default:
+        print("ℹ️ [\(logger ?? "server")] \(data)")
+    }
+}
+```
+
+Log levels follow the standard syslog severity levels (RFC 5424):
+- **debug**: Detailed debugging information
+- **info**: General informational messages
+- **notice**: Normal but significant events
+- **warning**: Warning conditions
+- **error**: Error conditions
+- **critical**: Critical conditions
+- **alert**: Action must be taken immediately
+- **emergency**: System is unusable
+
 ### Error Handling
 
 Handle common client errors:
@@ -505,6 +711,8 @@ let server = Server(
     name: "MyModelServer",
     version: "1.0.0",
     capabilities: .init(
+        completions: .init(),
+        logging: .init(),
         prompts: .init(listChanged: true),
         resources: .init(subscribe: true, listChanged: true),
         tools: .init(listChanged: true)
@@ -686,6 +894,156 @@ await server.withMethodHandler(GetPrompt.self) { params in
     default:
         throw MCPError.invalidParams("Unknown prompt name: \(params.name)")
     }
+}
+```
+
+### Completions
+
+Servers can provide autocompletion suggestions for prompt and resource template arguments:
+
+```swift
+// Enable completions capability
+let server = Server(
+    name: "MyServer",
+    version: "1.0.0",
+    capabilities: .init(
+        completions: .init(),
+        prompts: .init(listChanged: true)
+    )
+)
+
+// Register a completion handler
+await server.withMethodHandler(Complete.self) { params in
+    // Get the argument being completed
+    let argumentName = params.argument.name
+    let currentValue = params.argument.value
+
+    // Check which prompt or resource is being completed
+    switch params.ref {
+    case .prompt(let promptRef):
+        // Provide completions for a prompt argument
+        if promptRef.name == "code_review" && argumentName == "language" {
+            // Simple prefix matching
+            let allLanguages = ["python", "perl", "php", "javascript", "java", "swift"]
+            let matches = allLanguages.filter { $0.hasPrefix(currentValue.lowercased()) }
+
+            return .init(
+                completion: .init(
+                    values: Array(matches.prefix(100)),  // Max 100 items
+                    total: matches.count,
+                    hasMore: matches.count > 100
+                )
+            )
+        }
+
+    case .resource(let resourceRef):
+        // Provide completions for a resource template argument
+        if resourceRef.uri == "file:///{path}" && argumentName == "path" {
+            // Return directory suggestions
+            let suggestions = try getDirectoryCompletions(for: currentValue)
+            return .init(
+                completion: .init(
+                    values: suggestions,
+                    total: suggestions.count,
+                    hasMore: false
+                )
+            )
+        }
+    }
+
+    // No completions available
+    return .init(completion: .init(values: [], total: 0, hasMore: false))
+}
+```
+
+You can also use context from already-resolved arguments:
+
+```swift
+await server.withMethodHandler(Complete.self) { params in
+    // Access context from previous argument completions
+    if let context = params.context,
+       let language = context.arguments["language"]?.stringValue {
+
+        // Provide framework suggestions based on selected language
+        if language == "python" {
+            let frameworks = ["flask", "django", "fastapi", "tornado"]
+            let matches = frameworks.filter {
+                $0.hasPrefix(params.argument.value.lowercased())
+            }
+            return .init(
+                completion: .init(values: matches, total: matches.count, hasMore: false)
+            )
+        }
+    }
+
+    return .init(completion: .init(values: [], total: 0, hasMore: false))
+}
+```
+
+### Logging
+
+Servers can send structured log messages to clients:
+
+```swift
+// Enable logging capability
+let server = Server(
+    name: "MyServer",
+    version: "1.0.0",
+    capabilities: .init(
+        logging: .init(),
+        tools: .init(listChanged: true)
+    )
+)
+
+// Send log messages at different severity levels
+try await server.log(
+    level: .info,
+    logger: "database",
+    data: Value.object([
+        "message": .string("Database connected successfully"),
+        "host": .string("localhost"),
+        "port": .int(5432)
+    ])
+)
+
+try await server.log(
+    level: .error,
+    logger: "api",
+    data: Value.object([
+        "message": .string("Request failed"),
+        "statusCode": .int(500),
+        "error": .string("Internal server error")
+    ])
+)
+
+// You can also use codable types directly
+struct ErrorLog: Codable {
+    let message: String
+    let code: Int
+    let timestamp: String
+}
+
+let errorLog = ErrorLog(
+    message: "Operation failed",
+    code: 500,
+    timestamp: ISO8601DateFormatter().string(from: Date())
+)
+
+try await server.log(level: .error, logger: "operations", data: errorLog)
+```
+
+Clients can control which log levels they receive:
+
+```swift
+// Register a handler for client's logging level preferences
+await server.withMethodHandler(SetLoggingLevel.self) { params in
+    let minimumLevel = params.level
+
+    // Store the client's preference and filter log messages accordingly
+    // (Implementation depends on your server architecture)
+    storeLogLevel(minimumLevel)
+
+    return Empty()
 }
 ```
 
@@ -982,4 +1340,4 @@ see the [GitHub Releases page](https://github.com/modelcontextprotocol/swift-sdk
 This project is licensed under Apache 2.0 for new contributions, with existing code under MIT. See the [LICENSE](LICENSE) file for details.
 
 [mcp]: https://modelcontextprotocol.io
-[mcp-spec-2025-06-18]: https://modelcontextprotocol.io/specification/2025-06-18
+[mcp-spec-2025-11-25]: https://modelcontextprotocol.io/specification/2025-11-25

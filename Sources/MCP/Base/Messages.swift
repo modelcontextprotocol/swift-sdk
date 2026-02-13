@@ -39,10 +39,9 @@ struct AnyMethod: Method, Sendable {
 extension Method where Parameters == Empty {
     public static func request(
         id: ID = .random,
-        _meta: [String: Value]? = nil,
-        extraFields: [String: Value]? = nil
+        _meta: Metadata? = nil
     ) -> Request<Self> {
-        Request(id: id, method: name, params: Empty(), _meta: _meta, extraFields: extraFields)
+        Request(id: id, method: name, params: Empty(), _meta: _meta)
     }
 }
 
@@ -57,30 +56,27 @@ extension Method {
     public static func request(
         id: ID = .random,
         _ parameters: Self.Parameters,
-        _meta: [String: Value]? = nil,
-        extraFields: [String: Value]? = nil
+        _meta: Metadata? = nil
     ) -> Request<Self> {
-        Request(id: id, method: name, params: parameters, _meta: _meta, extraFields: extraFields)
+        Request(id: id, method: name, params: parameters, _meta: _meta)
     }
 
     /// Create a response with the given result.
     public static func response(
         id: ID,
         result: Self.Result,
-        _meta: [String: Value]? = nil,
-        extraFields: [String: Value]? = nil
+        _meta: Metadata? = nil,
     ) -> Response<Self> {
-        Response(id: id, result: result, _meta: _meta, extraFields: extraFields)
+        Response(id: id, result: result, _meta: _meta)
     }
 
     /// Create a response with the given error.
     public static func response(
         id: ID,
         error: MCPError,
-        _meta: [String: Value]? = nil,
-        extraFields: [String: Value]? = nil
+        _meta: Metadata? = nil
     ) -> Response<Self> {
-        Response(id: id, error: error, _meta: _meta, extraFields: extraFields)
+        Response(id: id, error: error, _meta: _meta)
     }
 }
 
@@ -95,26 +91,22 @@ public struct Request<M: Method>: Hashable, Identifiable, Codable, Sendable {
     /// The request parameters.
     public let params: M.Parameters
     /// Metadata for this request (see spec for _meta usage, includes progressToken)
-    public let _meta: [String: Value]?
-    /// Extra fields for this request (index signature)
-    public let extraFields: [String: Value]?
+    public let _meta: Metadata?
 
     init(
         id: ID = .random,
         method: String,
         params: M.Parameters,
-        _meta: [String: Value]? = nil,
-        extraFields: [String: Value]? = nil
+        _meta: Metadata? = nil
     ) {
         self.id = id
         self.method = method
         self.params = params
         self._meta = _meta
-        self.extraFields = extraFields
     }
 
     private enum CodingKeys: String, CodingKey, CaseIterable {
-        case jsonrpc, id, method, params
+        case jsonrpc, id, method, params, _meta
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -123,12 +115,7 @@ public struct Request<M: Method>: Hashable, Identifiable, Codable, Sendable {
         try container.encode(id, forKey: .id)
         try container.encode(method, forKey: .method)
         try container.encode(params, forKey: .params)
-
-        // Encode _meta and extra fields, excluding JSON-RPC protocol fields
-        var dynamicContainer = encoder.container(keyedBy: DynamicCodingKey.self)
-        try encodeMeta(_meta, to: &dynamicContainer)
-        try encodeExtraFields(
-            extraFields, to: &dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
+        try container.encodeIfPresent(_meta, forKey: ._meta)
     }
 }
 
@@ -142,6 +129,7 @@ extension Request {
         }
         id = try container.decode(ID.self, forKey: .id)
         method = try container.decode(String.self, forKey: .method)
+        _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
 
         if M.Parameters.self is NotRequired.Type {
             // For NotRequired parameters, use decodeIfPresent or init()
@@ -170,11 +158,6 @@ extension Request {
                     codingPath: container.codingPath,
                     debugDescription: "Invalid params field"))
         }
-
-        let dynamicContainer = try decoder.container(keyedBy: DynamicCodingKey.self)
-        _meta = try decodeMeta(from: dynamicContainer)
-        extraFields = try decodeExtraFields(
-            from: dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
     }
 }
 
@@ -239,60 +222,50 @@ public struct Response<M: Method>: Hashable, Identifiable, Codable, Sendable {
     /// The response result.
     public let result: Swift.Result<M.Result, MCPError>
     /// Metadata for this response (see spec for _meta usage)
-    public let _meta: [String: Value]?
-    /// Extra fields for this response (index signature)
-    public let extraFields: [String: Value]?
+    public let _meta: Metadata?
 
     public init(
         id: ID,
         result: Swift.Result<M.Result, MCPError>,
-        _meta: [String: Value]? = nil,
-        extraFields: [String: Value]? = nil
+        _meta: Metadata? = nil
     ) {
         self.id = id
         self.result = result
         self._meta = _meta
-        self.extraFields = extraFields
     }
 
     public init(
         id: ID,
         result: M.Result,
-        _meta: [String: Value]? = nil,
-        extraFields: [String: Value]? = nil
+        _meta: Metadata? = nil
     ) {
-        self.init(id: id, result: .success(result), _meta: _meta, extraFields: extraFields)
+        self.init(id: id, result: .success(result), _meta: _meta)
     }
 
     public init(
         id: ID,
         error: MCPError,
-        _meta: [String: Value]? = nil,
-        extraFields: [String: Value]? = nil
+        _meta: Metadata? = nil
     ) {
-        self.init(id: id, result: .failure(error), _meta: _meta, extraFields: extraFields)
+        self.init(id: id, result: .failure(error), _meta: _meta)
     }
 
     private enum CodingKeys: String, CodingKey, CaseIterable {
-        case jsonrpc, id, result, error
+        case jsonrpc, id, result, error, _meta
     }
 
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(jsonrpc, forKey: .jsonrpc)
         try container.encode(id, forKey: .id)
+        try container.encodeIfPresent(_meta, forKey: ._meta)
+
         switch result {
         case .success(let result):
             try container.encode(result, forKey: .result)
         case .failure(let error):
             try container.encode(error, forKey: .error)
         }
-
-        // Encode _meta and extra fields, excluding JSON-RPC protocol fields
-        var dynamicContainer = encoder.container(keyedBy: DynamicCodingKey.self)
-        try encodeMeta(_meta, to: &dynamicContainer)
-        try encodeExtraFields(
-            extraFields, to: &dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
     }
 
     public init(from decoder: Decoder) throws {
@@ -313,11 +286,7 @@ public struct Response<M: Method>: Hashable, Identifiable, Codable, Sendable {
                     codingPath: container.codingPath,
                     debugDescription: "Invalid response"))
         }
-
-        let dynamicContainer = try decoder.container(keyedBy: DynamicCodingKey.self)
-        _meta = try decodeMeta(from: dynamicContainer)
-        extraFields = try decodeExtraFields(
-            from: dynamicContainer, excluding: Set(CodingKeys.allCases.map(\.rawValue)))
+        _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
     }
 }
 
@@ -333,14 +302,14 @@ extension AnyResponse {
             self = Response<AnyMethod>(
                 id: response.id,
                 result: .success(resultValue),
-                _meta: response._meta,
-                extraFields: response.extraFields)
+                _meta: response._meta
+            )
         case .failure(let error):
             self = Response<AnyMethod>(
                 id: response.id,
                 result: .failure(error),
-                _meta: response._meta,
-                extraFields: response.extraFields)
+                _meta: response._meta
+            )
         }
     }
 }
