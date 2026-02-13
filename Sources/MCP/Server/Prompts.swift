@@ -134,8 +134,8 @@ public struct Prompt: Hashable, Codable, Sendable {
             case image(data: String, mimeType: String)
             /// Audio content
             case audio(data: String, mimeType: String)
-            /// Embedded resource content
-            case resource(uri: String, mimeType: String, text: String?, blob: String?)
+            /// Embedded resource content (EmbeddedResource from spec)
+            case resource(resource: Resource.Content, annotations: Resource.Annotations? = nil, _meta: Metadata? = nil)
         }
     }
 
@@ -175,7 +175,7 @@ public struct Prompt: Hashable, Codable, Sendable {
 
 extension Prompt.Message.Content: Codable {
     private enum CodingKeys: String, CodingKey {
-        case type, text, data, mimeType, uri, blob
+        case type, text, data, mimeType, resource, annotations, _meta
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -193,12 +193,11 @@ extension Prompt.Message.Content: Codable {
             try container.encode("audio", forKey: .type)
             try container.encode(data, forKey: .data)
             try container.encode(mimeType, forKey: .mimeType)
-        case .resource(let uri, let mimeType, let text, let blob):
+        case .resource(let resourceContent, let annotations, let _meta):
             try container.encode("resource", forKey: .type)
-            try container.encode(uri, forKey: .uri)
-            try container.encode(mimeType, forKey: .mimeType)
-            try container.encodeIfPresent(text, forKey: .text)
-            try container.encodeIfPresent(blob, forKey: .blob)
+            try container.encode(resourceContent, forKey: .resource)
+            try container.encodeIfPresent(annotations, forKey: .annotations)
+            try container.encodeIfPresent(_meta, forKey: ._meta)
         }
     }
 
@@ -219,11 +218,10 @@ extension Prompt.Message.Content: Codable {
             let mimeType = try container.decode(String.self, forKey: .mimeType)
             self = .audio(data: data, mimeType: mimeType)
         case "resource":
-            let uri = try container.decode(String.self, forKey: .uri)
-            let mimeType = try container.decode(String.self, forKey: .mimeType)
-            let text = try container.decodeIfPresent(String.self, forKey: .text)
-            let blob = try container.decodeIfPresent(String.self, forKey: .blob)
-            self = .resource(uri: uri, mimeType: mimeType, text: text, blob: blob)
+            let resourceContent = try container.decode(Resource.Content.self, forKey: .resource)
+            let annotations = try container.decodeIfPresent(Resource.Annotations.self, forKey: .annotations)
+            let _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
+            self = .resource(resource: resourceContent, annotations: annotations, _meta: _meta)
         default:
             throw DecodingError.dataCorruptedError(
                 forKey: .type,
@@ -343,7 +341,7 @@ public enum GetPrompt: Method {
             var container = encoder.container(keyedBy: CodingKeys.self)
             try container.encodeIfPresent(description, forKey: .description)
             try container.encode(messages, forKey: .messages)
-            try container.encode(_meta, forKey: ._meta)
+            try container.encodeIfPresent(_meta, forKey: ._meta)
         }
 
         public init(from decoder: Decoder) throws {

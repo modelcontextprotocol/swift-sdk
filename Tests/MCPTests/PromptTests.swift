@@ -88,19 +88,20 @@ struct PromptTests {
         }
 
         // Test resource content
-        let resourceContent = Prompt.Message.Content.resource(
+        let textResourceContent = Resource.Content.text(
+            "Sample text",
             uri: "file://test.txt",
-            mimeType: "text/plain",
-            text: "Sample text",
-            blob: "blob_data"
+            mimeType: "text/plain"
         )
+        let resourceContent = Prompt.Message.Content.resource(resource: textResourceContent, annotations: nil, _meta: nil)
         let resourceData = try encoder.encode(resourceContent)
         let decodedResource = try decoder.decode(Prompt.Message.Content.self, from: resourceData)
-        if case .resource(let uri, let mimeType, let text, let blob) = decodedResource {
-            #expect(uri == "file://test.txt")
-            #expect(mimeType == "text/plain")
-            #expect(text == "Sample text")
-            #expect(blob == "blob_data")
+        if case .resource(let resourceData, let annotations, let _meta) = decodedResource {
+            #expect(resourceData.uri == "file://test.txt")
+            #expect(resourceData.mimeType == "text/plain")
+            #expect(resourceData.text == "Sample text")
+            #expect(annotations == nil)
+            #expect(_meta == nil)
         } else {
             #expect(Bool(false), "Expected resource content")
         }
@@ -249,15 +250,19 @@ struct PromptTests {
         }
 
         // Test with resource content
-        let resourceMessage: Prompt.Message = .user(
-            .resource(
-                uri: "file://test.txt", mimeType: "text/plain", text: "Sample text", blob: nil))
+        let resourceContent = Resource.Content.text(
+            "Sample text",
+            uri: "file://test.txt",
+            mimeType: "text/plain"
+        )
+        let resourceMessage: Prompt.Message = .user(.resource(resource: resourceContent, annotations: nil, _meta: nil))
         #expect(resourceMessage.role == .user)
-        if case .resource(let uri, let mimeType, let text, let blob) = resourceMessage.content {
-            #expect(uri == "file://test.txt")
-            #expect(mimeType == "text/plain")
-            #expect(text == "Sample text")
-            #expect(blob == nil)
+        if case .resource(let resource, let annotations, let _meta) = resourceMessage.content {
+            #expect(resource.uri == "file://test.txt")
+            #expect(resource.mimeType == "text/plain")
+            #expect(resource.text == "Sample text")
+            #expect(annotations == nil)
+            #expect(_meta == nil)
         } else {
             #expect(Bool(false), "Expected resource content")
         }

@@ -807,6 +807,87 @@ public actor Client {
         return self
     }
 
+    // MARK: - Logging
+
+    /// Set the minimum logging level for server log messages.
+    ///
+    /// Servers that declare the `logging` capability will send log messages via
+    /// `notifications/message` notifications. Use this method to control which
+    /// severity levels the server should send.
+    ///
+    /// - Parameter level: The minimum log level to receive
+    /// - Throws: MCPError if the client is not connected or if the server doesn't support logging
+    /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/server/utilities/logging/
+    public func setLoggingLevel(_ level: LogLevel) async throws {
+        try validateServerCapability(\.logging, "Logging")
+        let request = SetLoggingLevel.request(.init(level: level))
+        _ = try await sendAndAwait(request)
+    }
+
+    // MARK: - Completions
+
+    /// Request completion suggestions for a prompt argument.
+    ///
+    /// Servers that declare the `completions` capability can provide autocompletion
+    /// suggestions for prompt arguments as users type.
+    ///
+    /// - Parameters:
+    ///   - promptName: The name of the prompt
+    ///   - argumentName: The name of the argument being completed
+    ///   - argumentValue: The current (partial) value of the argument
+    ///   - context: Optional context with already-resolved arguments
+    /// - Returns: A completion result containing suggested values
+    /// - Throws: MCPError if the client is not connected or if the server doesn't support completions
+    /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/server/utilities/completion/
+    public func complete(
+        promptName: String,
+        argumentName: String,
+        argumentValue: String,
+        context: [String: Value]? = nil
+    ) async throws -> Complete.Result.Completion {
+        try validateServerCapability(\.completions, "Completions")
+        let request = Complete.request(
+            .init(
+                ref: .prompt(.init(name: promptName)),
+                argument: .init(name: argumentName, value: argumentValue),
+                context: context.map { .init(arguments: $0) }
+            )
+        )
+        let result = try await sendAndAwait(request)
+        return result.completion
+    }
+
+    /// Request completion suggestions for a resource template argument.
+    ///
+    /// Servers that declare the `completions` capability can provide autocompletion
+    /// suggestions for resource template arguments as users type.
+    ///
+    /// - Parameters:
+    ///   - resourceURI: The URI of the resource template
+    ///   - argumentName: The name of the argument being completed
+    ///   - argumentValue: The current (partial) value of the argument
+    ///   - context: Optional context with already-resolved arguments
+    /// - Returns: A completion result containing suggested values
+    /// - Throws: MCPError if the client is not connected or if the server doesn't support completions
+    /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/server/utilities/completion/
+    public func complete(
+        resourceURI: String,
+        argumentName: String,
+        argumentValue: String,
+        context: [String: Value]? = nil
+    ) async throws -> Complete.Result.Completion {
+        try validateServerCapability(\.completions, "Completions")
+        let request = Complete.request(
+            .init(
+                ref: .resource(.init(uri: resourceURI)),
+                argument: .init(name: argumentName, value: argumentValue),
+                context: context.map { .init(arguments: $0) }
+            )
+        )
+        let result = try await sendAndAwait(request)
+        return result.completion
+    }
+
     // MARK: -
 
     private func handleResponse(_ response: Response<AnyMethod>) async {

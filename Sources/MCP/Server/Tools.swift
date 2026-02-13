@@ -119,11 +119,8 @@ public struct Tool: Hashable, Codable, Sendable {
         case image(data: String, mimeType: String, metadata: Metadata?)
         /// Audio content
         case audio(data: String, mimeType: String)
-        /// Embedded resource content
-        case resource(
-            uri: String, mimeType: String, text: String?, title: String? = nil,
-            annotations: Resource.Annotations? = nil
-        )
+        /// Embedded resource content (EmbeddedResource from spec)
+        case resource(resource: Resource.Content, annotations: Resource.Annotations? = nil, _meta: Metadata? = nil)
         /// Resource link
         case resourceLink(
             uri: String, name: String, title: String? = nil, description: String? = nil,
@@ -167,15 +164,10 @@ public struct Tool: Hashable, Codable, Sendable {
                 let mimeType = try container.decode(String.self, forKey: .mimeType)
                 self = .audio(data: data, mimeType: mimeType)
             case "resource":
-                let uri = try container.decode(String.self, forKey: .uri)
-                let title = try container.decodeIfPresent(String.self, forKey: .title)
-                let mimeType = try container.decode(String.self, forKey: .mimeType)
-                let text = try container.decodeIfPresent(String.self, forKey: .text)
-                let annotations = try container.decodeIfPresent(
-                    Resource.Annotations.self, forKey: .annotations)
-                self = .resource(
-                    uri: uri, mimeType: mimeType, text: text, title: title, annotations: annotations
-                )
+                let resourceContent = try container.decode(Resource.Content.self, forKey: .resource)
+                let annotations = try container.decodeIfPresent(Resource.Annotations.self, forKey: .annotations)
+                let _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
+                self = .resource(resource: resourceContent, annotations: annotations, _meta: _meta)
             case "resourceLink":
                 let uri = try container.decode(String.self, forKey: .uri)
                 let name = try container.decode(String.self, forKey: .name)
@@ -209,13 +201,11 @@ public struct Tool: Hashable, Codable, Sendable {
                 try container.encode("audio", forKey: .type)
                 try container.encode(data, forKey: .data)
                 try container.encode(mimeType, forKey: .mimeType)
-            case .resource(let uri, let mimeType, let text, let title, let annotations):
+            case .resource(let resourceContent, let annotations, let _meta):
                 try container.encode("resource", forKey: .type)
-                try container.encode(uri, forKey: .uri)
-                try container.encode(mimeType, forKey: .mimeType)
-                try container.encodeIfPresent(text, forKey: .text)
-                try container.encodeIfPresent(title, forKey: .title)
+                try container.encode(resourceContent, forKey: .resource)
                 try container.encodeIfPresent(annotations, forKey: .annotations)
+                try container.encodeIfPresent(_meta, forKey: ._meta)
             case .resourceLink(
                 let uri, let name, let title, let description, let mimeType, let annotations):
                 try container.encode("resourceLink", forKey: .type)

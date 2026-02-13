@@ -90,6 +90,13 @@ public actor Server {
             public init() {}
         }
 
+        /// Completions capabilities
+        public struct Completions: Hashable, Codable, Sendable {
+            public init() {}
+        }
+
+        /// Completions capabilities
+        public var completions: Completions?
         /// Logging capabilities
         public var logging: Logging?
         /// Prompts capabilities
@@ -102,12 +109,14 @@ public actor Server {
         public var tools: Tools?
 
         public init(
+            completions: Completions? = nil,
             logging: Logging? = nil,
             prompts: Prompts? = nil,
             resources: Resources? = nil,
             sampling: Sampling? = nil,
             tools: Tools? = nil
         ) {
+            self.completions = completions
             self.logging = logging
             self.prompts = prompts
             self.resources = resources
@@ -193,7 +202,8 @@ public actor Server {
         try await transport.connect()
 
         await logger?.debug(
-            "Server started", metadata: ["name": "\(name)", "version": "\(version)"])
+            "Server started", metadata: ["name": "\(name)", "version": "\(version)"]
+        )
 
         // Start message handling loop
         task = Task {
@@ -378,6 +388,50 @@ public actor Server {
         // similar to how the client sends requests to servers
         throw MCPError.internalError(
             "Bidirectional sampling requests not yet implemented in transport layer")
+    }
+
+    // MARK: - Logging
+
+    /// Send a log message notification to connected clients.
+    ///
+    /// Servers that declare the `logging` capability can send structured log messages
+    /// to clients. The client controls which severity levels it wants to receive via
+    /// the `logging/setLevel` request.
+    ///
+    /// - Parameters:
+    ///   - level: The severity level of the log message
+    ///   - logger: Optional logger name to identify the source
+    ///   - data: Arbitrary JSON-serializable data for the log message
+    /// - Throws: MCPError if the server is not connected
+    /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/server/utilities/logging/
+    public func log(
+        level: LogLevel,
+        logger: String? = nil,
+        data: Value
+    ) async throws {
+        let notification = LogMessageNotification.message(
+            .init(level: level, logger: logger, data: data)
+        )
+        try await notify(notification)
+    }
+
+    /// Send a log message notification with codable data.
+    ///
+    /// Convenience method that encodes data to JSON before sending.
+    ///
+    /// - Parameters:
+    ///   - level: The severity level of the log message
+    ///   - logger: Optional logger name to identify the source
+    ///   - data: Any codable data for the log message
+    /// - Throws: MCPError if the server is not connected or encoding fails
+    /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/server/utilities/logging/
+    public func log<T: Codable>(
+        level: LogLevel,
+        logger: String? = nil,
+        data: T
+    ) async throws {
+        let value = try Value(data)
+        try await log(level: level, logger: logger, data: value)
     }
 
     /// A JSON-RPC batch containing multiple requests and/or notifications
