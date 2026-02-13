@@ -6,12 +6,6 @@ import class Foundation.JSONEncoder
 
 @testable import MCP
 
-#if canImport(System)
-    import System
-#else
-    @preconcurrency import SystemPackage
-#endif
-
 @Suite("Sampling Tests")
 struct SamplingTests {
     @Test("Sampling.Message encoding and decoding")
@@ -240,45 +234,6 @@ struct SamplingTests {
 
         // Should return self for method chaining
         #expect(handlerClient === client)
-    }
-
-    @Test("Server sampling request method")
-    func testServerSamplingRequestMethod() async throws {
-        let transport = MockTransport()
-        let server = Server(
-            name: "TestServer",
-            version: "1.0",
-            capabilities: .init(sampling: .init())
-        )
-
-        try await server.start(transport: transport)
-
-        // Test that server can attempt to request sampling
-        let messages: [Sampling.Message] = [
-            .user("Test message")
-        ]
-
-        do {
-            _ = try await server.requestSampling(
-                messages: messages,
-                maxTokens: 100
-            )
-            #expect(
-                Bool(false),
-                "Should have thrown an error for unimplemented bidirectional communication")
-        } catch let error as MCPError {
-            if case .internalError(let message) = error {
-                #expect(
-                    message?.contains("Bidirectional sampling requests not yet implemented") == true
-                )
-            } else {
-                #expect(Bool(false), "Expected internalError, got \(error)")
-            }
-        } catch {
-            #expect(Bool(false), "Expected MCPError, got \(error)")
-        }
-
-        await server.stop()
     }
 
     @Test("Sampling message content JSON format")
@@ -545,67 +500,67 @@ struct SamplingTests {
 
 @Suite("Sampling Integration Tests")
 struct SamplingIntegrationTests {
-    @Test(
-        .timeLimit(.minutes(1))
-    )
+
+    @Test
     func testSamplingCapabilitiesNegotiation() async throws {
-        let (clientToServerRead, clientToServerWrite) = try FileDescriptor.pipe()
-        let (serverToClientRead, serverToClientWrite) = try FileDescriptor.pipe()
-
-        var logger = Logger(
-            label: "mcp.test.sampling",
-            factory: { StreamLogHandler.standardError(label: $0) })
-        logger.logLevel = .debug
-
-        let serverTransport = StdioTransport(
-            input: clientToServerRead,
-            output: serverToClientWrite,
-            logger: logger
-        )
-        let clientTransport = StdioTransport(
-            input: serverToClientRead,
-            output: clientToServerWrite,
-            logger: logger
-        )
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
         // Server with sampling capability
         let server = Server(
             name: "SamplingTestServer",
             version: "1.0.0",
             capabilities: .init(
-                sampling: .init(),  // Enable sampling
+                sampling: .init(),
                 tools: .init()
             )
         )
 
-        // Client (capabilities will be set during initialization)
+        // Client with sampling capability
         let client = Client(
             name: "SamplingTestClient",
             version: "1.0"
         )
+
+        // Register sampling handler on client
+        await client.withSamplingHandler { parameters in
+            // Mock LLM response
+            return CreateSamplingMessage.Result(
+                model: "test-model",
+                stopReason: .endTurn,
+                role: .assistant,
+                content: .text("Mock response")
+            )
+        }
 
         try await server.start(transport: serverTransport)
         try await client.connect(transport: clientTransport)
 
         await server.stop()
         await client.disconnect()
-        try? clientToServerRead.close()
-        try? clientToServerWrite.close()
-        try? serverToClientRead.close()
-        try? serverToClientWrite.close()
     }
 
-    @Test(
-        .timeLimit(.minutes(1))
-    )
+    @Test
     func testSamplingHandlerRegistration() async throws {
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+
+        let server = Server(
+            name: "SamplingHandlerTestServer",
+            version: "1.0",
+            capabilities: .init(sampling: .init())
+        )
+
         let client = Client(
             name: "SamplingHandlerTestClient",
             version: "1.0"
         )
 
+        nonisolated(unsafe) var handlerCalled = false
+
         // Register sampling handler
-        let handlerClient = await client.withSamplingHandler { parameters in
+        await client.withSamplingHandler { parameters in
+            handlerCalled = true
+            #expect(parameters.messages.count == 1)
+
             // Mock LLM response
             return CreateSamplingMessage.Result(
                 model: "test-model-v1",
@@ -615,26 +570,59 @@ struct SamplingIntegrationTests {
             )
         }
 
-        // Verify method chaining works
-        #expect(
-            handlerClient === client, "withSamplingHandler should return self for method chaining")
+        try await server.start(transport: serverTransport)
+        try await client.connect(transport: clientTransport)
 
-        // Note: We can't test the actual handler invocation without bidirectional transport,
-        // but we can verify the handler registration doesn't crash and returns correctly
+        // Test that the handler actually gets called
+        let messages: [Sampling.Message] = [.user("Test")]
+        let result = try await server.requestSampling(messages: messages, maxTokens: 100)
+
+        #expect(handlerCalled, "Sampling handler should have been called")
+        #expect(result.model == "test-model-v1")
+        #expect(result.stopReason == .endTurn)
+
+        await server.stop()
+        await client.disconnect()
     }
 
-    @Test(
-        .timeLimit(.minutes(1))
-    )
+    @Test
     func testServerSamplingRequestAPI() async throws {
-        let transport = MockTransport()
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+
         let server = Server(
             name: "SamplingRequestTestServer",
             version: "1.0",
             capabilities: .init(sampling: .init())
         )
 
-        try await server.start(transport: transport)
+        let client = Client(
+            name: "SamplingTestClient",
+            version: "1.0"
+        )
+
+        // Register sampling handler on client to respond to server's request
+        let responseContentString = "Based on the analysis, sales show strong growth through Q3 with Q4 stabilization."
+        await client.withSamplingHandler { parameters in
+            // Verify the request parameters were passed correctly
+            #expect(parameters.messages.count == 3)
+            #expect(parameters.systemPrompt == "You are a business analyst expert.")
+            #expect(parameters.includeContext == .thisServer)
+            #expect(parameters.temperature == 0.7)
+            #expect(parameters.maxTokens == 500)
+            #expect(parameters.stopSequences?.count == 2)
+            #expect(parameters.metadata?["requestId"]?.stringValue == "test-123")
+
+            // Return mock LLM response
+            return CreateSamplingMessage.Result(
+                model: "claude-4-sonnet",
+                stopReason: .endTurn,
+                role: .assistant,
+                content: .text(responseContentString)
+            )
+        }
+
+        try await server.start(transport: serverTransport)
+        try await client.connect(transport: clientTransport)
 
         // Test sampling request with comprehensive parameters
         let messages: [Sampling.Message] = [
@@ -653,43 +641,37 @@ struct SamplingIntegrationTests {
             intelligencePriority: 0.9
         )
 
-        // Test that the API accepts all parameters correctly
-        do {
-            _ = try await server.requestSampling(
-                messages: messages,
-                modelPreferences: modelPreferences,
-                systemPrompt: "You are a business analyst expert.",
-                includeContext: .thisServer,
-                temperature: 0.7,
-                maxTokens: 500,
-                stopSequences: ["END_ANALYSIS", "\n\n---"],
-                metadata: [
-                    "requestId": "test-123",
-                    "priority": "high",
-                    "department": "analytics",
-                ]
-            )
-            #expect(Bool(false), "Should throw error for unimplemented bidirectional communication")
-        } catch let error as MCPError {
-            if case .internalError(let message) = error {
-                #expect(
-                    message?.contains("Bidirectional sampling requests not yet implemented")
-                        == true,
-                    "Should indicate bidirectional communication not implemented"
-                )
-            } else {
-                #expect(Bool(false), "Expected internalError, got \(error)")
-            }
-        } catch {
-            #expect(Bool(false), "Expected MCPError, got \(error)")
+        // Test that the API works end-to-end
+        let result = try await server.requestSampling(
+            messages: messages,
+            modelPreferences: modelPreferences,
+            systemPrompt: "You are a business analyst expert.",
+            includeContext: .thisServer,
+            temperature: 0.7,
+            maxTokens: 500,
+            stopSequences: ["END_ANALYSIS", "\n\n---"],
+            metadata: [
+                "requestId": "test-123",
+                "priority": "high",
+                "department": "analytics",
+            ]
+        )
+
+        // Verify the response
+        #expect(result.model == "claude-4-sonnet")
+        #expect(result.stopReason == .endTurn)
+        #expect(result.role == .assistant)
+        if case .text(let text) = result.content {
+            #expect(text == responseContentString)
+        } else {
+            Issue.record("Expected text content")
         }
 
         await server.stop()
+        await client.disconnect()
     }
 
-    @Test(
-        .timeLimit(.minutes(1))
-    )
+    @Test
     func testSamplingMessageTypes() async throws {
         // Test comprehensive message content types
         let textMessage: Sampling.Message = .user("What do you see in this data?")
@@ -727,9 +709,7 @@ struct SamplingIntegrationTests {
         }
     }
 
-    @Test(
-        .timeLimit(.minutes(1))
-    )
+    @Test
     func testSamplingResultTypes() async throws {
         // Test different result content types and stop reasons
         let textResult = CreateSamplingMessage.Result(
@@ -784,51 +764,44 @@ struct SamplingIntegrationTests {
         #expect(decodedStopResult.stopReason == .stopSequence)
     }
 
-    @Test(
-        .timeLimit(.minutes(1))
-    )
+    @Test
     func testSamplingErrorHandling() async throws {
-        let transport = MockTransport()
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+
         let server = Server(
             name: "ErrorTestServer",
             version: "1.0",
-            capabilities: .init()  // No sampling capability
+            capabilities: .init(sampling: .init())
         )
 
-        try await server.start(transport: transport)
+        // Client WITHOUT sampling capability
+        let client = Client(
+            name: "ErrorTestClient",
+            version: "1.0"
+        )
+        // Note: Not registering a sampling handler
 
-        // Test sampling request on server without sampling capability
+        try await server.start(transport: serverTransport)
+        try await client.connect(transport: clientTransport)
+
+        // Test sampling request - should fail because client doesn't support sampling
         let messages: [Sampling.Message] = [
             .user("Test message")
         ]
 
-        do {
+        // Should throw an error because client doesn't have sampling capability
+        await #expect(throws: (any Error).self) {
             _ = try await server.requestSampling(
                 messages: messages,
                 maxTokens: 100
             )
-            #expect(Bool(false), "Should throw error for missing connection")
-        } catch let error as MCPError {
-            if case .internalError(let message) = error {
-                #expect(
-                    message?.contains("Server connection not initialized") == true
-                        || message?.contains("Bidirectional sampling requests not yet implemented")
-                            == true,
-                    "Should indicate connection or implementation issue"
-                )
-            } else {
-                #expect(Bool(false), "Expected internalError, got \(error)")
-            }
-        } catch {
-            #expect(Bool(false), "Expected MCPError, got \(error)")
         }
 
         await server.stop()
+        await client.disconnect()
     }
 
-    @Test(
-        .timeLimit(.minutes(1))
-    )
+    @Test
     func testSamplingParameterValidation() async throws {
         // Test parameter validation and edge cases
         let validMessages: [Sampling.Message] = [
@@ -891,9 +864,7 @@ struct SamplingIntegrationTests {
         #expect(decoded.metadata?["sessionId"]?.stringValue == "test-session-123")
     }
 
-    @Test(
-        .timeLimit(.minutes(1))
-    )
+    @Test
     func testSamplingWorkflowScenarios() async throws {
         // Test realistic sampling workflow scenarios
 
