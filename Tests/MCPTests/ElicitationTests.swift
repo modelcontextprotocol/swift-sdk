@@ -102,7 +102,7 @@ struct ElicitationTests {
             .init(
                 message: "Please share your GitHub username",
                 requestedSchema: schema,
-                metadata: ["flow": "onboarding"]
+                _meta: Metadata(additionalFields: ["flow": "onboarding"])
             )
         )
 
@@ -112,7 +112,7 @@ struct ElicitationTests {
         if case .form(let formParams) = decoded {
             #expect(formParams.message == "Please share your GitHub username")
             #expect(formParams.requestedSchema?.properties.keys.contains("username") == true)
-            #expect(formParams.metadata?["flow"]?.stringValue == "onboarding")
+            #expect(formParams._meta?["flow"]?.stringValue == "onboarding")
         } else {
             #expect(Bool(false), "Expected form parameters")
         }

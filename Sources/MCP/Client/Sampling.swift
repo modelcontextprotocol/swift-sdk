@@ -463,8 +463,8 @@ public enum CreateSamplingMessage: Method {
         public let maxTokens: Int
         /// Array of sequences that stop generation
         public let stopSequences: [String]?
-        /// Additional provider-specific parameters
-        public let metadata: [String: Value]?
+        /// Optional request metadata
+        public var _meta: Metadata?
         /// Tools available for the model to use
         public let tools: [Tool]?
         /// Tool choice configuration
@@ -478,7 +478,7 @@ public enum CreateSamplingMessage: Method {
             temperature: Double? = nil,
             maxTokens: Int,
             stopSequences: [String]? = nil,
-            metadata: [String: Value]? = nil,
+            _meta: Metadata? = nil,
             tools: [Tool]? = nil,
             toolChoice: ToolChoice? = nil
         ) {
@@ -489,7 +489,7 @@ public enum CreateSamplingMessage: Method {
             self.temperature = temperature
             self.maxTokens = maxTokens
             self.stopSequences = stopSequences
-            self.metadata = metadata
+            self._meta = _meta
             self.tools = tools
             self.toolChoice = toolChoice
         }

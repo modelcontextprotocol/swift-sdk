@@ -70,19 +70,19 @@ public enum CreateElicitation: Method {
             public var mode: Elicitation.Mode?
             /// Optional schema describing the expected response content
             public var requestedSchema: Elicitation.RequestSchema?
-            /// Optional provider-specific metadata
-            public var metadata: [String: Value]?
+            /// Optional metadata
+            public var _meta: Metadata?
 
             public init(
                 message: String,
                 mode: Elicitation.Mode? = nil,
                 requestedSchema: Elicitation.RequestSchema? = nil,
-                metadata: [String: Value]? = nil
+                _meta: Metadata? = nil
             ) {
                 self.message = message
                 self.mode = mode
                 self.requestedSchema = requestedSchema
-                self.metadata = metadata
+                self._meta = _meta
             }
         }
 
@@ -96,20 +96,20 @@ public enum CreateElicitation: Method {
             public var url: String
             /// Unique identifier for this elicitation
             public var elicitationId: String
-            /// Optional provider-specific metadata
-            public var metadata: [String: Value]?
+            /// Optional metadata
+            public var _meta: Metadata?
 
             public init(
                 message: String,
                 url: String,
                 elicitationId: String,
-                metadata: [String: Value]? = nil
+                _meta: Metadata? = nil
             ) {
                 self.message = message
                 self.mode = .url
                 self.url = url
                 self.elicitationId = elicitationId
-                self.metadata = metadata
+                self._meta = _meta
             }
         }
     }
@@ -178,23 +178,23 @@ extension CreateElicitation.Parameters: Codable {
             let message = try container.decode(String.self, forKey: .message)
             let url = try container.decode(String.self, forKey: .url)
             let elicitationId = try container.decode(String.self, forKey: .elicitationId)
-            let metadata = try container.decodeIfPresent([String: Value].self, forKey: .metadata)
+            let _meta = try container.decodeIfPresent(Metadata.self, forKey: .metadata)
             self = .url(URLParameters(
                 message: message,
                 url: url,
                 elicitationId: elicitationId,
-                metadata: metadata))
+                _meta: _meta))
         } else {
             // Form mode (default for backward compatibility)
             let message = try container.decode(String.self, forKey: .message)
             let requestedSchema = try container.decodeIfPresent(
                 Elicitation.RequestSchema.self, forKey: .requestedSchema)
-            let metadata = try container.decodeIfPresent([String: Value].self, forKey: .metadata)
+            let _meta = try container.decodeIfPresent(Metadata.self, forKey: .metadata)
             self = .form(FormParameters(
                 message: message,
                 mode: mode,
                 requestedSchema: requestedSchema,
-                metadata: metadata))
+                _meta: _meta))
         }
     }
 
@@ -206,13 +206,13 @@ extension CreateElicitation.Parameters: Codable {
             try container.encode(params.message, forKey: .message)
             try container.encodeIfPresent(params.mode, forKey: .mode)
             try container.encodeIfPresent(params.requestedSchema, forKey: .requestedSchema)
-            try container.encodeIfPresent(params.metadata, forKey: .metadata)
+            try container.encodeIfPresent(params._meta, forKey: .metadata)
         case .url(let params):
             try container.encode(params.message, forKey: .message)
             try container.encode(params.mode, forKey: .mode)
             try container.encode(params.url, forKey: .url)
             try container.encode(params.elicitationId, forKey: .elicitationId)
-            try container.encodeIfPresent(params.metadata, forKey: .metadata)
+            try container.encodeIfPresent(params._meta, forKey: .metadata)
         }
     }
 }

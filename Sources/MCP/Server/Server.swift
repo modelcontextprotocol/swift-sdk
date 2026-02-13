@@ -459,7 +459,7 @@ public actor Server {
     ///   - temperature: Controls randomness (0.0 to 1.0)
     ///   - maxTokens: Maximum tokens to generate
     ///   - stopSequences: Array of sequences that stop generation
-    ///   - metadata: Additional provider-specific parameters
+    ///   - _meta: Optional request metadata
     /// - Returns: The sampling result containing the model used, stop reason, role, and content
     /// - Throws: MCPError if the request fails
     /// - SeeAlso: https://modelcontextprotocol.io/docs/concepts/sampling#how-sampling-works
@@ -471,7 +471,7 @@ public actor Server {
         temperature: Double? = nil,
         maxTokens: Int,
         stopSequences: [String]? = nil,
-        metadata: [String: Value]? = nil
+        _meta: Metadata? = nil
     ) async throws -> CreateSamplingMessage.Result {
         guard connection != nil else {
             throw MCPError.internalError("Server connection not initialized")
@@ -488,7 +488,7 @@ public actor Server {
                 temperature: temperature,
                 maxTokens: maxTokens,
                 stopSequences: stopSequences,
-                metadata: metadata
+                _meta: _meta
             )
         )
 

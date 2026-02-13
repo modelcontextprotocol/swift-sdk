@@ -121,7 +121,7 @@ struct SamplingTests {
             temperature: 0.7,
             maxTokens: 150,
             stopSequences: ["END", "STOP"],
-            metadata: ["provider": "test"]
+            _meta: Metadata(additionalFields: ["provider": "test"])
         )
 
         let data = try encoder.encode(parameters)
@@ -136,7 +136,7 @@ struct SamplingTests {
         #expect(decoded.stopSequences?.count == 2)
         #expect(decoded.stopSequences?[0] == "END")
         #expect(decoded.stopSequences?[1] == "STOP")
-        #expect(decoded.metadata?["provider"]?.stringValue == "test")
+        #expect(decoded._meta?["provider"]?.stringValue == "test")
     }
 
     @Test("CreateMessage result")
@@ -502,44 +502,6 @@ struct SamplingTests {
 struct SamplingIntegrationTests {
 
     @Test
-    func testSamplingCapabilitiesNegotiation() async throws {
-        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
-
-        // Server with sampling capability
-        let server = Server(
-            name: "SamplingTestServer",
-            version: "1.0.0",
-            capabilities: .init(
-                sampling: .init(),
-                tools: .init()
-            )
-        )
-
-        // Client with sampling capability
-        let client = Client(
-            name: "SamplingTestClient",
-            version: "1.0"
-        )
-
-        // Register sampling handler on client
-        await client.withSamplingHandler { parameters in
-            // Mock LLM response
-            return CreateSamplingMessage.Result(
-                model: "test-model",
-                stopReason: .endTurn,
-                role: .assistant,
-                content: .text("Mock response")
-            )
-        }
-
-        try await server.start(transport: serverTransport)
-        try await client.connect(transport: clientTransport)
-
-        await server.stop()
-        await client.disconnect()
-    }
-
-    @Test
     func testSamplingHandlerRegistration() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
@@ -610,7 +572,7 @@ struct SamplingIntegrationTests {
             #expect(parameters.temperature == 0.7)
             #expect(parameters.maxTokens == 500)
             #expect(parameters.stopSequences?.count == 2)
-            #expect(parameters.metadata?["requestId"]?.stringValue == "test-123")
+            #expect(parameters._meta?["requestId"]?.stringValue == "test-123")
 
             // Return mock LLM response
             return CreateSamplingMessage.Result(
@@ -650,11 +612,11 @@ struct SamplingIntegrationTests {
             temperature: 0.7,
             maxTokens: 500,
             stopSequences: ["END_ANALYSIS", "\n\n---"],
-            metadata: [
+            _meta: Metadata(additionalFields: [
                 "requestId": "test-123",
                 "priority": "high",
                 "department": "analytics",
-            ]
+            ])
         )
 
         // Verify the response
@@ -690,23 +652,12 @@ struct SamplingIntegrationTests {
         // Test text message
         let textData = try encoder.encode(textMessage)
         let decodedTextMessage = try decoder.decode(Sampling.Message.self, from: textData)
-        #expect(decodedTextMessage.role == .user)
-        if case .single(.text(let text)) = decodedTextMessage.content {
-            #expect(text == "What do you see in this data?")
-        } else {
-            #expect(Bool(false), "Expected text content")
-        }
+        #expect(decodedTextMessage == textMessage)
 
         // Test image message
         let imageData = try encoder.encode(imageMessage)
         let decodedImageMessage = try decoder.decode(Sampling.Message.self, from: imageData)
-        #expect(decodedImageMessage.role == .user)
-        if case .single(.image(let data, let mimeType)) = decodedImageMessage.content {
-            #expect(data.contains("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ"))
-            #expect(mimeType == "image/png")
-        } else {
-            #expect(Bool(false), "Expected image content")
-        }
+        #expect(decodedImageMessage == imageMessage)
     }
 
     @Test
@@ -745,23 +696,23 @@ struct SamplingIntegrationTests {
         // Test text result
         let textData = try encoder.encode(textResult)
         let decodedTextResult = try decoder.decode(
-            CreateSamplingMessage.Result.self, from: textData)
-        #expect(decodedTextResult.model == "claude-4-sonnet")
-        #expect(decodedTextResult.stopReason == .endTurn)
-        #expect(decodedTextResult.role == .assistant)
+            CreateSamplingMessage.Result.self, from: textData
+        )
+        #expect(decodedTextResult == textResult)
 
         // Test image result
         let imageData = try encoder.encode(imageResult)
         let decodedImageResult = try decoder.decode(
-            CreateSamplingMessage.Result.self, from: imageData)
-        #expect(decodedImageResult.model == "dall-e-3")
-        #expect(decodedImageResult.stopReason == .maxTokens)
+            CreateSamplingMessage.Result.self, from: imageData
+        )
+        #expect(decodedImageResult == imageResult)
 
         // Test stop sequence result
         let stopData = try encoder.encode(stopSequenceResult)
         let decodedStopResult = try decoder.decode(
-            CreateSamplingMessage.Result.self, from: stopData)
-        #expect(decodedStopResult.stopReason == .stopSequence)
+            CreateSamplingMessage.Result.self, from: stopData
+        )
+        #expect(decodedStopResult == stopSequenceResult)
     }
 
     @Test
@@ -779,7 +730,6 @@ struct SamplingIntegrationTests {
             name: "ErrorTestClient",
             version: "1.0"
         )
-        // Note: Not registering a sampling handler
 
         try await server.start(transport: serverTransport)
         try await client.connect(transport: clientTransport)
@@ -789,12 +739,143 @@ struct SamplingIntegrationTests {
             .user("Test message")
         ]
 
-        // Should throw an error because client doesn't have sampling capability
-        await #expect(throws: (any Error).self) {
+        await #expect(throws: MCPError.self) {
             _ = try await server.requestSampling(
                 messages: messages,
                 maxTokens: 100
             )
+        }
+
+        await server.stop()
+        await client.disconnect()
+    }
+
+    @Test("Strict mode succeeds when client declares sampling capability")
+    func testSamplingStrictCapabilitiesSuccess() async throws {
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+
+        let server = Server(
+            name: "StrictTestServer",
+            version: "1.0",
+            capabilities: .init(sampling: .init()),
+            configuration: .strict
+        )
+
+        let client = Client(
+            name: "StrictTestClient",
+            version: "1.0",
+            capabilities: .init(sampling: .init()),
+            configuration: .strict
+        )
+
+        // Register sampling handler
+        await client.withSamplingHandler { _ in
+            CreateSamplingMessage.Result(
+                model: "test-model",
+                stopReason: .endTurn,
+                role: .assistant,
+                content: .text("Strict mode success")
+            )
+        }
+
+        try await server.start(transport: serverTransport)
+        try await client.connect(transport: clientTransport)
+
+        // Should succeed because client declares sampling capability
+        let result = try await server.requestSampling(
+            messages: [.user("Test message")],
+            maxTokens: 100
+        )
+
+        #expect(result.model == "test-model")
+        #expect(result.role == .assistant)
+        if case .single(.text(let text)) = result.content {
+            #expect(text == "Strict mode success")
+        } else {
+            Issue.record("Expected text content")
+        }
+
+        await server.stop()
+        await client.disconnect()
+    }
+
+    @Test("Strict mode fails when client doesn't declare sampling capability")
+    func testSamplingStrictCapabilitiesError() async throws {
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+
+        let server = Server(
+            name: "StrictTestServer",
+            version: "1.0",
+            capabilities: .init(sampling: .init()),
+            configuration: .strict
+        )
+
+        // Client WITHOUT sampling capability in strict mode
+        let client = Client(
+            name: "StrictTestClient",
+            version: "1.0",
+            capabilities: .init(),
+            configuration: .strict
+        )
+
+        try await server.start(transport: serverTransport)
+        try await client.connect(transport: clientTransport)
+
+        // Should fail because client doesn't declare sampling capability in strict mode
+        await #expect(throws: MCPError.self) {
+            _ = try await server.requestSampling(
+                messages: [.user("Test message")],
+                maxTokens: 100
+            )
+        }
+
+        await server.stop()
+        await client.disconnect()
+    }
+
+    @Test("Non-strict mode succeeds even without client capability declaration")
+    func testSamplingNonStrictCapabilities() async throws {
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+
+        let server = Server(
+            name: "NonStrictTestServer",
+            version: "1.0",
+            capabilities: .init(sampling: .init()),
+            configuration: .default  // Non-strict mode
+        )
+
+        // Client WITHOUT sampling capability in non-strict mode
+        let client = Client(
+            name: "NonStrictTestClient",
+            version: "1.0",
+            capabilities: .init(),
+            configuration: .default
+        )
+
+        // Register sampling handler anyway
+        await client.withSamplingHandler { _ in
+            CreateSamplingMessage.Result(
+                model: "test-model",
+                stopReason: .endTurn,
+                role: .assistant,
+                content: .text("Non-strict mode success")
+            )
+        }
+
+        try await server.start(transport: serverTransport)
+        try await client.connect(transport: clientTransport)
+
+        // Should succeed because server is in non-strict mode
+        let result = try await server.requestSampling(
+            messages: [.user("Test message")],
+            maxTokens: 100
+        )
+
+        #expect(result.model == "test-model")
+        if case .single(.text(let text)) = result.content {
+            #expect(text == "Non-strict mode success")
+        } else {
+            Issue.record("Expected text content")
         }
 
         await server.stop()
@@ -807,8 +888,6 @@ struct SamplingIntegrationTests {
         let validMessages: [Sampling.Message] = [
             .user("Valid message")
         ]
-
-        _ = [Sampling.Message]()  // Test empty messages array.
 
         // Test with valid parameters
         let validParams = CreateSamplingMessage.Parameters(
@@ -832,10 +911,10 @@ struct SamplingIntegrationTests {
             temperature: 0.7,
             maxTokens: 500,
             stopSequences: ["STOP", "END"],
-            metadata: [
+            _meta: Metadata(additionalFields: [
                 "sessionId": "test-session-123",
                 "userId": "user-456",
-            ]
+            ])
         )
 
         #expect(comprehensiveParams.messages.count == 1)
@@ -845,7 +924,7 @@ struct SamplingIntegrationTests {
         #expect(comprehensiveParams.temperature == 0.7)
         #expect(comprehensiveParams.maxTokens == 500)
         #expect(comprehensiveParams.stopSequences?.count == 2)
-        #expect(comprehensiveParams.metadata?.count == 2)
+        #expect(comprehensiveParams._meta?.fields.count == 2)
 
         // Test encoding/decoding of comprehensive parameters
         let encoder = JSONEncoder()
@@ -854,14 +933,7 @@ struct SamplingIntegrationTests {
         let data = try encoder.encode(comprehensiveParams)
         let decoded = try decoder.decode(CreateSamplingMessage.Parameters.self, from: data)
 
-        #expect(decoded.messages.count == 1)
-        #expect(decoded.modelPreferences?.costPriority?.doubleValue == 0.5)
-        #expect(decoded.systemPrompt == "You are a helpful assistant.")
-        #expect(decoded.includeContext == .allServers)
-        #expect(decoded.temperature == 0.7)
-        #expect(decoded.maxTokens == 500)
-        #expect(decoded.stopSequences?[0] == "STOP")
-        #expect(decoded.metadata?["sessionId"]?.stringValue == "test-session-123")
+        #expect(decoded == comprehensiveParams)
     }
 
     @Test
@@ -893,7 +965,7 @@ struct SamplingIntegrationTests {
             temperature: 0.3,  // Lower temperature for analytical tasks
             maxTokens: 400,
             stopSequences: ["---END---"],
-            metadata: ["analysisType": "customer-feedback"]
+            _meta: Metadata(additionalFields: ["analysisType": "customer-feedback"])
         )
 
         // Scenario 2: Creative Content Generation
@@ -913,7 +985,7 @@ struct SamplingIntegrationTests {
             systemPrompt: "You are a creative marketing copywriter.",
             temperature: 0.8,  // Higher temperature for creativity
             maxTokens: 200,
-            metadata: ["contentType": "marketing-copy"]
+            _meta: Metadata(additionalFields: ["contentType": "marketing-copy"])
         )
 
         // Test parameter encoding for both scenarios
@@ -922,10 +994,6 @@ struct SamplingIntegrationTests {
         let analysisData = try encoder.encode(dataAnalysisParams)
         let creativeData = try encoder.encode(creativeParams)
 
-        // Verify both encode successfully
-        #expect(analysisData.count > 0)
-        #expect(creativeData.count > 0)
-
         // Test decoding
         let decoder = JSONDecoder()
         let decodedAnalysis = try decoder.decode(
@@ -933,10 +1001,8 @@ struct SamplingIntegrationTests {
         let decodedCreative = try decoder.decode(
             CreateSamplingMessage.Parameters.self, from: creativeData)
 
-        #expect(decodedAnalysis.temperature == 0.3)
-        #expect(decodedCreative.temperature == 0.8)
-        #expect(decodedAnalysis.modelPreferences?.intelligencePriority?.doubleValue == 0.9)
-        #expect(decodedCreative.modelPreferences?.costPriority?.doubleValue == 0.4)
+        #expect(decodedAnalysis == dataAnalysisParams)
+        #expect(decodedCreative == creativeParams)
     }
 }
 
@@ -977,7 +1043,7 @@ struct Sampling2025_11_25Tests {
         let data = try encoder.encode(result)
         let decoded = try decoder.decode(CreateSamplingMessage.Result.self, from: data)
 
-        #expect(decoded.stopReason == .toolUse)
+        #expect(decoded == result)
     }
 
     @Test("Multiple content blocks")
@@ -985,30 +1051,20 @@ struct Sampling2025_11_25Tests {
         let encoder = JSONEncoder()
         let decoder = JSONDecoder()
 
-        let content = Sampling.Message.Content.multiple([
+        let blocks: [Sampling.Message.Content.ContentBlock] = [
             .text("Here's an image:"),
             .image(data: "imagedata", mimeType: "image/png"),
             .text("And some audio:"),
             .audio(data: "audiodata", mimeType: "audio/mp3")
-        ])
+        ]
+
+        let content = Sampling.Message.Content.multiple(blocks)
 
         let message = Sampling.Message.assistant(content)
         let data = try encoder.encode(message)
         let decoded = try decoder.decode(Sampling.Message.self, from: data)
 
-        if case .multiple(let blocks) = decoded.content {
-            #expect(blocks.count == 4)
-            if case .text(let text) = blocks[0] {
-                #expect(text == "Here's an image:")
-            }
-            if case .image = blocks[1] {
-                // Success
-            } else {
-                #expect(Bool(false), "Expected image block")
-            }
-        } else {
-            #expect(Bool(false), "Expected multiple content blocks")
-        }
+        #expect(decoded == message)
     }
 
     @Test("Tools parameter encoding and decoding")
@@ -1037,9 +1093,7 @@ struct Sampling2025_11_25Tests {
         let data = try encoder.encode(params)
         let decoded = try decoder.decode(CreateSamplingMessage.Parameters.self, from: data)
 
-        #expect(decoded.tools?.count == 1)
-        #expect(decoded.tools?[0].name == "get_weather")
-        #expect(decoded.toolChoice?.mode == .auto)
+        #expect(decoded == params)
     }
 
     @Test("Client sampling capabilities with sub-capabilities")
@@ -1057,7 +1111,6 @@ struct Sampling2025_11_25Tests {
         let data = try encoder.encode(capabilities)
         let decoded = try decoder.decode(Client.Capabilities.self, from: data)
 
-        #expect(decoded.sampling?.tools != nil)
-        #expect(decoded.sampling?.context != nil)
+        #expect(decoded == capabilities)
     }
 }
