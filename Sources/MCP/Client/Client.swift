@@ -177,10 +177,11 @@ public actor Client {
         name: String,
         version: String,
         title: String? = nil,
+        capabilities: Capabilities = Capabilities(),
         configuration: Configuration = .default
     ) {
         self.clientInfo = Client.Info(name: name, version: version, title: title)
-        self.capabilities = Capabilities()
+        self.capabilities = capabilities
         self.configuration = configuration
     }
 

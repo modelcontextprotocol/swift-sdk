@@ -231,34 +231,6 @@ struct RootsTests {
         #expect(set.count == 2)  // root1 and root2 should be the same
     }
 
-    @Test("Server capability check validates client capabilities")
-    func testServerCapabilityCheckValidatesClientCapabilities() async throws {
-        let server = Server(
-            name: "test-server",
-            version: "1.0.0",
-            configuration: .strict
-        )
-
-        // Server not initialized yet, should throw
-        await #expect(throws: (any Error).self) {
-            try await server.listRoots()
-        }
-    }
-
-    @Test("Server Capabilities struct validation")
-    func testServerCapabilitiesStruct() throws {
-        // Test that Server.Capabilities exists and can be used
-        let capabilities = Server.Capabilities(
-            prompts: .init(listChanged: true),
-            resources: .init(listChanged: true),
-            tools: .init(listChanged: true)
-        )
-
-        #expect(capabilities.resources?.listChanged == true)
-        #expect(capabilities.tools?.listChanged == true)
-        #expect(capabilities.prompts?.listChanged == true)
-    }
-
     @Test("Client Capabilities struct with roots encoding")
     func testClientCapabilitiesWithRootsEncoding() throws {
         let capabilities = Client.Capabilities(
@@ -272,5 +244,251 @@ struct RootsTests {
         let decoded = try decoder.decode(Client.Capabilities.self, from: data)
 
         #expect(decoded.roots?.listChanged == true)
+    }
+
+    // MARK: - Integration Tests
+
+    @Test("Server listRoots with client that has roots capability")
+    func testServerListRootsWithCapableClient() async throws {
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+
+        let server = Server(
+            name: "test-server",
+            version: "1.0.0",
+            configuration: .strict
+        )
+
+        let testRoots = [
+            Root(uri: "file:///workspace", name: "Workspace"),
+            Root(uri: "file:///home/user/docs", name: "Documents"),
+        ]
+
+        let client = Client(
+            name: "test-client",
+            version: "1.0.0",
+            capabilities: Client.Capabilities(
+                roots: Client.Capabilities.Roots(listChanged: true)
+            )
+        )
+
+        await client.withRootsHandler {
+            return testRoots
+        }
+
+        // Start server and client
+        try await server.start(transport: serverTransport)
+        try await client.connect(transport: clientTransport)
+
+        // Wait for initialization to complete
+        try await Task.sleep(for: .milliseconds(100))
+
+        // Server requests roots from client - should succeed
+        let roots = try await server.listRoots()
+
+        #expect(roots == testRoots)
+
+        // Cleanup
+        await server.stop()
+        await client.disconnect()
+    }
+
+    @Test("Server listRoots fails when client lacks roots capability (strict mode)")
+    func testServerListRootsFailsWithoutCapability() async throws {
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+
+        let server = Server(
+            name: "test-server",
+            version: "1.0.0",
+            configuration: .strict
+        )
+
+        // Client has NO roots capability (default empty capabilities)
+        let client = Client(
+            name: "test-client",
+            version: "1.0.0"
+        )
+
+        // Start server and client
+        try await server.start(transport: serverTransport)
+        try await client.connect(transport: clientTransport)
+
+        // Wait for initialization to complete
+        try await Task.sleep(for: .milliseconds(100))
+
+        // Server tries to request roots - should fail
+        await #expect(throws: MCPError.self) {
+            try await server.listRoots()
+        }
+
+        // Cleanup
+        await server.stop()
+        await client.disconnect()
+    }
+
+    @Test("Server listRoots succeeds when client lacks capability (non-strict mode)")
+    func testServerListRootsNonStrictMode() async throws {
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+
+        let server = Server(
+            name: "test-server",
+            version: "1.0.0",
+            configuration: .default  // Non-strict mode
+        )
+
+        let testRoots = [Root(uri: "file:///workspace")]
+
+        // Client has NO roots capability but registers handler anyway
+        let client = Client(
+            name: "test-client",
+            version: "1.0.0"
+        )
+
+        await client.withRootsHandler {
+            return testRoots
+        }
+
+        // Start server and client
+        try await server.start(transport: serverTransport)
+        try await client.connect(transport: clientTransport)
+
+        // Wait for initialization to complete
+        try await Task.sleep(for: .milliseconds(100))
+
+        // Server requests roots - should succeed in non-strict mode
+        let roots = try await server.listRoots()
+        #expect(roots == testRoots)
+
+        // Cleanup
+        await server.stop()
+        await client.disconnect()
+    }
+
+    @Test("Client sends roots list changed notification")
+    func testClientSendsRootsListChangedNotification() async throws {
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+
+        let server = Server(
+            name: "test-server",
+            version: "1.0.0"
+        )
+
+        let client = Client(
+            name: "test-client",
+            version: "1.0.0",
+            capabilities: Client.Capabilities(
+                roots: Client.Capabilities.Roots(listChanged: true)
+            )
+        )
+
+        // Register notification handler on server
+        nonisolated(unsafe) var didReceive = false
+        await server.onNotification(RootsListChangedNotification.self) { _ in
+            didReceive = true
+        }
+
+        // Start server and client
+        try await server.start(transport: serverTransport)
+        try await client.connect(transport: clientTransport)
+
+        // Wait for initialization
+        try await Task.sleep(for: .milliseconds(100))
+
+        // Client sends notification
+        try await client.notifyRootsChanged()
+
+        // Wait for notification to be processed
+        try await Task.sleep(for: .milliseconds(100))
+
+        // Verify notification was received
+        #expect(didReceive)
+
+        // Cleanup
+        await server.stop()
+        await client.disconnect()
+    }
+
+    @Test("Server listRoots fails when client has no handler registered")
+    func testServerListRootsFailsWithoutHandler() async throws {
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+
+        let server = Server(
+            name: "test-server",
+            version: "1.0.0",
+            configuration: .default
+        )
+
+        let client = Client(
+            name: "test-client",
+            version: "1.0.0",
+            capabilities: Client.Capabilities(
+                roots: Client.Capabilities.Roots(listChanged: true)
+            )
+        )
+
+        // NO handler registered on client
+
+        // Start server and client
+        try await server.start(transport: serverTransport)
+        try await client.connect(transport: clientTransport)
+
+        // Wait for initialization
+        try await Task.sleep(for: .milliseconds(100))
+
+        // Server requests roots - should fail with method not found
+        await #expect(throws: MCPError.self) {
+            try await server.listRoots()
+        }
+
+        // Cleanup
+        await server.stop()
+        await client.disconnect()
+    }
+
+    @Test("Multiple roots requests work correctly")
+    func testMultipleRootsRequests() async throws {
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+
+        let server = Server(
+            name: "test-server",
+            version: "1.0.0"
+        )
+
+        nonisolated(unsafe) var count = 0
+
+        let client = Client(
+            name: "test-client",
+            version: "1.0.0",
+            capabilities: Client.Capabilities(
+                roots: Client.Capabilities.Roots(listChanged: true)
+            )
+        )
+
+        await client.withRootsHandler {
+            count += 1
+            return [Root(uri: "file:///workspace\(count)")]
+        }
+
+        // Start server and client
+        try await server.start(transport: serverTransport)
+        try await client.connect(transport: clientTransport)
+
+        try await Task.sleep(for: .milliseconds(100))
+
+        // Make multiple requests
+        let roots1 = try await server.listRoots()
+        #expect(roots1.count == 1)
+        #expect(roots1[0].uri == "file:///workspace1")
+
+        let roots2 = try await server.listRoots()
+        #expect(roots2.count == 1)
+        #expect(roots2[0].uri == "file:///workspace2")
+
+        let roots3 = try await server.listRoots()
+        #expect(roots3.count == 1)
+        #expect(roots3[0].uri == "file:///workspace3")
+
+        // Cleanup
+        await server.stop()
+        await client.disconnect()
     }
 }
