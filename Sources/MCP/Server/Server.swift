@@ -496,6 +496,95 @@ public actor Server {
         return result
     }
 
+    // MARK: - Elicitation
+
+    /// Request user input from the client using form-based elicitation
+    ///
+    /// Elicitation allows servers to request user input during operations.
+    /// This is useful for collecting user feedback, confirmations, or data
+    /// that the server needs but doesn't have.
+    ///
+    /// The flow:
+    /// 1. Server requests elicitation with a message and optional schema
+    /// 2. Client displays the request to the user
+    /// 3. User provides input or declines
+    /// 4. Client returns the result to the server
+    ///
+    /// - Parameters:
+    ///   - message: The message to display to the user
+    ///   - mode: The elicitation mode (form or url)
+    ///   - requestedSchema: Optional JSON schema describing the expected response
+    ///   - _meta: Optional request metadata
+    /// - Returns: The elicitation result containing the action and optional content
+    /// - Throws: MCPError if the request fails
+    /// - SeeAlso: https://modelcontextprotocol.io/docs/concepts/elicitation
+    public func requestElicitation(
+        message: String,
+        mode: Elicitation.Mode? = nil,
+        requestedSchema: Elicitation.RequestSchema? = nil,
+        _meta: Metadata? = nil
+    ) async throws -> CreateElicitation.Result {
+        guard connection != nil else {
+            throw MCPError.internalError("Server connection not initialized")
+        }
+
+        try validateClientCapability(\.elicitation, "Elicitation")
+
+        let request = CreateElicitation.request(
+            .form(
+                .init(
+                    message: message,
+                    mode: mode,
+                    requestedSchema: requestedSchema,
+                    _meta: _meta
+                )
+            )
+        )
+
+        let result = try await sendAndAwait(request)
+        return result
+    }
+
+    /// Request user input from the client using URL-based elicitation
+    ///
+    /// URL-based elicitation directs the user to an external URL for authentication
+    /// or data collection. This is useful for OAuth flows or other web-based input.
+    ///
+    /// - Parameters:
+    ///   - message: The message to display to the user
+    ///   - url: The URL to direct the user to
+    ///   - elicitationId: Unique identifier for this elicitation
+    ///   - _meta: Optional request metadata
+    /// - Returns: The elicitation result containing the action and optional content
+    /// - Throws: MCPError if the request fails
+    /// - SeeAlso: https://modelcontextprotocol.io/docs/concepts/elicitation
+    public func requestElicitation(
+        message: String,
+        url: String,
+        elicitationId: String,
+        _meta: Metadata? = nil
+    ) async throws -> CreateElicitation.Result {
+        guard connection != nil else {
+            throw MCPError.internalError("Server connection not initialized")
+        }
+
+        try validateClientCapability(\.elicitation, "Elicitation")
+
+        let request = CreateElicitation.request(
+            .url(
+                .init(
+                    message: message,
+                    url: url,
+                    elicitationId: elicitationId,
+                    _meta: _meta
+                )
+            )
+        )
+
+        let result = try await sendAndAwait(request)
+        return result
+    }
+
     // MARK: - Logging
 
     /// Send a log message notification to connected clients.
