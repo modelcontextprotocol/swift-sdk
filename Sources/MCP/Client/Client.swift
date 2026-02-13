@@ -59,13 +59,49 @@ public actor Client {
         }
 
         /// The sampling capabilities
-        public struct Sampling: Hashable, Codable, Sendable {
-            public init() {}
+        public struct Sampling: Hashable, Sendable {
+            /// Tools sub-capability for sampling
+            public struct Tools: Hashable, Codable, Sendable {
+                public init() {}
+            }
+
+            /// Context sub-capability for sampling
+            public struct Context: Hashable, Codable, Sendable {
+                public init() {}
+            }
+
+            /// Whether tools are supported in sampling
+            public var tools: Tools?
+            /// Whether context is supported in sampling
+            public var context: Context?
+
+            public init(tools: Tools? = nil, context: Context? = nil) {
+                self.tools = tools
+                self.context = context
+            }
         }
 
         /// The elicitation capabilities
-        public struct Elicitation: Hashable, Codable, Sendable {
-            public init() {}
+        public struct Elicitation: Hashable, Sendable {
+            /// Form-based elicitation sub-capability
+            public struct Form: Hashable, Codable, Sendable {
+                public init() {}
+            }
+
+            /// URL-based elicitation sub-capability
+            public struct URL: Hashable, Codable, Sendable {
+                public init() {}
+            }
+
+            /// Whether form-based elicitation is supported
+            public var form: Form?
+            /// Whether URL-based elicitation is supported
+            public var url: URL?
+
+            public init(form: Form? = Form(), url: URL? = nil) {
+                self.form = form
+                self.url = url
+            }
         }
 
         /// Whether the client supports sampling
@@ -1062,5 +1098,59 @@ public actor Client {
                 )
             }
         }
+    }
+}
+
+// MARK: - Codable
+
+extension Client.Capabilities.Sampling: Codable {
+    private enum CodingKeys: String, CodingKey {
+        case tools, context
+    }
+
+    public init(from decoder: Decoder) throws {
+        // Handle both empty object {} and object with sub-capabilities
+        if let container = try? decoder.container(keyedBy: CodingKeys.self) {
+            self.tools = try container.decodeIfPresent(Tools.self, forKey: .tools)
+            self.context = try container.decodeIfPresent(Context.self, forKey: .context)
+        } else {
+            // Empty object - no capabilities
+            self.tools = nil
+            self.context = nil
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(tools, forKey: .tools)
+        try container.encodeIfPresent(context, forKey: .context)
+    }
+}
+
+extension Client.Capabilities.Elicitation: Codable {
+    private enum CodingKeys: String, CodingKey {
+        case form, url
+    }
+
+    public init(from decoder: Decoder) throws {
+        // Handle both empty object {} and object with sub-capabilities
+        if let container = try? decoder.container(keyedBy: CodingKeys.self) {
+            self.form = try container.decodeIfPresent(Form.self, forKey: .form)
+            self.url = try container.decodeIfPresent(URL.self, forKey: .url)
+            // If both are nil, default to form for backward compatibility
+            if self.form == nil && self.url == nil {
+                self.form = Form()
+            }
+        } else {
+            // Empty object - default to form-only for backward compatibility
+            self.form = Form()
+            self.url = nil
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(form, forKey: .form)
+        try container.encodeIfPresent(url, forKey: .url)
     }
 }

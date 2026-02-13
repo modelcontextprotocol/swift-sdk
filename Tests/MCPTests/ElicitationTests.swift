@@ -98,18 +98,24 @@ struct ElicitationTests {
             required: ["username"]
         )
 
-        let parameters = CreateElicitation.Parameters(
-            message: "Please share your GitHub username",
-            requestedSchema: schema,
-            metadata: ["flow": "onboarding"]
+        let parameters = CreateElicitation.Parameters.form(
+            .init(
+                message: "Please share your GitHub username",
+                requestedSchema: schema,
+                metadata: ["flow": "onboarding"]
+            )
         )
 
         let data = try encoder.encode(parameters)
         let decoded = try decoder.decode(CreateElicitation.Parameters.self, from: data)
 
-        #expect(decoded.message == "Please share your GitHub username")
-        #expect(decoded.requestedSchema?.properties.keys.contains("username") == true)
-        #expect(decoded.metadata?["flow"]?.stringValue == "onboarding")
+        if case .form(let formParams) = decoded {
+            #expect(formParams.message == "Please share your GitHub username")
+            #expect(formParams.requestedSchema?.properties.keys.contains("username") == true)
+            #expect(formParams.metadata?["flow"]?.stringValue == "onboarding")
+        } else {
+            #expect(Bool(false), "Expected form parameters")
+        }
     }
 
     @Test("CreateElicitation.Result coding")
@@ -152,10 +158,125 @@ struct ElicitationTests {
         let client = Client(name: "TestClient", version: "1.0")
 
         let handlerClient = await client.withElicitationHandler { parameters in
-            #expect(parameters.message == "Collect input")
+            if case .form(let formParams) = parameters {
+                #expect(formParams.message == "Collect input")
+            }
             return CreateElicitation.Result(action: .decline)
         }
 
         #expect(handlerClient === client)
+    }
+}
+
+@Suite("Elicitation 2025-11-25 Spec Tests")
+struct Elicitation2025_11_25Tests {
+    @Test("URL mode parameters encoding and decoding")
+    func testURLModeParameters() throws {
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+
+        let params = CreateElicitation.Parameters.url(
+            .init(
+                message: "Please authenticate",
+                url: "https://example.com/auth",
+                elicitationId: "elicit-123"
+            )
+        )
+
+        let data = try encoder.encode(params)
+        let decoded = try decoder.decode(CreateElicitation.Parameters.self, from: data)
+
+        if case .url(let urlParams) = decoded {
+            #expect(urlParams.message == "Please authenticate")
+            #expect(urlParams.url == "https://example.com/auth")
+            #expect(urlParams.elicitationId == "elicit-123")
+            #expect(urlParams.mode == .url)
+        } else {
+            #expect(Bool(false), "Expected URL parameters")
+        }
+    }
+
+    @Test("Form mode backward compatibility")
+    func testFormModeBackwardCompatibility() throws {
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+
+        let params = CreateElicitation.Parameters.form(
+            .init(message: "Enter your name")
+        )
+
+        let data = try encoder.encode(params)
+        let decoded = try decoder.decode(CreateElicitation.Parameters.self, from: data)
+
+        if case .form(let formParams) = decoded {
+            #expect(formParams.message == "Enter your name")
+        } else {
+            #expect(Bool(false), "Expected form parameters")
+        }
+    }
+
+    @Test("ElicitationCompleteNotification")
+    func testElicitationCompleteNotification() throws {
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+
+        let notification = ElicitationCompleteNotification.Parameters(
+            elicitationId: "elicit-456"
+        )
+
+        let data = try encoder.encode(notification)
+        let decoded = try decoder.decode(
+            ElicitationCompleteNotification.Parameters.self, from: data)
+
+        #expect(decoded.elicitationId == "elicit-456")
+    }
+
+    @Test("Client elicitation capabilities with sub-capabilities")
+    func testElicitationSubCapabilities() throws {
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+
+        let capabilities = Client.Capabilities(
+            elicitation: .init(form: .init(), url: .init())
+        )
+
+        #expect(capabilities.elicitation?.form != nil)
+        #expect(capabilities.elicitation?.url != nil)
+
+        let data = try encoder.encode(capabilities)
+        let decoded = try decoder.decode(Client.Capabilities.self, from: data)
+
+        #expect(decoded.elicitation?.form != nil)
+        #expect(decoded.elicitation?.url != nil)
+    }
+
+    @Test("URLElicitationRequiredError encoding and decoding")
+    func testURLElicitationRequiredError() throws {
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+
+        let elicitationInfo = URLElicitationInfo(
+            elicitationId: "elicit-789",
+            url: "https://example.com/verify",
+            message: "Please verify your identity"
+        )
+
+        let error = MCPError.urlElicitationRequired(
+            message: "Authentication required",
+            elicitations: [elicitationInfo]
+        )
+
+        let data = try encoder.encode(error)
+        let decoded = try decoder.decode(MCPError.self, from: data)
+
+        if case .urlElicitationRequired(let message, let elicitations) = decoded {
+            // The message gets prefixed with "URL elicitation required: " in errorDescription
+            #expect(message == "URL elicitation required: Authentication required")
+            #expect(elicitations.count == 1)
+            #expect(elicitations[0].elicitationId == "elicit-789")
+            #expect(elicitations[0].url == "https://example.com/verify")
+        } else {
+            #expect(Bool(false), "Expected URLElicitationRequiredError")
+        }
     }
 }

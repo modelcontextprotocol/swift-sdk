@@ -3,7 +3,7 @@ import Foundation
 /// Types supporting the MCP elicitation flow.
 ///
 /// Servers use elicitation to collect structured input from users via the client.
-/// The schema subset mirrors the 2025-06-18 revision of the specification.
+/// The schema subset mirrors the 2025-11-25 revision of the specification.
 public enum Elicitation {
     /// Schema describing the expected response content.
     public struct RequestSchema: Hashable, Codable, Sendable {
@@ -41,6 +41,14 @@ public enum Elicitation {
             case title, description, properties, required, type
         }
     }
+
+    /// Elicitation mode indicating how user input is collected
+    public enum Mode: String, Hashable, Codable, Sendable {
+        /// Form-based elicitation (client displays UI)
+        case form
+        /// URL-based elicitation (client opens external URL)
+        case url
+    }
 }
 
 /// To request information from a user, servers send an `elicitation/create` request.
@@ -48,22 +56,61 @@ public enum Elicitation {
 public enum CreateElicitation: Method {
     public static let name = "elicitation/create"
 
-    public struct Parameters: Hashable, Codable, Sendable {
-        /// Message displayed to the user describing the request.
-        public var message: String
-        /// Optional schema describing the expected response content.
-        public var requestedSchema: Elicitation.RequestSchema?
-        /// Optional provider-specific metadata.
-        public var metadata: [String: Value]?
+    public enum Parameters: Hashable, Sendable {
+        /// Form-based elicitation parameters
+        case form(FormParameters)
+        /// URL-based elicitation parameters
+        case url(URLParameters)
 
-        public init(
-            message: String,
-            requestedSchema: Elicitation.RequestSchema? = nil,
-            metadata: [String: Value]? = nil
-        ) {
-            self.message = message
-            self.requestedSchema = requestedSchema
-            self.metadata = metadata
+        /// Parameters for form-based elicitation
+        public struct FormParameters: Hashable, Codable, Sendable {
+            /// Message displayed to the user describing the request
+            public var message: String
+            /// Elicitation mode (optional for backward compatibility, defaults to form)
+            public var mode: Elicitation.Mode?
+            /// Optional schema describing the expected response content
+            public var requestedSchema: Elicitation.RequestSchema?
+            /// Optional provider-specific metadata
+            public var metadata: [String: Value]?
+
+            public init(
+                message: String,
+                mode: Elicitation.Mode? = nil,
+                requestedSchema: Elicitation.RequestSchema? = nil,
+                metadata: [String: Value]? = nil
+            ) {
+                self.message = message
+                self.mode = mode
+                self.requestedSchema = requestedSchema
+                self.metadata = metadata
+            }
+        }
+
+        /// Parameters for URL-based elicitation
+        public struct URLParameters: Hashable, Codable, Sendable {
+            /// Message displayed to the user describing the request
+            public var message: String
+            /// Elicitation mode (always "url")
+            public var mode: Elicitation.Mode
+            /// URL for the user to visit
+            public var url: String
+            /// Unique identifier for this elicitation
+            public var elicitationId: String
+            /// Optional provider-specific metadata
+            public var metadata: [String: Value]?
+
+            public init(
+                message: String,
+                url: String,
+                elicitationId: String,
+                metadata: [String: Value]? = nil
+            ) {
+                self.message = message
+                self.mode = .url
+                self.url = url
+                self.elicitationId = elicitationId
+                self.metadata = metadata
+            }
         }
     }
 
@@ -108,6 +155,78 @@ public enum CreateElicitation: Method {
             action = try container.decode(Action.self, forKey: .action)
             content = try container.decodeIfPresent([String: Value].self, forKey: .content)
             _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
+        }
+    }
+}
+
+// MARK: - Codable
+
+extension CreateElicitation.Parameters: Codable {
+    private enum CodingKeys: String, CodingKey {
+        case mode, message, requestedSchema, metadata, url, elicitationId
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+
+        // Read mode field (may be missing for backward compatibility)
+        let mode = try container.decodeIfPresent(Elicitation.Mode.self, forKey: .mode)
+
+        // Discriminate based on mode
+        if mode == .url {
+            // URL mode
+            let message = try container.decode(String.self, forKey: .message)
+            let url = try container.decode(String.self, forKey: .url)
+            let elicitationId = try container.decode(String.self, forKey: .elicitationId)
+            let metadata = try container.decodeIfPresent([String: Value].self, forKey: .metadata)
+            self = .url(URLParameters(
+                message: message,
+                url: url,
+                elicitationId: elicitationId,
+                metadata: metadata))
+        } else {
+            // Form mode (default for backward compatibility)
+            let message = try container.decode(String.self, forKey: .message)
+            let requestedSchema = try container.decodeIfPresent(
+                Elicitation.RequestSchema.self, forKey: .requestedSchema)
+            let metadata = try container.decodeIfPresent([String: Value].self, forKey: .metadata)
+            self = .form(FormParameters(
+                message: message,
+                mode: mode,
+                requestedSchema: requestedSchema,
+                metadata: metadata))
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+
+        switch self {
+        case .form(let params):
+            try container.encode(params.message, forKey: .message)
+            try container.encodeIfPresent(params.mode, forKey: .mode)
+            try container.encodeIfPresent(params.requestedSchema, forKey: .requestedSchema)
+            try container.encodeIfPresent(params.metadata, forKey: .metadata)
+        case .url(let params):
+            try container.encode(params.message, forKey: .message)
+            try container.encode(params.mode, forKey: .mode)
+            try container.encode(params.url, forKey: .url)
+            try container.encode(params.elicitationId, forKey: .elicitationId)
+            try container.encodeIfPresent(params.metadata, forKey: .metadata)
+        }
+    }
+}
+
+/// Notification sent when a URL-based elicitation is complete
+public struct ElicitationCompleteNotification: Notification {
+    public static let name = "notifications/elicitation/complete"
+
+    public struct Parameters: Hashable, Codable, Sendable {
+        /// The elicitation ID that was completed
+        public var elicitationId: String
+
+        public init(elicitationId: String) {
+            self.elicitationId = elicitationId
         }
     }
 }

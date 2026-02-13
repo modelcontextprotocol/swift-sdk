@@ -20,7 +20,7 @@ struct SamplingTests {
         let decodedTextMessage = try decoder.decode(Sampling.Message.self, from: textData)
 
         #expect(decodedTextMessage.role == .user)
-        if case .text(let text) = decodedTextMessage.content {
+        if case .single(.text(let text)) = decodedTextMessage.content {
             #expect(text == "Hello, world!")
         } else {
             #expect(Bool(false), "Expected text content")
@@ -34,7 +34,7 @@ struct SamplingTests {
         let decodedImageMessage = try decoder.decode(Sampling.Message.self, from: imageData)
 
         #expect(decodedImageMessage.role == .assistant)
-        if case .image(let data, let mimeType) = decodedImageMessage.content {
+        if case .single(.image(let data, let mimeType)) = decodedImageMessage.content {
             #expect(data == "base64imagedata")
             #expect(mimeType == "image/png")
         } else {
@@ -158,7 +158,7 @@ struct SamplingTests {
         #expect(decoded.stopReason == .endTurn)
         #expect(decoded.role == .assistant)
 
-        if case .text(let text) = decoded.content {
+        if case .single(.text(let text)) = decoded.content {
             #expect(text == "The weather is sunny and 75°F.")
         } else {
             #expect(Bool(false), "Expected text content")
@@ -290,7 +290,7 @@ struct SamplingTests {
         // Test user message factory method
         let userMessage: Sampling.Message = .user("Hello, world!")
         #expect(userMessage.role == .user)
-        if case .text(let text) = userMessage.content {
+        if case .single(.text(let text)) = userMessage.content {
             #expect(text == "Hello, world!")
         } else {
             #expect(Bool(false), "Expected text content")
@@ -299,7 +299,7 @@ struct SamplingTests {
         // Test assistant message factory method
         let assistantMessage: Sampling.Message = .assistant("Hi there!")
         #expect(assistantMessage.role == .assistant)
-        if case .text(let text) = assistantMessage.content {
+        if case .single(.text(let text)) = assistantMessage.content {
             #expect(text == "Hi there!")
         } else {
             #expect(Bool(false), "Expected text content")
@@ -309,7 +309,7 @@ struct SamplingTests {
         let imageMessage: Sampling.Message = .user(
             .image(data: "base64data", mimeType: "image/png"))
         #expect(imageMessage.role == .user)
-        if case .image(let data, let mimeType) = imageMessage.content {
+        if case .single(.image(let data, let mimeType)) = imageMessage.content {
             #expect(data == "base64data")
             #expect(mimeType == "image/png")
         } else {
@@ -322,7 +322,7 @@ struct SamplingTests {
         // Test string literal assignment
         let content: Sampling.Message.Content = "Hello from string literal"
 
-        if case .text(let text) = content {
+        if case .single(.text(let text)) = content {
             #expect(text == "Hello from string literal")
         } else {
             #expect(Bool(false), "Expected text content")
@@ -330,7 +330,7 @@ struct SamplingTests {
 
         // Test in message creation
         let message: Sampling.Message = .user("Direct string literal")
-        if case .text(let text) = message.content {
+        if case .single(.text(let text)) = message.content {
             #expect(text == "Direct string literal")
         } else {
             #expect(Bool(false), "Expected text content")
@@ -359,7 +359,7 @@ struct SamplingTests {
         let content: Sampling.Message.Content =
             "Hello \(userName), the temperature in \(location) is \(temperature)°F"
 
-        if case .text(let text) = content {
+        if case .single(.text(let text)) = content {
             #expect(text == "Hello Alice, the temperature in San Francisco is 72°F")
         } else {
             #expect(Bool(false), "Expected text content")
@@ -368,7 +368,7 @@ struct SamplingTests {
         // Test in message creation with interpolation
         let message = Sampling.Message.user(
             "Welcome \(userName)! Today's weather in \(location) is \(temperature)°F")
-        if case .text(let text) = message.content {
+        if case .single(.text(let text)) = message.content {
             #expect(text == "Welcome Alice! Today's weather in San Francisco is 72°F")
         } else {
             #expect(Bool(false), "Expected text content")
@@ -380,7 +380,7 @@ struct SamplingTests {
         let listMessage: Sampling.Message = .assistant(
             "You have \(count) items: \(items.joined(separator: ", "))")
 
-        if case .text(let text) = listMessage.content {
+        if case .single(.text(let text)) = listMessage.content {
             #expect(text == "You have 3 items: apples, bananas, oranges")
         } else {
             #expect(Bool(false), "Expected text content")
@@ -397,7 +397,7 @@ struct SamplingTests {
         let userMessage: Sampling.Message = .user(
             "Hi, I'm \(customerName) and I have an issue with order \(orderNumber)")
         #expect(userMessage.role == .user)
-        if case .text(let text) = userMessage.content {
+        if case .single(.text(let text)) = userMessage.content {
             #expect(text == "Hi, I'm Bob and I have an issue with order ORD-12345")
         } else {
             #expect(Bool(false), "Expected text content")
@@ -408,7 +408,7 @@ struct SamplingTests {
             "Hello \(customerName), I can help you with your \(issueType) issue for order \(orderNumber)"
         )
         #expect(assistantMessage.role == .assistant)
-        if case .text(let text) = assistantMessage.content {
+        if case .single(.text(let text)) = assistantMessage.content {
             #expect(
                 text
                     == "Hello Bob, I can help you with your delivery delay issue for order ORD-12345"
@@ -430,7 +430,7 @@ struct SamplingTests {
         #expect(conversation.count == 4)
 
         // Verify interpolated content
-        if case .text(let text) = conversation[2].content {
+        if case .single(.text(let text)) = conversation[2].content {
             #expect(text == "I have an issue with order ORD-12345 - it's a delivery delay")
         } else {
             #expect(Bool(false), "Expected text content")
@@ -474,10 +474,10 @@ struct SamplingTests {
         #expect(mixedContent.count == 4)
 
         // Verify content types
-        if case .text = mixedContent[0].content,
-            case .image = mixedContent[1].content,
-            case .text = mixedContent[2].content,
-            case .text = mixedContent[3].content
+        if case .single(.text) = mixedContent[0].content,
+            case .single(.image) = mixedContent[1].content,
+            case .single(.text) = mixedContent[2].content,
+            case .single(.text) = mixedContent[3].content
         {
             // All content types are correct
         } else {
@@ -661,7 +661,7 @@ struct SamplingIntegrationTests {
         #expect(result.model == "claude-4-sonnet")
         #expect(result.stopReason == .endTurn)
         #expect(result.role == .assistant)
-        if case .text(let text) = result.content {
+        if case .single(.text(let text)) = result.content {
             #expect(text == responseContentString)
         } else {
             Issue.record("Expected text content")
@@ -691,7 +691,7 @@ struct SamplingIntegrationTests {
         let textData = try encoder.encode(textMessage)
         let decodedTextMessage = try decoder.decode(Sampling.Message.self, from: textData)
         #expect(decodedTextMessage.role == .user)
-        if case .text(let text) = decodedTextMessage.content {
+        if case .single(.text(let text)) = decodedTextMessage.content {
             #expect(text == "What do you see in this data?")
         } else {
             #expect(Bool(false), "Expected text content")
@@ -701,7 +701,7 @@ struct SamplingIntegrationTests {
         let imageData = try encoder.encode(imageMessage)
         let decodedImageMessage = try decoder.decode(Sampling.Message.self, from: imageData)
         #expect(decodedImageMessage.role == .user)
-        if case .image(let data, let mimeType) = decodedImageMessage.content {
+        if case .single(.image(let data, let mimeType)) = decodedImageMessage.content {
             #expect(data.contains("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ"))
             #expect(mimeType == "image/png")
         } else {
@@ -937,5 +937,127 @@ struct SamplingIntegrationTests {
         #expect(decodedCreative.temperature == 0.8)
         #expect(decodedAnalysis.modelPreferences?.intelligencePriority?.doubleValue == 0.9)
         #expect(decodedCreative.modelPreferences?.costPriority?.doubleValue == 0.4)
+    }
+}
+
+@Suite("Sampling 2025-11-25 Spec Tests")
+struct Sampling2025_11_25Tests {
+    @Test("Audio content encoding and decoding")
+    func testAudioContent() throws {
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+
+        let audioMessage: Sampling.Message = .user(
+            .audio(data: "base64audiodata", mimeType: "audio/mp3"))
+
+        let data = try encoder.encode(audioMessage)
+        let decoded = try decoder.decode(Sampling.Message.self, from: data)
+
+        #expect(decoded.role == .user)
+        if case .single(.audio(let audioData, let mimeType)) = decoded.content {
+            #expect(audioData == "base64audiodata")
+            #expect(mimeType == "audio/mp3")
+        } else {
+            #expect(Bool(false), "Expected audio content")
+        }
+    }
+
+    @Test("StopReason.toolUse encoding and decoding")
+    func testToolUseStopReason() throws {
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+
+        let result = CreateSamplingMessage.Result(
+            model: "claude-4",
+            stopReason: .toolUse,
+            role: .assistant,
+            content: .single(.text("I need to use a tool"))
+        )
+
+        let data = try encoder.encode(result)
+        let decoded = try decoder.decode(CreateSamplingMessage.Result.self, from: data)
+
+        #expect(decoded.stopReason == .toolUse)
+    }
+
+    @Test("Multiple content blocks")
+    func testMultipleContentBlocks() throws {
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+
+        let content = Sampling.Message.Content.multiple([
+            .text("Here's an image:"),
+            .image(data: "imagedata", mimeType: "image/png"),
+            .text("And some audio:"),
+            .audio(data: "audiodata", mimeType: "audio/mp3")
+        ])
+
+        let message = Sampling.Message.assistant(content)
+        let data = try encoder.encode(message)
+        let decoded = try decoder.decode(Sampling.Message.self, from: data)
+
+        if case .multiple(let blocks) = decoded.content {
+            #expect(blocks.count == 4)
+            if case .text(let text) = blocks[0] {
+                #expect(text == "Here's an image:")
+            }
+            if case .image = blocks[1] {
+                // Success
+            } else {
+                #expect(Bool(false), "Expected image block")
+            }
+        } else {
+            #expect(Bool(false), "Expected multiple content blocks")
+        }
+    }
+
+    @Test("Tools parameter encoding and decoding")
+    func testToolsParameter() throws {
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+
+        let tool = Tool(
+            name: "get_weather",
+            description: "Get current weather",
+            inputSchema: [
+                "type": "object",
+                "properties": [
+                    "location": ["type": "string"]
+                ]
+            ]
+        )
+
+        let params = CreateSamplingMessage.Parameters(
+            messages: [.user("What's the weather?")],
+            maxTokens: 100,
+            tools: [tool],
+            toolChoice: .init(mode: .auto)
+        )
+
+        let data = try encoder.encode(params)
+        let decoded = try decoder.decode(CreateSamplingMessage.Parameters.self, from: data)
+
+        #expect(decoded.tools?.count == 1)
+        #expect(decoded.tools?[0].name == "get_weather")
+        #expect(decoded.toolChoice?.mode == .auto)
+    }
+
+    @Test("Client sampling capabilities with sub-capabilities")
+    func testSamplingSubCapabilities() throws {
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+
+        let capabilities = Client.Capabilities(
+            sampling: .init(tools: .init(), context: .init())
+        )
+
+        #expect(capabilities.sampling?.tools != nil)
+        #expect(capabilities.sampling?.context != nil)
+
+        let data = try encoder.encode(capabilities)
+        let decoded = try decoder.decode(Client.Capabilities.self, from: data)
+
+        #expect(decoded.sampling?.tools != nil)
+        #expect(decoded.sampling?.context != nil)
     }
 }
