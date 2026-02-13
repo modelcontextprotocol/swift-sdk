@@ -161,6 +161,50 @@ public actor Server {
     /// Pending request tasks (for cancellation support)
     private var pendingRequestTasks: [ID: Task<Response<AnyMethod>, Error>] = [:]
 
+    /// An error indicating a type mismatch when decoding a pending request
+    private struct TypeMismatchError: Swift.Error {}
+
+    /// A pending request with a continuation for the result
+    private struct PendingRequest<T> {
+        let continuation: CheckedContinuation<T, Swift.Error>
+    }
+
+    /// A type-erased pending request
+    private struct AnyPendingRequest: Sendable {
+        private let _resume: @Sendable (Result<Any, Swift.Error>) -> Void
+
+        init<T: Sendable & Decodable>(_ request: PendingRequest<T>) {
+            _resume = { result in
+                switch result {
+                case .success(let value):
+                    if let typedValue = value as? T {
+                        request.continuation.resume(returning: typedValue)
+                    } else if let value = value as? Value,
+                        let data = try? JSONEncoder().encode(value),
+                        let decoded = try? JSONDecoder().decode(T.self, from: data)
+                    {
+                        request.continuation.resume(returning: decoded)
+                    } else {
+                        request.continuation.resume(throwing: TypeMismatchError())
+                    }
+                case .failure(let error):
+                    request.continuation.resume(throwing: error)
+                }
+            }
+        }
+
+        func resume(returning value: Any) {
+            _resume(.success(value))
+        }
+
+        func resume(throwing error: Swift.Error) {
+            _resume(.failure(error))
+        }
+    }
+
+    /// Pending requests sent to the client, awaiting responses
+    private var pendingRequests: [ID: AnyPendingRequest] = [:]
+
     /// Whether the server is initialized
     private var isInitialized = false
     /// The client information
@@ -214,10 +258,12 @@ public actor Server {
 
                     var requestID: ID?
                     do {
-                        // Attempt to decode as batch first, then as individual request or notification
+                        // Attempt to decode as batch first, then as individual response, request, or notification
                         let decoder = JSONDecoder()
                         if let batch = try? decoder.decode(Server.Batch.self, from: data) {
                             try await handleBatch(batch)
+                        } else if let response = try? decoder.decode(AnyResponse.self, from: data) {
+                            await handleResponse(response)
                         } else if let request = try? decoder.decode(AnyRequest.self, from: data) {
                             _ = try await handleRequest(request, sendResponse: true)
                         } else if let message = try? decoder.decode(AnyMessage.self, from: data) {
@@ -263,6 +309,14 @@ public actor Server {
     public func stop() async {
         task?.cancel()
         task = nil
+
+        // Clear pending requests with errors
+        let pendingRequestsToCancel = self.pendingRequests
+        self.pendingRequests = [:]
+        for (_, request) in pendingRequestsToCancel {
+            request.resume(throwing: MCPError.internalError("Server disconnected"))
+        }
+
         if let connection = connection {
             await connection.disconnect()
         }
@@ -327,6 +381,62 @@ public actor Server {
         try await connection.send(notificationData)
     }
 
+    /// Send a request to the client and return a Task for the response
+    private func send<M: Method>(_ request: Request<M>) throws -> Task<M.Result, Error> {
+        guard let connection = connection else {
+            throw MCPError.internalError("Server connection not initialized")
+        }
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        let requestData = try encoder.encode(request)
+
+        let requestTask = Task<M.Result, Error> {
+            try await withCheckedThrowingContinuation { continuation in
+                Task {
+                    // Add pending response before sending
+                    self.addPendingResponse(
+                        id: request.id,
+                        continuation: continuation,
+                        type: M.Result.self
+                    )
+
+                    // Send the request
+                    do {
+                        try await connection.send(requestData)
+                    } catch {
+                        // If send fails, remove pending response and resume with error
+                        if self.removePendingResponse(id: request.id) != nil {
+                            continuation.resume(throwing: error)
+                        }
+                    }
+                }
+            }
+        }
+
+        return requestTask
+    }
+
+    /// Send a request and await its response
+    private func sendAndAwait<M: Method>(_ request: Request<M>) async throws -> M.Result {
+        let task = try send(request)
+        return try await task.value
+    }
+
+    private func addPendingResponse<T: Sendable & Decodable>(
+        id: ID,
+        continuation: CheckedContinuation<T, Swift.Error>,
+        type: T.Type
+    ) {
+        pendingRequests[id] = AnyPendingRequest(
+            PendingRequest(continuation: continuation)
+        )
+    }
+
+    private func removePendingResponse(id: ID) -> AnyPendingRequest? {
+        return pendingRequests.removeValue(forKey: id)
+    }
+
     // MARK: - Sampling
 
     /// Request sampling from the connected client
@@ -367,11 +477,9 @@ public actor Server {
             throw MCPError.internalError("Server connection not initialized")
         }
 
-        // Note: This is a conceptual implementation. The actual implementation would require
-        // bidirectional communication support in the transport layer, allowing servers to
-        // send requests to clients and receive responses.
+        try validateClientCapability(\.sampling, "Sampling")
 
-        _ = CreateSamplingMessage.request(
+        let request = CreateSamplingMessage.request(
             .init(
                 messages: messages,
                 modelPreferences: modelPreferences,
@@ -384,10 +492,8 @@ public actor Server {
             )
         )
 
-        // This would need to be implemented with proper request/response handling
-        // similar to how the client sends requests to servers
-        throw MCPError.internalError(
-            "Bidirectional sampling requests not yet implemented in transport layer")
+        let result = try await sendAndAwait(request)
+        return result
     }
 
     // MARK: - Logging
@@ -432,6 +538,29 @@ public actor Server {
     ) async throws {
         let value = try Value(data)
         try await log(level: level, logger: logger, data: value)
+    }
+
+    // MARK: - Roots
+
+    /// Request the list of roots from the connected client
+    ///
+    /// Roots define filesystem boundaries that servers can operate within.
+    /// The client must have declared the `roots` capability and registered
+    /// a roots handler for this to work.
+    ///
+    /// - Returns: Array of Root objects representing accessible directories/files
+    /// - Throws: MCPError if the client doesn't support roots or request fails
+    /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/client/roots
+    public func listRoots() async throws -> [Root] {
+        guard connection != nil else {
+            throw MCPError.internalError("Server connection not initialized")
+        }
+
+        try validateClientCapability(\.roots, "Roots")
+
+        let request = ListRoots.request()
+        let result = try await sendAndAwait(request)
+        return result.roots
     }
 
     /// A JSON-RPC batch containing multiple requests and/or notifications
@@ -640,9 +769,47 @@ public actor Server {
         }
     }
 
+    private func handleResponse(_ response: Response<AnyMethod>) async {
+        await logger?.trace(
+            "Processing response from client",
+            metadata: ["id": "\(response.id)"])
+
+        if let pendingRequest = self.removePendingResponse(id: response.id) {
+            switch response.result {
+            case .success(let value):
+                pendingRequest.resume(returning: value)
+            case .failure(let error):
+                pendingRequest.resume(throwing: error)
+            }
+        } else {
+            await logger?.warning(
+                "Received response for unknown request",
+                metadata: ["id": "\(response.id)"]
+            )
+        }
+    }
+
     private func checkInitialized() throws {
         guard isInitialized else {
             throw MCPError.invalidRequest("Server is not initialized")
+        }
+    }
+
+    /// Validate the client capabilities.
+    /// Throws an error if the server is configured to be strict and the capability is not supported.
+    private func validateClientCapability<T>(
+        _ keyPath: KeyPath<Client.Capabilities, T?>,
+        _ name: String
+    )
+        throws
+    {
+        if configuration.strict {
+            guard let capabilities = clientCapabilities else {
+                throw MCPError.methodNotFound("Client capabilities not initialized")
+            }
+            guard capabilities[keyPath: keyPath] != nil else {
+                throw MCPError.methodNotFound("\(name) is not supported by the client")
+            }
         }
     }
 
