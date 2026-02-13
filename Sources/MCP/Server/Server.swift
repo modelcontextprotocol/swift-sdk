@@ -90,6 +90,13 @@ public actor Server {
             public init() {}
         }
 
+        /// Completions capabilities
+        public struct Completions: Hashable, Codable, Sendable {
+            public init() {}
+        }
+
+        /// Completions capabilities
+        public var completions: Completions?
         /// Logging capabilities
         public var logging: Logging?
         /// Prompts capabilities
@@ -102,12 +109,14 @@ public actor Server {
         public var tools: Tools?
 
         public init(
+            completions: Completions? = nil,
             logging: Logging? = nil,
             prompts: Prompts? = nil,
             resources: Resources? = nil,
             sampling: Sampling? = nil,
             tools: Tools? = nil
         ) {
+            self.completions = completions
             self.logging = logging
             self.prompts = prompts
             self.resources = resources
@@ -149,6 +158,8 @@ public actor Server {
     private var methodHandlers: [String: RequestHandlerBox] = [:]
     /// Notification handlers
     private var notificationHandlers: [String: [NotificationHandlerBox]] = [:]
+    /// Pending request tasks (for cancellation support)
+    private var pendingRequestTasks: [ID: Task<Response<AnyMethod>, Error>] = [:]
 
     /// Whether the server is initialized
     private var isInitialized = false
@@ -187,10 +198,12 @@ public actor Server {
     ) async throws {
         self.connection = transport
         registerDefaultHandlers(initializeHook: initializeHook)
+        registerCancellationHandler()
         try await transport.connect()
 
         await logger?.debug(
-            "Server started", metadata: ["name": "\(name)", "version": "\(version)"])
+            "Server started", metadata: ["name": "\(name)", "version": "\(version)"]
+        )
 
         // Start message handling loop
         task = Task {
@@ -377,6 +390,50 @@ public actor Server {
             "Bidirectional sampling requests not yet implemented in transport layer")
     }
 
+    // MARK: - Logging
+
+    /// Send a log message notification to connected clients.
+    ///
+    /// Servers that declare the `logging` capability can send structured log messages
+    /// to clients. The client controls which severity levels it wants to receive via
+    /// the `logging/setLevel` request.
+    ///
+    /// - Parameters:
+    ///   - level: The severity level of the log message
+    ///   - logger: Optional logger name to identify the source
+    ///   - data: Arbitrary JSON-serializable data for the log message
+    /// - Throws: MCPError if the server is not connected
+    /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/server/utilities/logging/
+    public func log(
+        level: LogLevel,
+        logger: String? = nil,
+        data: Value
+    ) async throws {
+        let notification = LogMessageNotification.message(
+            .init(level: level, logger: logger, data: data)
+        )
+        try await notify(notification)
+    }
+
+    /// Send a log message notification with codable data.
+    ///
+    /// Convenience method that encodes data to JSON before sending.
+    ///
+    /// - Parameters:
+    ///   - level: The severity level of the log message
+    ///   - logger: Optional logger name to identify the source
+    ///   - data: Any codable data for the log message
+    /// - Throws: MCPError if the server is not connected or encoding fails
+    /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/server/utilities/logging/
+    public func log<T: Codable>(
+        level: LogLevel,
+        logger: String? = nil,
+        data: T
+    ) async throws {
+        let value = try Value(data)
+        try await log(level: level, logger: logger, data: value)
+    }
+
     /// A JSON-RPC batch containing multiple requests and/or notifications
     struct Batch: Sendable {
         /// An item in a JSON-RPC batch
@@ -496,9 +553,39 @@ public actor Server {
             return response
         }
 
+        // Create a task to handle the request with cancellation support
+        let handlerTask = Task<Response<AnyMethod>, Error> {
+            do {
+                // Check if task was cancelled before starting
+                try Task.checkCancellation()
+
+                // Handle request and get response
+                let response = try await handler(request)
+                return response
+            } catch is CancellationError {
+                // Request was cancelled, don't send a response per MCP spec
+                await logger?.debug(
+                    "Request cancelled",
+                    metadata: ["id": "\(request.id)", "method": "\(request.method)"]
+                )
+                throw CancellationError()
+            } catch {
+                let mcpError =
+                    error as? MCPError ?? MCPError.internalError(error.localizedDescription)
+                return AnyMethod.response(id: request.id, error: mcpError)
+            }
+        }
+
+        // Store the handler task for potential cancellation
+        pendingRequestTasks[request.id] = handlerTask
+
+        // Ensure cleanup happens regardless of success or failure
+        defer {
+            pendingRequestTasks.removeValue(forKey: request.id)
+        }
+
         do {
-            // Handle request and get response
-            let response = try await handler(request)
+            let response = try await handlerTask.value
 
             if sendResponse {
                 try await send(response)
@@ -506,7 +593,11 @@ public actor Server {
             }
 
             return response
+        } catch is CancellationError {
+            // Request was cancelled, don't send a response per MCP spec
+            return nil
         } catch {
+            // This should not happen as errors are caught in the task
             let mcpError = error as? MCPError ?? MCPError.internalError(error.localizedDescription)
             let response = AnyMethod.response(id: request.id, error: mcpError)
 
@@ -606,6 +697,68 @@ public actor Server {
         self.clientCapabilities = clientCapabilities
         self.protocolVersion = protocolVersion
         self.isInitialized = true
+    }
+
+    /// Cancel and remove a pending request task
+    private func removePendingRequest(id: ID) -> Task<Response<AnyMethod>, Error>? {
+        pendingRequestTasks.removeValue(forKey: id)
+    }
+
+    private func registerCancellationHandler() {
+        onNotification(CancelledNotification.self) { [weak self] message in
+            guard let self = self else { return }
+
+            let requestId = message.params.requestId
+            let reason = message.params.reason
+
+            await self.logger?.debug(
+                "Received cancellation notification",
+                metadata: [
+                    "requestId": "\(requestId)",
+                    "reason": reason.map { "\($0)" } ?? "none",
+                ]
+            )
+
+            // Cancel the pending request task if it exists and remove from tracking
+            if let task = await self.removePendingRequest(id: requestId) {
+                task.cancel()
+                await self.logger?.debug(
+                    "Cancelled request",
+                    metadata: ["requestId": "\(requestId)"]
+                )
+            } else {
+                // Request may have already completed or is unknown
+                // Per MCP spec, we should ignore this gracefully
+                await self.logger?.trace(
+                    "Cancellation notification for unknown or completed request",
+                    metadata: ["requestId": "\(requestId)"]
+                )
+            }
+        }
+    }
+
+    /// Cancel a request by sending a CancelledNotification to the client.
+    ///
+    /// This is used when the server needs to cancel an in-progress request it made to the client
+    /// (e.g., a sampling request).
+    ///
+    /// According to the MCP specification, cancellation is advisory:
+    /// - The client SHOULD stop processing and free resources
+    /// - The client MAY ignore the cancellation if the request is unknown, already completed,
+    ///   or cannot be cancelled
+    /// - The server SHOULD ignore any response that arrives after cancellation
+    ///
+    /// - Parameters:
+    ///   - requestID: The ID of the request to cancel
+    ///   - reason: An optional human-readable reason for the cancellation
+    /// - Throws: MCPError if the notification cannot be sent
+    /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/cancellation
+    public func cancelRequest(_ requestID: ID, reason: String? = nil) async throws {
+        // Send cancellation notification to client
+        let notification = CancelledNotification.message(
+            .init(requestId: requestID, reason: reason)
+        )
+        try await notify(notification)
     }
 }
 

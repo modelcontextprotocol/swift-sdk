@@ -9,16 +9,20 @@ import Logging
     import FoundationNetworking
 #endif
 
+// MARK: - Timeout Helpers
+
+/// Error thrown when an operation times out
 /// An implementation of the MCP Streamable HTTP transport protocol for clients.
 ///
-/// This transport implements the [Streamable HTTP transport](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#streamable-http)
-/// specification from the Model Context Protocol.
+/// This transport implements the [Streamable HTTP transport](https://spec.modelcontextprotocol.io/specification/2025-11-25/basic/transports#streamable-http)
+/// specification from the Model Context Protocol (version 2025-11-25).
 ///
 /// It supports:
 /// - Sending JSON-RPC messages via HTTP POST requests
 /// - Receiving responses via both direct JSON responses and SSE streams
-/// - Session management using the `Mcp-Session-Id` header
-/// - Automatic reconnection for dropped SSE streams
+/// - Session management using the `MCP-Session-Id` header
+/// - Protocol version negotiation via `MCP-Protocol-Version` header
+/// - Automatic reconnection for dropped SSE streams with resumability support
 /// - Platform-specific optimizations for different operating systems
 ///
 /// The transport supports two modes:
@@ -56,6 +60,10 @@ public actor HTTPClientTransport: Transport {
 
     /// The session ID assigned by the server, used for maintaining state across requests
     public private(set) var sessionID: String?
+
+    /// The negotiated protocol version to send in MCP-Protocol-Version header
+    public var protocolVersion: String?
+
     private let streaming: Bool
     private var streamingTask: Task<Void, Never>?
 
@@ -75,6 +83,16 @@ public actor HTTPClientTransport: Transport {
     private var initialSessionIDSignalTask: Task<Void, Never>?
     private var initialSessionIDContinuation: CheckedContinuation<Void, Never>?
 
+    /// The last event ID received from the server for SSE stream resumability
+    private var lastEventID: String?
+
+    /// The retry interval (in milliseconds) from the server's SSE `retry:` field
+    private var retryInterval: Int = 3000  // Default 3000ms per SSE spec
+
+    /// The underlying URLSession task for the active GET SSE stream.
+    /// Used to trigger reconnection when a POST SSE stream closes without delivering data.
+    private var activeGETSessionTask: URLSessionDataTask?
+
     /// Creates a new HTTP transport client with the specified endpoint
     ///
     /// - Parameters:
@@ -82,6 +100,7 @@ public actor HTTPClientTransport: Transport {
     ///   - configuration: URLSession configuration to use for HTTP requests
     ///   - streaming: Whether to enable SSE streaming mode (default: true)
     ///   - sseInitializationTimeout: Maximum time to wait for session ID before proceeding with SSE (default: 10 seconds)
+    ///   - protocolVersion: The MCP protocol version to use (default: "2025-11-25")
     ///   - requestModifier: Optional closure to customize requests before they are sent (default: no modification)
     ///   - logger: Optional logger instance for transport events
     public init(
@@ -89,6 +108,7 @@ public actor HTTPClientTransport: Transport {
         configuration: URLSessionConfiguration = .default,
         streaming: Bool = true,
         sseInitializationTimeout: TimeInterval = 10,
+        protocolVersion: String = Version.latest,
         requestModifier: @escaping (URLRequest) -> URLRequest = { $0 },
         logger: Logger? = nil
     ) {
@@ -97,6 +117,7 @@ public actor HTTPClientTransport: Transport {
             session: URLSession(configuration: configuration),
             streaming: streaming,
             sseInitializationTimeout: sseInitializationTimeout,
+            protocolVersion: protocolVersion,
             requestModifier: requestModifier,
             logger: logger
         )
@@ -107,6 +128,7 @@ public actor HTTPClientTransport: Transport {
         session: URLSession,
         streaming: Bool = false,
         sseInitializationTimeout: TimeInterval = 10,
+        protocolVersion: String = Version.latest,
         requestModifier: @escaping (URLRequest) -> URLRequest = { $0 },
         logger: Logger? = nil
     ) {
@@ -114,6 +136,7 @@ public actor HTTPClientTransport: Transport {
         self.session = session
         self.streaming = streaming
         self.sseInitializationTimeout = sseInitializationTimeout
+        self.protocolVersion = protocolVersion
         self.requestModifier = requestModifier
 
         // Create message stream
@@ -144,7 +167,9 @@ public actor HTTPClientTransport: Transport {
         if let continuation = self.initialSessionIDContinuation {
             continuation.resume()
             self.initialSessionIDContinuation = nil  // Consume the continuation
-            logger.trace("Initial session ID signal triggered for SSE task.")
+            logger.debug("✓ Initial session ID signal triggered for SSE task")
+        } else {
+            logger.debug("✗ No continuation to trigger - signal already consumed or SSE task not waiting")
         }
     }
 
@@ -202,6 +227,7 @@ public actor HTTPClientTransport: Transport {
     /// the response according to the MCP Streamable HTTP specification. It handles:
     ///
     /// - Adding appropriate Accept headers for both JSON and SSE
+    /// - Including the MCP-Protocol-Version header as required by the specification
     /// - Including the session ID in requests if one has been established
     /// - Processing different response types (JSON vs SSE)
     /// - Handling HTTP error codes according to the specification
@@ -219,9 +245,14 @@ public actor HTTPClientTransport: Transport {
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = data
 
+        // Add protocol version header (required by MCP specification 2025-11-25)
+        if let protocolVersion = protocolVersion {
+            request.addValue(protocolVersion, forHTTPHeaderField: "MCP-Protocol-Version")
+        }
+
         // Add session ID if available
         if let sessionID = sessionID {
-            request.addValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
+            request.addValue(sessionID, forHTTPHeaderField: "MCP-Session-Id")
         }
 
         // Apply request modifier
@@ -249,7 +280,7 @@ public actor HTTPClientTransport: Transport {
             let contentType = httpResponse.value(forHTTPHeaderField: "Content-Type") ?? ""
 
             // Extract session ID if present
-            if let newSessionID = httpResponse.value(forHTTPHeaderField: "Mcp-Session-Id") {
+            if let newSessionID = httpResponse.value(forHTTPHeaderField: "MCP-Session-Id") {
                 let wasSessionIDNil = (self.sessionID == nil)
                 self.sessionID = newSessionID
                 if wasSessionIDNil {
@@ -286,7 +317,7 @@ public actor HTTPClientTransport: Transport {
             let contentType = httpResponse.value(forHTTPHeaderField: "Content-Type") ?? ""
 
             // Extract session ID if present
-            if let newSessionID = httpResponse.value(forHTTPHeaderField: "Mcp-Session-Id") {
+            if let newSessionID = httpResponse.value(forHTTPHeaderField: "MCP-Session-Id") {
                 let wasSessionIDNil = (self.sessionID == nil)
                 self.sessionID = newSessionID
                 if wasSessionIDNil {
@@ -302,7 +333,15 @@ public actor HTTPClientTransport: Transport {
             if contentType.contains("text/event-stream") {
                 // For SSE, processing happens via the stream
                 logger.trace("Received SSE response, processing in streaming task")
-                try await self.processSSE(stream)
+                let hadData = try await self.processSSE(stream)
+
+                // If the POST SSE stream closed without delivering a JSON-RPC response,
+                // trigger GET reconnection so the server can deliver it there.
+                // This implements standard SSE reconnection behavior per the spec.
+                if !hadData {
+                    logger.debug("POST SSE stream closed without data, triggering GET reconnection")
+                    self.activeGETSessionTask?.cancel()
+                }
             } else if contentType.contains("application/json") {
                 // For JSON responses, collect and deliver the data
                 var buffer = Data()
@@ -404,75 +443,93 @@ public actor HTTPClientTransport: Transport {
             // This is the original code for platforms that support SSE
             guard isConnected else { return }
 
-            // Wait for the initial session ID signal, but only if sessionID isn't already set
-            if self.sessionID == nil, let signalTask = self.initialSessionIDSignalTask {
-                logger.trace("SSE streaming task waiting for initial sessionID signal...")
+            // Wait for session ID to be available before opening SSE stream
+            if self.sessionID == nil {
+                logger.debug("⏳ Waiting for session ID to be set (timeout: \(self.sseInitializationTimeout)s)...")
 
-                // Race the signalTask against a timeout
-                let timeoutTask = Task {
-                    try? await Task.sleep(for: .seconds(self.sseInitializationTimeout))
-                    return false
-                }
+                let startTime = Date()
+                let timeout = self.sseInitializationTimeout
 
-                let signalCompletionTask = Task {
-                    await signalTask.value
-                    return true  // Indicates signal received
-                }
-
-                // Use TaskGroup to race the two tasks
-                var signalReceived = false
-                do {
-                    signalReceived = try await withThrowingTaskGroup(of: Bool.self) { group in
-                        group.addTask {
-                            await signalCompletionTask.value
-                        }
-                        group.addTask {
-                            await timeoutTask.value
-                        }
-
-                        // Take the first result and cancel the other task
-                        if let firstResult = try await group.next() {
-                            group.cancelAll()
-                            return firstResult
-                        }
-                        return false
+                // Poll for session ID with exponential backoff
+                var attempt = 0
+                while self.sessionID == nil && !Task.isCancelled {
+                    let elapsed = Date().timeIntervalSince(startTime)
+                    if elapsed >= timeout {
+                        logger.warning("⏱️ Timeout waiting for session ID (\(timeout)s). SSE stream will proceed anyway.")
+                        break
                     }
-                } catch {
-                    logger.error("Error while waiting for session ID signal: \(error)")
+
+                    // Exponential backoff: 10ms, 20ms, 50ms, 100ms, 200ms, then 500ms
+                    let delay = min(500, max(10, 10 * (1 << attempt)))
+                    try? await Task.sleep(for: .milliseconds(delay))
+                    attempt += 1
                 }
 
-                // Clean up tasks
-                timeoutTask.cancel()
-
-                if signalReceived {
-                    logger.trace("SSE streaming task proceeding after initial sessionID signal.")
-                } else {
-                    logger.warning(
-                        "Timeout waiting for initial sessionID signal. SSE stream will proceed (sessionID might be nil)."
-                    )
+                if self.sessionID != nil {
+                    let elapsed = Date().timeIntervalSince(startTime)
+                    logger.debug("✓ Session ID received after \(Int(elapsed * 1000))ms, proceeding with SSE connection")
                 }
-            } else if self.sessionID != nil {
-                logger.trace(
-                    "Initial sessionID already available. Proceeding with SSE streaming task immediately."
-                )
             } else {
-                logger.trace(
-                    "Proceeding with SSE connection attempt; sessionID is nil. This might be expected for stateless servers or if initialize hasn't provided one yet."
-                )
+                logger.debug("✓ Session ID already available, proceeding with SSE connection immediately")
             }
 
             // Retry loop for connection drops
+            var isFirstAttempt = true
+            var attemptCount = 0
+
+            logger.debug("🔄 Starting SSE retry loop", metadata: [
+                "isConnected": "\(isConnected)",
+                "isCancelled": "\(Task.isCancelled)"
+            ])
+
             while isConnected && !Task.isCancelled {
+                attemptCount += 1
+                logger.debug("🔄 SSE retry loop iteration", metadata: [
+                    "attempt": "\(attemptCount)",
+                    "isFirstAttempt": "\(isFirstAttempt)"
+                ])
+
                 do {
-                    try await connectToEventStream()
+                    // Wait for retry interval before reconnecting (except first attempt)
+                    if !isFirstAttempt {
+                        let delayMs = self.retryInterval
+                        logger.debug("⏳ Waiting before SSE reconnection", metadata: ["retryMs": "\(delayMs)"])
+                        try await Task.sleep(for: .milliseconds(delayMs))
+                        logger.debug("✓ Wait complete, reconnecting now")
+                    }
+                    isFirstAttempt = false
+
+                    logger.debug("📡 Calling connectToEventStream (attempt #\(attemptCount))")
+
+                    try await self.connectToEventStream()
+
+                    // If connectToEventStream() returns without error,
+                    // it means the stream closed gracefully - reconnect with retry interval
+                    logger.info("🔌 SSE stream closed gracefully, will reconnect", metadata: [
+                        "attempt": "\(attemptCount)",
+                        "willRetryAfter": "\(self.retryInterval)ms"
+                    ])
                 } catch {
                     if !Task.isCancelled {
-                        logger.error("SSE connection error: \(error)")
-                        // Wait before retrying
-                        try? await Task.sleep(for: .seconds(1))
+                        logger.error("❌ SSE connection error (attempt #\(attemptCount)): \(error)")
+                        // Error case - will also use retry interval on next iteration
+                    } else {
+                        logger.debug("⏹️ SSE task cancelled")
                     }
                 }
+
+                logger.debug("🔄 End of retry loop iteration", metadata: [
+                    "isConnected": "\(isConnected)",
+                    "isCancelled": "\(Task.isCancelled)",
+                    "willContinue": "\(isConnected && !Task.isCancelled)"
+                ])
             }
+
+            logger.debug("⏹️ SSE retry loop exited", metadata: [
+                "isConnected": "\(isConnected)",
+                "isCancelled": "\(Task.isCancelled)",
+                "totalAttempts": "\(attemptCount)"
+            ])
         #endif
     }
 
@@ -481,19 +538,38 @@ public actor HTTPClientTransport: Transport {
         ///
         /// This initiates a GET request to the server endpoint with appropriate
         /// headers to establish an SSE stream according to the MCP specification.
+        /// Supports stream resumability via Last-Event-ID header.
         ///
         /// - Throws: MCPError for connection failures or server errors
         private func connectToEventStream() async throws {
-            guard isConnected else { return }
+            guard isConnected else {
+                logger.debug("⚠️ Skipping connectToEventStream - transport not connected")
+                return
+            }
+
+            logger.debug("🔌 Preparing SSE connection request")
 
             var request = URLRequest(url: endpoint)
             request.httpMethod = "GET"
             request.addValue("text/event-stream", forHTTPHeaderField: "Accept")
             request.addValue("no-cache", forHTTPHeaderField: "Cache-Control")
 
+            // Add protocol version header (required by MCP specification 2025-11-25)
+            if let protocolVersion = protocolVersion {
+                request.addValue(protocolVersion, forHTTPHeaderField: "MCP-Protocol-Version")
+            }
+
             // Add session ID if available
             if let sessionID = sessionID {
-                request.addValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
+                request.addValue(sessionID, forHTTPHeaderField: "MCP-Session-Id")
+            }
+
+            // Add last event ID for resumability (if available)
+            if let lastEventID = lastEventID {
+                request.addValue(lastEventID, forHTTPHeaderField: "Last-Event-ID")
+                logger.info("→ Resuming SSE stream with Last-Event-ID", metadata: ["lastEventID": "\(lastEventID)"])
+            } else {
+                logger.info("→ Connecting to SSE stream (no last event ID to resume from)")
             }
 
             // Apply request modifier
@@ -503,6 +579,7 @@ public actor HTTPClientTransport: Transport {
 
             // Create URLSession task for SSE
             let (stream, response) = try await session.bytes(for: request)
+            self.activeGETSessionTask = stream.task
 
             guard let httpResponse = response as? HTTPURLResponse else {
                 throw MCPError.internalError("Invalid HTTP response")
@@ -520,7 +597,7 @@ public actor HTTPClientTransport: Transport {
             }
 
             // Extract session ID if present
-            if let newSessionID = httpResponse.value(forHTTPHeaderField: "Mcp-Session-Id") {
+            if let newSessionID = httpResponse.value(forHTTPHeaderField: "MCP-Session-Id") {
                 let wasSessionIDNil = (self.sessionID == nil)
                 self.sessionID = newSessionID
                 if wasSessionIDNil {
@@ -531,36 +608,62 @@ public actor HTTPClientTransport: Transport {
                 logger.debug("Session ID received", metadata: ["sessionID": "\(newSessionID)"])
             }
 
+            defer { self.activeGETSessionTask = nil }
             try await self.processSSE(stream)
         }
 
-        /// Processes an SSE byte stream, extracting events and delivering them
+        /// Processes an SSE byte stream, extracting events and delivering them.
+        ///
+        /// This method processes Server-Sent Events according to the MCP specification,
+        /// including support for event IDs for resumability.
         ///
         /// - Parameter stream: The URLSession.AsyncBytes stream to process
+        /// - Returns: `true` if any data events were received, `false` otherwise.
         /// - Throws: Error for stream processing failures
-        private func processSSE(_ stream: URLSession.AsyncBytes) async throws {
-            do {
-                for try await event in stream.events {
-                    // Check if task has been cancelled
-                    if Task.isCancelled { break }
+        @discardableResult
+        private func processSSE(_ stream: URLSession.AsyncBytes) async throws -> Bool {
+            logger.debug("📥 Starting SSE event processing")
+            var eventCount = 0
+            var hadDataEvent = false
 
-                    logger.trace(
-                        "SSE event received",
-                        metadata: [
-                            "type": "\(event.event ?? "message")",
-                            "id": "\(event.id ?? "none")",
-                        ]
-                    )
+            for try await event in stream.events {
+                eventCount += 1
 
-                    // Convert the event data to Data and yield it to the message stream
-                    if !event.data.isEmpty, let data = event.data.data(using: .utf8) {
-                        messageContinuation.yield(data)
-                    }
+                // Check if task has been cancelled
+                if Task.isCancelled {
+                    logger.debug("⏹️ SSE processing cancelled", metadata: ["eventsProcessed": "\(eventCount)"])
+                    break
                 }
-            } catch {
-                logger.error("Error processing SSE events: \(error)")
-                throw error
+
+                logger.trace(
+                    "SSE event received",
+                    metadata: [
+                        "type": "\(event.event ?? "message")",
+                        "id": "\(event.id ?? "none")",
+                    ]
+                )
+
+                // Store event ID for resumability support
+                if let eventID = event.id, !eventID.isEmpty {
+                    self.lastEventID = eventID
+                    logger.debug("Stored event ID for resumability", metadata: ["eventID": "\(eventID)"])
+                }
+
+                // Store retry interval if provided by server
+                if let retry = event.retry {
+                    self.retryInterval = retry
+                    logger.debug("SSE retry interval updated", metadata: ["retryMs": "\(retry)"])
+                }
+
+                // Convert the event data to Data and yield it to the message stream
+                if !event.data.isEmpty, let data = event.data.data(using: .utf8) {
+                    hadDataEvent = true
+                    messageContinuation.yield(data)
+                }
             }
+
+            logger.debug("✓ SSE event stream completed", metadata: ["eventsProcessed": "\(eventCount)", "hadData": "\(hadDataEvent)"])
+            return hadDataEvent
         }
     #endif
 }
