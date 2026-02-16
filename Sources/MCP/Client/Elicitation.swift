@@ -163,7 +163,8 @@ public enum CreateElicitation: Method {
 
 extension CreateElicitation.Parameters: Codable {
     private enum CodingKeys: String, CodingKey {
-        case mode, message, requestedSchema, metadata, url, elicitationId
+        case mode, message, requestedSchema, url, elicitationId
+        case _meta
     }
 
     public init(from decoder: Decoder) throws {
@@ -178,7 +179,7 @@ extension CreateElicitation.Parameters: Codable {
             let message = try container.decode(String.self, forKey: .message)
             let url = try container.decode(String.self, forKey: .url)
             let elicitationId = try container.decode(String.self, forKey: .elicitationId)
-            let _meta = try container.decodeIfPresent(Metadata.self, forKey: .metadata)
+            let _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
             self = .url(URLParameters(
                 message: message,
                 url: url,
@@ -189,7 +190,7 @@ extension CreateElicitation.Parameters: Codable {
             let message = try container.decode(String.self, forKey: .message)
             let requestedSchema = try container.decodeIfPresent(
                 Elicitation.RequestSchema.self, forKey: .requestedSchema)
-            let _meta = try container.decodeIfPresent(Metadata.self, forKey: .metadata)
+            let _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
             self = .form(FormParameters(
                 message: message,
                 mode: mode,
@@ -206,13 +207,13 @@ extension CreateElicitation.Parameters: Codable {
             try container.encode(params.message, forKey: .message)
             try container.encodeIfPresent(params.mode, forKey: .mode)
             try container.encodeIfPresent(params.requestedSchema, forKey: .requestedSchema)
-            try container.encodeIfPresent(params._meta, forKey: .metadata)
+            try container.encodeIfPresent(params._meta, forKey: ._meta)
         case .url(let params):
             try container.encode(params.message, forKey: .message)
             try container.encode(params.mode, forKey: .mode)
             try container.encode(params.url, forKey: .url)
             try container.encode(params.elicitationId, forKey: .elicitationId)
-            try container.encodeIfPresent(params._meta, forKey: .metadata)
+            try container.encodeIfPresent(params._meta, forKey: ._meta)
         }
     }
 }

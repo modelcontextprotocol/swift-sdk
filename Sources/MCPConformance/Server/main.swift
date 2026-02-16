@@ -71,7 +71,12 @@ func createConformanceServer(state: ServerState) async -> Server {
             Tool(name: "add_numbers", description: "Adds two numbers together", inputSchema: .object(["type": "object", "properties": ["a": ["type": "number", "description": "First number"], "b": ["type": "number", "description": "Second number"]]])),
             Tool(name: "test_tool_with_progress", description: "Tool reports progress notifications", inputSchema: .object(["type": "object", "properties": [:]])),
             Tool(name: "test_tool_with_logging", description: "Tool sends log messages during execution", inputSchema: .object(["type": "object", "properties": [:]])),
-            Tool(name: "test_reconnection", description: "Tests SSE reconnection and resumption with Last-Event-ID", inputSchema: .object(["type": "object", "properties": [:]]))
+            Tool(name: "test_reconnection", description: "Tests SSE reconnection and resumption with Last-Event-ID", inputSchema: .object(["type": "object", "properties": [:]])),
+            Tool(name: "test_sampling", description: "Tests LLM sampling capabilities", inputSchema: .object(["type": "object", "properties": ["prompt": ["type": "string", "description": "Text to send to the LLM"]], "required": ["prompt"]])),
+            Tool(name: "test_elicitation", description: "Tests user input elicitation", inputSchema: .object(["type": "object", "properties": ["message": ["type": "string", "description": "Text displayed to user"]], "required": ["message"]])),
+            Tool(name: "test_elicitation_sep1034_defaults", description: "Tests elicitation with default values (SEP-1034)", inputSchema: .object(["type": "object", "properties": [:]])),
+            Tool(name: "test_elicitation_sep1330_enums", description: "Tests elicitation with enum variants (SEP-1330)", inputSchema: .object(["type": "object", "properties": [:]])),
+            Tool(name: "test_client_elicitation_defaults", description: "Tests that client applies defaults for omitted elicitation fields", inputSchema: .object(["type": "object", "properties": [:]]))
         ])
     }
 
@@ -156,6 +161,185 @@ func createConformanceServer(state: ServerState) async -> Server {
             // and the client would need to reconnect with Last-Event-ID to get the result.
             // For now, we return a simple success response.
             return .init(content: [.text("Reconnection test completed successfully")], isError: false)
+        case "test_sampling":
+            // Test LLM sampling - request sampling/createMessage from client
+            guard let prompt = params.arguments?["prompt"]?.stringValue else {
+                return .init(content: [.text("Missing required argument: prompt")], isError: true)
+            }
+
+            let samplingResult = try await server?.requestSampling(
+                messages: [.user(.text(prompt))],
+                maxTokens: 100
+            )
+
+            let responseText = samplingResult?.content.asArray
+                .compactMap { block -> String? in
+                    if case .text(let text) = block {
+                        return text
+                    }
+                    return nil
+                }
+                .joined(separator: "\n") ?? "No response"
+
+            return .init(content: [.text(responseText)], isError: false)
+        case "test_elicitation":
+            // Test elicitation - request user input for username and email
+            guard let message = params.arguments?["message"]?.stringValue else {
+                return .init(content: [.text("Missing required argument: message")], isError: true)
+            }
+
+            let elicitationResult = try await server?.requestElicitation(
+                message: message,
+                requestedSchema: Elicitation.RequestSchema(
+                    properties: [
+                        "username": .object(["type": .string("string")]),
+                        "email": .object(["type": .string("string")])
+                    ],
+                    required: ["username", "email"]
+                )
+            )
+
+            return .init(
+                content: [.text("Elicitation completed: action=\(elicitationResult?.action.rawValue ?? "unknown"), content=\(elicitationResult?.content ?? [:])")],
+                isError: false
+            )
+        case "test_elicitation_sep1034_defaults":
+            // Test elicitation with default values (SEP-1034)
+            let elicitationResult = try await server?.requestElicitation(
+                message: "Please provide the following information:",
+                requestedSchema: Elicitation.RequestSchema(
+                    properties: [
+                        "name": .object([
+                            "type": .string("string"),
+                            "default": .string("John Doe")
+                        ]),
+                        "age": .object([
+                            "type": .string("integer"),
+                            "default": .int(30)
+                        ]),
+                        "score": .object([
+                            "type": .string("number"),
+                            "default": .double(95.5)
+                        ]),
+                        "status": .object([
+                            "type": .string("string"),
+                            "enum": .array([.string("active"), .string("inactive"), .string("pending")]),
+                            "default": .string("active")
+                        ]),
+                        "verified": .object([
+                            "type": .string("boolean"),
+                            "default": .bool(true)
+                        ])
+                    ]
+                )
+            )
+
+            return .init(
+                content: [.text("Elicitation completed: action=\(elicitationResult?.action.rawValue ?? "unknown"), content=\(elicitationResult?.content ?? [:])")],
+                isError: false
+            )
+        case "test_elicitation_sep1330_enums":
+            // Test elicitation with enum variants (SEP-1330)
+            let elicitationResult = try await server?.requestElicitation(
+                message: "Select options for enum testing:",
+                requestedSchema: Elicitation.RequestSchema(
+                    properties: [
+                        // 1. Untitled single-select
+                        "untitledSingle": .object([
+                            "type": .string("string"),
+                            "enum": .array([.string("option1"), .string("option2"), .string("option3")])
+                        ]),
+                        // 2. Titled single-select
+                        "titledSingle": .object([
+                            "type": .string("string"),
+                            "oneOf": .array([
+                                .object(["const": .string("opt1"), "title": .string("Option One")]),
+                                .object(["const": .string("opt2"), "title": .string("Option Two")]),
+                                .object(["const": .string("opt3"), "title": .string("Option Three")])
+                            ])
+                        ]),
+                        // 3. Legacy titled (deprecated enumNames)
+                        "legacyEnum": .object([
+                            "type": .string("string"),
+                            "enum": .array([.string("legacy1"), .string("legacy2"), .string("legacy3")]),
+                            "enumNames": .array([.string("Legacy One"), .string("Legacy Two"), .string("Legacy Three")])
+                        ]),
+                        // 4. Untitled multi-select
+                        "untitledMulti": .object([
+                            "type": .string("array"),
+                            "items": .object([
+                                "type": .string("string"),
+                                "enum": .array([.string("multi1"), .string("multi2"), .string("multi3")])
+                            ])
+                        ]),
+                        // 5. Titled multi-select
+                        "titledMulti": .object([
+                            "type": .string("array"),
+                            "items": .object([
+                                "anyOf": .array([
+                                    .object(["const": .string("titled1"), "title": .string("Titled One")]),
+                                    .object(["const": .string("titled2"), "title": .string("Titled Two")]),
+                                    .object(["const": .string("titled3"), "title": .string("Titled Three")])
+                                ])
+                            ])
+                        ])
+                    ]
+                )
+            )
+
+            return .init(
+                content: [.text("Elicitation completed: action=\(elicitationResult?.action.rawValue ?? "unknown"), content=\(elicitationResult?.content ?? [:])")],
+                isError: false
+            )
+        case "test_client_elicitation_defaults":
+            // Tool for client-side elicitation defaults test
+            let elicitationResult = try await server?.requestElicitation(
+                message: "Please provide your information (defaults available):",
+                requestedSchema: Elicitation.RequestSchema(
+                    properties: [
+                        "name": .object([
+                            "type": .string("string"),
+                            "default": .string("John Doe")
+                        ]),
+                        "age": .object([
+                            "type": .string("integer"),
+                            "default": .int(30)
+                        ]),
+                        "score": .object([
+                            "type": .string("number"),
+                            "default": .double(95.5)
+                        ]),
+                        "status": .object([
+                            "type": .string("string"),
+                            "enum": .array([.string("active"), .string("inactive"), .string("pending")]),
+                            "default": .string("active")
+                        ]),
+                        "verified": .object([
+                            "type": .string("boolean"),
+                            "default": .bool(true)
+                        ])
+                    ]
+                )
+            )
+
+            // Verify the client applied defaults correctly
+            guard let content = elicitationResult?.content,
+                  let name = content["name"]?.stringValue,
+                  let age = content["age"]?.intValue,
+                  let score = content["score"]?.doubleValue,
+                  let status = content["status"]?.stringValue,
+                  let verified = content["verified"]?.boolValue else {
+                return .init(content: [.text("Client did not provide all required fields with defaults")], isError: true)
+            }
+
+            guard name == "John Doe", age == 30, score == 95.5, status == "active", verified == true else {
+                return .init(content: [.text("Client defaults do not match expected values")], isError: true)
+            }
+
+            return .init(
+                content: [.text("Client correctly applied all default values")],
+                isError: false
+            )
         default:
             return .init(content: [.text("Unknown tool: \(params.name)")], isError: true)
         }
@@ -269,7 +453,12 @@ struct MCPHTTPServer {
         }
 
         var loggerConfig = Logger(label: "mcp.http.server", factory: { StreamLogHandler.standardError(label: $0) })
-        loggerConfig.logLevel = .trace
+        // Check for debug environment variable
+        if ProcessInfo.processInfo.environment["MCP_CONFORMANCE_DEBUG"] != nil {
+            loggerConfig.logLevel = .trace
+        } else {
+            loggerConfig.logLevel = .debug
+        }
         let logger = loggerConfig
 
         let state = ServerState()

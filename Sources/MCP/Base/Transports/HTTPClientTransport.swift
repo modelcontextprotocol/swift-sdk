@@ -444,25 +444,28 @@ public actor HTTPClientTransport: Transport {
             guard isConnected else { return }
 
             // Wait for session ID to be available before opening SSE stream
-            if self.sessionID == nil {
+            if self.sessionID == nil, let signalTask = self.initialSessionIDSignalTask {
                 logger.debug("⏳ Waiting for session ID to be set (timeout: \(self.sseInitializationTimeout)s)...")
 
                 let startTime = Date()
                 let timeout = self.sseInitializationTimeout
+                do {
+                    try await withThrowingTaskGroup { group in
+                        group.addTask {
+                            try await Task.sleep(for: .seconds(timeout))
+                        }
 
-                // Poll for session ID with exponential backoff
-                var attempt = 0
-                while self.sessionID == nil && !Task.isCancelled {
-                    let elapsed = Date().timeIntervalSince(startTime)
-                    if elapsed >= timeout {
-                        logger.warning("⏱️ Timeout waiting for session ID (\(timeout)s). SSE stream will proceed anyway.")
-                        break
+                        group.addTask {
+                            await signalTask.value
+                        }
+
+                        if let firstResult = try await group.next() {
+                            group.cancelAll()
+                            return firstResult
+                        }
                     }
-
-                    // Exponential backoff: 10ms, 20ms, 50ms, 100ms, 200ms, then 500ms
-                    let delay = min(500, max(10, 10 * (1 << attempt)))
-                    try? await Task.sleep(for: .milliseconds(delay))
-                    attempt += 1
+                } catch {
+                    logger.warning("⏱️ Timeout waiting for session ID (\(timeout)s). SSE stream will proceed anyway.")
                 }
 
                 if self.sessionID != nil {

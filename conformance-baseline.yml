@@ -1,5 +1,4 @@
 client:
-  - elicitation-sep1034-client-defaults
   - auth/metadata-default
   - auth/metadata-var1
   - auth/metadata-var2
@@ -20,9 +19,5 @@ client:
   - auth/client-credentials-basic
 
 server:
-  - tools-call-sampling
-  - tools-call-elicitation
   - json-schema-2020-12
-  - elicitation-sep1034-defaults
   - server-sse-polling
-  - elicitation-sep1330-enums

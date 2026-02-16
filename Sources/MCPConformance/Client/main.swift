@@ -176,6 +176,98 @@ func runSSEScenario(_ args: [String]) async throws {
     logger.debug("SSE scenario completed")
 }
 
+/// Client that handles elicitation-sep1034-client-defaults scenario
+/// Tests that client properly applies default values for omitted fields
+func runElicitationSEP1034ClientDefaults(_ args: [String]) async throws {
+    var logger = Logger(
+        label: "mcp.conformance.client.elicitation_client_defaults",
+        factory: { StreamLogHandler.standardError(label: $0) }
+    )
+    logger.logLevel = .debug
+
+    logger.debug("Starting elicitation-sep1034-client-defaults scenario")
+
+    // Get server URL from args
+    guard let serverURLString = args.last,
+          let serverURL = URL(string: serverURLString) else {
+        throw ConformanceError.invalidArguments("Valid server URL is required")
+    }
+
+    // Create HTTP transport with streaming enabled for bidirectional communication
+    let transport = HTTPClientTransport(
+        endpoint: serverURL,
+        streaming: true,
+        logger: logger
+    )
+
+    // Create client with elicitation capabilities
+    let client = Client(
+        name: "test-client",
+        version: "1.0.0",
+        capabilities: Client.Capabilities(
+            elicitation: Client.Capabilities.Elicitation(form: .init(), url: .init())
+        )
+    )
+
+    // Set up elicitation handler that accepts defaults BEFORE connecting
+    await client.withElicitationHandler { [logger] params in
+        let message: String
+        switch params {
+        case .form(let formParams):
+            message = formParams.message
+        case .url(let urlParams):
+            message = urlParams.message
+        }
+
+        logger.debug("Elicitation handler invoked", metadata: [
+            "message": "\(message)"
+        ])
+
+        // Accept with default values applied
+        // The schema has optional fields with defaults:
+        // name: "John Doe", age: 30, score: 95.5, status: "active", verified: true
+        return CreateElicitation.Result(
+            action: .accept,
+            content: [
+                "name": "John Doe",
+                "age": 30,
+                "score": 95.5,
+                "status": "active",
+                "verified": true
+            ]
+        )
+    }
+
+    // Connect
+    try await client.connect(transport: transport)
+    logger.debug("Successfully connected to MCP server")
+
+    // List tools
+    let (tools, _) = try await client.listTools()
+    logger.debug("Successfully listed tools", metadata: [
+        "toolCount": "\(tools.count)"
+    ])
+
+    // Call the test_client_elicitation_defaults tool
+    if tools.contains(where: { $0.name == "test_client_elicitation_defaults" }) {
+        let result = try await client.callTool(
+            name: "test_client_elicitation_defaults",
+            arguments: [:]
+        )
+        logger.debug("Tool call result", metadata: [
+            "isError": "\(result.isError ?? false)",
+            "contentCount": "\(result.content.count)"
+        ])
+    } else {
+        logger.warning("test_client_elicitation_defaults tool not found")
+    }
+
+    // Disconnect
+    await client.disconnect()
+
+    logger.debug("Elicitation client defaults scenario completed successfully")
+}
+
 // MARK: - Default Handler for Unimplemented Scenarios
 
 /// Default handler that performs basic connection test for unimplemented scenarios
@@ -222,7 +314,8 @@ nonisolated(unsafe) let scenarioHandlers: [String: ScenarioHandler] = [
     "initialize": runInitializeScenario,
     "tools_call": runToolsCallScenario,
     "sse-retry": runSSEScenario,
-    // Note: Other scenarios (elicitation, auth/*) will use the default handler
+    "elicitation-sep1034-client-defaults": runElicitationSEP1034ClientDefaults,
+    // Note: Other scenarios (auth/*) will use the default handler
 ]
 
 // MARK: - Error Types

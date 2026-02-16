@@ -265,7 +265,10 @@ public actor Server {
                         } else if let response = try? decoder.decode(AnyResponse.self, from: data) {
                             await handleResponse(response)
                         } else if let request = try? decoder.decode(AnyRequest.self, from: data) {
-                            _ = try await handleRequest(request, sendResponse: true)
+                            // Handle request in a separate task to avoid blocking the receive loop
+                            Task {
+                                _ = try? await self.handleRequest(request, sendResponse: true)
+                            }
                         } else if let message = try? decoder.decode(AnyMessage.self, from: data) {
                             try await handleMessage(message)
                         } else {
@@ -859,10 +862,6 @@ public actor Server {
     }
 
     private func handleResponse(_ response: Response<AnyMethod>) async {
-        await logger?.trace(
-            "Processing response from client",
-            metadata: ["id": "\(response.id)"])
-
         if let pendingRequest = self.removePendingResponse(id: response.id) {
             switch response.result {
             case .success(let value):
