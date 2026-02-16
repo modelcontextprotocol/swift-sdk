@@ -250,7 +250,7 @@ extension Prompt.Message.Content: ExpressibleByStringInterpolation {
 // MARK: -
 
 /// To retrieve available prompts, clients send a `prompts/list` request.
-/// - SeeAlso: https://spec.modelcontextprotocol.io/specification/2024-11-05/server/prompts/#listing-prompts
+/// - SeeAlso: https://modelcontextprotocol.io/specification/2024-11-05/server/prompts/#listing-prompts
 public enum ListPrompts: Method {
     public static let name: String = "prompts/list"
 
