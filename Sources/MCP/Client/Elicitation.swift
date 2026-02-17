@@ -132,7 +132,7 @@ public enum CreateElicitation: Method {
         public init(
             action: Action,
             content: [String: Value]? = nil,
-            _meta: Metadata? = nil,
+            _meta: Metadata? = nil
         ) {
             self.action = action
             self.content = content

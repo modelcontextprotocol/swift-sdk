@@ -33,7 +33,7 @@ public struct Resource: Hashable, Codable, Sendable {
         mimeType: String? = nil,
         metadata: [String: String]? = nil,
         icons: [Icon]? = nil,
-        _meta: Metadata? = nil,
+        _meta: Metadata? = nil
     ) {
         self.name = name
         self.title = title

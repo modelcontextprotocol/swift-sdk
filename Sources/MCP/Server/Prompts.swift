@@ -274,7 +274,7 @@ public enum ListPrompts: Method {
         public init(
             prompts: [Prompt],
             nextCursor: String? = nil,
-            _meta: Metadata? = nil,
+            _meta: Metadata? = nil
         ) {
             self.prompts = prompts
             self.nextCursor = nextCursor
@@ -326,7 +326,7 @@ public enum GetPrompt: Method {
         public init(
             description: String? = nil,
             messages: [Prompt.Message],
-            _meta: Metadata? = nil,
+            _meta: Metadata? = nil
         ) {
             self.description = description
             self.messages = messages

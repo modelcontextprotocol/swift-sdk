@@ -53,7 +53,7 @@ public enum Initialize: Method {
             capabilities: Server.Capabilities,
             serverInfo: Server.Info,
             instructions: String? = nil,
-            _meta: Metadata? = nil,
+            _meta: Metadata? = nil
         ) {
             self.protocolVersion = protocolVersion
             self.capabilities = capabilities

@@ -65,7 +65,7 @@ extension Method {
     public static func response(
         id: ID,
         result: Self.Result,
-        _meta: Metadata? = nil,
+        _meta: Metadata? = nil
     ) -> Response<Self> {
         Response(id: id, result: result, _meta: _meta)
     }
