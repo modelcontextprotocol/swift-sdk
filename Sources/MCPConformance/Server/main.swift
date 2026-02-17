@@ -453,12 +453,7 @@ struct MCPHTTPServer {
         }
 
         var loggerConfig = Logger(label: "mcp.http.server", factory: { StreamLogHandler.standardError(label: $0) })
-        // Check for debug environment variable
-        if ProcessInfo.processInfo.environment["MCP_CONFORMANCE_DEBUG"] != nil {
-            loggerConfig.logLevel = .trace
-        } else {
-            loggerConfig.logLevel = .debug
-        }
+        loggerConfig.logLevel = .trace
         let logger = loggerConfig
 
         let state = ServerState()
