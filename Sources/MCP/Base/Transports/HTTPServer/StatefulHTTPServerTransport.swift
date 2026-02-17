@@ -370,24 +370,34 @@ public actor StatefulHTTPServerTransport: Transport {
 
     // MARK: - Message Routing
 
-    private func routeResponse(_ data: Data, requestID: String) {
+    /// Routes a message to a specific request's SSE stream without closing it.
+    /// Used for server-initiated messages during request handling.
+    private func routeToRequestStream(_ data: Data, requestID: String) {
         let eventID = storeEvent(streamID: requestID, message: data)
 
         guard let continuation = requestSSEContinuations[requestID] else {
             logger.debug(
-                "No active stream for request, response stored for replay",
+                "No active stream for request, message stored for replay",
                 metadata: ["requestID": "\(requestID)"]
             )
             return
         }
 
-        // Format as SSE and yield
+        // Format as SSE and yield (but don't close the stream)
         let sseEvent = SSEEvent.message(data: data, id: eventID)
         continuation.yield(sseEvent.formatted())
+    }
+
+    /// Routes a response to a specific request's SSE stream and closes it.
+    /// Used for final responses to client requests.
+    private func routeResponse(_ data: Data, requestID: String) {
+        routeToRequestStream(data, requestID: requestID)
 
         // Response means the request is complete — close the stream
-        continuation.finish()
-        requestSSEContinuations.removeValue(forKey: requestID)
+        if let continuation = requestSSEContinuations[requestID] {
+            continuation.finish()
+            requestSSEContinuations.removeValue(forKey: requestID)
+        }
     }
 
     private func routeServerInitiatedMessage(_ data: Data) {

@@ -97,7 +97,7 @@ if [[ "$MODE" == "server" || "$MODE" == "both" ]]; then
   log_info "Running server conformance tests..."
   npx "$CONFORMANCE_PKG" server \
     --url http://localhost:3001/mcp \
-    --suite core \
+    --suite all \
     $BASELINE_ARG || {
     log_error "Server conformance tests failed"
     kill $SERVER_PID 2>/dev/null || true

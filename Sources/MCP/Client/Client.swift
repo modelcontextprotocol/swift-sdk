@@ -59,13 +59,49 @@ public actor Client {
         }
 
         /// The sampling capabilities
-        public struct Sampling: Hashable, Codable, Sendable {
-            public init() {}
+        public struct Sampling: Hashable, Sendable {
+            /// Tools sub-capability for sampling
+            public struct Tools: Hashable, Codable, Sendable {
+                public init() {}
+            }
+
+            /// Context sub-capability for sampling
+            public struct Context: Hashable, Codable, Sendable {
+                public init() {}
+            }
+
+            /// Whether tools are supported in sampling
+            public var tools: Tools?
+            /// Whether context is supported in sampling
+            public var context: Context?
+
+            public init(tools: Tools? = nil, context: Context? = nil) {
+                self.tools = tools
+                self.context = context
+            }
         }
 
         /// The elicitation capabilities
-        public struct Elicitation: Hashable, Codable, Sendable {
-            public init() {}
+        public struct Elicitation: Hashable, Sendable {
+            /// Form-based elicitation sub-capability
+            public struct Form: Hashable, Codable, Sendable {
+                public init() {}
+            }
+
+            /// URL-based elicitation sub-capability
+            public struct URL: Hashable, Codable, Sendable {
+                public init() {}
+            }
+
+            /// Whether form-based elicitation is supported
+            public var form: Form?
+            /// Whether URL-based elicitation is supported
+            public var url: URL?
+
+            public init(form: Form? = Form(), url: URL? = nil) {
+                self.form = form
+                self.url = url
+            }
         }
 
         /// Whether the client supports sampling
@@ -122,6 +158,8 @@ public actor Client {
 
     /// A dictionary of type-erased notification handlers, keyed by method name
     private var notificationHandlers: [String: [NotificationHandlerBox]] = [:]
+    /// Method handlers for server-to-client requests
+    private var methodHandlers: [String: RequestHandlerBox] = [:]
     /// The task for the message handling loop
     private var task: Task<Void, Never>?
 
@@ -175,10 +213,11 @@ public actor Client {
         name: String,
         version: String,
         title: String? = nil,
+        capabilities: Capabilities = Capabilities(),
         configuration: Configuration = .default
     ) {
         self.clientInfo = Client.Info(name: name, version: version, title: title)
-        self.capabilities = Capabilities()
+        self.capabilities = capabilities
         self.configuration = configuration
     }
 
@@ -209,6 +248,8 @@ public actor Client {
                             await handleBatchResponse(batchResponse)
                         } else if let response = try? decoder.decode(AnyResponse.self, from: data) {
                             await handleResponse(response)
+                        } else if let request = try? decoder.decode(AnyRequest.self, from: data) {
+                            await handleIncomingRequest(request)
                         } else if let message = try? decoder.decode(AnyMessage.self, from: data) {
                             await handleMessage(message)
                         } else {
@@ -313,6 +354,19 @@ public actor Client {
         return self
     }
 
+    /// Register a handler for server-to-client requests
+    @discardableResult
+    public func withMethodHandler<M: Method>(
+        _ type: M.Type,
+        handler: @escaping @Sendable (M.Parameters) async throws -> M.Result
+    ) -> Self {
+        methodHandlers[M.name] = TypedRequestHandler { (request: Request<M>) -> Response<M> in
+            let result = try await handler(request.params)
+            return Response(id: request.id, result: result)
+        }
+        return self
+    }
+
     /// Send a notification to the server
     public func notify<N: Notification>(_ notification: Message<N>) async throws {
         guard let connection = connection else {
@@ -321,6 +375,15 @@ public actor Client {
 
         let notificationData = try encoder.encode(notification)
         try await connection.send(notificationData)
+    }
+
+    /// Send a response back to the server for a server-to-client request
+    private func send<M: Method>(_ response: Response<M>) async throws {
+        guard let connection = connection else {
+            throw MCPError.internalError("Client connection not initialized")
+        }
+        let responseData = try encoder.encode(response)
+        try await connection.send(responseData)
     }
 
     // MARK: - Requests
@@ -768,21 +831,7 @@ public actor Client {
             @escaping @Sendable (CreateSamplingMessage.Parameters) async throws ->
             CreateSamplingMessage.Result
     ) -> Self {
-        // Note: This would require extending the client architecture to handle incoming requests from servers.
-        // The current MCP Swift SDK architecture assumes clients only send requests to servers,
-        // but sampling requires bidirectional communication where servers can send requests to clients.
-        //
-        // A full implementation would need:
-        // 1. Request handlers in the client (similar to how servers handle requests)
-        // 2. Bidirectional transport support
-        // 3. Request/response correlation for server-to-client requests
-        //
-        // For now, this serves as the correct API design for when bidirectional support is added.
-
-        // This would register the handler similar to how servers register method handlers:
-        // methodHandlers[CreateSamplingMessage.name] = TypedRequestHandler(handler)
-
-        return self
+        return withMethodHandler(CreateSamplingMessage.self, handler: handler)
     }
 
     // MARK: - Elicitation
@@ -802,9 +851,40 @@ public actor Client {
             @escaping @Sendable (CreateElicitation.Parameters) async throws ->
             CreateElicitation.Result
     ) -> Self {
-        // Supporting server-initiated requests requires bidirectional transports.
-        // Once available, this handler will be wired into the request routing path.
-        return self
+        return withMethodHandler(CreateElicitation.self, handler: handler)
+    }
+
+    // MARK: - Roots
+
+    /// Register a handler for roots/list requests from servers
+    ///
+    /// Roots define filesystem boundaries that servers can operate within.
+    /// Unlike other MCP features, roots use bidirectional communication where
+    /// servers send requests TO clients to discover available roots.
+    ///
+    /// - Parameter handler: A closure that returns the list of available roots
+    /// - Returns: Self for method chaining
+    /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/client/roots
+    @discardableResult
+    public func withRootsHandler(
+        _ handler: @escaping @Sendable () async throws -> [Root]
+    ) -> Self {
+        return withMethodHandler(ListRoots.self) { _ in
+            let roots = try await handler()
+            return ListRoots.Result(roots: roots)
+        }
+    }
+
+    /// Notify the server that the list of roots has changed
+    ///
+    /// Clients should send this notification when roots are added, removed,
+    /// or modified to inform connected servers of the change.
+    ///
+    /// - Throws: MCPError if the client is not connected
+    /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/client/roots
+    public func notifyRootsChanged() async throws {
+        let notification = RootsListChangedNotification.message()
+        try await notify(notification)
     }
 
     // MARK: - Logging
@@ -938,6 +1018,43 @@ public actor Client {
         }
     }
 
+    private func handleIncomingRequest(_ request: Request<AnyMethod>) async {
+        await logger?.trace(
+            "Processing incoming request from server",
+            metadata: ["method": "\(request.method)", "id": "\(request.id)"])
+
+        guard let handler = methodHandlers[request.method] else {
+            await logger?.warning(
+                "No handler registered for method",
+                metadata: ["method": "\(request.method)"])
+            let error = MCPError.methodNotFound("Unknown method: \(request.method)")
+            let response = AnyMethod.response(id: request.id, error: error)
+            do {
+                try await send(response)
+            } catch {
+                await logger?.error(
+                    "Failed to send error response",
+                    metadata: ["error": "\(error)"])
+            }
+            return
+        }
+
+        do {
+            let response = try await handler(request)
+            try await send(response)
+        } catch {
+            let mcpError = error as? MCPError ?? MCPError.internalError(error.localizedDescription)
+            let response = AnyMethod.response(id: request.id, error: mcpError)
+            do {
+                try await send(response)
+            } catch {
+                await logger?.error(
+                    "Failed to send error response",
+                    metadata: ["error": "\(error)"])
+            }
+        }
+    }
+
     // MARK: -
 
     /// Validate the server capabilities.
@@ -981,5 +1098,59 @@ public actor Client {
                 )
             }
         }
+    }
+}
+
+// MARK: - Codable
+
+extension Client.Capabilities.Sampling: Codable {
+    private enum CodingKeys: String, CodingKey {
+        case tools, context
+    }
+
+    public init(from decoder: Decoder) throws {
+        // Handle both empty object {} and object with sub-capabilities
+        if let container = try? decoder.container(keyedBy: CodingKeys.self) {
+            self.tools = try container.decodeIfPresent(Tools.self, forKey: .tools)
+            self.context = try container.decodeIfPresent(Context.self, forKey: .context)
+        } else {
+            // Empty object - no capabilities
+            self.tools = nil
+            self.context = nil
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(tools, forKey: .tools)
+        try container.encodeIfPresent(context, forKey: .context)
+    }
+}
+
+extension Client.Capabilities.Elicitation: Codable {
+    private enum CodingKeys: String, CodingKey {
+        case form, url
+    }
+
+    public init(from decoder: Decoder) throws {
+        // Handle both empty object {} and object with sub-capabilities
+        if let container = try? decoder.container(keyedBy: CodingKeys.self) {
+            self.form = try container.decodeIfPresent(Form.self, forKey: .form)
+            self.url = try container.decodeIfPresent(URL.self, forKey: .url)
+            // If both are nil, default to form for backward compatibility
+            if self.form == nil && self.url == nil {
+                self.form = Form()
+            }
+        } else {
+            // Empty object - default to form-only for backward compatibility
+            self.form = Form()
+            self.url = nil
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(form, forKey: .form)
+        try container.encodeIfPresent(url, forKey: .url)
     }
 }
