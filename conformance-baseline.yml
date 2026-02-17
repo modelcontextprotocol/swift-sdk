@@ -19,5 +19,4 @@ client:
   - auth/client-credentials-basic
 
 server:
-  - json-schema-2020-12
   - server-sse-polling

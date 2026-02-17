@@ -76,7 +76,25 @@ func createConformanceServer(state: ServerState) async -> Server {
             Tool(name: "test_elicitation", description: "Tests user input elicitation", inputSchema: .object(["type": "object", "properties": ["message": ["type": "string", "description": "Text displayed to user"]], "required": ["message"]])),
             Tool(name: "test_elicitation_sep1034_defaults", description: "Tests elicitation with default values (SEP-1034)", inputSchema: .object(["type": "object", "properties": [:]])),
             Tool(name: "test_elicitation_sep1330_enums", description: "Tests elicitation with enum variants (SEP-1330)", inputSchema: .object(["type": "object", "properties": [:]])),
-            Tool(name: "test_client_elicitation_defaults", description: "Tests that client applies defaults for omitted elicitation fields", inputSchema: .object(["type": "object", "properties": [:]]))
+            Tool(name: "test_client_elicitation_defaults", description: "Tests that client applies defaults for omitted elicitation fields", inputSchema: .object(["type": "object", "properties": [:]])),
+            Tool(name: "json_schema_2020_12_tool", description: "Tool with JSON Schema 2020-12 features", inputSchema: .object([
+                "$schema": .string("https://json-schema.org/draft/2020-12/schema"),
+                "type": .string("object"),
+                "$defs": .object([
+                    "address": .object([
+                        "type": .string("object"),
+                        "properties": .object([
+                            "street": .object(["type": .string("string")]),
+                            "city": .object(["type": .string("string")])
+                        ])
+                    ])
+                ]),
+                "properties": .object([
+                    "name": .object(["type": .string("string")]),
+                    "address": .object(["$ref": .string("#/$defs/address")])
+                ]),
+                "additionalProperties": .bool(false)
+            ]))
         ])
     }
 
@@ -128,6 +146,8 @@ func createConformanceServer(state: ServerState) async -> Server {
                 try await server?.notify(notification3)
             }
 
+            return .init(content: [.text("This is a simple text response for testing.")], isError: false)
+        case "json_schema_2020_12_tool":
             return .init(content: [.text("This is a simple text response for testing.")], isError: false)
         case "test_tool_with_logging":
             // Send first log message
