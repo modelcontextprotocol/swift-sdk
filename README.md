@@ -434,6 +434,7 @@ await server.withMethodHandler(ListTools.self) { _ in
             name: "weather",
             description: "Get current weather for a location",
             inputSchema: .object([
+                "type": .string("object"),
                 "properties": .object([
                     "location": .string("City name or coordinates"),
                     "units": .string("Units of measurement, e.g., metric, imperial")
@@ -444,6 +445,7 @@ await server.withMethodHandler(ListTools.self) { _ in
             name: "calculator",
             description: "Perform calculations",
             inputSchema: .object([
+                "type": .string("object"),
                 "properties": .object([
                     "expression": .string("Mathematical expression to evaluate")
                 ])
@@ -692,13 +694,8 @@ struct MCPService: Service {
         // Start the server
         try await server.start(transport: transport)
 
-        // Keep running until external cancellation
-        try await Task.sleep(for: .days(365 * 100))  // Effectively forever
-    }
-
-    func shutdown() async throws {
-        // Gracefully shutdown the server
-        await server.stop()
+        // Keep running until external cancellation or receiving EOF
+        await server.waitUntilCompleted()
     }
 }
 ```
@@ -738,17 +735,20 @@ await server.withMethodHandler(CallTool.self) { params in
 
 // Create MCP service and other services
 let transport = StdioTransport(logger: logger)
+
 let mcpService = MCPService(server: server, transport: transport)
+// use .gracefullyShutdownGroup instead of the default .cancelGroup, because group cancellation leads to ServiceGroupError.serviceFinishedUnexpectedly when mcpService receives, for example, EOF, which is a normal signal to shutdown
+let mcpServiceCfg = ServiceGroupConfiguration.ServiceConfiguration(service: mcpService, successTerminationBehavior: .gracefullyShutdownGroup)
+
 let databaseService = DatabaseService() // Your other services
+let databaseServiceCfg = ServiceGroupConfiguration.ServiceConfiguration(service: databaseService)
 
 // Create service group with signal handling
-let serviceGroup = ServiceGroup(
-    services: [mcpService, databaseService],
-    configuration: .init(
-        gracefulShutdownSignals: [.sigterm, .sigint]
-    ),
-    logger: logger
-)
+let serviceGroupCfg = ServiceGroupConfiguration(
+    services: [mcpServiceCfg, databaseServiceCfg],
+    gracefulShutdownSignals: [.sigterm, .sigint],
+    logger: logger)
+let serviceGroup = ServiceGroup(configuration: serviceGroupCfg)
 
 // Run the service group - this blocks until shutdown
 try await serviceGroup.run()
@@ -760,8 +760,6 @@ This approach has several benefits:
   Automatically traps SIGINT, SIGTERM and triggers graceful shutdown
 - **Graceful shutdown**:
   Properly shuts down your MCP server and other services
-- **Timeout-based shutdown**:
-  Configurable shutdown timeouts to prevent hanging processes
 - **Advanced service management**:
   [`ServiceLifecycle`](https://swiftpackageindex.com/swift-server/swift-service-lifecycle/documentation/servicelifecycle)
   also supports service dependencies, conditional services,
