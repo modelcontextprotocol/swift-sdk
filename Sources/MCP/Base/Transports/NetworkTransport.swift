@@ -349,16 +349,20 @@ import Logging
         /// - Throws: Error if the connection fails
         private func attemptConnection() async throws {
             // Create stream for state changes with proper cleanup
-            let (stateStream, continuation) = AsyncStream.makeStream(of: NWConnection.State.self)
+            let stateStream = AsyncStream<NWConnection.State> { continuation in
+                continuation.onTermination = { [weak self] _ in
+                    self?.connection.stateUpdateHandler = nil
+                }
 
-            connection.stateUpdateHandler = { state in
-                continuation.yield(state)
-            }
-
-            // Ensure cleanup happens when we exit
-            defer {
-                continuation.finish()
-                connection.stateUpdateHandler = nil
+                connection.stateUpdateHandler = { state in
+                    continuation.yield(state)
+                    switch state {
+                    case .ready, .failed, .cancelled:
+                        continuation.finish()
+                    default:
+                        break
+                    }
+                }
             }
 
             connection.start(queue: .main)

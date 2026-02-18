@@ -3,7 +3,7 @@ import Testing
 
 @testable import MCP
 
-@Suite("Client Tests")
+@Suite("Client Tests", .timeLimit(.minutes(1)))
 struct ClientTests {
     @Test("Client connect and disconnect")
     func testClientConnectAndDisconnect() async throws {
