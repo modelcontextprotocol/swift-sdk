@@ -10,6 +10,42 @@ This Swift SDK implements both client and server components
 according to the [2025-11-25][mcp-spec-2025-11-25] (latest) version
 of the MCP specification.
 
+## Table of contents
+
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Client Usage](#client-usage)
+  - [Basic Client Setup](#basic-client-setup)
+  - [Transport Options for Clients](#transport-options-for-clients)
+  - [Tools](#tools)
+  - [Resources](#resources)
+  - [Prompts](#prompts)
+  - [Completions](#completions)
+  - [Sampling](#sampling)
+  - [Elicitation](#elicitation)
+  - [Logging](#logging)
+  - [Error Handling](#error-handling)
+  - [Cancellation](#cancellation)
+  - [Progress Tracking](#progress-tracking)
+  - [Advanced Client Features](#advanced-client-features)
+- [Server Usage](#server-usage)
+  - [Basic Server Setup](#basic-server-setup)
+  - [Tools](#tools-1)
+  - [Resources](#resources-1)
+  - [Prompts](#prompts-1)
+  - [Completions](#completions-1)
+  - [Sampling](#sampling-1)
+  - [Elicitations](#elicitations)
+  - [Logging](#logging-1)
+  - [Initialize Hook](#initialize-hook)
+  - [Graceful Shutdown](#graceful-shutdown)
+- [Transports](#transports)
+- [Platform Availability](#platform-availability)
+- [Debugging and Logging](#debugging-and-logging)
+- [Additional Resources](#additional-resources)
+- [Changelog](#changelog)
+- [License](#license)
+
 ## Requirements
 
 - Swift 6.0+ (Xcode 16+)
@@ -25,7 +61,7 @@ Add the following to your `Package.swift` file:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", from: "0.10.0")
+    .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", from: "0.11.0")
 ]
 ```
 
@@ -59,14 +95,6 @@ let result = try await client.connect(transport: transport)
 // Check server capabilities
 if result.capabilities.tools != nil {
     // Server supports tools (implicitly including tool calling if the 'tools' capability object is present)
-}
-
-if result.capabilities.logging != nil {
-    // Server supports sending log messages
-}
-
-if result.capabilities.completions != nil {
-    // Server supports argument autocompletion
 }
 ```
 
@@ -120,47 +148,6 @@ let (content, isError) = try await client.callTool(
     ]
 )
 
-// Call a tool with cancellation support using the RequestContext overload
-let context: RequestContext<CallTool.Result> = try client.callTool(
-    name: "image-generator",
-    arguments: [
-        "prompt": "A serene mountain landscape at sunset",
-        "style": "photorealistic",
-        "width": 1024,
-        "height": 768
-    ]
-)
-
-// Cancel if needed
-try await client.cancelRequest(context.requestID, reason: "User cancelled")
-
-// Get the result
-let result = try await context.value
-let content = result.content
-let isError = result.isError
-
-// Call a tool with progress tracking
-let progressToken = ProgressToken.unique()
-
-// Register a notification handler to receive progress updates
-await client.onNotification(ProgressNotification.self) { message in
-    let params = message.params
-    // Filter by your progress token
-    if params.progressToken == progressToken {
-        print("Progress: \(params.progress)/\(params.total ?? 0)")
-        if let message = params.message {
-            print("Status: \(message)")
-        }
-    }
-}
-
-// Make the request with the progress token
-let (progressContent, progressError) = try await client.callTool(
-    name: "long-running-tool",
-    arguments: ["input": "value"],
-    meta: RequestMeta(progressToken: progressToken)
-)
-
 // Handle tool content
 for item in content {
     switch item {
@@ -182,72 +169,6 @@ for item in content {
     }
 }
 ```
-
-### Request Cancellation
-
-MCP supports cancellation of in-progress requests according to the [MCP 2025-11-25 specification](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/cancellation). There are multiple ways to work with cancellation depending on your needs:
-
-#### Option 1: Convenience Methods with RequestContext Overload
-
-For common operations like tool calls, use the overloaded method that returns `RequestContext`:
-
-```swift
-// Call a tool and get a context for cancellation
-let context = try client.callTool(
-    name: "long-running-analysis",
-    arguments: ["data": largeDataset]
-)
-
-// You can cancel the request at any time
-try await client.cancelRequest(context.requestID, reason: "User cancelled")
-
-// Await the result (will throw CancellationError if cancelled)
-do {
-    let result = try await context.value
-    print("Result: \(result.content)")
-} catch is CancellationError {
-    print("Request was cancelled")
-}
-```
-
-#### Option 2: Direct send() for Maximum Flexibility
-
-For full control or custom requests, use `send()` directly:
-
-```swift
-// Create any request type
-let request = CallTool.request(.init(
-    name: "long-running-analysis",
-    arguments: ["data": largeDataset]
-))
-
-// Send and get a context for cancellation tracking
-let context: RequestContext<CallTool.Result> = try client.send(request)
-
-// Cancel when needed
-try await client.cancelRequest(context.requestID, reason: "Timeout")
-
-// Get the result
-let result = try await context.value
-```
-
-#### Option 3: Simple async/await (No Cancellation)
-
-For simple cases where cancellation isn't needed:
-
-```swift
-// Just await the result directly
-let (content, isError) = try await client.callTool(name: "myTool", arguments: [:])
-```
-
-**Cancellation Behavior:**
-
-- Cancellation is **advisory** - servers SHOULD stop processing but MAY ignore if the request is completed or cannot be cancelled
-- Cancelled requests don't send responses (per MCP specification)
-- The client automatically handles incoming `CancelledNotification` from servers
-- Race conditions (cancellation after completion) are handled gracefully
-
-For more details, see the [MCP Cancellation Specification](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/cancellation).
 
 ### Resources
 
@@ -406,44 +327,6 @@ await client.withSamplingHandler { parameters in
 }
 ```
 
-The sampling flow follows these steps:
-
-```mermaid
-sequenceDiagram
-    participant S as MCP Server
-    participant C as MCP Client
-    participant U as User/Human
-    participant L as LLM Service
-
-    Note over S,L: Server-initiated sampling request
-    S->>C: sampling/createMessage request
-    Note right of S: Server needs AI assistance<br/>for decision or content
-
-    Note over C,U: Human-in-the-loop review #1
-    C->>U: Show sampling request
-    U->>U: Review & optionally modify<br/>messages, system prompt
-    U->>C: Approve request
-
-    Note over C,L: Client handles LLM interaction
-    C->>L: Send messages to LLM
-    L->>C: Return completion
-
-    Note over C,U: Human-in-the-loop review #2
-    C->>U: Show LLM completion
-    U->>U: Review & optionally modify<br/>or reject completion
-    U->>C: Approve completion
-
-    Note over C,S: Return result to server
-    C->>S: sampling/createMessage response
-    Note left of C: Contains model used,<br/>stop reason, final content
-
-    Note over S: Server continues with<br/>AI-assisted result
-```
-
-This human-in-the-loop design ensures that users 
-maintain control over what the LLM sees and generates, 
-even when servers initiate the requests.
-
 ### Elicitation
 
 Elicitation allows servers to request structured information directly from users through the client. 
@@ -488,53 +371,8 @@ await client.setElicitationHandler { parameters in
 }
 ```
 
-#### Server-Side: Requesting User Input
-
-Servers can request information from users through elicitation:
-
-```swift
-// Request credentials from the user
-let schema = Elicitation.RequestSchema(
-    title: "API Credentials Required",
-    description: "Please provide your API credentials to continue",
-    properties: [
-        "apiKey": .object([
-            "type": .string("string"),
-            "description": .string("Your API key")
-        ]),
-        "apiSecret": .object([
-            "type": .string("string"),
-            "description": .string("Your API secret")
-        ])
-    ],
-    required: ["apiKey", "apiSecret"]
-)
-
-let result = try await client.request(
-    CreateElicitation.self,
-    params: CreateElicitation.Parameters(
-        message: "This operation requires API credentials",
-        requestedSchema: schema
-    )
-)
-
-switch result.action {
-case .accept:
-    if let credentials = result.content {
-        let apiKey = credentials["apiKey"]?.stringValue
-        let apiSecret = credentials["apiSecret"]?.stringValue
-        // Use the credentials...
-    }
-case .decline:
-    // User declined to provide credentials
-    throw MCPError.invalidRequest("User declined credential request")
-case .cancel:
-    // User canceled the operation
-    throw MCPError.invalidRequest("Operation canceled by user")
-}
-```
-
 Common use cases for elicitation:
+
 - **Authentication**: Request credentials when needed rather than upfront
 - **Confirmation**: Ask for user approval before sensitive operations
 - **Configuration**: Collect preferences or settings during operation
@@ -567,6 +405,7 @@ await client.onNotification(LogMessageNotification.self) { message in
 ```
 
 Log levels follow the standard syslog severity levels (RFC 5424):
+
 - **debug**: Detailed debugging information
 - **info**: General informational messages
 - **notice**: Normal but significant events
@@ -589,6 +428,84 @@ do {
 } catch {
     print("Unexpected error: \(error)")
 }
+```
+
+### Cancellation
+
+Either side can cancel an in-progress request and handle incoming cancellations gracefully:
+
+#### Option 1: Convenience Methods with RequestContext Overload
+
+For common operations like tool calls, use the overloaded method that returns `RequestContext`:
+
+```swift
+// Call a tool and get a context for cancellation
+let context = try client.callTool(
+    name: "long-running-analysis",
+    arguments: ["data": largeDataset]
+)
+
+// You can cancel the request at any time
+try await client.cancelRequest(context.requestID, reason: "User cancelled")
+
+// Await the result (will throw CancellationError if cancelled)
+do {
+    let result = try await context.value
+    print("Result: \(result.content)")
+} catch is CancellationError {
+    print("Request was cancelled")
+}
+```
+
+#### Option 2: Direct send() for Maximum Flexibility
+
+For full control or custom requests, use `send()` directly:
+
+```swift
+// Create any request type
+let request = CallTool.request(.init(
+    name: "long-running-analysis",
+    arguments: ["data": largeDataset]
+))
+
+// Send and get a context for cancellation tracking
+let context: RequestContext<CallTool.Result> = try client.send(request)
+
+// Cancel when needed
+try await client.cancelRequest(context.requestID, reason: "Timeout")
+
+// Get the result
+let result = try await context.value
+let content = result.content
+let isError = result.isError
+```
+
+### Progress tracking
+
+Clients can attach a progress token to a request and receive incremental progress updates for long-running operations:
+
+```swift
+// Call a tool with progress tracking
+let progressToken = ProgressToken.unique()
+
+// Register a notification handler to receive progress updates
+await client.onNotification(ProgressNotification.self) { message in
+    let params = message.params
+    // Filter by your progress token
+    if params.progressToken == progressToken {
+        print("Progress: \(params.progress)/\(params.total ?? 0)")
+        if let message = params.message {
+            print("Status: \(message)")
+        }
+    }
+}
+
+// Make the request with the progress token
+let (content, isError) = try await client.callTool(
+    name: "long-running-tool",
+    arguments: ["input": "value"],
+    meta: RequestMeta(progressToken: progressToken)
+)
 ```
 
 ### Advanced Client Features
@@ -980,6 +897,91 @@ await server.withMethodHandler(Complete.self) { params in
 }
 ```
 
+### Sampling
+
+Servers can request LLM completions from clients through sampling. This enables agentic behaviors where servers can ask for AI assistance while maintaining human oversight.
+
+> [!NOTE]
+> The current implementation provides the correct API design for sampling, but requires bidirectional communication support in the transport layer. This feature will be fully functional when bidirectional transport support is added.
+
+```swift
+// Enable sampling capability in server
+let server = Server(
+    name: "MyModelServer",
+    version: "1.0.0",
+    capabilities: .init(
+        sampling: .init(),  // Enable sampling capability
+        tools: .init(listChanged: true)
+    )
+)
+
+// Request sampling from the client (conceptual - requires bidirectional transport)
+do {
+    let result = try await server.requestSampling(
+        messages: [
+            .user("Analyze this data and suggest next steps")
+        ],
+        systemPrompt: "You are a helpful data analyst",
+        temperature: 0.7,
+        maxTokens: 150
+    )
+    
+    // Use the LLM completion in your server logic
+    print("LLM suggested: \(result.content)")
+    
+} catch {
+    print("Sampling request failed: \(error)")
+}
+```
+
+Sampling enables powerful agentic workflows:
+
+- **Decision-making**: Ask the LLM to choose between options
+- **Content generation**: Request drafts for user approval
+- **Data analysis**: Get AI insights on complex data
+- **Multi-step reasoning**: Chain AI completions with tool calls
+
+### Elicitations
+
+Servers can request information from users through elicitation:
+
+```swift
+// Ask the user to provide some additional information
+let schema = Elicitation.RequestSchema(
+    title: "Additional Information Required",
+    description: "Please provide the following details to continue",
+    properties: [
+        "name": .object([
+            "type": .string("string"),
+            "description": .string("Your full name")
+        ]),
+        "confirmed": .object([
+            "type": .string("boolean"),
+            "description": .string("Do you confirm the provided information?")
+        ])
+    ],
+    required: ["name", "confirmed"]
+)
+
+let result = try await server.requestElicitation(
+    message: "Some details are needed before proceeding",
+    requestedSchema: schema
+)
+
+switch result.action {
+case .accept:
+    if let content = result.content {
+        let name = content["name"]?.stringValue
+        let confirmed = content["confirmed"]?.boolValue
+        // Use the collected data...
+    }
+case .decline:
+    throw MCPError.invalidRequest("User declined to provide information")
+case .cancel:
+    throw MCPError.invalidRequest("Operation canceled by user")
+}
+```
+
 ### Logging
 
 Servers can send structured log messages to clients:
@@ -1046,49 +1048,6 @@ await server.withMethodHandler(SetLoggingLevel.self) { params in
     return Empty()
 }
 ```
-
-### Sampling
-
-Servers can request LLM completions from clients through sampling. This enables agentic behaviors where servers can ask for AI assistance while maintaining human oversight.
-
-> [!NOTE]
-> The current implementation provides the correct API design for sampling, but requires bidirectional communication support in the transport layer. This feature will be fully functional when bidirectional transport support is added.
-
-```swift
-// Enable sampling capability in server
-let server = Server(
-    name: "MyModelServer",
-    version: "1.0.0",
-    capabilities: .init(
-        sampling: .init(),  // Enable sampling capability
-        tools: .init(listChanged: true)
-    )
-)
-
-// Request sampling from the client (conceptual - requires bidirectional transport)
-do {
-    let result = try await server.requestSampling(
-        messages: [
-            .user("Analyze this data and suggest next steps")
-        ],
-        systemPrompt: "You are a helpful data analyst",
-        temperature: 0.7,
-        maxTokens: 150
-    )
-    
-    // Use the LLM completion in your server logic
-    print("LLM suggested: \(result.content)")
-    
-} catch {
-    print("Sampling request failed: \(error)")
-}
-```
-
-Sampling enables powerful agentic workflows:
-- **Decision-making**: Ask the LLM to choose between options
-- **Content generation**: Request drafts for user approval
-- **Data analysis**: Get AI insights on complex data
-- **Multi-step reasoning**: Chain AI completions with tool calls
 
 #### Initialize Hook
 
@@ -1211,27 +1170,29 @@ try await serviceGroup.run()
 This approach has several benefits:
 
 - **Signal handling**:
-  Automatically traps SIGINT, SIGTERM and triggers graceful shutdown
+Automatically traps SIGINT, SIGTERM and triggers graceful shutdown
 - **Graceful shutdown**:
-  Properly shuts down your MCP server and other services
+Properly shuts down your MCP server and other services
 - **Timeout-based shutdown**:
-  Configurable shutdown timeouts to prevent hanging processes
+Configurable shutdown timeouts to prevent hanging processes
 - **Advanced service management**:
-  [`ServiceLifecycle`](https://swiftpackageindex.com/swift-server/swift-service-lifecycle/documentation/servicelifecycle)
-  also supports service dependencies, conditional services,
-  and other useful features.
+`[ServiceLifecycle](https://swiftpackageindex.com/swift-server/swift-service-lifecycle/documentation/servicelifecycle)`
+also supports service dependencies, conditional services,
+and other useful features.
 
 ## Transports
 
 MCP's transport layer handles communication between clients and servers.
 The Swift SDK provides multiple built-in transports:
 
-| Transport | Description | Platforms | Best for |
-|-----------|-------------|-----------|----------|
-| [`StdioTransport`](/Sources/MCP/Base/Transports/StdioTransport.swift) | Implements [stdio transport](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#stdio) using standard input/output streams | Apple platforms, Linux with glibc | Local subprocesses, CLI tools |
-| [`HTTPClientTransport`](/Sources/MCP/Base/Transports/HTTPClientTransport.swift) | Implements [Streamable HTTP transport](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#streamable-http) using Foundation's URL Loading System | All platforms with Foundation | Remote servers, web applications |
-| [`InMemoryTransport`](/Sources/MCP/Base/Transports/InMemoryTransport.swift) | Custom in-memory transport for direct communication within the same process | All platforms | Testing, debugging, same-process client-server communication |
-| [`NetworkTransport`](/Sources/MCP/Base/Transports/NetworkTransport.swift) | Custom transport using Apple's Network framework for TCP/UDP connections | Apple platforms only | Low-level networking, custom protocols |
+
+| Transport                                                                       | Description                                                                                                                                                             | Platforms                         | Best for                                                     |
+| ------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------- | ------------------------------------------------------------ |
+| `[StdioTransport](/Sources/MCP/Base/Transports/StdioTransport.swift)`           | Implements [stdio transport](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#stdio) using standard input/output streams                       | Apple platforms, Linux with glibc | Local subprocesses, CLI tools                                |
+| `[HTTPClientTransport](/Sources/MCP/Base/Transports/HTTPClientTransport.swift)` | Implements [Streamable HTTP transport](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#streamable-http) using Foundation's URL Loading System | All platforms with Foundation     | Remote servers, web applications                             |
+| `[InMemoryTransport](/Sources/MCP/Base/Transports/InMemoryTransport.swift)`     | Custom in-memory transport for direct communication within the same process                                                                                             | All platforms                     | Testing, debugging, same-process client-server communication |
+| `[NetworkTransport](/Sources/MCP/Base/Transports/NetworkTransport.swift)`       | Custom transport using Apple's Network framework for TCP/UDP connections                                                                                                | Apple platforms only              | Low-level networking, custom protocols                       |
+
 
 ### Custom Transport Implementation
 
@@ -1280,20 +1241,19 @@ public actor MyCustomTransport: Transport {
 
 The Swift SDK has the following platform requirements:
 
-| Platform | Minimum Version |
-|----------|----------------|
-| macOS | 13.0+ |
-| iOS / Mac Catalyst | 16.0+ |
-| watchOS | 9.0+ |
-| tvOS | 16.0+ |
-| visionOS | 1.0+ |
-| Linux | Distributions with `glibc` or `musl`, including Ubuntu, Debian, Fedora, and Alpine Linux |
+
+| Platform           | Minimum Version                                                                          |
+| ------------------ | ---------------------------------------------------------------------------------------- |
+| macOS              | 13.0+                                                                                    |
+| iOS / Mac Catalyst | 16.0+                                                                                    |
+| watchOS            | 9.0+                                                                                     |
+| tvOS               | 16.0+                                                                                    |
+| visionOS           | 1.0+                                                                                     |
+| Linux              | Distributions with `glibc` or `musl`, including Ubuntu, Debian, Fedora, and Alpine Linux |
+
 
 While the core library works on any platform supporting Swift 6
-(including Linux and Windows),
-running a client or server requires a compatible transport.
-
-We're working to add [Windows support](https://github.com/modelcontextprotocol/swift-sdk/pull/64).
+(including Linux), running a client or server requires a compatible transport.
 
 ## Debugging and Logging
 
@@ -1322,7 +1282,7 @@ let transport = StdioTransport(logger: logger)
 
 ## Additional Resources
 
-- [MCP Specification](https://modelcontextprotocol.io/specification/2025-06-18)
+- [MCP Specification](https://modelcontextprotocol.io/specification/2025-11-25)
 - [Protocol Documentation](https://modelcontextprotocol.io)
 - [GitHub Repository](https://github.com/modelcontextprotocol/swift-sdk)
 
