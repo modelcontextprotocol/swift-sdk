@@ -34,7 +34,11 @@ import Testing
         func start(queue: DispatchQueue) {
             // Simulate successful connection by default
             Task { @MainActor in
-                self.updateState(.ready)
+                if mockError != nil {
+                    self.updateState(mockState)
+                } else {
+                    self.updateState(.ready)
+                }
             }
         }
 
