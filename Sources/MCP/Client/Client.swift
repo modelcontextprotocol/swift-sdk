@@ -34,11 +34,14 @@ public actor Client {
     public struct Info: Hashable, Codable, Sendable {
         /// The client name
         public var name: String
+        /// A human-readable title for display purposes
+        public var title: String?
         /// The client version
         public var version: String
 
-        public init(name: String, version: String) {
+        public init(name: String, version: String, title: String? = nil) {
             self.name = name
+            self.title = title
             self.version = version
         }
     }
@@ -56,12 +59,55 @@ public actor Client {
         }
 
         /// The sampling capabilities
-        public struct Sampling: Hashable, Codable, Sendable {
-            public init() {}
+        public struct Sampling: Hashable, Sendable {
+            /// Tools sub-capability for sampling
+            public struct Tools: Hashable, Codable, Sendable {
+                public init() {}
+            }
+
+            /// Context sub-capability for sampling
+            public struct Context: Hashable, Codable, Sendable {
+                public init() {}
+            }
+
+            /// Whether tools are supported in sampling
+            public var tools: Tools?
+            /// Whether context is supported in sampling
+            public var context: Context?
+
+            public init(tools: Tools? = nil, context: Context? = nil) {
+                self.tools = tools
+                self.context = context
+            }
+        }
+
+        /// The elicitation capabilities
+        public struct Elicitation: Hashable, Sendable {
+            /// Form-based elicitation sub-capability
+            public struct Form: Hashable, Codable, Sendable {
+                public init() {}
+            }
+
+            /// URL-based elicitation sub-capability
+            public struct URL: Hashable, Codable, Sendable {
+                public init() {}
+            }
+
+            /// Whether form-based elicitation is supported
+            public var form: Form?
+            /// Whether URL-based elicitation is supported
+            public var url: URL?
+
+            public init(form: Form? = Form(), url: URL? = nil) {
+                self.form = form
+                self.url = url
+            }
         }
 
         /// Whether the client supports sampling
         public var sampling: Sampling?
+        /// Whether the client supports elicitation
+        public var elicitation: Elicitation?
         /// Experimental features supported by the client
         public var experimental: [String: String]?
         /// Whether the client supports roots
@@ -69,10 +115,12 @@ public actor Client {
 
         public init(
             sampling: Sampling? = nil,
+            elicitation: Elicitation? = nil,
             experimental: [String: String]? = nil,
             roots: Capabilities.Roots? = nil
         ) {
             self.sampling = sampling
+            self.elicitation = elicitation
             self.experimental = experimental
             self.roots = roots
         }
@@ -91,6 +139,8 @@ public actor Client {
     private let clientInfo: Client.Info
     /// The client name
     public nonisolated var name: String { clientInfo.name }
+    /// A human-readable client title
+    public nonisolated var title: String? { clientInfo.title }
     /// The client version
     public nonisolated var version: String { clientInfo.version }
 
@@ -108,6 +158,8 @@ public actor Client {
 
     /// A dictionary of type-erased notification handlers, keyed by method name
     private var notificationHandlers: [String: [NotificationHandlerBox]] = [:]
+    /// Method handlers for server-to-client requests
+    private var methodHandlers: [String: RequestHandlerBox] = [:]
     /// The task for the message handling loop
     private var task: Task<Void, Never>?
 
@@ -120,8 +172,8 @@ public actor Client {
     }
 
     /// A type-erased pending request
-    private struct AnyPendingRequest {
-        private let _resume: (Result<Any, Swift.Error>) -> Void
+    private struct AnyPendingRequest: Sendable {
+        private let _resume: @Sendable (Result<Any, Swift.Error>) -> Void
 
         init<T: Sendable & Decodable>(_ request: PendingRequest<T>) {
             _resume = { result in
@@ -160,10 +212,12 @@ public actor Client {
     public init(
         name: String,
         version: String,
+        title: String? = nil,
+        capabilities: Capabilities = Capabilities(),
         configuration: Configuration = .default
     ) {
-        self.clientInfo = Client.Info(name: name, version: version)
-        self.capabilities = Capabilities()
+        self.clientInfo = Client.Info(name: name, version: version, title: title)
+        self.capabilities = capabilities
         self.configuration = configuration
     }
 
@@ -194,6 +248,8 @@ public actor Client {
                             await handleBatchResponse(batchResponse)
                         } else if let response = try? decoder.decode(AnyResponse.self, from: data) {
                             await handleResponse(response)
+                        } else if let request = try? decoder.decode(AnyRequest.self, from: data) {
+                            await handleIncomingRequest(request)
                         } else if let message = try? decoder.decode(AnyMessage.self, from: data) {
                             await handleMessage(message)
                         } else {
@@ -217,6 +273,27 @@ public actor Client {
                 }
             } while true
             await self.logger?.debug("Client message handling loop task is terminating.")
+        }
+
+        // Register cancellation notification handler
+        await self.onNotification(CancelledNotification.self) { [weak self] message in
+            guard let self = self else { return }
+
+            let requestId = message.params.requestId
+            let reason = message.params.reason
+
+            await self.logger?.debug(
+                "Received cancellation notification",
+                metadata: [
+                    "requestId": "\(requestId)",
+                    "reason": reason.map { "\($0)" } ?? "none",
+                ]
+            )
+
+            // Remove the pending request and resume with cancellation error
+            if let pendingRequest = await self.removePendingRequest(id: requestId) {
+                pendingRequest.resume(throwing: CancellationError())
+            }
         }
 
         // Automatically initialize after connecting
@@ -277,6 +354,19 @@ public actor Client {
         return self
     }
 
+    /// Register a handler for server-to-client requests
+    @discardableResult
+    public func withMethodHandler<M: Method>(
+        _ type: M.Type,
+        handler: @escaping @Sendable (M.Parameters) async throws -> M.Result
+    ) -> Self {
+        methodHandlers[M.name] = TypedRequestHandler { (request: Request<M>) -> Response<M> in
+            let result = try await handler(request.params)
+            return Response(id: request.id, result: result)
+        }
+        return self
+    }
+
     /// Send a notification to the server
     public func notify<N: Notification>(_ notification: Message<N>) async throws {
         guard let connection = connection else {
@@ -287,43 +377,108 @@ public actor Client {
         try await connection.send(notificationData)
     }
 
+    /// Send a response back to the server for a server-to-client request
+    private func send<M: Method>(_ response: Response<M>) async throws {
+        guard let connection = connection else {
+            throw MCPError.internalError("Client connection not initialized")
+        }
+        let responseData = try encoder.encode(response)
+        try await connection.send(responseData)
+    }
+
     // MARK: - Requests
 
-    /// Send a request and receive its response
-    public func send<M: Method>(_ request: Request<M>) async throws -> M.Result {
+    /// Send a request and return a RequestContext that wraps both the request ID and the Task.
+    ///
+    /// This allows you to track and cancel the request by sending a CancelledNotification
+    /// to the server using the requestID.
+    ///
+    /// Example:
+    /// ```swift
+    /// let context = try await client.send(request)
+    /// // Later, to cancel:
+    /// try await client.cancelRequest(context.requestID, reason: "User cancelled")
+    /// // Await the result:
+    /// let result = try await context.value
+    /// ```
+    ///
+    /// - Parameter request: The request to send
+    /// - Returns: A RequestContext containing the request ID and Task
+    /// - Throws: MCPError if the client is not connected
+    /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/cancellation
+    public func send<M: Method>(_ request: Request<M>) throws -> RequestContext<M.Result> {
         guard let connection = connection else {
             throw MCPError.internalError("Client connection not initialized")
         }
 
         let requestData = try encoder.encode(request)
 
-        // Store the pending request first
-        return try await withCheckedThrowingContinuation { continuation in
-            Task {
-                // Add the pending request before attempting to send
-                self.addPendingRequest(
-                    id: request.id,
-                    continuation: continuation,
-                    type: M.Result.self
-                )
+        let requestTask = Task<M.Result, Error> {
+            try await withCheckedThrowingContinuation { continuation in
+                Task {
+                    // Add the pending request before attempting to send
+                    self.addPendingRequest(
+                        id: request.id,
+                        continuation: continuation,
+                        type: M.Result.self
+                    )
 
-                // Send the request data
-                do {
-                    // Use the existing connection send
-                    try await connection.send(requestData)
-                } catch {
-                    // If send fails, try to remove the pending request.
-                    // Resume with the send error only if we successfully removed the request,
-                    // indicating the response handler hasn't processed it yet.
-                    if self.removePendingRequest(id: request.id) != nil {
-                        continuation.resume(throwing: error)
+                    // Send the request data
+                    do {
+                        try await connection.send(requestData)
+                    } catch {
+                        // If send fails, try to remove the pending request.
+                        if self.removePendingRequest(id: request.id) != nil {
+                            continuation.resume(throwing: error)
+                        }
                     }
-                    // Otherwise, the request was already removed by the response handler
-                    // or by disconnect, so the continuation was already resumed.
-                    // Do nothing here.
                 }
             }
         }
+
+        return RequestContext(requestID: request.id, requestTask: requestTask)
+    }
+
+    /// Cancel a request by sending a CancelledNotification to the server.
+    ///
+    /// According to the MCP specification, cancellation is advisory:
+    /// - The server SHOULD stop processing and free resources
+    /// - The server MAY ignore the cancellation if the request is unknown, already completed,
+    ///   or cannot be cancelled
+    /// - The client SHOULD ignore any response that arrives after cancellation
+    ///
+    /// This method removes the pending request and resumes it with CancellationError,
+    /// ensuring that any response arriving after cancellation is ignored.
+    ///
+    /// - Parameters:
+    ///   - requestID: The ID of the request to cancel
+    ///   - reason: An optional human-readable reason for the cancellation
+    /// - Throws: MCPError if the notification cannot be sent
+    /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/cancellation
+    public func cancelRequest(_ requestID: ID, reason: String? = nil) async throws {
+        // Remove the pending request and resume with cancellation error
+        // This ensures any response that arrives after cancellation is ignored
+        if let pendingRequest = removePendingRequest(id: requestID) {
+            pendingRequest.resume(throwing: CancellationError())
+        }
+
+        // Send cancellation notification to server
+        let notification = CancelledNotification.message(
+            .init(requestId: requestID, reason: reason)
+        )
+        try await notify(notification)
+    }
+
+    /// Send a request and receive its response immediately.
+    ///
+    /// Internal convenience method for cases where cancellation tracking is not needed.
+    ///
+    /// - Parameter request: The request to send
+    /// - Returns: The result of the request
+    /// - Throws: MCPError if the client is not connected
+    func sendAndAwait<M: Method>(_ request: Request<M>) async throws -> M.Result {
+        let context = try send(request)
+        return try await context.value
     }
 
     private func addPendingRequest<T: Sendable & Decodable>(
@@ -331,7 +486,9 @@ public actor Client {
         continuation: CheckedContinuation<T, Swift.Error>,
         type: T.Type  // Keep type for AnyPendingRequest internal logic
     ) {
-        pendingRequests[id] = AnyPendingRequest(PendingRequest(continuation: continuation))
+        pendingRequests[id] = AnyPendingRequest(
+            PendingRequest(continuation: continuation)
+        )
     }
 
     private func removePendingRequest(id: ID) -> AnyPendingRequest? {
@@ -452,7 +609,7 @@ public actor Client {
     ///                   Use this object to add requests to the batch.
     /// - Throws: `MCPError.internalError` if the client is not connected.
     ///           Can also rethrow errors from the `body` closure or from sending the batch request.
-    public func withBatch(body: @escaping (Batch) async throws -> Void) async throws {
+    public func withBatch(body: @escaping @Sendable (Batch) async throws -> Void) async throws {
         guard let connection = connection else {
             throw MCPError.internalError("Client connection not initialized")
         }
@@ -508,7 +665,7 @@ public actor Client {
                 clientInfo: clientInfo
             ))
 
-        let result = try await send(request)
+        let result = try await sendAndAwait(request)
 
         self.serverCapabilities = result.capabilities
         self.serverVersion = result.protocolVersion
@@ -521,7 +678,7 @@ public actor Client {
 
     public func ping() async throws {
         let request = Ping.request()
-        _ = try await send(request)
+        _ = try await sendAndAwait(request)
     }
 
     // MARK: - Prompts
@@ -531,7 +688,7 @@ public actor Client {
     {
         try validateServerCapability(\.prompts, "Prompts")
         let request = GetPrompt.request(.init(name: name, arguments: arguments))
-        let result = try await send(request)
+        let result = try await sendAndAwait(request)
         return (description: result.description, messages: result.messages)
     }
 
@@ -545,7 +702,7 @@ public actor Client {
         } else {
             request = ListPrompts.request(.init())
         }
-        let result = try await send(request)
+        let result = try await sendAndAwait(request)
         return (prompts: result.prompts, nextCursor: result.nextCursor)
     }
 
@@ -554,7 +711,7 @@ public actor Client {
     public func readResource(uri: String) async throws -> [Resource.Content] {
         try validateServerCapability(\.resources, "Resources")
         let request = ReadResource.request(.init(uri: uri))
-        let result = try await send(request)
+        let result = try await sendAndAwait(request)
         return result.contents
     }
 
@@ -568,14 +725,14 @@ public actor Client {
         } else {
             request = ListResources.request(.init())
         }
-        let result = try await send(request)
+        let result = try await sendAndAwait(request)
         return (resources: result.resources, nextCursor: result.nextCursor)
     }
 
     public func subscribeToResource(uri: String) async throws {
         try validateServerCapability(\.resources?.subscribe, "Resource subscription")
         let request = ResourceSubscribe.request(.init(uri: uri))
-        _ = try await send(request)
+        _ = try await sendAndAwait(request)
     }
 
     public func listResourceTemplates(cursor: String? = nil) async throws -> (
@@ -588,7 +745,7 @@ public actor Client {
         } else {
             request = ListResourceTemplates.request(.init())
         }
-        let result = try await send(request)
+        let result = try await sendAndAwait(request)
         return (templates: result.templates, nextCursor: result.nextCursor)
     }
 
@@ -604,17 +761,51 @@ public actor Client {
         } else {
             request = ListTools.request(.init())
         }
-        let result = try await send(request)
+        let result = try await sendAndAwait(request)
         return (tools: result.tools, nextCursor: result.nextCursor)
     }
 
-    public func callTool(name: String, arguments: [String: Value]? = nil) async throws -> (
-        content: [Tool.Content], isError: Bool?
-    ) {
+    /// Call a tool on the server.
+    ///
+    /// - Parameters:
+    ///   - name: The name of the tool to call.
+    ///   - arguments: Arguments to use for the tool call.
+    ///   - meta: Optional request metadata including progress token. If `progressToken` is specified,
+    ///           the caller is requesting out-of-band progress notifications for this request.
+    ///           Use `onNotification(ProgressNotification.self)` to receive progress updates.
+    /// - Returns: A tuple containing the tool's content response and an optional error flag.
+    /// - Note: For advanced use cases requiring cancellation support, use `send()` directly to get a `RequestContext`.
+    /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/server/tools/#calling-tools
+    public func callTool(
+        name: String,
+        arguments: [String: Value]? = nil,
+        meta: Metadata? = nil
+    ) async throws -> (content: [Tool.Content], isError: Bool?) {
         try validateServerCapability(\.tools, "Tools")
-        let request = CallTool.request(.init(name: name, arguments: arguments))
-        let result = try await send(request)
+        let request = CallTool.request(.init(name: name, arguments: arguments, meta: meta))
+        let result = try await sendAndAwait(request)
         return (content: result.content, isError: result.isError)
+    }
+
+    /// Call a tool on the server.
+    ///
+    /// - Parameters:
+    ///   - name: The name of the tool to call.
+    ///   - arguments: Arguments to use for the tool call.
+    ///   - meta: Optional request metadata including progress token. If `progressToken` is specified,
+    ///           the caller is requesting out-of-band progress notifications for this request.
+    ///           Use `onNotification(ProgressNotification.self)` to receive progress updates.
+    /// - Returns: A tuple containing the tool's content response and an optional error flag.
+    /// - Note: For advanced use cases requiring cancellation support, use `send()` directly to get a `RequestContext`.
+    /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/server/tools/#calling-tools
+    public func callTool(
+        name: String,
+        arguments: [String: Value]? = nil,
+        meta: Metadata? = nil
+    ) throws -> RequestContext<CallTool.Result> {
+        try validateServerCapability(\.tools, "Tools")
+        let request = CallTool.request(.init(name: name, arguments: arguments, meta: meta))
+        return try send(request)
     }
 
     // MARK: - Sampling
@@ -636,24 +827,145 @@ public actor Client {
     /// - SeeAlso: https://modelcontextprotocol.io/docs/concepts/sampling#how-sampling-works
     @discardableResult
     public func withSamplingHandler(
-        _ handler: @escaping @Sendable (CreateSamplingMessage.Parameters) async throws ->
+        _ handler:
+            @escaping @Sendable (CreateSamplingMessage.Parameters) async throws ->
             CreateSamplingMessage.Result
     ) -> Self {
-        // Note: This would require extending the client architecture to handle incoming requests from servers.
-        // The current MCP Swift SDK architecture assumes clients only send requests to servers,
-        // but sampling requires bidirectional communication where servers can send requests to clients.
-        //
-        // A full implementation would need:
-        // 1. Request handlers in the client (similar to how servers handle requests)
-        // 2. Bidirectional transport support
-        // 3. Request/response correlation for server-to-client requests
-        //
-        // For now, this serves as the correct API design for when bidirectional support is added.
+        return withMethodHandler(CreateSamplingMessage.self, handler: handler)
+    }
 
-        // This would register the handler similar to how servers register method handlers:
-        // methodHandlers[CreateSamplingMessage.name] = TypedRequestHandler(handler)
+    // MARK: - Elicitation
 
-        return self
+    /// Register a handler for elicitation requests from servers
+    ///
+    /// The elicitation flow lets servers collect structured input from users during
+    /// ongoing interactions. Clients remain in control by mediating the prompt,
+    /// collecting the response, and returning the chosen action to the server.
+    ///
+    /// - Parameter handler: A closure that processes elicitation requests and returns user actions
+    /// - Returns: Self for method chaining
+    /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-06-18/client/elicitation
+    @discardableResult
+    public func withElicitationHandler(
+        _ handler:
+            @escaping @Sendable (CreateElicitation.Parameters) async throws ->
+            CreateElicitation.Result
+    ) -> Self {
+        return withMethodHandler(CreateElicitation.self, handler: handler)
+    }
+
+    // MARK: - Roots
+
+    /// Register a handler for roots/list requests from servers
+    ///
+    /// Roots define filesystem boundaries that servers can operate within.
+    /// Unlike other MCP features, roots use bidirectional communication where
+    /// servers send requests TO clients to discover available roots.
+    ///
+    /// - Parameter handler: A closure that returns the list of available roots
+    /// - Returns: Self for method chaining
+    /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/client/roots
+    @discardableResult
+    public func withRootsHandler(
+        _ handler: @escaping @Sendable () async throws -> [Root]
+    ) -> Self {
+        return withMethodHandler(ListRoots.self) { _ in
+            let roots = try await handler()
+            return ListRoots.Result(roots: roots)
+        }
+    }
+
+    /// Notify the server that the list of roots has changed
+    ///
+    /// Clients should send this notification when roots are added, removed,
+    /// or modified to inform connected servers of the change.
+    ///
+    /// - Throws: MCPError if the client is not connected
+    /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/client/roots
+    public func notifyRootsChanged() async throws {
+        let notification = RootsListChangedNotification.message()
+        try await notify(notification)
+    }
+
+    // MARK: - Logging
+
+    /// Set the minimum logging level for server log messages.
+    ///
+    /// Servers that declare the `logging` capability will send log messages via
+    /// `notifications/message` notifications. Use this method to control which
+    /// severity levels the server should send.
+    ///
+    /// - Parameter level: The minimum log level to receive
+    /// - Throws: MCPError if the client is not connected or if the server doesn't support logging
+    /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/server/utilities/logging/
+    public func setLoggingLevel(_ level: LogLevel) async throws {
+        try validateServerCapability(\.logging, "Logging")
+        let request = SetLoggingLevel.request(.init(level: level))
+        _ = try await sendAndAwait(request)
+    }
+
+    // MARK: - Completions
+
+    /// Request completion suggestions for a prompt argument.
+    ///
+    /// Servers that declare the `completions` capability can provide autocompletion
+    /// suggestions for prompt arguments as users type.
+    ///
+    /// - Parameters:
+    ///   - promptName: The name of the prompt
+    ///   - argumentName: The name of the argument being completed
+    ///   - argumentValue: The current (partial) value of the argument
+    ///   - context: Optional context with already-resolved arguments
+    /// - Returns: A completion result containing suggested values
+    /// - Throws: MCPError if the client is not connected or if the server doesn't support completions
+    /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/server/utilities/completion/
+    public func complete(
+        promptName: String,
+        argumentName: String,
+        argumentValue: String,
+        context: [String: Value]? = nil
+    ) async throws -> Complete.Result.Completion {
+        try validateServerCapability(\.completions, "Completions")
+        let request = Complete.request(
+            .init(
+                ref: .prompt(.init(name: promptName)),
+                argument: .init(name: argumentName, value: argumentValue),
+                context: context.map { .init(arguments: $0) }
+            )
+        )
+        let result = try await sendAndAwait(request)
+        return result.completion
+    }
+
+    /// Request completion suggestions for a resource template argument.
+    ///
+    /// Servers that declare the `completions` capability can provide autocompletion
+    /// suggestions for resource template arguments as users type.
+    ///
+    /// - Parameters:
+    ///   - resourceURI: The URI of the resource template
+    ///   - argumentName: The name of the argument being completed
+    ///   - argumentValue: The current (partial) value of the argument
+    ///   - context: Optional context with already-resolved arguments
+    /// - Returns: A completion result containing suggested values
+    /// - Throws: MCPError if the client is not connected or if the server doesn't support completions
+    /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/server/utilities/completion/
+    public func complete(
+        resourceURI: String,
+        argumentName: String,
+        argumentValue: String,
+        context: [String: Value]? = nil
+    ) async throws -> Complete.Result.Completion {
+        try validateServerCapability(\.completions, "Completions")
+        let request = Complete.request(
+            .init(
+                ref: .resource(.init(uri: resourceURI)),
+                argument: .init(name: argumentName, value: argumentValue),
+                context: context.map { .init(arguments: $0) }
+            )
+        )
+        let result = try await sendAndAwait(request)
+        return result.completion
     }
 
     // MARK: -
@@ -706,6 +1018,43 @@ public actor Client {
         }
     }
 
+    private func handleIncomingRequest(_ request: Request<AnyMethod>) async {
+        await logger?.trace(
+            "Processing incoming request from server",
+            metadata: ["method": "\(request.method)", "id": "\(request.id)"])
+
+        guard let handler = methodHandlers[request.method] else {
+            await logger?.warning(
+                "No handler registered for method",
+                metadata: ["method": "\(request.method)"])
+            let error = MCPError.methodNotFound("Unknown method: \(request.method)")
+            let response = AnyMethod.response(id: request.id, error: error)
+            do {
+                try await send(response)
+            } catch {
+                await logger?.error(
+                    "Failed to send error response",
+                    metadata: ["error": "\(error)"])
+            }
+            return
+        }
+
+        do {
+            let response = try await handler(request)
+            try await send(response)
+        } catch {
+            let mcpError = error as? MCPError ?? MCPError.internalError(error.localizedDescription)
+            let response = AnyMethod.response(id: request.id, error: mcpError)
+            do {
+                try await send(response)
+            } catch {
+                await logger?.error(
+                    "Failed to send error response",
+                    metadata: ["error": "\(error)"])
+            }
+        }
+    }
+
     // MARK: -
 
     /// Validate the server capabilities.
@@ -749,5 +1098,59 @@ public actor Client {
                 )
             }
         }
+    }
+}
+
+// MARK: - Codable
+
+extension Client.Capabilities.Sampling: Codable {
+    private enum CodingKeys: String, CodingKey {
+        case tools, context
+    }
+
+    public init(from decoder: Decoder) throws {
+        // Handle both empty object {} and object with sub-capabilities
+        if let container = try? decoder.container(keyedBy: CodingKeys.self) {
+            self.tools = try container.decodeIfPresent(Tools.self, forKey: .tools)
+            self.context = try container.decodeIfPresent(Context.self, forKey: .context)
+        } else {
+            // Empty object - no capabilities
+            self.tools = nil
+            self.context = nil
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(tools, forKey: .tools)
+        try container.encodeIfPresent(context, forKey: .context)
+    }
+}
+
+extension Client.Capabilities.Elicitation: Codable {
+    private enum CodingKeys: String, CodingKey {
+        case form, url
+    }
+
+    public init(from decoder: Decoder) throws {
+        // Handle both empty object {} and object with sub-capabilities
+        if let container = try? decoder.container(keyedBy: CodingKeys.self) {
+            self.form = try container.decodeIfPresent(Form.self, forKey: .form)
+            self.url = try container.decodeIfPresent(URL.self, forKey: .url)
+            // If both are nil, default to form for backward compatibility
+            if self.form == nil && self.url == nil {
+                self.form = Form()
+            }
+        } else {
+            // Empty object - default to form-only for backward compatibility
+            self.form = Form()
+            self.url = nil
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(form, forKey: .form)
+        try container.encodeIfPresent(url, forKey: .url)
     }
 }

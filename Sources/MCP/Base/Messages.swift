@@ -37,8 +37,11 @@ struct AnyMethod: Method, Sendable {
 }
 
 extension Method where Parameters == Empty {
-    public static func request(id: ID = .random) -> Request<Self> {
-        Request(id: id, method: name, params: Empty())
+    public static func request(
+        id: ID = .random,
+        _meta: Metadata? = nil
+    ) -> Request<Self> {
+        Request(id: id, method: name, params: Empty(), _meta: _meta)
     }
 }
 
@@ -50,18 +53,30 @@ extension Method where Result == Empty {
 
 extension Method {
     /// Create a request with the given parameters.
-    public static func request(id: ID = .random, _ parameters: Self.Parameters) -> Request<Self> {
-        Request(id: id, method: name, params: parameters)
+    public static func request(
+        id: ID = .random,
+        _ parameters: Self.Parameters,
+        _meta: Metadata? = nil
+    ) -> Request<Self> {
+        Request(id: id, method: name, params: parameters, _meta: _meta)
     }
 
     /// Create a response with the given result.
-    public static func response(id: ID, result: Self.Result) -> Response<Self> {
-        Response(id: id, result: result)
+    public static func response(
+        id: ID,
+        result: Self.Result,
+        _meta: Metadata? = nil
+    ) -> Response<Self> {
+        Response(id: id, result: result, _meta: _meta)
     }
 
     /// Create a response with the given error.
-    public static func response(id: ID, error: MCPError) -> Response<Self> {
-        Response(id: id, error: error)
+    public static func response(
+        id: ID,
+        error: MCPError,
+        _meta: Metadata? = nil
+    ) -> Response<Self> {
+        Response(id: id, error: error, _meta: _meta)
     }
 }
 
@@ -75,15 +90,23 @@ public struct Request<M: Method>: Hashable, Identifiable, Codable, Sendable {
     public let method: String
     /// The request parameters.
     public let params: M.Parameters
+    /// Metadata for this request (see spec for _meta usage, includes progressToken)
+    public let _meta: Metadata?
 
-    init(id: ID = .random, method: String, params: M.Parameters) {
+    init(
+        id: ID = .random,
+        method: String,
+        params: M.Parameters,
+        _meta: Metadata? = nil
+    ) {
         self.id = id
         self.method = method
         self.params = params
+        self._meta = _meta
     }
 
-    private enum CodingKeys: String, CodingKey {
-        case jsonrpc, id, method, params
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case jsonrpc, id, method, params, _meta
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -92,6 +115,7 @@ public struct Request<M: Method>: Hashable, Identifiable, Codable, Sendable {
         try container.encode(id, forKey: .id)
         try container.encode(method, forKey: .method)
         try container.encode(params, forKey: .params)
+        try container.encodeIfPresent(_meta, forKey: ._meta)
     }
 }
 
@@ -105,6 +129,7 @@ extension Request {
         }
         id = try container.decode(ID.self, forKey: .id)
         method = try container.decode(String.self, forKey: .method)
+        _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
 
         if M.Parameters.self is NotRequired.Type {
             // For NotRequired parameters, use decodeIfPresent or init()
@@ -196,25 +221,45 @@ public struct Response<M: Method>: Hashable, Identifiable, Codable, Sendable {
     public let id: ID
     /// The response result.
     public let result: Swift.Result<M.Result, MCPError>
+    /// Metadata for this response (see spec for _meta usage)
+    public let _meta: Metadata?
 
-    public init(id: ID, result: M.Result) {
+    public init(
+        id: ID,
+        result: Swift.Result<M.Result, MCPError>,
+        _meta: Metadata? = nil
+    ) {
         self.id = id
-        self.result = .success(result)
+        self.result = result
+        self._meta = _meta
     }
 
-    public init(id: ID, error: MCPError) {
-        self.id = id
-        self.result = .failure(error)
+    public init(
+        id: ID,
+        result: M.Result,
+        _meta: Metadata? = nil
+    ) {
+        self.init(id: id, result: .success(result), _meta: _meta)
     }
 
-    private enum CodingKeys: String, CodingKey {
-        case jsonrpc, id, result, error
+    public init(
+        id: ID,
+        error: MCPError,
+        _meta: Metadata? = nil
+    ) {
+        self.init(id: id, result: .failure(error), _meta: _meta)
+    }
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case jsonrpc, id, result, error, _meta
     }
 
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(jsonrpc, forKey: .jsonrpc)
         try container.encode(id, forKey: .id)
+        try container.encodeIfPresent(_meta, forKey: ._meta)
+
         switch result {
         case .success(let result):
             try container.encode(result, forKey: .result)
@@ -241,6 +286,7 @@ public struct Response<M: Method>: Hashable, Identifiable, Codable, Sendable {
                     codingPath: container.codingPath,
                     debugDescription: "Invalid response"))
         }
+        _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
     }
 }
 
@@ -249,18 +295,21 @@ typealias AnyResponse = Response<AnyMethod>
 
 extension AnyResponse {
     init<T: Method>(_ response: Response<T>) throws {
-        // Instead of re-encoding/decoding which might double-wrap the error,
-        // directly transfer the properties
-        self.id = response.id
         switch response.result {
         case .success(let result):
-            // For success, we still need to convert the result to a Value
             let data = try JSONEncoder().encode(result)
             let resultValue = try JSONDecoder().decode(Value.self, from: data)
-            self.result = .success(resultValue)
+            self = Response<AnyMethod>(
+                id: response.id,
+                result: .success(resultValue),
+                _meta: response._meta
+            )
         case .failure(let error):
-            // Keep the original error without re-encoding/decoding
-            self.result = .failure(error)
+            self = Response<AnyMethod>(
+                id: response.id,
+                result: .failure(error),
+                _meta: response._meta
+            )
         }
     }
 }

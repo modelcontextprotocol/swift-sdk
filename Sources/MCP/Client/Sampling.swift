@@ -48,10 +48,55 @@ public enum Sampling {
 
         /// Content types for sampling messages
         public enum Content: Hashable, Sendable {
-            /// Text content
-            case text(String)
-            /// Image content
-            case image(data: String, mimeType: String)
+            /// Single content block
+            case single(ContentBlock)
+            /// Multiple content blocks
+            case multiple([ContentBlock])
+
+            /// Individual content blocks in messages
+            public enum ContentBlock: Hashable, Sendable {
+                /// Text content
+                case text(String)
+                /// Image content
+                case image(data: String, mimeType: String)
+                /// Audio content
+                case audio(data: String, mimeType: String)
+                /// Tool use content
+                case toolUse(Sampling.ToolUseContent)
+                /// Tool result content
+                case toolResult(Sampling.ToolResultContent)
+            }
+
+            /// Returns true if this is a single content block
+            public var isSingle: Bool {
+                if case .single = self { return true }
+                return false
+            }
+
+            /// Returns content as an array of blocks
+            public var asArray: [ContentBlock] {
+                switch self {
+                case .single(let block):
+                    return [block]
+                case .multiple(let blocks):
+                    return blocks
+                }
+            }
+
+            /// Creates content from a text string (convenience)
+            public static func text(_ text: String) -> Content {
+                .single(.text(text))
+            }
+
+            /// Creates content from an image (convenience)
+            public static func image(data: String, mimeType: String) -> Content {
+                .single(.image(data: data, mimeType: mimeType))
+            }
+
+            /// Creates content from audio (convenience)
+            public static func audio(data: String, mimeType: String) -> Content {
+                .single(.audio(data: data, mimeType: mimeType))
+            }
         }
     }
 
@@ -107,14 +152,79 @@ public enum Sampling {
         case stopSequence
         /// Reached maximum tokens
         case maxTokens
+        /// Model wants to use a tool
+        case toolUse
+    }
+
+    /// Content representing a tool use request from the model
+    public struct ToolUseContent: Hashable, Codable, Sendable {
+        /// Unique identifier for this tool use
+        public let id: String
+        /// Name of the tool being invoked
+        public let name: String
+        /// Input parameters for the tool
+        public let input: [String: Value]
+        /// Optional metadata
+        public var _meta: Metadata?
+
+        public init(id: String, name: String, input: [String: Value], _meta: Metadata? = nil) {
+            self.id = id
+            self.name = name
+            self.input = input
+            self._meta = _meta
+        }
+    }
+
+    /// Content representing the result of a tool execution
+    public struct ToolResultContent: Hashable, Codable, Sendable {
+        /// ID of the tool use this result corresponds to
+        public let toolUseId: String
+        /// Content blocks from tool execution
+        public let content: [ContentBlock]
+        /// Structured data from tool execution
+        public let structuredContent: [String: Value]?
+        /// Whether the tool execution resulted in an error
+        public let isError: Bool?
+        /// Optional metadata
+        public var _meta: Metadata?
+
+        /// Individual content blocks in tool results
+        public enum ContentBlock: Hashable, Sendable {
+            /// Text content
+            case text(String)
+            /// Image content
+            case image(data: String, mimeType: String)
+            /// Audio content
+            case audio(data: String, mimeType: String)
+            /// Embedded resource content
+            case resource(resource: Resource.Content, annotations: Resource.Annotations?, _meta: Metadata?)
+            /// Resource link
+            case resourceLink(uri: String, name: String, title: String?, description: String?, mimeType: String?, annotations: Resource.Annotations?)
+        }
+
+        public init(
+            toolUseId: String,
+            content: [ContentBlock],
+            structuredContent: [String: Value]? = nil,
+            isError: Bool? = nil,
+            _meta: Metadata? = nil
+        ) {
+            self.toolUseId = toolUseId
+            self.content = content
+            self.structuredContent = structuredContent
+            self.isError = isError
+            self._meta = _meta
+        }
     }
 }
 
 // MARK: - Codable
 
-extension Sampling.Message.Content: Codable {
+extension Sampling.Message.Content.ContentBlock: Codable {
     private enum CodingKeys: String, CodingKey {
         case type, text, data, mimeType
+        case id, name, input, _meta
+        case toolUseId, content, structuredContent, isError
     }
 
     public init(from decoder: Decoder) throws {
@@ -129,10 +239,32 @@ extension Sampling.Message.Content: Codable {
             let data = try container.decode(String.self, forKey: .data)
             let mimeType = try container.decode(String.self, forKey: .mimeType)
             self = .image(data: data, mimeType: mimeType)
+        case "audio":
+            let data = try container.decode(String.self, forKey: .data)
+            let mimeType = try container.decode(String.self, forKey: .mimeType)
+            self = .audio(data: data, mimeType: mimeType)
+        case "toolUse":
+            let id = try container.decode(String.self, forKey: .id)
+            let name = try container.decode(String.self, forKey: .name)
+            let input = try container.decode([String: Value].self, forKey: .input)
+            let _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
+            self = .toolUse(Sampling.ToolUseContent(id: id, name: name, input: input, _meta: _meta))
+        case "toolResult":
+            let toolUseId = try container.decode(String.self, forKey: .toolUseId)
+            let content = try container.decode([Sampling.ToolResultContent.ContentBlock].self, forKey: .content)
+            let structuredContent = try container.decodeIfPresent([String: Value].self, forKey: .structuredContent)
+            let isError = try container.decodeIfPresent(Bool.self, forKey: .isError)
+            let _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
+            self = .toolResult(Sampling.ToolResultContent(
+                toolUseId: toolUseId,
+                content: content,
+                structuredContent: structuredContent,
+                isError: isError,
+                _meta: _meta))
         default:
             throw DecodingError.dataCorruptedError(
                 forKey: .type, in: container,
-                debugDescription: "Unknown sampling message content type")
+                debugDescription: "Unknown sampling message content block type")
         }
     }
 
@@ -147,6 +279,52 @@ extension Sampling.Message.Content: Codable {
             try container.encode("image", forKey: .type)
             try container.encode(data, forKey: .data)
             try container.encode(mimeType, forKey: .mimeType)
+        case .audio(let data, let mimeType):
+            try container.encode("audio", forKey: .type)
+            try container.encode(data, forKey: .data)
+            try container.encode(mimeType, forKey: .mimeType)
+        case .toolUse(let toolUse):
+            try container.encode("toolUse", forKey: .type)
+            try container.encode(toolUse.id, forKey: .id)
+            try container.encode(toolUse.name, forKey: .name)
+            try container.encode(toolUse.input, forKey: .input)
+            try container.encodeIfPresent(toolUse._meta, forKey: ._meta)
+        case .toolResult(let toolResult):
+            try container.encode("toolResult", forKey: .type)
+            try container.encode(toolResult.toolUseId, forKey: .toolUseId)
+            try container.encode(toolResult.content, forKey: .content)
+            try container.encodeIfPresent(toolResult.structuredContent, forKey: .structuredContent)
+            try container.encodeIfPresent(toolResult.isError, forKey: .isError)
+            try container.encodeIfPresent(toolResult._meta, forKey: ._meta)
+        }
+    }
+}
+
+extension Sampling.Message.Content: Codable {
+    public init(from decoder: Decoder) throws {
+        // Try to decode as an array first
+        if let blocks = try? [ContentBlock](from: decoder) {
+            // If it's a single-element array, unwrap it to single
+            if blocks.count == 1, let block = blocks.first {
+                self = .single(block)
+            } else {
+                self = .multiple(blocks)
+            }
+        } else {
+            // Try to decode as a single block
+            let block = try ContentBlock(from: decoder)
+            self = .single(block)
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        switch self {
+        case .single(let block):
+            // Encode single block directly (not as array)
+            try block.encode(to: encoder)
+        case .multiple(let blocks):
+            // Encode as array
+            try blocks.encode(to: encoder)
         }
     }
 }
@@ -155,7 +333,7 @@ extension Sampling.Message.Content: Codable {
 
 extension Sampling.Message.Content: ExpressibleByStringLiteral {
     public init(stringLiteral value: String) {
-        self = .text(value)
+        self = .single(.text(value))
     }
 }
 
@@ -163,7 +341,83 @@ extension Sampling.Message.Content: ExpressibleByStringLiteral {
 
 extension Sampling.Message.Content: ExpressibleByStringInterpolation {
     public init(stringInterpolation: DefaultStringInterpolation) {
-        self = .text(String(stringInterpolation: stringInterpolation))
+        self = .single(.text(String(stringInterpolation: stringInterpolation)))
+    }
+}
+
+extension Sampling.ToolResultContent.ContentBlock: Codable {
+    private enum CodingKeys: String, CodingKey {
+        case type, text, data, mimeType, resource, annotations, _meta
+        case uri, name, title, description
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let type = try container.decode(String.self, forKey: .type)
+
+        switch type {
+        case "text":
+            let text = try container.decode(String.self, forKey: .text)
+            self = .text(text)
+        case "image":
+            let data = try container.decode(String.self, forKey: .data)
+            let mimeType = try container.decode(String.self, forKey: .mimeType)
+            self = .image(data: data, mimeType: mimeType)
+        case "audio":
+            let data = try container.decode(String.self, forKey: .data)
+            let mimeType = try container.decode(String.self, forKey: .mimeType)
+            self = .audio(data: data, mimeType: mimeType)
+        case "resource":
+            let resourceContent = try container.decode(Resource.Content.self, forKey: .resource)
+            let annotations = try container.decodeIfPresent(Resource.Annotations.self, forKey: .annotations)
+            let _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
+            self = .resource(resource: resourceContent, annotations: annotations, _meta: _meta)
+        case "resourceLink":
+            let uri = try container.decode(String.self, forKey: .uri)
+            let name = try container.decode(String.self, forKey: .name)
+            let title = try container.decodeIfPresent(String.self, forKey: .title)
+            let description = try container.decodeIfPresent(String.self, forKey: .description)
+            let mimeType = try container.decodeIfPresent(String.self, forKey: .mimeType)
+            let annotations = try container.decodeIfPresent(Resource.Annotations.self, forKey: .annotations)
+            self = .resourceLink(
+                uri: uri, name: name, title: title, description: description,
+                mimeType: mimeType, annotations: annotations)
+        default:
+            throw DecodingError.dataCorruptedError(
+                forKey: .type, in: container,
+                debugDescription: "Unknown tool result content block type")
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+
+        switch self {
+        case .text(let text):
+            try container.encode("text", forKey: .type)
+            try container.encode(text, forKey: .text)
+        case .image(let data, let mimeType):
+            try container.encode("image", forKey: .type)
+            try container.encode(data, forKey: .data)
+            try container.encode(mimeType, forKey: .mimeType)
+        case .audio(let data, let mimeType):
+            try container.encode("audio", forKey: .type)
+            try container.encode(data, forKey: .data)
+            try container.encode(mimeType, forKey: .mimeType)
+        case .resource(let resourceContent, let annotations, let _meta):
+            try container.encode("resource", forKey: .type)
+            try container.encode(resourceContent, forKey: .resource)
+            try container.encodeIfPresent(annotations, forKey: .annotations)
+            try container.encodeIfPresent(_meta, forKey: ._meta)
+        case .resourceLink(let uri, let name, let title, let description, let mimeType, let annotations):
+            try container.encode("resourceLink", forKey: .type)
+            try container.encode(uri, forKey: .uri)
+            try container.encode(name, forKey: .name)
+            try container.encodeIfPresent(title, forKey: .title)
+            try container.encodeIfPresent(description, forKey: .description)
+            try container.encodeIfPresent(mimeType, forKey: .mimeType)
+            try container.encodeIfPresent(annotations, forKey: .annotations)
+        }
     }
 }
 
@@ -173,6 +427,26 @@ extension Sampling.Message.Content: ExpressibleByStringInterpolation {
 /// - SeeAlso: https://modelcontextprotocol.io/docs/concepts/sampling#how-sampling-works
 public enum CreateSamplingMessage: Method {
     public static let name = "sampling/createMessage"
+
+    /// Tool choice configuration for sampling
+    public struct ToolChoice: Hashable, Codable, Sendable {
+        /// Tool choice mode
+        public enum Mode: String, Hashable, Codable, Sendable {
+            /// Automatically decide whether to use tools
+            case auto
+            /// Require using at least one tool
+            case required
+            /// Do not use any tools
+            case none
+        }
+
+        /// The tool choice mode
+        public let mode: Mode
+
+        public init(mode: Mode) {
+            self.mode = mode
+        }
+    }
 
     public struct Parameters: Hashable, Codable, Sendable {
         /// The conversation history to send to the LLM
@@ -189,8 +463,12 @@ public enum CreateSamplingMessage: Method {
         public let maxTokens: Int
         /// Array of sequences that stop generation
         public let stopSequences: [String]?
-        /// Additional provider-specific parameters
-        public let metadata: [String: Value]?
+        /// Optional request metadata
+        public var _meta: Metadata?
+        /// Tools available for the model to use
+        public let tools: [Tool]?
+        /// Tool choice configuration
+        public let toolChoice: ToolChoice?
 
         public init(
             messages: [Sampling.Message],
@@ -200,7 +478,9 @@ public enum CreateSamplingMessage: Method {
             temperature: Double? = nil,
             maxTokens: Int,
             stopSequences: [String]? = nil,
-            metadata: [String: Value]? = nil
+            _meta: Metadata? = nil,
+            tools: [Tool]? = nil,
+            toolChoice: ToolChoice? = nil
         ) {
             self.messages = messages
             self.modelPreferences = modelPreferences
@@ -209,7 +489,9 @@ public enum CreateSamplingMessage: Method {
             self.temperature = temperature
             self.maxTokens = maxTokens
             self.stopSequences = stopSequences
-            self.metadata = metadata
+            self._meta = _meta
+            self.tools = tools
+            self.toolChoice = toolChoice
         }
     }
 
@@ -222,17 +504,44 @@ public enum CreateSamplingMessage: Method {
         public let role: Sampling.Message.Role
         /// The completion content
         public let content: Sampling.Message.Content
+        /// Optional metadata about this result
+        public var _meta: Metadata?
 
         public init(
             model: String,
             stopReason: Sampling.StopReason? = nil,
             role: Sampling.Message.Role,
-            content: Sampling.Message.Content
+            content: Sampling.Message.Content,
+            _meta: Metadata? = nil
         ) {
             self.model = model
             self.stopReason = stopReason
             self.role = role
             self.content = content
+            self._meta = _meta
+        }
+
+        private enum CodingKeys: String, CodingKey, CaseIterable {
+            case model, stopReason, role, content, _meta
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(model, forKey: .model)
+            try container.encodeIfPresent(stopReason, forKey: .stopReason)
+            try container.encode(role, forKey: .role)
+            try container.encode(content, forKey: .content)
+            try container.encodeIfPresent(_meta, forKey: ._meta)
+        }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            model = try container.decode(String.self, forKey: .model)
+            stopReason = try container.decodeIfPresent(
+                Sampling.StopReason.self, forKey: .stopReason)
+            role = try container.decode(Sampling.Message.Role.self, forKey: .role)
+            content = try container.decode(Sampling.Message.Content.self, forKey: .content)
+            _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
         }
     }
 }

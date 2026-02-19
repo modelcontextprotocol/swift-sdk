@@ -7,8 +7,47 @@ Official Swift SDK for the [Model Context Protocol][mcp] (MCP).
 The Model Context Protocol (MCP) defines a standardized way
 for applications to communicate with AI and ML models.
 This Swift SDK implements both client and server components
-according to the [2025-03-26][mcp-spec-2025-03-26] (latest) version 
+according to the [2025-11-25][mcp-spec-2025-11-25] (latest) version
 of the MCP specification.
+
+## Table of contents
+
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Client Usage](#client-usage)
+  - [Basic Client Setup](#basic-client-setup)
+  - [Transport Options for Clients](#transport-options-for-clients)
+  - [Tools](#tools)
+  - [Resources](#resources)
+  - [Prompts](#prompts)
+  - [Completions](#completions)
+  - [Sampling](#sampling)
+  - [Elicitation](#elicitation)
+  - [Roots](#roots)
+  - [Logging](#logging)
+  - [Error Handling](#error-handling)
+  - [Cancellation](#cancellation)
+  - [Progress Tracking](#progress-tracking)
+  - [Advanced Client Features](#advanced-client-features)
+- [Server Usage](#server-usage)
+  - [Basic Server Setup](#basic-server-setup)
+  - [Tools](#tools-1)
+  - [Resources](#resources-1)
+  - [Prompts](#prompts-1)
+  - [Completions](#completions-1)
+  - [Sampling](#sampling-1)
+  - [Elicitations](#elicitations)
+  - [Roots](#roots-1)
+  - [Logging](#logging-1)
+  - [Progress Tracking](#progress-tracking-1)
+  - [Initialize Hook](#initialize-hook)
+  - [Graceful Shutdown](#graceful-shutdown)
+- [Transports](#transports)
+- [Platform Availability](#platform-availability)
+- [Debugging and Logging](#debugging-and-logging)
+- [Additional Resources](#additional-resources)
+- [Changelog](#changelog)
+- [License](#license)
 
 ## Requirements
 
@@ -25,7 +64,7 @@ Add the following to your `Package.swift` file:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", from: "0.10.0")
+    .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", from: "0.11.0")
 ]
 ```
 
@@ -101,7 +140,7 @@ Tools represent functions that can be called by the client:
 let (tools, cursor) = try await client.listTools()
 print("Available tools: \(tools.map { $0.name }.joined(separator: ", "))")
 
-// Call a tool with arguments
+// Call a tool with arguments and get the result
 let (content, isError) = try await client.callTool(
     name: "image-generator",
     arguments: [
@@ -125,11 +164,10 @@ for item in content {
         }
     case .audio(let data, let mimeType):
         print("Received audio data of type \(mimeType)")
-    case .resource(let uri, let mimeType, let text):
-        print("Received resource from \(uri) of type \(mimeType)")
-        if let text = text {
-            print("Resource text: \(text)")
-        }
+    case .resource(let resource, _, _):
+        print("Received embedded resource: \(resource)")
+    case .resourceLink(let uri, let name, _, _, let mimeType, _):
+        print("Resource link: \(name) at \(uri), type: \(mimeType ?? "unknown")")
     }
 }
 ```
@@ -148,7 +186,7 @@ let contents = try await client.readResource(uri: "resource://example")
 print("Resource content: \(contents)")
 
 // Subscribe to resource updates if supported
-if result.capabilities.resources.subscribe {
+if result.capabilities.resources?.subscribe == true {
     try await client.subscribeToResource(uri: "resource://example")
 
     // Register notification handler
@@ -189,6 +227,61 @@ for message in messages {
         print("\(message.role): \(text)")
     }
 }
+```
+
+### Completions
+
+Completions allow servers to provide autocompletion suggestions for prompt and resource template arguments as users type:
+
+```swift
+// Request completions for a prompt argument
+let completion = try await client.complete(
+    promptName: "code_review",
+    argumentName: "language",
+    argumentValue: "py"
+)
+
+// Display suggestions to the user
+for value in completion.values {
+    print("Suggestion: \(value)")
+}
+
+if completion.hasMore == true {
+    print("More suggestions available (total: \(completion.total ?? 0))")
+}
+```
+
+You can also provide context with already-resolved arguments:
+
+```swift
+// First, user selects a language
+let languageCompletion = try await client.complete(
+    promptName: "code_review",
+    argumentName: "language",
+    argumentValue: "py"
+)
+// User selects "python"
+
+// Then get framework suggestions based on the selected language
+let frameworkCompletion = try await client.complete(
+    promptName: "code_review",
+    argumentName: "framework",
+    argumentValue: "fla",
+    context: ["language": .string("python")]
+)
+// Returns: ["flask"]
+```
+
+Completions work for resource templates as well:
+
+```swift
+// Get path completions for a resource URI template
+let pathCompletion = try await client.complete(
+    resourceURI: "file:///{path}",
+    argumentName: "path",
+    argumentValue: "/usr/"
+)
+// Returns: ["/usr/bin", "/usr/lib", "/usr/local"]
 ```
 
 ### Sampling
@@ -236,43 +329,129 @@ await client.withSamplingHandler { parameters in
 }
 ```
 
-The sampling flow follows these steps:
+### Elicitation
 
-```mermaid
-sequenceDiagram
-    participant S as MCP Server
-    participant C as MCP Client
-    participant U as User/Human
-    participant L as LLM Service
+Elicitation allows servers to request structured information directly from users through the client. 
+This is useful when servers need user input that wasn't provided in the original request, 
+such as credentials, configuration choices, or approval for sensitive operations.
 
-    Note over S,L: Server-initiated sampling request
-    S->>C: sampling/createMessage request
-    Note right of S: Server needs AI assistance<br/>for decision or content
+> [!TIP]
+> Elicitation requests flow from **server to client**, 
+> similar to sampling. 
+> Clients must register a handler to respond to elicitation requests from servers.
 
-    Note over C,U: Human-in-the-loop review #1
-    C->>U: Show sampling request
-    U->>U: Review & optionally modify<br/>messages, system prompt
-    U->>C: Approve request
+#### Client-Side: Handling Elicitation Requests
 
-    Note over C,L: Client handles LLM interaction
-    C->>L: Send messages to LLM
-    L->>C: Return completion
+Register an elicitation handler to respond to server requests:
 
-    Note over C,U: Human-in-the-loop review #2
-    C->>U: Show LLM completion
-    U->>U: Review & optionally modify<br/>or reject completion
-    U->>C: Approve completion
+```swift
+// Register an elicitation handler in the client
+await client.withElicitationHandler { parameters in
+    switch parameters {
+    case .form(let form):
+        // Display the request to the user
+        print("Server requests: \(form.message)")
 
-    Note over C,S: Return result to server
-    C->>S: sampling/createMessage response
-    Note left of C: Contains model used,<br/>stop reason, final content
+        // If a schema was provided, inspect it
+        if let schema = form.requestedSchema {
+            print("Required fields: \(schema.required ?? [])")
+            print("Schema: \(schema.properties)")
+        }
 
-    Note over S: Server continues with<br/>AI-assisted result
+        // Present UI to collect user input
+        let userResponse = presentElicitationUI(form)
+
+        // Return the user's response
+        if userResponse.accepted {
+            return CreateElicitation.Result(
+                action: .accept,
+                content: userResponse.data
+            )
+        } else if userResponse.canceled {
+            return CreateElicitation.Result(action: .cancel)
+        } else {
+            return CreateElicitation.Result(action: .decline)
+        }
+
+    case .url(let url):
+        // Direct the user to an external URL (e.g., for OAuth)
+        openURL(url.url)
+        return CreateElicitation.Result(action: .accept)
+    }
+}
 ```
 
-This human-in-the-loop design ensures that users 
-maintain control over what the LLM sees and generates, 
-even when servers initiate the requests.
+Common use cases for elicitation:
+
+- **Authentication**: Request credentials when needed rather than upfront
+- **Confirmation**: Ask for user approval before sensitive operations
+- **Configuration**: Collect preferences or settings during operation
+- **Missing information**: Request additional details not provided initially
+
+### Roots
+
+Roots define the filesystem boundaries that a client exposes to servers. Servers discover roots by sending a `roots/list` request to the client; clients notify servers when the list changes.
+
+> [!TIP]
+> To use roots, declare the `roots` capability when creating the client.
+
+```swift
+let client = Client(
+    name: "MyApp",
+    version: "1.0.0",
+    capabilities: .init(
+        roots: .init(listChanged: true)
+    )
+)
+
+// Register a handler for roots/list requests from servers
+await client.withRootsHandler {
+    return [
+        Root(uri: "file:///Users/user/projects", name: "Projects"),
+        Root(uri: "file:///Users/user/documents", name: "Documents")
+    ]
+}
+
+// Notify connected servers whenever roots change
+try await client.notifyRootsChanged()
+```
+
+### Logging
+
+Clients can control server logging levels and receive structured log messages:
+
+```swift
+// Set the minimum logging level
+try await client.setLoggingLevel(.warning)
+
+// Register a handler for log messages from the server
+await client.onNotification(LogMessageNotification.self) { message in
+    let level = message.params.level        // LogLevel (debug, info, warning, etc.)
+    let logger = message.params.logger      // Optional logger name
+    let data = message.params.data          // Arbitrary JSON data
+
+    // Display log message based on level
+    switch level {
+    case .error, .critical, .alert, .emergency:
+        print("❌ [\(logger ?? "server")] \(data)")
+    case .warning:
+        print("⚠️ [\(logger ?? "server")] \(data)")
+    default:
+        print("ℹ️ [\(logger ?? "server")] \(data)")
+    }
+}
+```
+
+Log levels follow the standard syslog severity levels (RFC 5424):
+
+- **debug**: Detailed debugging information
+- **info**: General informational messages
+- **notice**: Normal but significant events
+- **warning**: Warning conditions
+- **error**: Error conditions
+- **critical**: Critical conditions
+- **alert**: Action must be taken immediately
+- **emergency**: System is unusable
 
 ### Error Handling
 
@@ -287,6 +466,84 @@ do {
 } catch {
     print("Unexpected error: \(error)")
 }
+```
+
+### Cancellation
+
+Either side can cancel an in-progress request and handle incoming cancellations gracefully:
+
+#### Option 1: Convenience Methods with RequestContext Overload
+
+For common operations like tool calls, use the overloaded method that returns `RequestContext`:
+
+```swift
+// Call a tool and get a context for cancellation
+let context = try client.callTool(
+    name: "long-running-analysis",
+    arguments: ["data": largeDataset]
+)
+
+// You can cancel the request at any time
+try await client.cancelRequest(context.requestID, reason: "User cancelled")
+
+// Await the result (will throw CancellationError if cancelled)
+do {
+    let result = try await context.value
+    print("Result: \(result.content)")
+} catch is CancellationError {
+    print("Request was cancelled")
+}
+```
+
+#### Option 2: Direct send() for Maximum Flexibility
+
+For full control or custom requests, use `send()` directly:
+
+```swift
+// Create any request type
+let request = CallTool.request(.init(
+    name: "long-running-analysis",
+    arguments: ["data": largeDataset]
+))
+
+// Send and get a context for cancellation tracking
+let context: RequestContext<CallTool.Result> = try client.send(request)
+
+// Cancel when needed
+try await client.cancelRequest(context.requestID, reason: "Timeout")
+
+// Get the result
+let result = try await context.value
+let content = result.content
+let isError = result.isError
+```
+
+### Progress tracking
+
+Clients can attach a progress token to a request and receive incremental progress updates for long-running operations:
+
+```swift
+// Call a tool with progress tracking
+let progressToken = ProgressToken.unique()
+
+// Register a notification handler to receive progress updates
+await client.onNotification(ProgressNotification.self) { message in
+    let params = message.params
+    // Filter by your progress token
+    if params.progressToken == progressToken {
+        print("Progress: \(params.progress)/\(params.total ?? 0)")
+        if let message = params.message {
+            print("Status: \(message)")
+        }
+    }
+}
+
+// Make the request with the progress token
+let (content, isError) = try await client.callTool(
+    name: "long-running-tool",
+    arguments: ["input": "value"],
+    meta: Metadata(progressToken: progressToken)
+)
 ```
 
 ### Advanced Client Features
@@ -409,6 +666,8 @@ let server = Server(
     name: "MyModelServer",
     version: "1.0.0",
     capabilities: .init(
+        completions: .init(),
+        logging: .init(),
         prompts: .init(listChanged: true),
         resources: .init(subscribe: true, listChanged: true),
         tools: .init(listChanged: true)
@@ -577,9 +836,9 @@ await server.withMethodHandler(GetPrompt.self) { params in
 
         let description = "Job interview for \(position) position at \(company)"
         let messages: [Prompt.Message] = [
-            .user("You are an interviewer for the \(position) position at \(company)."),
-            .user("Hello, I'm \(interviewee) and I'm here for the \(position) interview."),
-            .assistant("Hi \(interviewee), welcome to \(company)! I'd like to start by asking about your background and experience.")
+            .user(.text(text: "You are an interviewer for the \(position) position at \(company).")),
+            .user(.text(text: "Hello, I'm \(interviewee) and I'm here for the \(position) interview.")),
+            .assistant(.text(text: "Hi \(interviewee), welcome to \(company)! I'd like to start by asking about your background and experience."))
         ]
 
         return .init(description: description, messages: messages)
@@ -593,12 +852,92 @@ await server.withMethodHandler(GetPrompt.self) { params in
 }
 ```
 
+### Completions
+
+Servers can provide autocompletion suggestions for prompt and resource template arguments:
+
+```swift
+// Enable completions capability
+let server = Server(
+    name: "MyServer",
+    version: "1.0.0",
+    capabilities: .init(
+        completions: .init(),
+        prompts: .init(listChanged: true)
+    )
+)
+
+// Register a completion handler
+await server.withMethodHandler(Complete.self) { params in
+    // Get the argument being completed
+    let argumentName = params.argument.name
+    let currentValue = params.argument.value
+
+    // Check which prompt or resource is being completed
+    switch params.ref {
+    case .prompt(let promptRef):
+        // Provide completions for a prompt argument
+        if promptRef.name == "code_review" && argumentName == "language" {
+            // Simple prefix matching
+            let allLanguages = ["python", "perl", "php", "javascript", "java", "swift"]
+            let matches = allLanguages.filter { $0.hasPrefix(currentValue.lowercased()) }
+
+            return .init(
+                completion: .init(
+                    values: Array(matches.prefix(100)),  // Max 100 items
+                    total: matches.count,
+                    hasMore: matches.count > 100
+                )
+            )
+        }
+
+    case .resource(let resourceRef):
+        // Provide completions for a resource template argument
+        if resourceRef.uri == "file:///{path}" && argumentName == "path" {
+            // Return directory suggestions
+            let suggestions = try getDirectoryCompletions(for: currentValue)
+            return .init(
+                completion: .init(
+                    values: suggestions,
+                    total: suggestions.count,
+                    hasMore: false
+                )
+            )
+        }
+    }
+
+    // No completions available
+    return .init(completion: .init(values: [], total: 0, hasMore: false))
+}
+```
+
+You can also use context from already-resolved arguments:
+
+```swift
+await server.withMethodHandler(Complete.self) { params in
+    // Access context from previous argument completions
+    if let context = params.context,
+       let language = context.arguments["language"]?.stringValue {
+
+        // Provide framework suggestions based on selected language
+        if language == "python" {
+            let frameworks = ["flask", "django", "fastapi", "tornado"]
+            let matches = frameworks.filter {
+                $0.hasPrefix(params.argument.value.lowercased())
+            }
+            return .init(
+                completion: .init(values: matches, total: matches.count, hasMore: false)
+            )
+        }
+    }
+
+    return .init(completion: .init(values: [], total: 0, hasMore: false))
+}
+```
+
 ### Sampling
 
 Servers can request LLM completions from clients through sampling. This enables agentic behaviors where servers can ask for AI assistance while maintaining human oversight.
-
-> [!NOTE]
-> The current implementation provides the correct API design for sampling, but requires bidirectional communication support in the transport layer. This feature will be fully functional when bidirectional transport support is added.
 
 ```swift
 // Enable sampling capability in server
@@ -611,7 +950,7 @@ let server = Server(
     )
 )
 
-// Request sampling from the client (conceptual - requires bidirectional transport)
+// Request sampling from the connected client
 do {
     let result = try await server.requestSampling(
         messages: [
@@ -631,10 +970,186 @@ do {
 ```
 
 Sampling enables powerful agentic workflows:
+
 - **Decision-making**: Ask the LLM to choose between options
 - **Content generation**: Request drafts for user approval
 - **Data analysis**: Get AI insights on complex data
 - **Multi-step reasoning**: Chain AI completions with tool calls
+
+### Elicitations
+
+Servers can request information from users through elicitation:
+
+```swift
+// Ask the user to provide some additional information
+let schema = Elicitation.RequestSchema(
+    title: "Additional Information Required",
+    description: "Please provide the following details to continue",
+    properties: [
+        "name": .object([
+            "type": .string("string"),
+            "description": .string("Your full name")
+        ]),
+        "confirmed": .object([
+            "type": .string("boolean"),
+            "description": .string("Do you confirm the provided information?")
+        ])
+    ],
+    required: ["name", "confirmed"]
+)
+
+let result = try await server.requestElicitation(
+    message: "Some details are needed before proceeding",
+    requestedSchema: schema
+)
+
+switch result.action {
+case .accept:
+    if let content = result.content {
+        let name = content["name"]?.stringValue
+        let confirmed = content["confirmed"]?.boolValue
+        // Use the collected data...
+    }
+case .decline:
+    throw MCPError.invalidRequest("User declined to provide information")
+case .cancel:
+    throw MCPError.invalidRequest("Operation canceled by user")
+}
+```
+
+For URL-based elicitation (e.g., OAuth flows), use the URL overload:
+
+```swift
+let result = try await server.requestElicitation(
+    message: "Please sign in to continue",
+    url: "https://example.com/oauth/authorize?client_id=...",
+    elicitationId: UUID().uuidString
+)
+```
+
+### Roots
+
+Servers can request the list of filesystem roots that the client has exposed:
+
+```swift
+// Request roots from the connected client
+// (requires the client to declare the roots capability)
+let roots = try await server.listRoots()
+for root in roots {
+    print("Root: \(root.name ?? root.uri) at \(root.uri)")
+}
+
+// React to root list changes
+await server.onNotification(RootsListChangedNotification.self) { _ in
+    let updatedRoots = try await server.listRoots()
+    print("Roots updated: \(updatedRoots.map { $0.uri })")
+}
+```
+
+### Logging
+
+Servers can send structured log messages to clients:
+
+```swift
+// Enable logging capability
+let server = Server(
+    name: "MyServer",
+    version: "1.0.0",
+    capabilities: .init(
+        logging: .init(),
+        tools: .init(listChanged: true)
+    )
+)
+
+// Send log messages at different severity levels
+try await server.log(
+    level: .info,
+    logger: "database",
+    data: Value.object([
+        "message": .string("Database connected successfully"),
+        "host": .string("localhost"),
+        "port": .int(5432)
+    ])
+)
+
+try await server.log(
+    level: .error,
+    logger: "api",
+    data: Value.object([
+        "message": .string("Request failed"),
+        "statusCode": .int(500),
+        "error": .string("Internal server error")
+    ])
+)
+
+// You can also use codable types directly
+struct ErrorLog: Codable {
+    let message: String
+    let code: Int
+    let timestamp: String
+}
+
+let errorLog = ErrorLog(
+    message: "Operation failed",
+    code: 500,
+    timestamp: ISO8601DateFormatter().string(from: Date())
+)
+
+try await server.log(level: .error, logger: "operations", data: errorLog)
+```
+
+Clients can control which log levels they receive:
+
+```swift
+// Register a handler for client's logging level preferences
+await server.withMethodHandler(SetLoggingLevel.self) { params in
+    let minimumLevel = params.level
+
+    // Store the client's preference and filter log messages accordingly
+    // (Implementation depends on your server architecture)
+    storeLogLevel(minimumLevel)
+
+    return Empty()
+}
+```
+
+### Progress Tracking
+
+Servers can send incremental progress notifications during long-running tool calls by reading the `progressToken` from the request metadata and sending `ProgressNotification` messages:
+
+```swift
+await server.withMethodHandler(CallTool.self) { params in
+    // Read the progress token from request metadata
+    guard let token = params._meta?.progressToken else {
+        // No progress token provided — run without reporting progress
+        return .init(content: [.text("Done")], isError: false)
+    }
+
+    // Report initial progress
+    let started = ProgressNotification.message(
+        .init(progressToken: token, progress: 0, total: 100)
+    )
+    try await server.notify(started)
+
+    // ... do work ...
+
+    // Report intermediate progress
+    let halfway = ProgressNotification.message(
+        .init(progressToken: token, progress: 50, total: 100, message: "Halfway there")
+    )
+    try await server.notify(halfway)
+
+    // ... do more work ...
+
+    // Report completion
+    let done = ProgressNotification.message(
+        .init(progressToken: token, progress: 100, total: 100, message: "Complete")
+    )
+    try await server.notify(done)
+
+    return .init(content: [.text("Done")], isError: false)
+}
+```
 
 #### Initialize Hook
 
@@ -757,27 +1272,31 @@ try await serviceGroup.run()
 This approach has several benefits:
 
 - **Signal handling**:
-  Automatically traps SIGINT, SIGTERM and triggers graceful shutdown
+Automatically traps SIGINT, SIGTERM and triggers graceful shutdown
 - **Graceful shutdown**:
-  Properly shuts down your MCP server and other services
+Properly shuts down your MCP server and other services
 - **Timeout-based shutdown**:
-  Configurable shutdown timeouts to prevent hanging processes
+Configurable shutdown timeouts to prevent hanging processes
 - **Advanced service management**:
-  [`ServiceLifecycle`](https://swiftpackageindex.com/swift-server/swift-service-lifecycle/documentation/servicelifecycle)
-  also supports service dependencies, conditional services,
-  and other useful features.
+`[ServiceLifecycle](https://swiftpackageindex.com/swift-server/swift-service-lifecycle/documentation/servicelifecycle)`
+also supports service dependencies, conditional services,
+and other useful features.
 
 ## Transports
 
 MCP's transport layer handles communication between clients and servers.
 The Swift SDK provides multiple built-in transports:
 
+
 | Transport | Description | Platforms | Best for |
-|-----------|-------------|-----------|----------|
-| [`StdioTransport`](/Sources/MCP/Base/Transports/StdioTransport.swift) | Implements [stdio transport](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#stdio) using standard input/output streams | Apple platforms, Linux with glibc | Local subprocesses, CLI tools |
-| [`HTTPClientTransport`](/Sources/MCP/Base/Transports/HTTPClientTransport.swift) | Implements [Streamable HTTP transport](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#streamable-http) using Foundation's URL Loading System | All platforms with Foundation | Remote servers, web applications |
+| --------- | ----------- | --------- | -------- |
+| [`StdioTransport`](/Sources/MCP/Base/Transports/StdioTransport.swift) | Implements [stdio transport](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#stdio) using standard input/output streams | Apple platforms, Linux with glibc | Local subprocesses, CLI tools |
+| [`HTTPClientTransport`](/Sources/MCP/Base/Transports/HTTPClientTransport.swift) | Implements [Streamable HTTP transport](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#streamable-http) using Foundation's URL Loading System | All platforms with Foundation | Remote servers, web applications |
+| [`StatelessHTTPServerTransport`](/Sources/MCP/Base/Transports/HTTPServer/StatelessHTTPServerTransport.swift) | HTTP server transport with simple request-response semantics; no session management or SSE streaming | All platforms with Foundation | Simple HTTP servers, serverless/edge functions |
+| [`StatefulHTTPServerTransport`](/Sources/MCP/Base/Transports/HTTPServer/StatefulHTTPServerTransport.swift) | HTTP server transport with full session management and SSE streaming for server-initiated messages | All platforms with Foundation | Full-featured HTTP servers, streaming notifications |
 | [`InMemoryTransport`](/Sources/MCP/Base/Transports/InMemoryTransport.swift) | Custom in-memory transport for direct communication within the same process | All platforms | Testing, debugging, same-process client-server communication |
 | [`NetworkTransport`](/Sources/MCP/Base/Transports/NetworkTransport.swift) | Custom transport using Apple's Network framework for TCP/UDP connections | Apple platforms only | Low-level networking, custom protocols |
+
 
 ### Custom Transport Implementation
 
@@ -826,20 +1345,19 @@ public actor MyCustomTransport: Transport {
 
 The Swift SDK has the following platform requirements:
 
-| Platform | Minimum Version |
-|----------|----------------|
-| macOS | 13.0+ |
-| iOS / Mac Catalyst | 16.0+ |
-| watchOS | 9.0+ |
-| tvOS | 16.0+ |
-| visionOS | 1.0+ |
-| Linux | Distributions with `glibc` or `musl`, including Ubuntu, Debian, Fedora, and Alpine Linux |
+
+| Platform           | Minimum Version                                                                          |
+| ------------------ | ---------------------------------------------------------------------------------------- |
+| macOS              | 13.0+                                                                                    |
+| iOS / Mac Catalyst | 16.0+                                                                                    |
+| watchOS            | 9.0+                                                                                     |
+| tvOS               | 16.0+                                                                                    |
+| visionOS           | 1.0+                                                                                     |
+| Linux              | Distributions with `glibc` or `musl`, including Ubuntu, Debian, Fedora, and Alpine Linux |
+
 
 While the core library works on any platform supporting Swift 6
-(including Linux and Windows),
-running a client or server requires a compatible transport.
-
-We're working to add [Windows support](https://github.com/modelcontextprotocol/swift-sdk/pull/64).
+(including Linux), running a client or server requires a compatible transport.
 
 ## Debugging and Logging
 
@@ -868,7 +1386,7 @@ let transport = StdioTransport(logger: logger)
 
 ## Additional Resources
 
-- [MCP Specification](https://modelcontextprotocol.io/specification/2025-03-26/)
+- [MCP Specification](https://modelcontextprotocol.io/specification/2025-11-25)
 - [Protocol Documentation](https://modelcontextprotocol.io)
 - [GitHub Repository](https://github.com/modelcontextprotocol/swift-sdk)
 
@@ -886,4 +1404,4 @@ see the [GitHub Releases page](https://github.com/modelcontextprotocol/swift-sdk
 This project is licensed under Apache 2.0 for new contributions, with existing code under MIT. See the [LICENSE](LICENSE) file for details.
 
 [mcp]: https://modelcontextprotocol.io
-[mcp-spec-2025-03-26]: https://modelcontextprotocol.io/specification/2025-03-26
+[mcp-spec-2025-11-25]: https://modelcontextprotocol.io/specification/2025-11-25

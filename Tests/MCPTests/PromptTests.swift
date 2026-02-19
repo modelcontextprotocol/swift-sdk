@@ -9,20 +9,24 @@ struct PromptTests {
     func testPromptInitialization() throws {
         let argument = Prompt.Argument(
             name: "test_arg",
+            title: "Test Argument Title",
             description: "A test argument",
             required: true
         )
 
         let prompt = Prompt(
             name: "test_prompt",
+            title: "Test Prompt Title",
             description: "A test prompt",
             arguments: [argument]
         )
 
         #expect(prompt.name == "test_prompt")
+        #expect(prompt.title == "Test Prompt Title")
         #expect(prompt.description == "A test prompt")
         #expect(prompt.arguments?.count == 1)
         #expect(prompt.arguments?[0].name == "test_arg")
+        #expect(prompt.arguments?[0].title == "Test Argument Title")
         #expect(prompt.arguments?[0].description == "A test argument")
         #expect(prompt.arguments?[0].required == true)
     }
@@ -84,19 +88,20 @@ struct PromptTests {
         }
 
         // Test resource content
-        let resourceContent = Prompt.Message.Content.resource(
+        let textResourceContent = Resource.Content.text(
+            "Sample text",
             uri: "file://test.txt",
-            mimeType: "text/plain",
-            text: "Sample text",
-            blob: "blob_data"
+            mimeType: "text/plain"
         )
+        let resourceContent = Prompt.Message.Content.resource(resource: textResourceContent, annotations: nil, _meta: nil)
         let resourceData = try encoder.encode(resourceContent)
         let decodedResource = try decoder.decode(Prompt.Message.Content.self, from: resourceData)
-        if case .resource(let uri, let mimeType, let text, let blob) = decodedResource {
-            #expect(uri == "file://test.txt")
-            #expect(mimeType == "text/plain")
-            #expect(text == "Sample text")
-            #expect(blob == "blob_data")
+        if case .resource(let resourceData, let annotations, let _meta) = decodedResource {
+            #expect(resourceData.uri == "file://test.txt")
+            #expect(resourceData.mimeType == "text/plain")
+            #expect(resourceData.text == "Sample text")
+            #expect(annotations == nil)
+            #expect(_meta == nil)
         } else {
             #expect(Bool(false), "Expected resource content")
         }
@@ -104,8 +109,7 @@ struct PromptTests {
 
     @Test("Prompt Reference validation")
     func testPromptReference() throws {
-        let reference = Prompt.Reference(name: "test_prompt")
-        #expect(reference.name == "test_prompt")
+        let reference = Prompt.Reference(name: "test_prompt", title: "Test Prompt Title")
 
         let encoder = JSONEncoder()
         let decoder = JSONDecoder()
@@ -113,43 +117,59 @@ struct PromptTests {
         let data = try encoder.encode(reference)
         let decoded = try decoder.decode(Prompt.Reference.self, from: data)
 
-        #expect(decoded.name == "test_prompt")
+        #expect(decoded == reference)
     }
 
     @Test("GetPrompt parameters validation")
     func testGetPromptParameters() throws {
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+
         let arguments: [String: Value] = [
             "param1": .string("value1"),
             "param2": .int(42),
         ]
 
         let params = GetPrompt.Parameters(name: "test_prompt", arguments: arguments)
-        #expect(params.name == "test_prompt")
-        #expect(params.arguments?["param1"] == .string("value1"))
-        #expect(params.arguments?["param2"] == .int(42))
+        let data = try encoder.encode(params)
+        let decoded = try decoder.decode(GetPrompt.Parameters.self, from: data)
+
+        #expect(decoded == params)
     }
 
     @Test("GetPrompt result validation")
     func testGetPromptResult() throws {
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+
         let messages: [Prompt.Message] = [
             .user("User message"),
             .assistant("Assistant response"),
         ]
 
         let result = GetPrompt.Result(description: "Test description", messages: messages)
-        #expect(result.description == "Test description")
-        #expect(result.messages.count == 2)
-        #expect(result.messages[0].role == .user)
-        #expect(result.messages[1].role == .assistant)
+        let data = try encoder.encode(result)
+        let decoded = try decoder.decode(GetPrompt.Result.self, from: data)
+
+        #expect(decoded == result)
     }
 
     @Test("ListPrompts parameters validation")
     func testListPromptsParameters() throws {
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+
         let params = ListPrompts.Parameters(cursor: "next_page")
-        #expect(params.cursor == "next_page")
+        let data = try encoder.encode(params)
+        let decoded = try decoder.decode(ListPrompts.Parameters.self, from: data)
+
+        #expect(decoded == params)
 
         let emptyParams = ListPrompts.Parameters()
-        #expect(emptyParams.cursor == nil)
+        let emptyData = try encoder.encode(emptyParams)
+        let decodedEmpty = try decoder.decode(ListPrompts.Parameters.self, from: emptyData)
+
+        #expect(decodedEmpty == emptyParams)
     }
 
     @Test("ListPrompts request decoding with omitted params")
@@ -184,16 +204,19 @@ struct PromptTests {
 
     @Test("ListPrompts result validation")
     func testListPromptsResult() throws {
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+
         let prompts = [
             Prompt(name: "prompt1", description: "First prompt"),
             Prompt(name: "prompt2", description: "Second prompt"),
         ]
 
         let result = ListPrompts.Result(prompts: prompts, nextCursor: "next_page")
-        #expect(result.prompts.count == 2)
-        #expect(result.prompts[0].name == "prompt1")
-        #expect(result.prompts[1].name == "prompt2")
-        #expect(result.nextCursor == "next_page")
+        let data = try encoder.encode(result)
+        let decoded = try decoder.decode(ListPrompts.Result.self, from: data)
+
+        #expect(decoded == result)
     }
 
     @Test("PromptListChanged notification name validation")
@@ -243,15 +266,19 @@ struct PromptTests {
         }
 
         // Test with resource content
-        let resourceMessage: Prompt.Message = .user(
-            .resource(
-                uri: "file://test.txt", mimeType: "text/plain", text: "Sample text", blob: nil))
+        let resourceContent = Resource.Content.text(
+            "Sample text",
+            uri: "file://test.txt",
+            mimeType: "text/plain"
+        )
+        let resourceMessage: Prompt.Message = .user(.resource(resource: resourceContent, annotations: nil, _meta: nil))
         #expect(resourceMessage.role == .user)
-        if case .resource(let uri, let mimeType, let text, let blob) = resourceMessage.content {
-            #expect(uri == "file://test.txt")
-            #expect(mimeType == "text/plain")
-            #expect(text == "Sample text")
-            #expect(blob == nil)
+        if case .resource(let resource, let annotations, let _meta) = resourceMessage.content {
+            #expect(resource.uri == "file://test.txt")
+            #expect(resource.mimeType == "text/plain")
+            #expect(resource.text == "Sample text")
+            #expect(annotations == nil)
+            #expect(_meta == nil)
         } else {
             #expect(Bool(false), "Expected resource content")
         }
@@ -441,5 +468,425 @@ struct PromptTests {
         #expect(decoded[1].role == .assistant)
         #expect(decoded[2].role == .user)
         #expect(decoded[3].role == .assistant)
+    }
+}
+
+@Suite("Prompt Integration Tests")
+struct PromptIntegrationTests {
+
+    @Test("List prompts with empty results")
+    func testListPromptsEmpty() async throws {
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+
+        let server = Server(
+            name: "PromptTestServer",
+            version: "1.0",
+            capabilities: .init(prompts: .init())
+        )
+
+        // Register list prompts handler
+        await server.withMethodHandler(ListPrompts.self) { _ in
+            ListPrompts.Result(prompts: [])
+        }
+
+        let client = Client(
+            name: "PromptTestClient",
+            version: "1.0"
+        )
+
+        try await server.start(transport: serverTransport)
+        try await client.connect(transport: clientTransport)
+
+        let (prompts, nextCursor) = try await client.listPrompts()
+
+        #expect(prompts.isEmpty)
+        #expect(nextCursor == nil)
+
+        await server.stop()
+        await client.disconnect()
+    }
+
+    @Test("List prompts with multiple results")
+    func testListPromptsWithResults() async throws {
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+
+        let server = Server(
+            name: "PromptTestServer",
+            version: "1.0",
+            capabilities: .init(prompts: .init())
+        )
+
+        let expectedPrompts = [
+            Prompt(
+                name: "greeting",
+                title: "Greeting Prompt",
+                description: "A friendly greeting prompt"
+            ),
+            Prompt(
+                name: "interview",
+                title: "Interview Prompt",
+                description: "An interview preparation prompt",
+                arguments: [
+                    Prompt.Argument(
+                        name: "position",
+                        title: "Job Position",
+                        description: "The job position to interview for",
+                        required: true
+                    )
+                ]
+            ),
+        ]
+
+        // Register list prompts handler
+        await server.withMethodHandler(ListPrompts.self) { _ in
+            ListPrompts.Result(prompts: expectedPrompts, nextCursor: "page2")
+        }
+
+        let client = Client(
+            name: "PromptTestClient",
+            version: "1.0"
+        )
+
+        try await server.start(transport: serverTransport)
+        try await client.connect(transport: clientTransport)
+
+        let (prompts, nextCursor) = try await client.listPrompts()
+
+        #expect(prompts == expectedPrompts)
+        #expect(nextCursor == "page2")
+
+        await server.stop()
+        await client.disconnect()
+    }
+
+    @Test("Get prompt with messages")
+    func testGetPrompt() async throws {
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+
+        let server = Server(
+            name: "PromptTestServer",
+            version: "1.0",
+            capabilities: .init(prompts: .init())
+        )
+
+        let expectedMessages: [Prompt.Message] = [
+            .user("Hello, I'd like to schedule an interview for the \(Value.string("Software Engineer")) position"),
+            .assistant("I'd be happy to help you prepare for the Software Engineer interview. Let's discuss your background."),
+        ]
+
+        // Register get prompt handler
+        await server.withMethodHandler(GetPrompt.self) { params in
+            #expect(params.name == "interview")
+            #expect(params.arguments?["position"]?.stringValue == "Software Engineer")
+
+            return GetPrompt.Result(
+                description: "Interview preparation prompt",
+                messages: expectedMessages
+            )
+        }
+
+        let client = Client(
+            name: "PromptTestClient",
+            version: "1.0"
+        )
+
+        try await server.start(transport: serverTransport)
+        try await client.connect(transport: clientTransport)
+
+        let (description, messages) = try await client.getPrompt(
+            name: "interview",
+            arguments: ["position": .string("Software Engineer")]
+        )
+
+        #expect(description == "Interview preparation prompt")
+        #expect(messages == expectedMessages)
+
+        await server.stop()
+        await client.disconnect()
+    }
+
+    @Test("Get prompt with mixed content types")
+    func testGetPromptMixedContent() async throws {
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+
+        let server = Server(
+            name: "PromptTestServer",
+            version: "1.0",
+            capabilities: .init(prompts: .init())
+        )
+
+        let expectedMessages: [Prompt.Message] = [
+            .user("Please review this design mockup:"),
+            .user(.image(data: "base64_image_data", mimeType: "image/png")),
+            .assistant("I'll analyze the design mockup for you."),
+            .assistant(.audio(data: "base64_audio_data", mimeType: "audio/mp3")),
+        ]
+
+        // Register get prompt handler
+        await server.withMethodHandler(GetPrompt.self) { params in
+            #expect(params.name == "design_review")
+
+            return GetPrompt.Result(
+                description: "Design review prompt with multimedia",
+                messages: expectedMessages
+            )
+        }
+
+        let client = Client(
+            name: "PromptTestClient",
+            version: "1.0"
+        )
+
+        try await server.start(transport: serverTransport)
+        try await client.connect(transport: clientTransport)
+
+        let (description, messages) = try await client.getPrompt(name: "design_review")
+
+        #expect(description == "Design review prompt with multimedia")
+        #expect(messages == expectedMessages)
+
+        await server.stop()
+        await client.disconnect()
+    }
+
+    @Test("Prompt with resource content")
+    func testPromptWithResourceContent() async throws {
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+
+        let server = Server(
+            name: "PromptTestServer",
+            version: "1.0",
+            capabilities: .init(prompts: .init())
+        )
+
+        let resourceContent = Resource.Content.text(
+            "Code review content",
+            uri: "file://code.swift",
+            mimeType: "text/plain"
+        )
+
+        let expectedMessages: [Prompt.Message] = [
+            .user("Review this code:"),
+            .user(.resource(resource: resourceContent, annotations: nil, _meta: nil)),
+            .assistant("I'll review the code for you."),
+        ]
+
+        // Register get prompt handler
+        await server.withMethodHandler(GetPrompt.self) { _ in
+            GetPrompt.Result(
+                description: "Code review prompt",
+                messages: expectedMessages
+            )
+        }
+
+        let client = Client(
+            name: "PromptTestClient",
+            version: "1.0"
+        )
+
+        try await server.start(transport: serverTransport)
+        try await client.connect(transport: clientTransport)
+
+        let (description, messages) = try await client.getPrompt(name: "code_review")
+
+        #expect(description == "Code review prompt")
+        #expect(messages == expectedMessages)
+
+        await server.stop()
+        await client.disconnect()
+    }
+
+    @Test("List prompts with pagination")
+    func testListPromptsWithPagination() async throws {
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+
+        let server = Server(
+            name: "PromptTestServer",
+            version: "1.0",
+            capabilities: .init(prompts: .init())
+        )
+
+        // Register list prompts handler with pagination
+        await server.withMethodHandler(ListPrompts.self) { params in
+            if let cursor = params.cursor {
+                #expect(cursor == "page2")
+                return ListPrompts.Result(
+                    prompts: [
+                        Prompt(name: "prompt3", description: "Third prompt"),
+                        Prompt(name: "prompt4", description: "Fourth prompt"),
+                    ],
+                    nextCursor: nil
+                )
+            } else {
+                return ListPrompts.Result(
+                    prompts: [
+                        Prompt(name: "prompt1", description: "First prompt"),
+                        Prompt(name: "prompt2", description: "Second prompt"),
+                    ],
+                    nextCursor: "page2"
+                )
+            }
+        }
+
+        let client = Client(
+            name: "PromptTestClient",
+            version: "1.0"
+        )
+
+        try await server.start(transport: serverTransport)
+        try await client.connect(transport: clientTransport)
+
+        // First page
+        let (page1Prompts, page1Cursor) = try await client.listPrompts()
+        #expect(page1Prompts.count == 2)
+        #expect(page1Prompts[0].name == "prompt1")
+        #expect(page1Prompts[1].name == "prompt2")
+        #expect(page1Cursor == "page2")
+
+        // Second page
+        let (page2Prompts, page2Cursor) = try await client.listPrompts(cursor: "page2")
+        #expect(page2Prompts.count == 2)
+        #expect(page2Prompts[0].name == "prompt3")
+        #expect(page2Prompts[1].name == "prompt4")
+        #expect(page2Cursor == nil)
+
+        await server.stop()
+        await client.disconnect()
+    }
+
+    @Test("Prompt without capability fails")
+    func testPromptWithoutCapabilityFails() async throws {
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+
+        // Server WITHOUT prompts capability
+        let server = Server(
+            name: "PromptTestServer",
+            version: "1.0"
+        )
+
+        let client = Client(
+            name: "PromptTestClient",
+            version: "1.0"
+        )
+
+        try await server.start(transport: serverTransport)
+        try await client.connect(transport: clientTransport)
+
+        // Should throw an error because server doesn't have prompts capability
+        await #expect(throws: MCPError.self) {
+            _ = try await client.listPrompts()
+        }
+
+        await server.stop()
+        await client.disconnect()
+    }
+
+    @Test("Strict mode succeeds when server declares prompts capability")
+    func testPromptStrictCapabilitiesSuccess() async throws {
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+
+        let server = Server(
+            name: "StrictPromptTestServer",
+            version: "1.0",
+            capabilities: .init(prompts: .init()),
+            configuration: .strict
+        )
+
+        // Register list prompts handler
+        await server.withMethodHandler(ListPrompts.self) { _ in
+            ListPrompts.Result(
+                prompts: [
+                    Prompt(name: "test", description: "Test prompt")
+                ]
+            )
+        }
+
+        let client = Client(
+            name: "StrictPromptTestClient",
+            version: "1.0",
+            configuration: .strict
+        )
+
+        try await server.start(transport: serverTransport)
+        try await client.connect(transport: clientTransport)
+
+        // Should succeed because server declares prompts capability
+        let (prompts, _) = try await client.listPrompts()
+
+        #expect(prompts.count == 1)
+        #expect(prompts[0].name == "test")
+
+        await server.stop()
+        await client.disconnect()
+    }
+
+    @Test("Strict mode fails when server doesn't declare prompts capability")
+    func testPromptStrictCapabilitiesError() async throws {
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+
+        // Server WITHOUT prompts capability in strict mode
+        let server = Server(
+            name: "StrictPromptTestServer",
+            version: "1.0",
+            capabilities: .init(),
+            configuration: .strict
+        )
+
+        let client = Client(
+            name: "StrictPromptTestClient",
+            version: "1.0",
+            configuration: .strict
+        )
+
+        try await server.start(transport: serverTransport)
+        try await client.connect(transport: clientTransport)
+
+        // Should fail because server doesn't declare prompts capability in strict mode
+        await #expect(throws: MCPError.self) {
+            _ = try await client.listPrompts()
+        }
+
+        await server.stop()
+        await client.disconnect()
+    }
+
+    @Test("Non-strict mode succeeds even without server capability declaration")
+    func testPromptNonStrictCapabilities() async throws {
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+
+        // Server WITHOUT prompts capability in non-strict mode
+        let server = Server(
+            name: "NonStrictPromptTestServer",
+            version: "1.0",
+            capabilities: .init(),
+            configuration: .default
+        )
+
+        // Register list prompts handler anyway
+        await server.withMethodHandler(ListPrompts.self) { _ in
+            ListPrompts.Result(
+                prompts: [
+                    Prompt(name: "non_strict_test", description: "Non-strict test prompt")
+                ]
+            )
+        }
+
+        let client = Client(
+            name: "NonStrictPromptTestClient",
+            version: "1.0",
+            configuration: .default
+        )
+
+        try await server.start(transport: serverTransport)
+        try await client.connect(transport: clientTransport)
+
+        // Should succeed because client is in non-strict mode
+        let (prompts, _) = try await client.listPrompts()
+
+        #expect(prompts.count == 1)
+        #expect(prompts[0].name == "non_strict_test")
+
+        await server.stop()
+        await client.disconnect()
     }
 }

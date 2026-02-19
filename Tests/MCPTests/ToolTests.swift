@@ -20,6 +20,8 @@ struct ToolTests {
         #expect(tool.name == "test_tool")
         #expect(tool.description == "A test tool")
         #expect(tool.inputSchema != nil)
+        #expect(tool.title == nil)
+        #expect(tool.outputSchema == nil)
     }
 
     @Test("Tool Annotations initialization and properties")
@@ -202,6 +204,40 @@ struct ToolTests {
         #expect(decoded.inputSchema == tool.inputSchema)
     }
 
+    @Test("Tool encoding and decoding with title and output schema")
+    func testToolEncodingDecodingWithTitleAndOutputSchema() throws {
+        let tool = Tool(
+            name: "test_tool",
+            title: "Readable Test Tool",
+            description: "Test tool description",
+            inputSchema: .object([
+                "type": .string("object"),
+                "properties": .object([
+                    "param1": .string("String parameter")
+                ]),
+            ]),
+            outputSchema: .object([
+                "type": .string("object"),
+                "properties": .object([
+                    "result": .string("String result")
+                ]),
+            ])
+        )
+
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+
+        let data = try encoder.encode(tool)
+        let decoded = try decoder.decode(Tool.self, from: data)
+
+        #expect(decoded.title == tool.title)
+        #expect(decoded.outputSchema == tool.outputSchema)
+
+        let jsonString = String(decoding: data, as: UTF8.self)
+        #expect(jsonString.contains("\"title\":\"Readable Test Tool\""))
+        #expect(jsonString.contains("\"outputSchema\""))
+    }
+
     @Test("Text content encoding and decoding")
     func testToolContentTextEncoding() throws {
         let content = Tool.Content.text("Hello, world!")
@@ -223,7 +259,7 @@ struct ToolTests {
         let content = Tool.Content.image(
             data: "base64data",
             mimeType: "image/png",
-            metadata: ["width": "100", "height": "100"]
+            metadata: .init(additionalFields: ["width": "100", "height": "100"])
         )
         let encoder = JSONEncoder()
         let decoder = JSONDecoder()
@@ -243,23 +279,57 @@ struct ToolTests {
 
     @Test("Resource content encoding and decoding")
     func testToolContentResourceEncoding() throws {
-        let content = Tool.Content.resource(
+        let resourceContent = Resource.Content.text(
+            "Sample text",
             uri: "file://test.txt",
-            mimeType: "text/plain",
-            text: "Sample text"
+            mimeType: "text/plain"
         )
+        let content = Tool.Content.resource(resource: resourceContent, annotations: nil, _meta: nil)
         let encoder = JSONEncoder()
         let decoder = JSONDecoder()
 
         let data = try encoder.encode(content)
         let decoded = try decoder.decode(Tool.Content.self, from: data)
 
-        if case .resource(let uri, let mimeType, let text) = decoded {
-            #expect(uri == "file://test.txt")
-            #expect(mimeType == "text/plain")
-            #expect(text == "Sample text")
+        if case .resource(let resource, let annotations, let _meta) = decoded {
+            #expect(resource.uri == "file://test.txt")
+            #expect(resource.mimeType == "text/plain")
+            #expect(resource.text == "Sample text")
+            #expect(annotations == nil)
+            #expect(_meta == nil)
         } else {
             #expect(Bool(false), "Expected resource content")
+        }
+    }
+
+    @Test("Resource link content includes title")
+    func testToolContentResourceLinkEncoding() throws {
+        let content = Tool.Content.resourceLink(
+            uri: "file://resource.txt",
+            name: "resource_name",
+            title: "Resource Title",
+            description: "Resource description",
+            mimeType: "text/plain"
+        )
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+
+        let data = try encoder.encode(content)
+        let jsonString = String(decoding: data, as: UTF8.self)
+        #expect(jsonString.contains("\"title\":\"Resource Title\""))
+
+        let decoded = try decoder.decode(Tool.Content.self, from: data)
+        if case .resourceLink(
+            let uri, let name, let title, let description, let mimeType, let annotations
+        ) = decoded {
+            #expect(uri == "file://resource.txt")
+            #expect(name == "resource_name")
+            #expect(title == "Resource Title")
+            #expect(description == "Resource description")
+            #expect(mimeType == "text/plain")
+            #expect(annotations == nil)
+        } else {
+            #expect(Bool(false), "Expected resourceLink content")
         }
     }
 
@@ -422,7 +492,6 @@ struct ToolTests {
             #expect(Bool(false), "Expected success result")
         }
     }
-}
 
     @Test("Tool with missing description")
     func testToolWithMissingDescription() throws {
@@ -433,10 +502,11 @@ struct ToolTests {
             }
             """
         let jsonData = jsonString.data(using: .utf8)!
-        
+
         let tool = try JSONDecoder().decode(Tool.self, from: jsonData)
-        
+
         #expect(tool.name == "test_tool")
         #expect(tool.description == nil)
         #expect(tool.inputSchema == [:])
     }
+}
