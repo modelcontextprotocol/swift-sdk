@@ -37,6 +37,7 @@ of the MCP specification.
   - [Sampling](#sampling-1)
   - [Elicitations](#elicitations)
   - [Logging](#logging-1)
+  - [Progress Tracking](#progress-tracking-1)
   - [Initialize Hook](#initialize-hook)
   - [Graceful Shutdown](#graceful-shutdown)
 - [Transports](#transports)
@@ -1046,6 +1047,44 @@ await server.withMethodHandler(SetLoggingLevel.self) { params in
     storeLogLevel(minimumLevel)
 
     return Empty()
+}
+```
+
+### Progress Tracking
+
+Servers can send incremental progress notifications during long-running tool calls by reading the `progressToken` from the request metadata and sending `ProgressNotification` messages:
+
+```swift
+await server.withMethodHandler(CallTool.self) { params in
+    // Read the progress token from request metadata
+    guard let token = params._meta?.progressToken else {
+        // No progress token provided — run without reporting progress
+        return .init(content: [.text("Done")], isError: false)
+    }
+
+    // Report initial progress
+    let started = ProgressNotification.message(
+        .init(progressToken: token, progress: 0, total: 100)
+    )
+    try await server.notify(started)
+
+    // ... do work ...
+
+    // Report intermediate progress
+    let halfway = ProgressNotification.message(
+        .init(progressToken: token, progress: 50, total: 100, message: "Halfway there")
+    )
+    try await server.notify(halfway)
+
+    // ... do more work ...
+
+    // Report completion
+    let done = ProgressNotification.message(
+        .init(progressToken: token, progress: 100, total: 100, message: "Complete")
+    )
+    try await server.notify(done)
+
+    return .init(content: [.text("Done")], isError: false)
 }
 ```
 
