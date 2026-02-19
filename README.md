@@ -23,6 +23,7 @@ of the MCP specification.
   - [Completions](#completions)
   - [Sampling](#sampling)
   - [Elicitation](#elicitation)
+  - [Roots](#roots)
   - [Logging](#logging)
   - [Error Handling](#error-handling)
   - [Cancellation](#cancellation)
@@ -36,6 +37,7 @@ of the MCP specification.
   - [Completions](#completions-1)
   - [Sampling](#sampling-1)
   - [Elicitations](#elicitations)
+  - [Roots](#roots-1)
   - [Logging](#logging-1)
   - [Progress Tracking](#progress-tracking-1)
   - [Initialize Hook](#initialize-hook)
@@ -162,11 +164,10 @@ for item in content {
         }
     case .audio(let data, let mimeType):
         print("Received audio data of type \(mimeType)")
-    case .resource(let uri, let mimeType, let text):
-        print("Received resource from \(uri) of type \(mimeType)")
-        if let text = text {
-            print("Resource text: \(text)")
-        }
+    case .resource(let resource, _, _):
+        print("Received embedded resource: \(resource)")
+    case .resourceLink(let uri, let name, _, _, let mimeType, _):
+        print("Resource link: \(name) at \(uri), type: \(mimeType ?? "unknown")")
     }
 }
 ```
@@ -185,7 +186,7 @@ let contents = try await client.readResource(uri: "resource://example")
 print("Resource content: \(contents)")
 
 // Subscribe to resource updates if supported
-if result.capabilities.resources.subscribe {
+if result.capabilities.resources?.subscribe == true {
     try await client.subscribeToResource(uri: "resource://example")
 
     // Register notification handler
@@ -345,29 +346,37 @@ Register an elicitation handler to respond to server requests:
 
 ```swift
 // Register an elicitation handler in the client
-await client.setElicitationHandler { parameters in
-    // Display the request to the user
-    print("Server requests: \(parameters.message)")
-    
-    // If a schema was provided, validate against it
-    if let schema = parameters.requestedSchema {
-        print("Required fields: \(schema.required ?? [])")
-        print("Schema: \(schema.properties)")
-    }
-    
-    // Present UI to collect user input
-    let userResponse = presentElicitationUI(parameters)
-    
-    // Return the user's response
-    if userResponse.accepted {
-        return CreateElicitation.Result(
-            action: .accept,
-            content: userResponse.data
-        )
-    } else if userResponse.canceled {
-        return CreateElicitation.Result(action: .cancel)
-    } else {
-        return CreateElicitation.Result(action: .decline)
+await client.withElicitationHandler { parameters in
+    switch parameters {
+    case .form(let form):
+        // Display the request to the user
+        print("Server requests: \(form.message)")
+
+        // If a schema was provided, inspect it
+        if let schema = form.requestedSchema {
+            print("Required fields: \(schema.required ?? [])")
+            print("Schema: \(schema.properties)")
+        }
+
+        // Present UI to collect user input
+        let userResponse = presentElicitationUI(form)
+
+        // Return the user's response
+        if userResponse.accepted {
+            return CreateElicitation.Result(
+                action: .accept,
+                content: userResponse.data
+            )
+        } else if userResponse.canceled {
+            return CreateElicitation.Result(action: .cancel)
+        } else {
+            return CreateElicitation.Result(action: .decline)
+        }
+
+    case .url(let url):
+        // Direct the user to an external URL (e.g., for OAuth)
+        openURL(url.url)
+        return CreateElicitation.Result(action: .accept)
     }
 }
 ```
@@ -378,6 +387,34 @@ Common use cases for elicitation:
 - **Confirmation**: Ask for user approval before sensitive operations
 - **Configuration**: Collect preferences or settings during operation
 - **Missing information**: Request additional details not provided initially
+
+### Roots
+
+Roots define the filesystem boundaries that a client exposes to servers. Servers discover roots by sending a `roots/list` request to the client; clients notify servers when the list changes.
+
+> [!TIP]
+> To use roots, declare the `roots` capability when creating the client.
+
+```swift
+let client = Client(
+    name: "MyApp",
+    version: "1.0.0",
+    capabilities: .init(
+        roots: .init(listChanged: true)
+    )
+)
+
+// Register a handler for roots/list requests from servers
+await client.withRootsHandler {
+    return [
+        Root(uri: "file:///Users/user/projects", name: "Projects"),
+        Root(uri: "file:///Users/user/documents", name: "Documents")
+    ]
+}
+
+// Notify connected servers whenever roots change
+try await client.notifyRootsChanged()
+```
 
 ### Logging
 
@@ -505,7 +542,7 @@ await client.onNotification(ProgressNotification.self) { message in
 let (content, isError) = try await client.callTool(
     name: "long-running-tool",
     arguments: ["input": "value"],
-    meta: RequestMeta(progressToken: progressToken)
+    meta: Metadata(progressToken: progressToken)
 )
 ```
 
@@ -799,9 +836,9 @@ await server.withMethodHandler(GetPrompt.self) { params in
 
         let description = "Job interview for \(position) position at \(company)"
         let messages: [Prompt.Message] = [
-            .user("You are an interviewer for the \(position) position at \(company)."),
-            .user("Hello, I'm \(interviewee) and I'm here for the \(position) interview."),
-            .assistant("Hi \(interviewee), welcome to \(company)! I'd like to start by asking about your background and experience.")
+            .user(.text(text: "You are an interviewer for the \(position) position at \(company).")),
+            .user(.text(text: "Hello, I'm \(interviewee) and I'm here for the \(position) interview.")),
+            .assistant(.text(text: "Hi \(interviewee), welcome to \(company)! I'd like to start by asking about your background and experience."))
         ]
 
         return .init(description: description, messages: messages)
@@ -902,9 +939,6 @@ await server.withMethodHandler(Complete.self) { params in
 
 Servers can request LLM completions from clients through sampling. This enables agentic behaviors where servers can ask for AI assistance while maintaining human oversight.
 
-> [!NOTE]
-> The current implementation provides the correct API design for sampling, but requires bidirectional communication support in the transport layer. This feature will be fully functional when bidirectional transport support is added.
-
 ```swift
 // Enable sampling capability in server
 let server = Server(
@@ -916,7 +950,7 @@ let server = Server(
     )
 )
 
-// Request sampling from the client (conceptual - requires bidirectional transport)
+// Request sampling from the connected client
 do {
     let result = try await server.requestSampling(
         messages: [
@@ -980,6 +1014,35 @@ case .decline:
     throw MCPError.invalidRequest("User declined to provide information")
 case .cancel:
     throw MCPError.invalidRequest("Operation canceled by user")
+}
+```
+
+For URL-based elicitation (e.g., OAuth flows), use the URL overload:
+
+```swift
+let result = try await server.requestElicitation(
+    message: "Please sign in to continue",
+    url: "https://example.com/oauth/authorize?client_id=...",
+    elicitationId: UUID().uuidString
+)
+```
+
+### Roots
+
+Servers can request the list of filesystem roots that the client has exposed:
+
+```swift
+// Request roots from the connected client
+// (requires the client to declare the roots capability)
+let roots = try await server.listRoots()
+for root in roots {
+    print("Root: \(root.name ?? root.uri) at \(root.uri)")
+}
+
+// React to root list changes
+await server.onNotification(RootsListChangedNotification.self) { _ in
+    let updatedRoots = try await server.listRoots()
+    print("Roots updated: \(updatedRoots.map { $0.uri })")
 }
 ```
 
@@ -1225,12 +1288,14 @@ MCP's transport layer handles communication between clients and servers.
 The Swift SDK provides multiple built-in transports:
 
 
-| Transport                                                                       | Description                                                                                                                                                             | Platforms                         | Best for                                                     |
-| ------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------- | ------------------------------------------------------------ |
-| `[StdioTransport](/Sources/MCP/Base/Transports/StdioTransport.swift)`           | Implements [stdio transport](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#stdio) using standard input/output streams                       | Apple platforms, Linux with glibc | Local subprocesses, CLI tools                                |
-| `[HTTPClientTransport](/Sources/MCP/Base/Transports/HTTPClientTransport.swift)` | Implements [Streamable HTTP transport](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#streamable-http) using Foundation's URL Loading System | All platforms with Foundation     | Remote servers, web applications                             |
-| `[InMemoryTransport](/Sources/MCP/Base/Transports/InMemoryTransport.swift)`     | Custom in-memory transport for direct communication within the same process                                                                                             | All platforms                     | Testing, debugging, same-process client-server communication |
-| `[NetworkTransport](/Sources/MCP/Base/Transports/NetworkTransport.swift)`       | Custom transport using Apple's Network framework for TCP/UDP connections                                                                                                | Apple platforms only              | Low-level networking, custom protocols                       |
+| Transport                                                                                               | Description                                                                                                                                                             | Platforms                         | Best for                                                     |
+| ------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------- | ------------------------------------------------------------ |
+| `[StdioTransport](/Sources/MCP/Base/Transports/StdioTransport.swift)`                                  | Implements [stdio transport](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#stdio) using standard input/output streams                       | Apple platforms, Linux with glibc | Local subprocesses, CLI tools                                |
+| `[HTTPClientTransport](/Sources/MCP/Base/Transports/HTTPClientTransport.swift)`                        | Implements [Streamable HTTP transport](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#streamable-http) using Foundation's URL Loading System | All platforms with Foundation     | Remote servers, web applications                             |
+| `[StatelessHTTPServerTransport](/Sources/MCP/Base/Transports/HTTPServer/StatelessHTTPServerTransport.swift)` | HTTP server transport with simple request-response semantics; no session management or SSE streaming                                                               | All platforms with Foundation     | Simple HTTP servers, serverless/edge functions               |
+| `[StatefulHTTPServerTransport](/Sources/MCP/Base/Transports/HTTPServer/StatefulHTTPServerTransport.swift)` | HTTP server transport with full session management and SSE streaming for server-initiated messages                                                                  | All platforms with Foundation     | Full-featured HTTP servers, streaming notifications          |
+| `[InMemoryTransport](/Sources/MCP/Base/Transports/InMemoryTransport.swift)`                            | Custom in-memory transport for direct communication within the same process                                                                                             | All platforms                     | Testing, debugging, same-process client-server communication |
+| `[NetworkTransport](/Sources/MCP/Base/Transports/NetworkTransport.swift)`                              | Custom transport using Apple's Network framework for TCP/UDP connections                                                                                                | Apple platforms only              | Low-level networking, custom protocols                       |
 
 
 ### Custom Transport Implementation
