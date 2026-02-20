@@ -654,6 +654,12 @@ public actor Client {
         self.serverVersion = result.protocolVersion
         self.instructions = result.instructions
 
+        // For HTTP transport, ensure subsequent MCP-Protocol-Version headers
+        // reflect the negotiated lifecycle version.
+        if let httpTransport = connection as? HTTPClientTransport {
+            await httpTransport.updateNegotiatedProtocolVersion(result.protocolVersion)
+        }
+
         try await notify(InitializedNotification.message())
 
         return result
