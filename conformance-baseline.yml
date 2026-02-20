@@ -17,6 +17,3 @@ client:
   - auth/2025-03-26-oauth-endpoint-fallback
   - auth/client-credentials-jwt
   - auth/client-credentials-basic
-
-server:
-  - server-sse-polling

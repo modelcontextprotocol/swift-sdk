@@ -43,7 +43,7 @@ actor HTTPApp {
     }
 
     /// Factory function to create MCP Server instances for each session.
-    typealias ServerFactory = @Sendable (String) async throws -> Server
+    typealias ServerFactory = @Sendable (String, StatefulHTTPServerTransport) async throws -> Server
 
     private let configuration: Configuration
     private let serverFactory: ServerFactory
@@ -209,7 +209,7 @@ actor HTTPApp {
         )
 
         do {
-            let server = try await serverFactory(sessionID)
+            let server = try await serverFactory(sessionID, transport)
             try await server.start(transport: transport)
 
             sessions[sessionID] = SessionContext(

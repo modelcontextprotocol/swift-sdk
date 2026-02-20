@@ -101,11 +101,6 @@ public actor Server {
             public init() {}
         }
 
-        /// Sampling capabilities
-        public struct Sampling: Hashable, Codable, Sendable {
-            public init() {}
-        }
-
         /// Completions capabilities
         public struct Completions: Hashable, Codable, Sendable {
             public init() {}
@@ -119,8 +114,6 @@ public actor Server {
         public var prompts: Prompts?
         /// Resources capabilities
         public var resources: Resources?
-        /// Sampling capabilities
-        public var sampling: Sampling?
         /// Tools capabilities
         public var tools: Tools?
 
@@ -129,14 +122,12 @@ public actor Server {
             logging: Logging? = nil,
             prompts: Prompts? = nil,
             resources: Resources? = nil,
-            sampling: Sampling? = nil,
             tools: Tools? = nil
         ) {
             self.completions = completions
             self.logging = logging
             self.prompts = prompts
             self.resources = resources
-            self.sampling = sampling
             self.tools = tools
         }
     }
@@ -304,6 +295,16 @@ public actor Server {
     public func waitUntilCompleted() async {
         await task?.value
     }
+
+    // MARK: - Request Context
+
+    /// The JSON-RPC request ID of the currently executing method handler.
+    ///
+    /// Set via `@TaskLocal` before dispatching each request, so it propagates
+    /// automatically into the handler task. Accessible package-wide for
+    /// transports that need to identify the active request (e.g. closing an
+    /// SSE stream mid-call for reconnection testing per SEP-1699).
+    @TaskLocal package static var currentRequestID: ID? = nil
 
     // MARK: - Registration
 
@@ -749,26 +750,30 @@ public actor Server {
             return response
         }
 
-        // Create a task to handle the request with cancellation support
-        let handlerTask = Task<Response<AnyMethod>, Error> {
-            do {
-                // Check if task was cancelled before starting
-                try Task.checkCancellation()
+        // Create a task to handle the request with cancellation support.
+        // Set currentRequestID as a task local so handlers can identify the active request.
+        var handlerTask: Task<Response<AnyMethod>, Error>!
+        Server.$currentRequestID.withValue(request.id) {
+            handlerTask = Task<Response<AnyMethod>, Error> {
+                do {
+                    // Check if task was cancelled before starting
+                    try Task.checkCancellation()
 
-                // Handle request and get response
-                let response = try await handler(request)
-                return response
-            } catch is CancellationError {
-                // Request was cancelled, don't send a response per MCP spec
-                await logger?.debug(
-                    "Request cancelled",
-                    metadata: ["id": "\(request.id)", "method": "\(request.method)"]
-                )
-                throw CancellationError()
-            } catch {
-                let mcpError =
-                    error as? MCPError ?? MCPError.internalError(error.localizedDescription)
-                return AnyMethod.response(id: request.id, error: mcpError)
+                    // Handle request and get response
+                    let response = try await handler(request)
+                    return response
+                } catch is CancellationError {
+                    // Request was cancelled, don't send a response per MCP spec
+                    await logger?.debug(
+                        "Request cancelled",
+                        metadata: ["id": "\(request.id)", "method": "\(request.method)"]
+                    )
+                    throw CancellationError()
+                } catch {
+                    let mcpError =
+                        error as? MCPError ?? MCPError.internalError(error.localizedDescription)
+                    return AnyMethod.response(id: request.id, error: mcpError)
+                }
             }
         }
 
@@ -949,7 +954,13 @@ public actor Server {
                 ]
             )
 
-            guard let requestId = requestId else { return }
+            guard let requestId = requestId else {
+                await self.logger?.warning(
+                    "Received cancellation notification with no requestId (violates spec MUST)",
+                    metadata: ["reason": reason.map { "\($0)" } ?? "none"]
+                )
+                return
+            }
 
             // Cancel the pending request task if it exists and remove from tracking
             if let task = await self.removePendingRequest(id: requestId) {

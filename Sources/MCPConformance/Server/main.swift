@@ -45,11 +45,12 @@ actor ServerState {
 
 // MARK: - Server Setup
 
-func createConformanceServer(state: ServerState) async -> Server {
+func createConformanceServer(state: ServerState, transport: StatefulHTTPServerTransport) async -> Server {
     let server = Server(
         name: "mcp-conformance-test-server",
         version: "1.0.0",
         capabilities: Server.Capabilities(
+            completions: .init(),
             logging: .init(),
             prompts: .init(listChanged: true),
             resources: .init(subscribe: true, listChanged: true),
@@ -98,7 +99,7 @@ func createConformanceServer(state: ServerState) async -> Server {
         ])
     }
 
-    await server.withMethodHandler(CallTool.self) { [weak server] params in
+    await server.withMethodHandler(CallTool.self) { [weak server, transport] params in
         switch params.name {
         case "test_simple_text":
             return .init(content: [.text(text: "This is a simple text response for testing.", annotations: nil, _meta: nil)], isError: false)
@@ -176,11 +177,16 @@ func createConformanceServer(state: ServerState) async -> Server {
 
             return .init(content: [.text(text: "Logging test completed", annotations: nil, _meta: nil)], isError: false)
         case "test_reconnection":
-            // This tool tests SSE reconnection behavior (SEP-1699)
-            // In a full implementation, the server would close the SSE stream mid-call
-            // and the client would need to reconnect with Last-Event-ID to get the result.
-            // For now, we return a simple success response.
-            return .init(content: [.text(text: "Reconnection test completed successfully", annotations: nil, _meta: nil)], isError: false)
+            // SEP-1699: Close the SSE stream mid-call to trigger client reconnection.
+            // The client should reconnect via GET with Last-Event-ID and receive the
+            // response on the new stream.
+            if let requestID = Server.currentRequestID {
+                
+                await transport.closeSSEStream(forRequestID: requestID.description)
+            }
+            // Wait briefly for the client to reconnect before sending the response.
+            try await Task.sleep(for: .milliseconds(100))
+            return .init(content: [.text(text: "Reconnection test completed successfully. If you received this, the client properly reconnected after stream closure.", annotations: nil, _meta: nil)], isError: false)
         case "test_sampling":
             // Test LLM sampling - request sampling/createMessage from client
             guard let prompt = params.arguments?["prompt"]?.stringValue else {
@@ -485,7 +491,8 @@ struct MCPHTTPServer {
             configuration: .init(
                 host: "127.0.0.1",
                 port: port,
-                endpoint: "/mcp"
+                endpoint: "/mcp",
+                retryInterval: 1000
             ),
             validationPipeline: StandardValidationPipeline(validators: [
                 OriginValidator.localhost(port: port),
@@ -494,9 +501,9 @@ struct MCPHTTPServer {
                 ProtocolVersionValidator(),
                 SessionValidator(),
             ]),
-            serverFactory: { sessionID in
+            serverFactory: { sessionID, transport in
                 logger.debug("Creating server for session", metadata: ["sessionID": "\(sessionID)"])
-                return await createConformanceServer(state: state)
+                return await createConformanceServer(state: state, transport: transport)
             },
             logger: logger
         )

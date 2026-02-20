@@ -182,7 +182,8 @@ public actor StatefulHTTPServerTransport: Transport {
             return .error(
                 statusCode: 405,
                 .invalidRequest("Method Not Allowed"),
-                sessionID: sessionID
+                sessionID: sessionID,
+                extraHeaders: [HTTPHeaderName.allow: "GET, POST, DELETE"]
             )
         }
     }
@@ -238,6 +239,15 @@ public actor StatefulHTTPServerTransport: Transport {
     }
 
     private func handleInitializationRequest(_ body: Data, request: HTTPRequest) -> HTTPResponse {
+        // Reject re-initialization at the transport level
+        if sessionID != nil {
+            return .error(
+                statusCode: 400,
+                .invalidRequest("Bad Request: Session already initialized"),
+                sessionID: sessionID
+            )
+        }
+
         // Generate session ID
         let newSessionID = sessionIDGenerator.generateSessionID()
 
@@ -271,15 +281,8 @@ public actor StatefulHTTPServerTransport: Transport {
         let (sseStream, sseContinuation) = AsyncThrowingStream<Data, Swift.Error>.makeStream()
         requestSSEContinuations[requestID] = sseContinuation
 
-        // Extract protocol version for priming event decision
-        let protocolVersion = extractProtocolVersion(from: body, request: request)
-
         // Send priming event for resumability
-        sendPrimingEvent(
-            streamID: requestID,
-            continuation: sseContinuation,
-            protocolVersion: protocolVersion
-        )
+        sendPrimingEvent(streamID: requestID, continuation: sseContinuation)
 
         // Yield the incoming message to the server
         incomingContinuation.yield(body)
@@ -327,15 +330,8 @@ public actor StatefulHTTPServerTransport: Transport {
         let (sseStream, sseContinuation) = AsyncThrowingStream<Data, Swift.Error>.makeStream()
         standaloneSSEContinuation = sseContinuation
 
-        // Extract protocol version for priming event
-        let protocolVersion = request.header(HTTPHeaderName.protocolVersion) ?? Version.latest
-
         // Send priming event
-        sendPrimingEvent(
-            streamID: standaloneStreamID,
-            continuation: sseContinuation,
-            protocolVersion: protocolVersion
-        )
+        sendPrimingEvent(streamID: standaloneStreamID, continuation: sseContinuation)
 
         // Build response headers
         var headers = sessionHeaders()
@@ -357,9 +353,7 @@ public actor StatefulHTTPServerTransport: Transport {
             supportedProtocolVersions: Version.supported
         )
 
-        // Only run session validation for DELETE (not all validators)
-        let sessionValidator = SessionValidator()
-        if let errorResponse = sessionValidator.validate(request, context: context) {
+        if let errorResponse = validationPipeline.validate(request, context: context) {
             return errorResponse
         }
 
@@ -439,12 +433,7 @@ public actor StatefulHTTPServerTransport: Transport {
         }
 
         // Send a new priming event so the client can resume again if disconnected
-        let protocolVersion = request.header(HTTPHeaderName.protocolVersion) ?? Version.latest
-        sendPrimingEvent(
-            streamID: replay.streamID,
-            continuation: sseContinuation,
-            protocolVersion: protocolVersion
-        )
+        sendPrimingEvent(streamID: replay.streamID, continuation: sseContinuation)
 
         var headers = sessionHeaders()
         headers[HTTPHeaderName.contentType] = ContentType.sse
@@ -478,12 +467,8 @@ public actor StatefulHTTPServerTransport: Transport {
 
     private func sendPrimingEvent(
         streamID: String,
-        continuation: AsyncThrowingStream<Data, Swift.Error>.Continuation,
-        protocolVersion: String
+        continuation: AsyncThrowingStream<Data, Swift.Error>.Continuation
     ) {
-        // Priming events with empty data are only safe for clients >= 2025-11-25
-        guard protocolVersion >= "2025-11-25" else { return }
-
         let primingEventID = storeEvent(streamID: streamID, message: nil)
         let primingEvent = SSEEvent.priming(id: primingEventID, retry: retryInterval)
         continuation.yield(primingEvent.formatted())
@@ -504,17 +489,16 @@ public actor StatefulHTTPServerTransport: Transport {
         return id.utf8.allSatisfy { $0 >= 0x21 && $0 <= 0x7E }
     }
 
-    private func extractProtocolVersion(from body: Data, request: HTTPRequest) -> String {
-        // For initialize requests, extract from the request body params
-        if let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
-           let method = json["method"] as? String, method == "initialize",
-           let params = json["params"] as? [String: Any],
-           let version = params["protocolVersion"] as? String
-        {
-            return version
-        }
-        // For other requests, use the header
-        return request.header(HTTPHeaderName.protocolVersion) ?? Version.latest
+    // MARK: - Stream Control
+
+    /// Closes the SSE stream for a specific request without sending a response.
+    ///
+    /// Used to trigger client reconnection mid-call (SEP-1699). The response,
+    /// when eventually sent, will be stored and replayed to the reconnected stream.
+    package func closeSSEStream(forRequestID requestID: String) {
+        guard let continuation = requestSSEContinuations[requestID] else { return }
+        continuation.finish()
+        requestSSEContinuations.removeValue(forKey: requestID)
     }
 
     // MARK: - Termination

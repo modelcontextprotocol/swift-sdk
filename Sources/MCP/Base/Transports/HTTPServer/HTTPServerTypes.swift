@@ -88,7 +88,7 @@ public enum HTTPResponse: Sendable {
 
     /// Error response with a JSON-RPC error body.
     /// The status code, headers, and body are derived automatically.
-    case error(statusCode: Int, MCPError, sessionID: String? = nil)
+    case error(statusCode: Int, MCPError, sessionID: String? = nil, extraHeaders: [String: String] = [:])
 
     // MARK: - Computed Properties
 
@@ -96,7 +96,7 @@ public enum HTTPResponse: Sendable {
         switch self {
         case .accepted: 202
         case .ok, .data, .stream: 200
-        case .error(let code, _, _): code
+        case .error(let code, _, _, _): code
         }
     }
 
@@ -104,9 +104,10 @@ public enum HTTPResponse: Sendable {
         switch self {
         case .accepted(let headers), .ok(let headers), .data(_, let headers), .stream(_, let headers):
             return headers
-        case .error(_, _, let sessionID):
+        case .error(_, _, let sessionID, let extraHeaders):
             var headers: [String: String] = [HTTPHeaderName.contentType: ContentType.json]
             if let sessionID { headers[HTTPHeaderName.sessionID] = sessionID }
+            headers.merge(extraHeaders) { _, new in new }
             return headers
         }
     }
@@ -118,7 +119,7 @@ public enum HTTPResponse: Sendable {
             return nil
         case .data(let data, _):
             return data
-        case .error(_, let error, _):
+        case .error(_, let error, _, _):
             let errorBody: [String: Any] = [
                 "jsonrpc": "2.0",
                 "error": [
@@ -136,8 +137,8 @@ public enum HTTPResponse: Sendable {
 
 /// Standard header names used by the MCP Streamable HTTP transport.
 public enum HTTPHeaderName {
-    public static let sessionID = "Mcp-Session-Id"
-    public static let protocolVersion = "Mcp-Protocol-Version"
+    public static let sessionID = "MCP-Session-Id"
+    public static let protocolVersion = "MCP-Protocol-Version"
     public static let lastEventID = "Last-Event-Id"
     public static let accept = "Accept"
     public static let contentType = "Content-Type"
