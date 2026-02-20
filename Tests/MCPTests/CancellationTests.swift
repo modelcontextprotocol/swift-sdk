@@ -133,7 +133,7 @@ struct CancellationTests {
         }
 
         await server.withMethodHandler(CallTool.self) { params in
-            return .init(content: [.text("Result for \(params.name)")], isError: false)
+            return .init(content: [.text(text: "Result for \(params.name)", annotations: nil, _meta: nil)], isError: false)
         }
 
         // Start server and connect client
@@ -149,7 +149,7 @@ struct CancellationTests {
 
         // Get the result
         let result = try await context.value
-        #expect(result.content == [.text("Result for testTool")])
+        #expect(result.content == [.text(text: "Result for testTool", annotations: nil, _meta: nil)])
         #expect(result.isError == false)
 
         await client.disconnect()
@@ -174,7 +174,7 @@ struct CancellationTests {
 
         await server.withMethodHandler(CallTool.self) { params in
             try await Task.sleep(for: .seconds(5))
-            return .init(content: [.text("Should not reach here")], isError: false)
+            return .init(content: [.text(text: "Should not reach here", annotations: nil, _meta: nil)], isError: false)
         }
 
         // Start server and connect client

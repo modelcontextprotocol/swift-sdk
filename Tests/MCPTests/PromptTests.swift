@@ -125,9 +125,9 @@ struct PromptTests {
         let encoder = JSONEncoder()
         let decoder = JSONDecoder()
 
-        let arguments: [String: Value] = [
-            "param1": .string("value1"),
-            "param2": .int(42),
+        let arguments: [String: String] = [
+            "param1": "value1",
+            "param2": "42",
         ]
 
         let params = GetPrompt.Parameters(name: "test_prompt", arguments: arguments)
@@ -570,14 +570,14 @@ struct PromptIntegrationTests {
         )
 
         let expectedMessages: [Prompt.Message] = [
-            .user("Hello, I'd like to schedule an interview for the \(Value.string("Software Engineer")) position"),
+            .user("Hello, I'd like to schedule an interview for the Software Engineer position"),
             .assistant("I'd be happy to help you prepare for the Software Engineer interview. Let's discuss your background."),
         ]
 
         // Register get prompt handler
         await server.withMethodHandler(GetPrompt.self) { params in
             #expect(params.name == "interview")
-            #expect(params.arguments?["position"]?.stringValue == "Software Engineer")
+            #expect(params.arguments?["position"] == "Software Engineer")
 
             return GetPrompt.Result(
                 description: "Interview preparation prompt",
@@ -595,7 +595,7 @@ struct PromptIntegrationTests {
 
         let (description, messages) = try await client.getPrompt(
             name: "interview",
-            arguments: ["position": .string("Software Engineer")]
+            arguments: ["position": "Software Engineer"]
         )
 
         #expect(description == "Interview preparation prompt")

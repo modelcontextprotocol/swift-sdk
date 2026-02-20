@@ -38,11 +38,27 @@ public actor Client {
         public var title: String?
         /// The client version
         public var version: String
+        /// Optional description of the client
+        public var description: String?
+        /// Optional website URL for the client
+        public var websiteUrl: String?
+        /// Optional set of sized icons for display in a user interface
+        public var icons: [Icon]?
 
-        public init(name: String, version: String, title: String? = nil) {
+        public init(
+            name: String,
+            version: String,
+            title: String? = nil,
+            description: String? = nil,
+            websiteUrl: String? = nil,
+            icons: [Icon]? = nil
+        ) {
             self.name = name
             self.title = title
             self.version = version
+            self.description = description
+            self.websiteUrl = websiteUrl
+            self.icons = icons
         }
     }
 
@@ -163,46 +179,6 @@ public actor Client {
     /// The task for the message handling loop
     private var task: Task<Void, Never>?
 
-    /// An error indicating a type mismatch when decoding a pending request
-    private struct TypeMismatchError: Swift.Error {}
-
-    /// A pending request with a continuation for the result
-    private struct PendingRequest<T> {
-        let continuation: CheckedContinuation<T, Swift.Error>
-    }
-
-    /// A type-erased pending request
-    private struct AnyPendingRequest: Sendable {
-        private let _resume: @Sendable (Result<Any, Swift.Error>) -> Void
-
-        init<T: Sendable & Decodable>(_ request: PendingRequest<T>) {
-            _resume = { result in
-                switch result {
-                case .success(let value):
-                    if let typedValue = value as? T {
-                        request.continuation.resume(returning: typedValue)
-                    } else if let value = value as? Value,
-                        let data = try? JSONEncoder().encode(value),
-                        let decoded = try? JSONDecoder().decode(T.self, from: data)
-                    {
-                        request.continuation.resume(returning: decoded)
-                    } else {
-                        request.continuation.resume(throwing: TypeMismatchError())
-                    }
-                case .failure(let error):
-                    request.continuation.resume(throwing: error)
-                }
-            }
-        }
-        func resume(returning value: Any) {
-            _resume(.success(value))
-        }
-
-        func resume(throwing error: Swift.Error) {
-            _resume(.failure(error))
-        }
-    }
-
     /// A dictionary of type-erased pending requests, keyed by request ID
     private var pendingRequests: [ID: AnyPendingRequest] = [:]
     // Add reusable JSON encoder/decoder
@@ -213,10 +189,15 @@ public actor Client {
         name: String,
         version: String,
         title: String? = nil,
+        description: String? = nil,
+        websiteUrl: String? = nil,
+        icons: [Icon]? = nil,
         capabilities: Capabilities = Capabilities(),
         configuration: Configuration = .default
     ) {
-        self.clientInfo = Client.Info(name: name, version: version, title: title)
+        self.clientInfo = Client.Info(
+            name: name, version: version, title: title,
+            description: description, websiteUrl: websiteUrl, icons: icons)
         self.capabilities = capabilities
         self.configuration = configuration
     }
@@ -285,13 +266,15 @@ public actor Client {
             await self.logger?.debug(
                 "Received cancellation notification",
                 metadata: [
-                    "requestId": "\(requestId)",
+                    "requestId": requestId.map { "\($0)" } ?? "none",
                     "reason": reason.map { "\($0)" } ?? "none",
                 ]
             )
 
             // Remove the pending request and resume with cancellation error
-            if let pendingRequest = await self.removePendingRequest(id: requestId) {
+            if let requestId = requestId,
+                let pendingRequest = await self.removePendingRequest(id: requestId)
+            {
                 pendingRequest.resume(throwing: CancellationError())
             }
         }
@@ -683,7 +666,7 @@ public actor Client {
 
     // MARK: - Prompts
 
-    public func getPrompt(name: String, arguments: [String: Value]? = nil) async throws
+    public func getPrompt(name: String, arguments: [String: String]? = nil) async throws
         -> (description: String?, messages: [Prompt.Message])
     {
         try validateServerCapability(\.prompts, "Prompts")
@@ -923,7 +906,7 @@ public actor Client {
         promptName: String,
         argumentName: String,
         argumentValue: String,
-        context: [String: Value]? = nil
+        context: [String: String]? = nil
     ) async throws -> Complete.Result.Completion {
         try validateServerCapability(\.completions, "Completions")
         let request = Complete.request(
@@ -954,7 +937,7 @@ public actor Client {
         resourceURI: String,
         argumentName: String,
         argumentValue: String,
-        context: [String: Value]? = nil
+        context: [String: String]? = nil
     ) async throws -> Complete.Result.Completion {
         try validateServerCapability(\.completions, "Completions")
         let request = Complete.request(

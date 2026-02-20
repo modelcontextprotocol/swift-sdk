@@ -176,7 +176,7 @@ struct Elicitation2025_11_25Tests {
         let decoder = JSONDecoder()
 
         let params = CreateElicitation.Parameters.form(
-            .init(message: "Enter your name")
+            .init(message: "Enter your name", requestedSchema: .init())
         )
 
         let data = try encoder.encode(params)
@@ -262,7 +262,7 @@ struct ElicitationIntegrationTests {
         await client.withElicitationHandler { parameters in
             if case .form(let formParams) = parameters {
                 #expect(formParams.message == "Please enter your details")
-                #expect(formParams.requestedSchema?.properties["email"] != nil)
+                #expect(formParams.requestedSchema.properties["email"] != nil)
                 #expect(formParams._meta?["flow"]?.stringValue == "onboarding")
 
                 // Return accepted response
@@ -384,7 +384,8 @@ struct ElicitationIntegrationTests {
         try await client.connect(transport: clientTransport)
 
         let result = try await server.requestElicitation(
-            message: "Optional question"
+            message: "Optional question",
+            requestedSchema: .init()
         )
 
         #expect(result.action == .decline)
@@ -414,7 +415,8 @@ struct ElicitationIntegrationTests {
         // Should throw an error because client doesn't have elicitation capability
         await #expect(throws: MCPError.self) {
             _ = try await server.requestElicitation(
-                message: "Test message"
+                message: "Test message",
+                requestedSchema: .init()
             )
         }
 
@@ -452,7 +454,8 @@ struct ElicitationIntegrationTests {
 
         // Should succeed because client declares elicitation capability
         let result = try await server.requestElicitation(
-            message: "Test message"
+            message: "Test message",
+            requestedSchema: .init()
         )
 
         #expect(result.action == .accept)
@@ -486,7 +489,8 @@ struct ElicitationIntegrationTests {
         // Should fail because client doesn't declare elicitation capability in strict mode
         await #expect(throws: MCPError.self) {
             _ = try await server.requestElicitation(
-                message: "Test message"
+                message: "Test message",
+                requestedSchema: .init()
             )
         }
 
@@ -525,7 +529,8 @@ struct ElicitationIntegrationTests {
 
         // Should succeed because server is in non-strict mode
         let result = try await server.requestElicitation(
-            message: "Test message"
+            message: "Test message",
+            requestedSchema: .init()
         )
 
         #expect(result.action == .accept)
@@ -608,15 +613,15 @@ struct ElicitationIntegrationTests {
         try await client.connect(transport: clientTransport)
 
         // Make multiple sequential requests
-        let result1 = try await server.requestElicitation(message: "First question")
+        let result1 = try await server.requestElicitation(message: "First question", requestedSchema: .init())
         #expect(result1.action == .accept)
         #expect(result1.content?["echo"]?.stringValue == "First question")
 
-        let result2 = try await server.requestElicitation(message: "Second question")
+        let result2 = try await server.requestElicitation(message: "Second question", requestedSchema: .init())
         #expect(result2.action == .accept)
         #expect(result2.content?["echo"]?.stringValue == "Second question")
 
-        let result3 = try await server.requestElicitation(message: "Third question")
+        let result3 = try await server.requestElicitation(message: "Third question", requestedSchema: .init())
         #expect(result3.action == .accept)
         #expect(result3.content?["echo"]?.stringValue == "Third question")
 

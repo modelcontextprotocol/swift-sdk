@@ -171,7 +171,6 @@ extension MCPError: Codable {
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(code, forKey: .code)
-        try container.encode(errorDescription ?? "Unknown error", forKey: .message)
 
         // Encode additional data if available
         switch self {
@@ -180,13 +179,17 @@ extension MCPError: Codable {
             .methodNotFound(let detail),
             .invalidParams(let detail),
             .internalError(let detail):
+            try container.encode(errorDescription ?? "Unknown error", forKey: .message)
             if let detail = detail {
                 try container.encode(["detail": detail], forKey: .data)
             }
         case .serverError(_, _):
             // No additional data for server errors
+            try container.encode(errorDescription ?? "Unknown error", forKey: .message)
             break
-        case .urlElicitationRequired(_, let elicitations):
+        case .urlElicitationRequired(let message, let elicitations):
+            // Encode the raw message so decode can round-trip without prefix doubling
+            try container.encode(message, forKey: .message)
             // Encode elicitations array as structured data
             let elicitationsData = elicitations.map { info -> [String: Value] in
                 return [
@@ -201,8 +204,9 @@ extension MCPError: Codable {
                 forKey: .data
             )
         case .connectionClosed:
-            break
+            try container.encode(errorDescription ?? "Unknown error", forKey: .message)
         case .transportError(let error):
+            try container.encode(errorDescription ?? "Unknown error", forKey: .message)
             try container.encode(
                 ["error": error.localizedDescription],
                 forKey: .data
@@ -279,7 +283,21 @@ extension MCPError: Codable {
 
 extension MCPError: Equatable {
     public static func == (lhs: MCPError, rhs: MCPError) -> Bool {
-        lhs.code == rhs.code
+        switch (lhs, rhs) {
+        case (.parseError(let a), .parseError(let b)): return a == b
+        case (.invalidRequest(let a), .invalidRequest(let b)): return a == b
+        case (.methodNotFound(let a), .methodNotFound(let b)): return a == b
+        case (.invalidParams(let a), .invalidParams(let b)): return a == b
+        case (.internalError(let a), .internalError(let b)): return a == b
+        case (.serverError(let c1, let m1), .serverError(let c2, let m2)):
+            return c1 == c2 && m1 == m2
+        case (.urlElicitationRequired(let m1, let e1), .urlElicitationRequired(let m2, let e2)):
+            return m1 == m2 && e1 == e2
+        case (.connectionClosed, .connectionClosed): return true
+        case (.transportError(let a), .transportError(let b)):
+            return a.localizedDescription == b.localizedDescription
+        default: return false
+        }
     }
 }
 

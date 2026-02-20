@@ -637,7 +637,7 @@ import Testing
                         #expect(toolName == "calculator")
 
                         let requestID = json["id"] as! String
-                        let result = CallTool.Result(content: [.text("42")])
+                        let result = CallTool.Result(content: [.text(text: "42", annotations: nil, _meta: nil)])
                         let response = CallTool.response(id: .string(requestID), result: result)
                         let responseData = try JSONEncoder().encode(response)
 
@@ -669,7 +669,7 @@ import Testing
                 // Step 2: Call a tool
                 let toolResult = try await client.callTool(name: "calculator")
                 #expect(toolResult.content.count == 1)
-                if case let .text(text) = toolResult.content[0] {
+                if case let .text(text, _, _) = toolResult.content[0] {
                     #expect(text == "42")
                 } else {
                     #expect(Bool(false), "Expected text content")

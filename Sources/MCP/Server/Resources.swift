@@ -18,8 +18,10 @@ public struct Resource: Hashable, Codable, Sendable {
     public var description: String?
     /// The resource MIME type
     public var mimeType: String?
-    /// The resource metadata
-    public var metadata: [String: String]?
+    /// Raw content size in bytes
+    public var size: Int?
+    /// Annotations for this resource
+    public var annotations: Resource.Annotations?
     /// Optional set of sized icons that the client can display in a user interface
     public var icons: [Icon]?
     /// Metadata fields for the resource (see spec for _meta usage)
@@ -31,7 +33,8 @@ public struct Resource: Hashable, Codable, Sendable {
         title: String? = nil,
         description: String? = nil,
         mimeType: String? = nil,
-        metadata: [String: String]? = nil,
+        size: Int? = nil,
+        annotations: Resource.Annotations? = nil,
         icons: [Icon]? = nil,
         _meta: Metadata? = nil
     ) {
@@ -40,7 +43,8 @@ public struct Resource: Hashable, Codable, Sendable {
         self.uri = uri
         self.description = description
         self.mimeType = mimeType
-        self.metadata = metadata
+        self.size = size
+        self.annotations = annotations
         self.icons = icons
         self._meta = _meta
     }
@@ -51,7 +55,8 @@ public struct Resource: Hashable, Codable, Sendable {
         case title
         case description
         case mimeType
-        case metadata
+        case size
+        case annotations
         case icons
         case _meta
     }
@@ -63,7 +68,8 @@ public struct Resource: Hashable, Codable, Sendable {
         title = try container.decodeIfPresent(String.self, forKey: .title)
         description = try container.decodeIfPresent(String.self, forKey: .description)
         mimeType = try container.decodeIfPresent(String.self, forKey: .mimeType)
-        metadata = try container.decodeIfPresent([String: String].self, forKey: .metadata)
+        size = try container.decodeIfPresent(Int.self, forKey: .size)
+        annotations = try container.decodeIfPresent(Resource.Annotations.self, forKey: .annotations)
         icons = try container.decodeIfPresent([Icon].self, forKey: .icons)
         _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
     }
@@ -75,7 +81,8 @@ public struct Resource: Hashable, Codable, Sendable {
         try container.encodeIfPresent(title, forKey: .title)
         try container.encodeIfPresent(description, forKey: .description)
         try container.encodeIfPresent(mimeType, forKey: .mimeType)
-        try container.encodeIfPresent(metadata, forKey: .metadata)
+        try container.encodeIfPresent(size, forKey: .size)
+        try container.encodeIfPresent(annotations, forKey: .annotations)
         try container.encodeIfPresent(icons, forKey: .icons)
         try container.encodeIfPresent(_meta, forKey: ._meta)
     }
@@ -181,8 +188,12 @@ public struct Resource: Hashable, Codable, Sendable {
         public var description: String?
         /// The resource MIME type
         public var mimeType: String?
+        /// Annotations for this template
+        public var annotations: Resource.Annotations?
         /// Optional set of sized icons that the client can display in a user interface
         public var icons: [Icon]?
+        /// Metadata fields for the template (see spec for _meta usage)
+        public var _meta: Metadata?
 
         public init(
             uriTemplate: String,
@@ -190,14 +201,18 @@ public struct Resource: Hashable, Codable, Sendable {
             title: String? = nil,
             description: String? = nil,
             mimeType: String? = nil,
-            icons: [Icon]? = nil
+            annotations: Resource.Annotations? = nil,
+            icons: [Icon]? = nil,
+            _meta: Metadata? = nil
         ) {
             self.uriTemplate = uriTemplate
             self.name = name
             self.title = title
             self.description = description
             self.mimeType = mimeType
+            self.annotations = annotations
             self.icons = icons
+            self._meta = _meta
         }
     }
 
@@ -233,7 +248,7 @@ public struct Resource: Hashable, Codable, Sendable {
 // MARK: -
 
 /// To discover available resources, clients send a `resources/list` request.
-/// - SeeAlso: https://spec.modelcontextprotocol.io/specification/2025-06-18/server/resources/#listing-resources
+/// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/server/resources/#listing-resources
 public enum ListResources: Method {
     public static let name: String = "resources/list"
 
@@ -285,7 +300,7 @@ public enum ListResources: Method {
 }
 
 /// To retrieve resource contents, clients send a `resources/read` request:
-/// - SeeAlso: https://spec.modelcontextprotocol.io/specification/2025-06-18/server/resources/#reading-resources
+/// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/server/resources/#reading-resources
 public enum ReadResource: Method {
     public static let name: String = "resources/read"
 
@@ -329,7 +344,7 @@ public enum ReadResource: Method {
 }
 
 /// To discover available resource templates, clients send a `resources/templates/list` request.
-/// - SeeAlso: https://spec.modelcontextprotocol.io/specification/2025-06-18/server/resources/#resource-templates
+/// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/server/resources/#resource-templates
 public enum ListResourceTemplates: Method {
     public static let name: String = "resources/templates/list"
 
@@ -384,7 +399,7 @@ public enum ListResourceTemplates: Method {
 }
 
 /// When the list of available resources changes, servers that declared the listChanged capability SHOULD send a notification.
-/// - SeeAlso: https://spec.modelcontextprotocol.io/specification/2025-06-18/server/resources/#list-changed-notification
+/// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/server/resources/#list-changed-notification
 public struct ResourceListChangedNotification: Notification {
     public static let name: String = "notifications/resources/list_changed"
 
@@ -392,7 +407,7 @@ public struct ResourceListChangedNotification: Notification {
 }
 
 /// Clients can subscribe to specific resources and receive notifications when they change.
-/// - SeeAlso: https://spec.modelcontextprotocol.io/specification/2025-06-18/server/resources/#subscriptions
+/// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/server/resources/#subscriptions
 public enum ResourceSubscribe: Method {
     public static let name: String = "resources/subscribe"
 
@@ -416,7 +431,7 @@ public enum ResourceUnsubscribe: Method {
 }
 
 /// When a resource changes, servers that declared the updated capability SHOULD send a notification to subscribed clients.
-/// - SeeAlso: https://spec.modelcontextprotocol.io/specification/2025-06-18/server/resources/#subscriptions
+/// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/server/resources/#subscriptions
 public struct ResourceUpdatedNotification: Notification {
     public static let name: String = "notifications/resources/updated"
 

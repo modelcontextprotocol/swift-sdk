@@ -57,17 +57,17 @@ struct RoundtripTests {
         }
         await server.withMethodHandler(CallTool.self) { request in
             guard request.name == "add" else {
-                return CallTool.Result(content: [.text("Invalid tool name")], isError: true)
+                return CallTool.Result(content: [.text(text: "Invalid tool name", annotations: nil, _meta: nil)], isError: true)
             }
 
             guard let a = request.arguments?["a"]?.intValue,
                 let b = request.arguments?["b"]?.intValue
             else {
                 return CallTool.Result(
-                    content: [.text("Did not receive valid arguments")], isError: true)
+                    content: [.text(text: "Did not receive valid arguments", annotations: nil, _meta: nil)], isError: true)
             }
 
-            return CallTool.Result(content: [.text("\(a + b)")])
+            return CallTool.Result(content: [.text(text: "\(a + b)", annotations: nil, _meta: nil)])
         }
 
         // Add resource handlers to server
@@ -151,7 +151,7 @@ struct RoundtripTests {
         let callToolTask = Task {
             let result = try await client.callTool(name: "add", arguments: ["a": 1, "b": 2])
             #expect(result.isError == nil)
-            #expect(result.content == [.text("3")])
+            #expect(result.content == [.text(text: "3", annotations: nil, _meta: nil)])
         }
 
         try await withThrowingTaskGroup(of: Void.self) { group in

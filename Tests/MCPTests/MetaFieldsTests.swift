@@ -18,60 +18,6 @@ struct MetaFieldsTests {
         typealias Result = Payload
     }
 
-    @Test("Encoding includes meta and custom fields")
-    func testEncodingGeneralFields() throws {
-        let meta: Metadata = Metadata(additionalFields: ["vendor.example/request-id": .string("abc123")])
-
-        let request = Request<TestMethod>(
-            id: 42,
-            method: TestMethod.name,
-            params: Payload(message: "hello"),
-            _meta: meta
-        )
-
-        let data = try JSONEncoder().encode(request)
-        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-
-        let metaObject = json?["_meta"] as? [String: Any]
-        #expect(metaObject?["vendor.example/request-id"] as? String == "abc123")
-    }
-
-    @Test("Decoding restores general fields")
-    func testDecodingGeneralFields() throws {
-        let payload: [String: Any] = [
-            "jsonrpc": "2.0",
-            "id": 7,
-            "method": TestMethod.name,
-            "params": ["message": "hi"],
-            "_meta": ["vendor.example/session": "s42"],
-            "custom-data": ["value": 1],
-        ]
-
-        let data = try JSONSerialization.data(withJSONObject: payload)
-        let decoded = try JSONDecoder().decode(Request<TestMethod>.self, from: data)
-
-        let metaValue = decoded._meta?["vendor.example/session"]
-        #expect(metaValue == .string("s42"))
-    }
-
-    @Test("Response encoding includes general fields")
-    func testResponseGeneralFields() throws {
-        let meta = Metadata(additionalFields: ["vendor.example/status": .string("partial")])
-        let response = Response<TestMethod>(
-            id: 99,
-            result: .success(Payload(message: "ok")),
-            _meta: meta
-        )
-
-        let data = try JSONEncoder().encode(response)
-        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        let metaObject = json?["_meta"] as? [String: Any]
-        #expect(metaObject?["vendor.example/status"] as? String == "partial")
-
-        let decoded = try JSONDecoder().decode(Response<TestMethod>.self, from: data)
-        #expect(decoded._meta?["vendor.example/status"] == .string("partial"))
-    }
-
     @Test("Tool encoding and decoding with general fields")
     func testToolGeneralFields() throws {
         let meta = Metadata(additionalFields: [
@@ -199,7 +145,7 @@ struct MetaFieldsTests {
         let meta = Metadata(additionalFields: ["vendor.example/executionTime": .int(150)])
 
         let result = CallTool.Result(
-            content: [.text("Result data")],
+            content: [.text(text: "Result data", annotations: nil, _meta: nil)],
             isError: false,
             _meta: meta
         )

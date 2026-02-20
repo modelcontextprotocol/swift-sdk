@@ -7,38 +7,10 @@ import Foundation
 
 // MARK: - Reference Types
 
-/// A reference to a prompt by name
-public struct PromptReference: Hashable, Codable, Sendable {
-    /// The prompt name
-    public let name: String
-
-    public init(name: String) {
-        self.name = name
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case type, name
-    }
-
-    public func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode("ref/prompt", forKey: .type)
-        try container.encode(name, forKey: .name)
-    }
-
-    public init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        let type = try container.decode(String.self, forKey: .type)
-        guard type == "ref/prompt" else {
-            throw DecodingError.dataCorruptedError(
-                forKey: .type,
-                in: container,
-                debugDescription: "Expected ref/prompt type"
-            )
-        }
-        name = try container.decode(String.self, forKey: .name)
-    }
-}
+/// A reference to a prompt by name.
+///
+/// This is a typealias for `Prompt.Reference` — the two types are equivalent.
+public typealias PromptReference = Prompt.Reference
 
 /// A reference to a resource by URI
 public struct ResourceReference: Hashable, Codable, Sendable {
@@ -153,9 +125,9 @@ public enum Complete: Method {
         /// Context containing already-resolved arguments
         public struct Context: Hashable, Codable, Sendable {
             /// A mapping of already-resolved argument names to their values
-            public let arguments: [String: Value]
+            public let arguments: [String: String]
 
-            public init(arguments: [String: Value]) {
+            public init(arguments: [String: String]) {
                 self.arguments = arguments
             }
         }
@@ -164,9 +136,28 @@ public enum Complete: Method {
     public struct Result: Hashable, Codable, Sendable {
         /// The completion result
         public let completion: Completion
+        /// Optional metadata about this result
+        public var _meta: Metadata?
 
-        public init(completion: Completion) {
+        public init(completion: Completion, _meta: Metadata? = nil) {
             self.completion = completion
+            self._meta = _meta
+        }
+
+        private enum CodingKeys: String, CodingKey, CaseIterable {
+            case completion, _meta
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(completion, forKey: .completion)
+            try container.encodeIfPresent(_meta, forKey: ._meta)
+        }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            completion = try container.decode(Completion.self, forKey: .completion)
+            _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
         }
 
         /// Completion result containing suggested values
