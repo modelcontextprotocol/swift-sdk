@@ -240,14 +240,14 @@ struct ToolTests {
 
     @Test("Text content encoding and decoding")
     func testToolContentTextEncoding() throws {
-        let content = Tool.Content.text("Hello, world!")
+        let content = Tool.Content.text(text: "Hello, world!", annotations: nil, _meta: nil)
         let encoder = JSONEncoder()
         let decoder = JSONDecoder()
 
         let data = try encoder.encode(content)
         let decoded = try decoder.decode(Tool.Content.self, from: data)
 
-        if case .text(let text) = decoded {
+        if case .text(let text, _, _) = decoded {
             #expect(text == "Hello, world!")
         } else {
             #expect(Bool(false), "Expected text content")
@@ -259,7 +259,8 @@ struct ToolTests {
         let content = Tool.Content.image(
             data: "base64data",
             mimeType: "image/png",
-            metadata: .init(additionalFields: ["width": "100", "height": "100"])
+            annotations: nil,
+            _meta: nil
         )
         let encoder = JSONEncoder()
         let decoder = JSONDecoder()
@@ -267,11 +268,9 @@ struct ToolTests {
         let data = try encoder.encode(content)
         let decoded = try decoder.decode(Tool.Content.self, from: data)
 
-        if case .image(let data, let mimeType, let metadata) = decoded {
+        if case .image(let data, let mimeType, _, _) = decoded {
             #expect(data == "base64data")
             #expect(mimeType == "image/png")
-            #expect(metadata?["width"] == "100")
-            #expect(metadata?["height"] == "100")
         } else {
             #expect(Bool(false), "Expected image content")
         }
@@ -337,7 +336,9 @@ struct ToolTests {
     func testToolContentAudioEncoding() throws {
         let content = Tool.Content.audio(
             data: "base64audiodata",
-            mimeType: "audio/wav"
+            mimeType: "audio/wav",
+            annotations: nil,
+            _meta: nil
         )
         let encoder = JSONEncoder()
         let decoder = JSONDecoder()
@@ -345,7 +346,7 @@ struct ToolTests {
         let data = try encoder.encode(content)
         let decoded = try decoder.decode(Tool.Content.self, from: data)
 
-        if case .audio(let data, let mimeType) = decoded {
+        if case .audio(let data, let mimeType, _, _) = decoded {
             #expect(data == "base64audiodata")
             #expect(mimeType == "audio/wav")
         } else {
@@ -422,15 +423,15 @@ struct ToolTests {
     @Test("CallTool success result validation")
     func testCallToolResult() throws {
         let content = [
-            Tool.Content.text("Result 1"),
-            Tool.Content.text("Result 2"),
+            Tool.Content.text(text: "Result 1", annotations: nil, _meta: nil),
+            Tool.Content.text(text: "Result 2", annotations: nil, _meta: nil),
         ]
 
         let result = CallTool.Result(content: content)
         #expect(result.content.count == 2)
         #expect(result.isError == nil)
 
-        if case .text(let text) = result.content[0] {
+        if case .text(let text, _, _) = result.content[0] {
             #expect(text == "Result 1")
         } else {
             #expect(Bool(false), "Expected text content")
@@ -439,12 +440,12 @@ struct ToolTests {
 
     @Test("CallTool error result validation")
     func testCallToolErrorResult() throws {
-        let errorContent = [Tool.Content.text("Error message")]
+        let errorContent = [Tool.Content.text(text: "Error message", annotations: nil, _meta: nil)]
         let errorResult = CallTool.Result(content: errorContent, isError: true)
         #expect(errorResult.content.count == 1)
         #expect(errorResult.isError == true)
 
-        if case .text(let text) = errorResult.content[0] {
+        if case .text(let text, _, _) = errorResult.content[0] {
             #expect(text == "Error message")
         } else {
             #expect(Bool(false), "Expected error text content")
