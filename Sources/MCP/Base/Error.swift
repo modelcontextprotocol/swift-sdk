@@ -279,7 +279,21 @@ extension MCPError: Codable {
 
 extension MCPError: Equatable {
     public static func == (lhs: MCPError, rhs: MCPError) -> Bool {
-        lhs.code == rhs.code
+        switch (lhs, rhs) {
+        case (.parseError(let a), .parseError(let b)): return a == b
+        case (.invalidRequest(let a), .invalidRequest(let b)): return a == b
+        case (.methodNotFound(let a), .methodNotFound(let b)): return a == b
+        case (.invalidParams(let a), .invalidParams(let b)): return a == b
+        case (.internalError(let a), .internalError(let b)): return a == b
+        case (.serverError(let c1, let m1), .serverError(let c2, let m2)):
+            return c1 == c2 && m1 == m2
+        case (.urlElicitationRequired(let m1, let e1), .urlElicitationRequired(let m2, let e2)):
+            return m1 == m2 && e1 == e2
+        case (.connectionClosed, .connectionClosed): return true
+        case (.transportError(let a), .transportError(let b)):
+            return a.localizedDescription == b.localizedDescription
+        default: return false
+        }
     }
 }
 

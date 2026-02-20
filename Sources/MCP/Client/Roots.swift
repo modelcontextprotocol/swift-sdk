@@ -16,30 +16,37 @@ public struct Root: Hashable, Codable, Sendable {
     public let uri: String
     /// Optional human-readable name for the root
     public let name: String?
+    /// Optional metadata
+    public var _meta: Metadata?
 
     public init(
         uri: String,
-        name: String? = nil
+        name: String? = nil,
+        _meta: Metadata? = nil
     ) {
         self.uri = uri
         self.name = name
+        self._meta = _meta
     }
 
     private enum CodingKeys: String, CodingKey {
         case uri
         case name
+        case _meta
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         uri = try container.decode(String.self, forKey: .uri)
         name = try container.decodeIfPresent(String.self, forKey: .name)
+        _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
     }
 
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(uri, forKey: .uri)
         try container.encodeIfPresent(name, forKey: .name)
+        try container.encodeIfPresent(_meta, forKey: ._meta)
     }
 }
 

@@ -34,11 +34,27 @@ public actor Server {
         public let title: String?
         /// The server version
         public let version: String
+        /// Optional description of the server
+        public let description: String?
+        /// Optional website URL for the server
+        public let websiteUrl: String?
+        /// Optional set of sized icons for display in a user interface
+        public let icons: [Icon]?
 
-        public init(name: String, version: String, title: String? = nil) {
+        public init(
+            name: String,
+            version: String,
+            title: String? = nil,
+            description: String? = nil,
+            websiteUrl: String? = nil,
+            icons: [Icon]? = nil
+        ) {
             self.name = name
             self.title = title
             self.version = version
+            self.description = description
+            self.websiteUrl = websiteUrl
+            self.icons = icons
         }
     }
 
@@ -160,47 +176,6 @@ public actor Server {
     private var notificationHandlers: [String: [NotificationHandlerBox]] = [:]
     /// Pending request tasks (for cancellation support)
     private var pendingRequestTasks: [ID: Task<Response<AnyMethod>, Error>] = [:]
-
-    /// An error indicating a type mismatch when decoding a pending request
-    private struct TypeMismatchError: Swift.Error {}
-
-    /// A pending request with a continuation for the result
-    private struct PendingRequest<T> {
-        let continuation: CheckedContinuation<T, Swift.Error>
-    }
-
-    /// A type-erased pending request
-    private struct AnyPendingRequest: Sendable {
-        private let _resume: @Sendable (Result<Any, Swift.Error>) -> Void
-
-        init<T: Sendable & Decodable>(_ request: PendingRequest<T>) {
-            _resume = { result in
-                switch result {
-                case .success(let value):
-                    if let typedValue = value as? T {
-                        request.continuation.resume(returning: typedValue)
-                    } else if let value = value as? Value,
-                        let data = try? JSONEncoder().encode(value),
-                        let decoded = try? JSONDecoder().decode(T.self, from: data)
-                    {
-                        request.continuation.resume(returning: decoded)
-                    } else {
-                        request.continuation.resume(throwing: TypeMismatchError())
-                    }
-                case .failure(let error):
-                    request.continuation.resume(throwing: error)
-                }
-            }
-        }
-
-        func resume(returning value: Any) {
-            _resume(.success(value))
-        }
-
-        func resume(throwing error: Swift.Error) {
-            _resume(.failure(error))
-        }
-    }
 
     /// Pending requests sent to the client, awaiting responses
     private var pendingRequests: [ID: AnyPendingRequest] = [:]
@@ -523,8 +498,8 @@ public actor Server {
     /// - SeeAlso: https://modelcontextprotocol.io/docs/concepts/elicitation
     public func requestElicitation(
         message: String,
+        requestedSchema: Elicitation.RequestSchema,
         mode: Elicitation.Mode? = nil,
-        requestedSchema: Elicitation.RequestSchema? = nil,
         _meta: Metadata? = nil
     ) async throws -> CreateElicitation.Result {
         guard connection != nil else {
@@ -969,10 +944,12 @@ public actor Server {
             await self.logger?.debug(
                 "Received cancellation notification",
                 metadata: [
-                    "requestId": "\(requestId)",
+                    "requestId": requestId.map { "\($0)" } ?? "none",
                     "reason": reason.map { "\($0)" } ?? "none",
                 ]
             )
+
+            guard let requestId = requestId else { return }
 
             // Cancel the pending request task if it exists and remove from tracking
             if let task = await self.removePendingRequest(id: requestId) {

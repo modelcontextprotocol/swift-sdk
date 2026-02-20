@@ -7,7 +7,7 @@ import Foundation
 /// - SeeAlso: https://modelcontextprotocol.io/docs/concepts/sampling#how-sampling-works
 public enum Sampling {
     /// A message in the conversation history.
-    public struct Message: Hashable, Codable, Sendable {
+    public struct Message: Hashable, Sendable {
         /// The message role
         public enum Role: String, Hashable, Codable, Sendable {
             /// A user message
@@ -20,30 +20,34 @@ public enum Sampling {
         public let role: Role
         /// The message content
         public let content: Content
+        /// Optional metadata
+        public var _meta: Metadata?
 
         /// Creates a message with the specified role and content
         @available(
             *, deprecated, message: "Use static factory methods .user(_:) or .assistant(_:) instead"
         )
-        public init(role: Role, content: Content) {
+        public init(role: Role, content: Content, _meta: Metadata? = nil) {
             self.role = role
             self.content = content
+            self._meta = _meta
         }
 
         /// Private initializer for convenience methods to avoid deprecation warnings
-        private init(_role role: Role, _content content: Content) {
+        private init(_role role: Role, _content content: Content, _meta: Metadata? = nil) {
             self.role = role
             self.content = content
+            self._meta = _meta
         }
 
         /// Creates a user message with the specified content
-        public static func user(_ content: Content) -> Message {
-            return Message(_role: .user, _content: content)
+        public static func user(_ content: Content, _meta: Metadata? = nil) -> Message {
+            return Message(_role: .user, _content: content, _meta: _meta)
         }
 
         /// Creates an assistant message with the specified content
-        public static func assistant(_ content: Content) -> Message {
-            return Message(_role: .assistant, _content: content)
+        public static func assistant(_ content: Content, _meta: Metadata? = nil) -> Message {
+            return Message(_role: .assistant, _content: content, _meta: _meta)
         }
 
         /// Content types for sampling messages
@@ -144,16 +148,25 @@ public enum Sampling {
         case allServers
     }
 
-    /// Stop reason for sampling completion
-    public enum StopReason: String, Hashable, Codable, Sendable {
+    /// Stop reason for sampling completion.
+    ///
+    /// The spec defines this as an open string — any provider-specific value is valid.
+    /// The well-known values are exposed as static constants.
+    public struct StopReason: RawRepresentable, Hashable, Codable, Sendable,
+        ExpressibleByStringLiteral
+    {
+        public let rawValue: String
+        public init(rawValue: String) { self.rawValue = rawValue }
+        public init(stringLiteral value: String) { self.rawValue = value }
+
         /// Natural end of turn
-        case endTurn
+        public static let endTurn = StopReason(rawValue: "endTurn")
         /// Hit a stop sequence
-        case stopSequence
+        public static let stopSequence = StopReason(rawValue: "stopSequence")
         /// Reached maximum tokens
-        case maxTokens
+        public static let maxTokens = StopReason(rawValue: "maxTokens")
         /// Model wants to use a tool
-        case toolUse
+        public static let toolUse = StopReason(rawValue: "toolUse")
     }
 
     /// Content representing a tool use request from the model
@@ -220,6 +233,26 @@ public enum Sampling {
 
 // MARK: - Codable
 
+extension Sampling.Message: Codable {
+    private enum CodingKeys: String, CodingKey {
+        case role, content, _meta
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        role = try container.decode(Role.self, forKey: .role)
+        content = try container.decode(Content.self, forKey: .content)
+        _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(role, forKey: .role)
+        try container.encode(content, forKey: .content)
+        try container.encodeIfPresent(_meta, forKey: ._meta)
+    }
+}
+
 extension Sampling.Message.Content.ContentBlock: Codable {
     private enum CodingKeys: String, CodingKey {
         case type, text, data, mimeType
@@ -243,13 +276,13 @@ extension Sampling.Message.Content.ContentBlock: Codable {
             let data = try container.decode(String.self, forKey: .data)
             let mimeType = try container.decode(String.self, forKey: .mimeType)
             self = .audio(data: data, mimeType: mimeType)
-        case "toolUse":
+        case "tool_use":
             let id = try container.decode(String.self, forKey: .id)
             let name = try container.decode(String.self, forKey: .name)
             let input = try container.decode([String: Value].self, forKey: .input)
             let _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
             self = .toolUse(Sampling.ToolUseContent(id: id, name: name, input: input, _meta: _meta))
-        case "toolResult":
+        case "tool_result":
             let toolUseId = try container.decode(String.self, forKey: .toolUseId)
             let content = try container.decode([Sampling.ToolResultContent.ContentBlock].self, forKey: .content)
             let structuredContent = try container.decodeIfPresent([String: Value].self, forKey: .structuredContent)
@@ -284,13 +317,13 @@ extension Sampling.Message.Content.ContentBlock: Codable {
             try container.encode(data, forKey: .data)
             try container.encode(mimeType, forKey: .mimeType)
         case .toolUse(let toolUse):
-            try container.encode("toolUse", forKey: .type)
+            try container.encode("tool_use", forKey: .type)
             try container.encode(toolUse.id, forKey: .id)
             try container.encode(toolUse.name, forKey: .name)
             try container.encode(toolUse.input, forKey: .input)
             try container.encodeIfPresent(toolUse._meta, forKey: ._meta)
         case .toolResult(let toolResult):
-            try container.encode("toolResult", forKey: .type)
+            try container.encode("tool_result", forKey: .type)
             try container.encode(toolResult.toolUseId, forKey: .toolUseId)
             try container.encode(toolResult.content, forKey: .content)
             try container.encodeIfPresent(toolResult.structuredContent, forKey: .structuredContent)
@@ -372,7 +405,7 @@ extension Sampling.ToolResultContent.ContentBlock: Codable {
             let annotations = try container.decodeIfPresent(Resource.Annotations.self, forKey: .annotations)
             let _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
             self = .resource(resource: resourceContent, annotations: annotations, _meta: _meta)
-        case "resourceLink":
+        case "resource_link":
             let uri = try container.decode(String.self, forKey: .uri)
             let name = try container.decode(String.self, forKey: .name)
             let title = try container.decodeIfPresent(String.self, forKey: .title)
@@ -410,7 +443,7 @@ extension Sampling.ToolResultContent.ContentBlock: Codable {
             try container.encodeIfPresent(annotations, forKey: .annotations)
             try container.encodeIfPresent(_meta, forKey: ._meta)
         case .resourceLink(let uri, let name, let title, let description, let mimeType, let annotations):
-            try container.encode("resourceLink", forKey: .type)
+            try container.encode("resource_link", forKey: .type)
             try container.encode(uri, forKey: .uri)
             try container.encode(name, forKey: .name)
             try container.encodeIfPresent(title, forKey: .title)
@@ -469,6 +502,8 @@ public enum CreateSamplingMessage: Method {
         public let tools: [Tool]?
         /// Tool choice configuration
         public let toolChoice: ToolChoice?
+        /// Provider-specific metadata to pass to the LLM
+        public let metadata: [String: Value]?
 
         public init(
             messages: [Sampling.Message],
@@ -480,7 +515,8 @@ public enum CreateSamplingMessage: Method {
             stopSequences: [String]? = nil,
             _meta: Metadata? = nil,
             tools: [Tool]? = nil,
-            toolChoice: ToolChoice? = nil
+            toolChoice: ToolChoice? = nil,
+            metadata: [String: Value]? = nil
         ) {
             self.messages = messages
             self.modelPreferences = modelPreferences
@@ -492,6 +528,7 @@ public enum CreateSamplingMessage: Method {
             self._meta = _meta
             self.tools = tools
             self.toolChoice = toolChoice
+            self.metadata = metadata
         }
     }
 
