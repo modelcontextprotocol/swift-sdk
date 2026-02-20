@@ -281,8 +281,15 @@ public actor StatefulHTTPServerTransport: Transport {
         let (sseStream, sseContinuation) = AsyncThrowingStream<Data, Swift.Error>.makeStream()
         requestSSEContinuations[requestID] = sseContinuation
 
+        // Extract protocol version for priming event decision
+        let protocolVersion = extractProtocolVersion(from: body, request: request)
+
         // Send priming event for resumability
-        sendPrimingEvent(streamID: requestID, continuation: sseContinuation)
+        sendPrimingEvent(
+            streamID: requestID,
+            continuation: sseContinuation,
+            protocolVersion: protocolVersion
+        )
 
         // Yield the incoming message to the server
         incomingContinuation.yield(body)
@@ -330,8 +337,15 @@ public actor StatefulHTTPServerTransport: Transport {
         let (sseStream, sseContinuation) = AsyncThrowingStream<Data, Swift.Error>.makeStream()
         standaloneSSEContinuation = sseContinuation
 
+        // Extract protocol version for priming event
+        let protocolVersion = request.header(HTTPHeaderName.protocolVersion) ?? Version.latest
+
         // Send priming event
-        sendPrimingEvent(streamID: standaloneStreamID, continuation: sseContinuation)
+        sendPrimingEvent(
+            streamID: standaloneStreamID,
+            continuation: sseContinuation,
+            protocolVersion: protocolVersion
+        )
 
         // Build response headers
         var headers = sessionHeaders()
@@ -433,7 +447,12 @@ public actor StatefulHTTPServerTransport: Transport {
         }
 
         // Send a new priming event so the client can resume again if disconnected
-        sendPrimingEvent(streamID: replay.streamID, continuation: sseContinuation)
+        let protocolVersion = request.header(HTTPHeaderName.protocolVersion) ?? Version.latest
+        sendPrimingEvent(
+            streamID: replay.streamID,
+            continuation: sseContinuation,
+            protocolVersion: protocolVersion
+        )
 
         var headers = sessionHeaders()
         headers[HTTPHeaderName.contentType] = ContentType.sse
@@ -467,11 +486,28 @@ public actor StatefulHTTPServerTransport: Transport {
 
     private func sendPrimingEvent(
         streamID: String,
-        continuation: AsyncThrowingStream<Data, Swift.Error>.Continuation
+        continuation: AsyncThrowingStream<Data, Swift.Error>.Continuation,
+        protocolVersion: String
     ) {
+        // Priming events with empty data are only safe for clients >= 2025-11-25
+        guard protocolVersion >= "2025-03-26" else { return }
+
         let primingEventID = storeEvent(streamID: streamID, message: nil)
         let primingEvent = SSEEvent.priming(id: primingEventID, retry: retryInterval)
         continuation.yield(primingEvent.formatted())
+    }
+
+    private func extractProtocolVersion(from body: Data, request: HTTPRequest) -> String {
+        // For initialize requests, extract from the request body params
+        if let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+           let method = json["method"] as? String, method == "initialize",
+           let params = json["params"] as? [String: Any],
+           let version = params["protocolVersion"] as? String
+        {
+            return version
+        }
+        // For other requests, use the header
+        return request.header(HTTPHeaderName.protocolVersion) ?? Version.latest
     }
 
     // MARK: - Session Helpers

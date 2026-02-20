@@ -126,7 +126,7 @@ func createConformanceServer(state: ServerState, transport: StatefulHTTPServerTr
             guard let a = params.arguments?["a"]?.intValue, let b = params.arguments?["b"]?.intValue else {
                 return .init(content: [.text(text: "Invalid arguments: expected numbers a and b", annotations: nil, _meta: nil)], isError: true)
             }
-            return .init(content: [.text(text: "\\(a + b)", annotations: nil, _meta: nil)], isError: false)
+            return .init(content: [.text(text: "\(a + b)", annotations: nil, _meta: nil)], isError: false)
         case "test_tool_with_progress":
             if let token = params._meta?.progressToken {
                 let notification1 = ProgressNotification.message(
