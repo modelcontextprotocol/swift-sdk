@@ -28,7 +28,7 @@ var targetDependencies: [Target.Dependency] = [
 let package = Package(
     name: "mcp-swift-sdk",
     platforms: [
-        .macOS("13.0"),
+        .macOS("12.0"),
         .macCatalyst("16.0"),
         .iOS("16.0"),
         .watchOS("9.0"),

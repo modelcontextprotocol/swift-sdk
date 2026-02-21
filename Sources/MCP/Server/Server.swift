@@ -287,7 +287,7 @@ public actor Server {
                         }
                     } catch let error where MCPError.isResourceTemporarilyUnavailable(error) {
                         // Resource temporarily unavailable, retry after a short delay
-                        try? await Task.sleep(for: .milliseconds(10))
+                        try? await Task.sleep(nanoseconds: 10 * 1_000_000)
                         continue
                     } catch {
                         await logger?.error(
