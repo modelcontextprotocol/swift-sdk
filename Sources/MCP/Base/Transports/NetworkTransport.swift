@@ -686,7 +686,7 @@ import Logging
                             } else {
                                 // We're not reconnecting, finish the message stream with error
                                 messageContinuation.finish(
-                                    throwing: MCPError.transportError(error))
+                                    throwing: MCPError.transportError(SendableError(error)))
                                 break
                             }
                         } else {
@@ -763,7 +763,8 @@ import Logging
                         if !receiveContinuationResumed {
                             receiveContinuationResumed = true
                             if let error = error {
-                                continuation.resume(throwing: MCPError.transportError(error))
+                                continuation.resume(
+                                    throwing: MCPError.transportError(SendableError(error)))
                             } else if let content = content {
                                 continuation.resume(returning: content)
                             } else if isComplete {

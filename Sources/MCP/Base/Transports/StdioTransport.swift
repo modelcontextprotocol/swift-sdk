@@ -113,13 +113,13 @@ import struct Foundation.Data
                 // Get current flags
                 let flags = fcntl(fileDescriptor.rawValue, F_GETFL)
                 guard flags >= 0 else {
-                    throw MCPError.transportError(Errno(rawValue: CInt(errno)))
+                    throw MCPError.transportError(SendableError(Errno(rawValue: CInt(errno))))
                 }
 
                 // Set non-blocking flag
                 let result = fcntl(fileDescriptor.rawValue, F_SETFL, flags | O_NONBLOCK)
                 guard result >= 0 else {
-                    throw MCPError.transportError(Errno(rawValue: CInt(errno)))
+                    throw MCPError.transportError(SendableError(Errno(rawValue: CInt(errno))))
                 }
             #else
                 // For platforms where non-blocking operations aren't supported
@@ -196,7 +196,7 @@ import struct Foundation.Data
         /// - Throws: Error if the message cannot be sent
         public func send(_ message: Data) async throws {
             guard isConnected else {
-                throw MCPError.transportError(Errno(rawValue: ENOTCONN))
+                throw MCPError.transportError(SendableError(Errno(rawValue: ENOTCONN)))
             }
 
             // Add newline as delimiter
@@ -216,7 +216,7 @@ import struct Foundation.Data
                     try await Task.sleep(for: .milliseconds(10))
                     continue
                 } catch {
-                    throw MCPError.transportError(error)
+                    throw MCPError.transportError(SendableError(error))
                 }
             }
         }
