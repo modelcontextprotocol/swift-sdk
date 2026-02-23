@@ -489,7 +489,7 @@ public actor StatefulHTTPServerTransport: Transport {
         continuation: AsyncThrowingStream<Data, Swift.Error>.Continuation,
         protocolVersion: String
     ) {
-        // Priming events with empty data are only safe for clients >= 2025-11-25
+        // Priming events with empty data are only safe for clients >= 2025-03-26
         guard protocolVersion >= "2025-03-26" else { return }
 
         let primingEventID = storeEvent(streamID: streamID, message: nil)

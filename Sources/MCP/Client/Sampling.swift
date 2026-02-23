@@ -473,11 +473,27 @@ public enum CreateSamplingMessage: Method {
             case none
         }
 
-        /// The tool choice mode
-        public let mode: Mode
+        /// The tool choice mode. If omitted, defaults to `.auto`.
+        public let mode: Mode?
 
-        public init(mode: Mode) {
+        public init(mode: Mode? = .auto) {
             self.mode = mode
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case mode
+        }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            mode = try container.decodeIfPresent(Mode.self, forKey: .mode) ?? .auto
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            if let mode, mode != .auto {
+                try container.encode(mode, forKey: .mode)
+            }
         }
     }
 
