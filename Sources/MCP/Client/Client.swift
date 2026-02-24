@@ -609,7 +609,7 @@ public actor Client {
     ///                   Use this object to add requests to the batch.
     /// - Throws: `MCPError.internalError` if the client is not connected.
     ///           Can also rethrow errors from the `body` closure or from sending the batch request.
-    public func withBatch(body: @escaping @Sendable (Batch) async throws -> Void) async throws {
+    public func withBatch(body: @Sendable @escaping (Batch) async throws -> Void) async throws {
         guard let connection = connection else {
             throw MCPError.internalError("Client connection not initialized")
         }

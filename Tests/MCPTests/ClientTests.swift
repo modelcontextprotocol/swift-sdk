@@ -5,6 +5,18 @@ import Testing
 
 @Suite("Client Tests", .timeLimit(.minutes(1)))
 struct ClientTests {
+    private actor PingTaskStore {
+        private var tasks: [Task<Ping.Result, Swift.Error>] = []
+
+        func append(_ task: Task<Ping.Result, Swift.Error>) {
+            tasks.append(task)
+        }
+
+        func all() -> [Task<Ping.Result, Swift.Error>] {
+            tasks
+        }
+    }
+
     @Test("Client connect and disconnect")
     func testClientConnectAndDisconnect() async throws {
         let transport = MockTransport()
@@ -345,12 +357,13 @@ struct ClientTests {
 
         let request1 = Ping.request()
         let request2 = Ping.request()
-        nonisolated(unsafe) var resultTask1: Task<Ping.Result, Swift.Error>?
-        nonisolated(unsafe) var resultTask2: Task<Ping.Result, Swift.Error>?
+        let taskStore = PingTaskStore()
 
         try await client.withBatch { batch in
-            resultTask1 = try await batch.addRequest(request1)
-            resultTask2 = try await batch.addRequest(request2)
+            let firstTask = try await batch.addRequest(request1)
+            await taskStore.append(firstTask)
+            let secondTask = try await batch.addRequest(request2)
+            await taskStore.append(secondTask)
         }
 
         // Check if batch message was sent (after initialize and initialized notification)
@@ -381,11 +394,14 @@ struct ClientTests {
         try await transport.queue(batch: [anyResponse1, anyResponse2])
 
         // Wait for results and verify
-        guard let task1 = resultTask1, let task2 = resultTask2 else {
-            #expect(Bool(false), "Result tasks not created")
+        let resultTasks = await taskStore.all()
+        guard resultTasks.count == 2 else {
+            #expect(Bool(false), "Expected 2 result tasks")
             return
         }
 
+        let task1 = resultTasks[0]
+        let task2 = resultTasks[1]
         _ = try await task1.value  // Should succeed
         _ = try await task2.value  // Should succeed
 
@@ -426,11 +442,13 @@ struct ClientTests {
         let request1 = Ping.request()  // Success
         let request2 = Ping.request()  // Error
 
-        nonisolated(unsafe) var resultTasks: [Task<Ping.Result, Swift.Error>] = []
+        let taskStore = PingTaskStore()
 
         try await client.withBatch { batch in
-            resultTasks.append(try await batch.addRequest(request1))
-            resultTasks.append(try await batch.addRequest(request2))
+            let firstTask = try await batch.addRequest(request1)
+            await taskStore.append(firstTask)
+            let secondTask = try await batch.addRequest(request2)
+            await taskStore.append(secondTask)
         }
 
         // Check if batch message was sent (after initialize and initialized notification)
@@ -447,6 +465,7 @@ struct ClientTests {
         try await transport.queue(batch: [anyResponse1, anyResponse2])
 
         // Wait for results and verify
+        let resultTasks = await taskStore.all()
         #expect(resultTasks.count == 2)
         guard resultTasks.count == 2 else {
             #expect(Bool(false), "Expected 2 result tasks")

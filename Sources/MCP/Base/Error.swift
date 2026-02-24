@@ -25,6 +25,14 @@ public struct URLElicitationInfo: Codable, Hashable, Sendable {
     }
 }
 
+/// A wrapper to make any Error Sendable.
+public struct SendableError: @unchecked Sendable, Swift.Error {
+    public let error: Swift.Error
+    public init(_ error: Swift.Error) {
+        self.error = error
+    }
+}
+
 /// A model context protocol error.
 public enum MCPError: Swift.Error, Sendable {
     // Standard JSON-RPC 2.0 errors (-32700 to -32603)
@@ -42,7 +50,7 @@ public enum MCPError: Swift.Error, Sendable {
 
     // Transport specific errors
     case connectionClosed
-    case transportError(Swift.Error)
+    case transportError(SendableError)
 
     /// The JSON-RPC 2.0 error code
     public var code: Int {
@@ -119,7 +127,7 @@ extension MCPError: LocalizedError {
         case .connectionClosed:
             return "The connection to the server was closed"
         case .transportError(let error):
-            return (error as? LocalizedError)?.failureReason ?? error.localizedDescription
+            return (error.error as? LocalizedError)?.failureReason ?? error.localizedDescription
         }
     }
 
@@ -153,7 +161,7 @@ extension MCPError: CustomDebugStringConvertible {
         switch self {
         case .transportError(let error):
             return
-                "[\(code)] \(errorDescription ?? "") (Underlying error: \(String(reflecting: error)))"
+                "[\(code)] \(errorDescription ?? "") (Underlying error: \(String(reflecting: error.error)))"
         default:
             return "[\(code)] \(errorDescription ?? "")"
         }
@@ -263,11 +271,11 @@ extension MCPError: Codable {
                     return nil
                 } ?? message
             self = .transportError(
-                NSError(
+                SendableError(NSError(
                     domain: "org.jsonrpc.error",
                     code: code,
                     userInfo: [NSLocalizedDescriptionKey: underlyingErrorString]
-                )
+                ))
             )
         default:
             self = .serverError(code: code, message: message)

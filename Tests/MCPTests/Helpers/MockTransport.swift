@@ -41,7 +41,7 @@ actor MockTransport: Transport {
 
     public func connect() async throws {
         if shouldFailConnect {
-            throw MCPError.transportError(POSIXError(.ECONNREFUSED))
+            throw MCPError.transportError(SendableError(POSIXError(.ECONNREFUSED)))
         }
         isConnected = true
     }
@@ -54,7 +54,7 @@ actor MockTransport: Transport {
 
     public func send(_ message: Data) async throws {
         if shouldFailSend {
-            throw MCPError.transportError(POSIXError(.EIO))
+            throw MCPError.transportError(SendableError(POSIXError(.EIO)))
         }
         sentData.append(message)
     }
