@@ -836,6 +836,13 @@ public actor Server {
             "Processing notification",
             metadata: ["method": "\(message.method)"])
 
+        // Handle transport-level connection notification (e.g., from Unix socket server)
+        // This resets session state to allow re-initialization for a new client
+        if message.method == "$/connection/didOpen" {
+            await resetSessionState()
+            return
+        }
+
         if configuration.strict {
             // Check initialization state unless this is an initialized notification
             if message.method != InitializedNotification.name {
@@ -952,6 +959,16 @@ public actor Server {
         self.clientCapabilities = clientCapabilities
         self.protocolVersion = protocolVersion
         self.isInitialized = true
+    }
+
+    /// Resets session state to allow re-initialization.
+    /// Called when a new client connects to a multi-client transport (e.g., Unix socket server).
+    private func resetSessionState() async {
+        self.isInitialized = false
+        self.clientInfo = nil
+        self.clientCapabilities = nil
+        self.protocolVersion = nil
+        await self.logger?.debug("Session state reset for new client connection")
     }
 
     /// Cancel and remove a pending request task
