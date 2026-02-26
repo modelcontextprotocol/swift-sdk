@@ -76,7 +76,7 @@ public enum CreateElicitation: Method {
             public init(
                 message: String,
                 mode: Elicitation.Mode? = nil,
-                requestedSchema: Elicitation.RequestSchema,
+                requestedSchema: Elicitation.RequestSchema = .init(),
                 _meta: Metadata? = nil
             ) {
                 self.message = message

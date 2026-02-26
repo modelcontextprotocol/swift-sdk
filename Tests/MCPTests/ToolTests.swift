@@ -354,6 +354,71 @@ struct ToolTests {
         }
     }
 
+    @Test("Text content encoding includes annotations and meta fields")
+    func testToolContentTextEncodingIncludesAnnotationsAndMeta() throws {
+        let annotations = Resource.Annotations(
+            audience: [.assistant],
+            priority: 0.75,
+            lastModified: "2026-01-01T00:00:00Z"
+        )
+        let meta = Metadata(additionalFields: [
+            "vendor.example/source": .string("tool-text")
+        ])
+        let expected = Tool.Content.text(
+            text: "Hello with metadata",
+            annotations: annotations,
+            _meta: meta
+        )
+
+        let data = try JSONEncoder().encode(expected)
+        let decoded = try JSONDecoder().decode(Tool.Content.self, from: data)
+        #expect(decoded == expected)
+    }
+
+    @Test("Image content encoding includes annotations and meta fields")
+    func testToolContentImageEncodingIncludesAnnotationsAndMeta() throws {
+        let annotations = Resource.Annotations(
+            audience: [.user],
+            priority: 0.9,
+            lastModified: "2026-01-02T00:00:00Z"
+        )
+        let meta = Metadata(additionalFields: [
+            "vendor.example/source": .string("tool-image")
+        ])
+        let expected = Tool.Content.image(
+            data: "base64-image",
+            mimeType: "image/jpeg",
+            annotations: annotations,
+            _meta: meta
+        )
+
+        let data = try JSONEncoder().encode(expected)
+        let decoded = try JSONDecoder().decode(Tool.Content.self, from: data)
+        #expect(decoded == expected)
+    }
+
+    @Test("Audio content encoding includes annotations and meta fields")
+    func testToolContentAudioEncodingIncludesAnnotationsAndMeta() throws {
+        let annotations = Resource.Annotations(
+            audience: [.assistant],
+            priority: 0.4,
+            lastModified: "2026-01-03T00:00:00Z"
+        )
+        let meta = Metadata(additionalFields: [
+            "vendor.example/source": .string("tool-audio")
+        ])
+        let expected = Tool.Content.audio(
+            data: "base64-audio",
+            mimeType: "audio/mp3",
+            annotations: annotations,
+            _meta: meta
+        )
+
+        let data = try JSONEncoder().encode(expected)
+        let decoded = try JSONDecoder().decode(Tool.Content.self, from: data)
+        #expect(decoded == expected)
+    }
+
     @Test("ListTools parameters validation")
     func testListToolsParameters() throws {
         let params = ListTools.Parameters(cursor: "next_page")

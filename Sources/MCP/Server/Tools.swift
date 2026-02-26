@@ -128,6 +128,42 @@ public struct Tool: Hashable, Codable, Sendable {
             annotations: Resource.Annotations? = nil
         )
 
+        /// Deprecated compatibility factory for older call sites that used `.text("...")` and `.text("...", metadata: ...)`.
+        @available(*, deprecated, message: "Use .text(text:annotations:_meta:) instead.")
+        public static func text(_ text: String, metadata: Metadata? = nil) -> Self {
+            .text(text: text, annotations: nil, _meta: metadata)
+        }
+
+        /// Deprecated compatibility factory for older call sites that used `.text(text: ..., metadata: ...)`.
+        @available(*, deprecated, message: "Use .text(text:annotations:_meta:) instead.")
+        public static func text(text: String, metadata: Metadata? = nil) -> Self {
+            .text(text: text, annotations: nil, _meta: metadata)
+        }
+
+        /// Deprecated compatibility factory for older call sites that used `.image(..., metadata: ...)`.
+        @available(*, deprecated, message: "Use .image(data:mimeType:annotations:_meta:) instead.")
+        public static func image(_ data: String, _ mimeType: String, metadata: Metadata? = nil) -> Self {
+            .image(data: data, mimeType: mimeType, annotations: nil, _meta: metadata)
+        }
+
+        /// Deprecated compatibility factory for older call sites that used `.image(data:mimeType:metadata:)`.
+        @available(*, deprecated, message: "Use .image(data:mimeType:annotations:_meta:) instead.")
+        public static func image(data: String, mimeType: String, metadata: Metadata? = nil) -> Self {
+            .image(data: data, mimeType: mimeType, annotations: nil, _meta: metadata)
+        }
+
+        /// Deprecated compatibility factory for older call sites that used `.audio(..., metadata: ...)`.
+        @available(*, deprecated, message: "Use .audio(data:mimeType:annotations:_meta:) instead.")
+        public static func audio(_ data: String, _ mimeType: String, metadata: Metadata? = nil) -> Self {
+            .audio(data: data, mimeType: mimeType, annotations: nil, _meta: metadata)
+        }
+
+        /// Deprecated compatibility factory for older call sites that used `.audio(data:mimeType:metadata:)`.
+        @available(*, deprecated, message: "Use .audio(data:mimeType:annotations:_meta:) instead.")
+        public static func audio(data: String, mimeType: String, metadata: Metadata? = nil) -> Self {
+            .audio(data: data, mimeType: mimeType, annotations: nil, _meta: metadata)
+        }
+
         private enum CodingKeys: String, CodingKey {
             case type
             case text
