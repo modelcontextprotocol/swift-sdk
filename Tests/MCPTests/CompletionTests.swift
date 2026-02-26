@@ -128,12 +128,12 @@ struct CompletionTests {
     func testCompleteRequestWithContext() throws {
         let ref = CompletionReference.prompt(PromptReference(name: "code_review"))
         let argument = Complete.Parameters.Argument(name: "framework", value: "fla")
-        let context = Complete.Parameters.Context(arguments: ["language": .string("python")])
+        let context = Complete.Parameters.Context(arguments: ["language": "python"])
 
         let request = Complete.request(.init(ref: ref, argument: argument, context: context))
 
         #expect(request.params.context != nil)
-        #expect(request.params.context?.arguments["language"] == .string("python"))
+        #expect(request.params.context?.arguments["language"] == "python")
     }
 
     @Test("Complete request encoding")
@@ -396,7 +396,7 @@ struct CompletionTests {
             #expect(params.argument.name == "framework")
             #expect(params.argument.value == "fla")
             #expect(params.context != nil)
-            #expect(params.context?.arguments["language"] == .string("python"))
+            #expect(params.context?.arguments["language"] == "python")
 
             return .init(
                 completion: .init(
@@ -415,7 +415,7 @@ struct CompletionTests {
             promptName: "code_review",
             argumentName: "framework",
             argumentValue: "fla",
-            context: ["language": .string("python")]
+            context: ["language": "python"]
         )
 
         #expect(completion.values == ["flask"])

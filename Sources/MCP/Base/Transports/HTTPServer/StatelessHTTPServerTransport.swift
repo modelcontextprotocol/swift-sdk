@@ -162,7 +162,8 @@ public actor StatelessHTTPServerTransport: Transport {
         default:
             return .error(
                 statusCode: 405,
-                .invalidRequest("Method Not Allowed")
+                .invalidRequest("Method Not Allowed"),
+                extraHeaders: [HTTPHeaderName.allow: "POST"]
             )
         }
     }

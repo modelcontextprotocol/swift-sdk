@@ -183,23 +183,6 @@ struct SamplingTests {
         #expect(request.params.maxTokens == 100)
     }
 
-    @Test("Server capabilities include sampling")
-    func testServerCapabilitiesIncludeSampling() throws {
-        let capabilities = Server.Capabilities(
-            sampling: .init()
-        )
-
-        #expect(capabilities.sampling != nil)
-
-        let encoder = JSONEncoder()
-        let decoder = JSONDecoder()
-
-        let data = try encoder.encode(capabilities)
-        let decoded = try decoder.decode(Server.Capabilities.self, from: data)
-
-        #expect(decoded.sampling != nil)
-    }
-
     @Test("Client capabilities include sampling")
     func testClientCapabilitiesIncludeSampling() throws {
         let capabilities = Client.Capabilities(
@@ -507,8 +490,7 @@ struct SamplingIntegrationTests {
 
         let server = Server(
             name: "SamplingHandlerTestServer",
-            version: "1.0",
-            capabilities: .init(sampling: .init())
+            version: "1.0"
         )
 
         let client = Client(
@@ -553,8 +535,7 @@ struct SamplingIntegrationTests {
 
         let server = Server(
             name: "SamplingRequestTestServer",
-            version: "1.0",
-            capabilities: .init(sampling: .init())
+            version: "1.0"
         )
 
         let client = Client(
@@ -721,8 +702,7 @@ struct SamplingIntegrationTests {
 
         let server = Server(
             name: "ErrorTestServer",
-            version: "1.0",
-            capabilities: .init(sampling: .init())
+            version: "1.0"
         )
 
         // Client WITHOUT sampling capability
@@ -757,7 +737,6 @@ struct SamplingIntegrationTests {
         let server = Server(
             name: "StrictTestServer",
             version: "1.0",
-            capabilities: .init(sampling: .init()),
             configuration: .strict
         )
 
@@ -806,7 +785,6 @@ struct SamplingIntegrationTests {
         let server = Server(
             name: "StrictTestServer",
             version: "1.0",
-            capabilities: .init(sampling: .init()),
             configuration: .strict
         )
 
@@ -840,7 +818,6 @@ struct SamplingIntegrationTests {
         let server = Server(
             name: "NonStrictTestServer",
             version: "1.0",
-            capabilities: .init(sampling: .init()),
             configuration: .default  // Non-strict mode
         )
 

@@ -13,7 +13,7 @@ struct ResourceTests {
             title: "Test Resource Title",
             description: "A test resource",
             mimeType: "text/plain",
-            metadata: ["key": "value"]
+            size: 1024
         )
 
         #expect(resource.name == "test_resource")
@@ -21,7 +21,7 @@ struct ResourceTests {
         #expect(resource.title == "Test Resource Title")
         #expect(resource.description == "A test resource")
         #expect(resource.mimeType == "text/plain")
-        #expect(resource.metadata?["key"] == "value")
+        #expect(resource.size == 1024)
     }
 
     @Test("Resource encoding and decoding")
@@ -32,7 +32,7 @@ struct ResourceTests {
             title: "Test Resource Title",
             description: "Test resource description",
             mimeType: "text/plain",
-            metadata: ["key1": "value1", "key2": "value2"]
+            size: 512
         )
 
         let encoder = JSONEncoder()
@@ -46,7 +46,7 @@ struct ResourceTests {
         #expect(decoded.title == resource.title)
         #expect(decoded.description == resource.description)
         #expect(decoded.mimeType == resource.mimeType)
-        #expect(decoded.metadata == resource.metadata)
+        #expect(decoded.size == resource.size)
     }
 
     @Test("Resource.Content text initialization and encoding")

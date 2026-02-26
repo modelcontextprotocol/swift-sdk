@@ -68,15 +68,15 @@ public enum CreateElicitation: Method {
             public var message: String
             /// Elicitation mode (optional for backward compatibility, defaults to form)
             public var mode: Elicitation.Mode?
-            /// Optional schema describing the expected response content
-            public var requestedSchema: Elicitation.RequestSchema?
+            /// Schema describing the expected response content (required per spec)
+            public var requestedSchema: Elicitation.RequestSchema
             /// Optional metadata
             public var _meta: Metadata?
 
             public init(
                 message: String,
                 mode: Elicitation.Mode? = nil,
-                requestedSchema: Elicitation.RequestSchema? = nil,
+                requestedSchema: Elicitation.RequestSchema = .init(),
                 _meta: Metadata? = nil
             ) {
                 self.message = message
@@ -188,7 +188,7 @@ extension CreateElicitation.Parameters: Codable {
         } else {
             // Form mode (default for backward compatibility)
             let message = try container.decode(String.self, forKey: .message)
-            let requestedSchema = try container.decodeIfPresent(
+            let requestedSchema = try container.decode(
                 Elicitation.RequestSchema.self, forKey: .requestedSchema)
             let _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
             self = .form(FormParameters(

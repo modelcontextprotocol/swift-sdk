@@ -205,8 +205,14 @@ public struct SessionValidator: HTTPRequestValidator {
         // Skip validation for initialization requests
         guard !context.isInitializationRequest else { return nil }
 
-        // If no session exists yet, skip (server hasn't been initialized)
-        guard let expectedSessionID = context.sessionID else { return nil }
+        // Non-initialization requests require an established session.
+        guard let expectedSessionID = context.sessionID else {
+            return .error(
+                statusCode: 400,
+                .invalidRequest("Bad Request: Session not initialized"),
+                sessionID: nil
+            )
+        }
 
         let requestSessionID = request.header(HTTPHeaderName.sessionID)
 

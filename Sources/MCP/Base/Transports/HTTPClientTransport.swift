@@ -221,6 +221,14 @@ public actor HTTPClientTransport: Transport {
         logger.debug("HTTP clienttransport disconnected")
     }
 
+    /// Updates the protocol version used for `MCP-Protocol-Version` headers on subsequent requests.
+    ///
+    /// Call this after lifecycle negotiation if the server responds with a different version.
+    /// - Parameter version: The negotiated protocol version.
+    public func updateNegotiatedProtocolVersion(_ version: String) {
+        self.protocolVersion = version
+    }
+
     /// Sends data through an HTTP POST request
     ///
     /// This sends a JSON-RPC message to the server via HTTP POST and processes

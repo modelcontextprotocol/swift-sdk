@@ -114,11 +114,11 @@ public struct Tool: Hashable, Codable, Sendable {
     /// Content types that can be returned by a tool
     public enum Content: Hashable, Codable, Sendable {
         /// Text content
-        case text(String)
+        case text(text: String, annotations: Resource.Annotations?, _meta: Metadata?)
         /// Image content
-        case image(data: String, mimeType: String, metadata: Metadata?)
+        case image(data: String, mimeType: String, annotations: Resource.Annotations?, _meta: Metadata?)
         /// Audio content
-        case audio(data: String, mimeType: String)
+        case audio(data: String, mimeType: String, annotations: Resource.Annotations?, _meta: Metadata?)
         /// Embedded resource content (EmbeddedResource from spec)
         case resource(resource: Resource.Content, annotations: Resource.Annotations? = nil, _meta: Metadata? = nil)
         /// Resource link
@@ -128,12 +128,48 @@ public struct Tool: Hashable, Codable, Sendable {
             annotations: Resource.Annotations? = nil
         )
 
+        /// Deprecated compatibility factory for older call sites that used `.text("...")` and `.text("...", metadata: ...)`.
+        @available(*, deprecated, message: "Use .text(text:annotations:_meta:) instead.")
+        public static func text(_ text: String, metadata: Metadata? = nil) -> Self {
+            .text(text: text, annotations: nil, _meta: metadata)
+        }
+
+        /// Deprecated compatibility factory for older call sites that used `.text(text: ..., metadata: ...)`.
+        @available(*, deprecated, message: "Use .text(text:annotations:_meta:) instead.")
+        public static func text(text: String, metadata: Metadata? = nil) -> Self {
+            .text(text: text, annotations: nil, _meta: metadata)
+        }
+
+        /// Deprecated compatibility factory for older call sites that used `.image(..., metadata: ...)`.
+        @available(*, deprecated, message: "Use .image(data:mimeType:annotations:_meta:) instead.")
+        public static func image(_ data: String, _ mimeType: String, metadata: Metadata? = nil) -> Self {
+            .image(data: data, mimeType: mimeType, annotations: nil, _meta: metadata)
+        }
+
+        /// Deprecated compatibility factory for older call sites that used `.image(data:mimeType:metadata:)`.
+        @available(*, deprecated, message: "Use .image(data:mimeType:annotations:_meta:) instead.")
+        public static func image(data: String, mimeType: String, metadata: Metadata? = nil) -> Self {
+            .image(data: data, mimeType: mimeType, annotations: nil, _meta: metadata)
+        }
+
+        /// Deprecated compatibility factory for older call sites that used `.audio(..., metadata: ...)`.
+        @available(*, deprecated, message: "Use .audio(data:mimeType:annotations:_meta:) instead.")
+        public static func audio(_ data: String, _ mimeType: String, metadata: Metadata? = nil) -> Self {
+            .audio(data: data, mimeType: mimeType, annotations: nil, _meta: metadata)
+        }
+
+        /// Deprecated compatibility factory for older call sites that used `.audio(data:mimeType:metadata:)`.
+        @available(*, deprecated, message: "Use .audio(data:mimeType:annotations:_meta:) instead.")
+        public static func audio(data: String, mimeType: String, metadata: Metadata? = nil) -> Self {
+            .audio(data: data, mimeType: mimeType, annotations: nil, _meta: metadata)
+        }
+
         private enum CodingKeys: String, CodingKey {
             case type
             case text
             case image
             case resource
-            case resourceLink
+            case resource_link
             case audio
             case uri
             case name
@@ -152,23 +188,27 @@ public struct Tool: Hashable, Codable, Sendable {
             switch type {
             case "text":
                 let text = try container.decode(String.self, forKey: .text)
-                self = .text(text)
+                let annotations = try container.decodeIfPresent(Resource.Annotations.self, forKey: .annotations)
+                let _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
+                self = .text(text: text, annotations: annotations, _meta: _meta)
             case "image":
                 let data = try container.decode(String.self, forKey: .data)
                 let mimeType = try container.decode(String.self, forKey: .mimeType)
-                let _meta = try container.decodeIfPresent(
-                    Metadata.self, forKey: ._meta)
-                self = .image(data: data, mimeType: mimeType, metadata: _meta)
+                let annotations = try container.decodeIfPresent(Resource.Annotations.self, forKey: .annotations)
+                let _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
+                self = .image(data: data, mimeType: mimeType, annotations: annotations, _meta: _meta)
             case "audio":
                 let data = try container.decode(String.self, forKey: .data)
                 let mimeType = try container.decode(String.self, forKey: .mimeType)
-                self = .audio(data: data, mimeType: mimeType)
+                let annotations = try container.decodeIfPresent(Resource.Annotations.self, forKey: .annotations)
+                let _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
+                self = .audio(data: data, mimeType: mimeType, annotations: annotations, _meta: _meta)
             case "resource":
                 let resourceContent = try container.decode(Resource.Content.self, forKey: .resource)
                 let annotations = try container.decodeIfPresent(Resource.Annotations.self, forKey: .annotations)
                 let _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
                 self = .resource(resource: resourceContent, annotations: annotations, _meta: _meta)
-            case "resourceLink":
+            case "resource_link":
                 let uri = try container.decode(String.self, forKey: .uri)
                 let name = try container.decode(String.self, forKey: .name)
                 let title = try container.decodeIfPresent(String.self, forKey: .title)
@@ -189,18 +229,23 @@ public struct Tool: Hashable, Codable, Sendable {
             var container = encoder.container(keyedBy: CodingKeys.self)
 
             switch self {
-            case .text(let text):
+            case .text(let text, let annotations, let _meta):
                 try container.encode("text", forKey: .type)
                 try container.encode(text, forKey: .text)
-            case .image(let data, let mimeType, let metadata):
+                try container.encodeIfPresent(annotations, forKey: .annotations)
+                try container.encodeIfPresent(_meta, forKey: ._meta)
+            case .image(let data, let mimeType, let annotations, let _meta):
                 try container.encode("image", forKey: .type)
                 try container.encode(data, forKey: .data)
                 try container.encode(mimeType, forKey: .mimeType)
-                try container.encodeIfPresent(metadata, forKey: ._meta)
-            case .audio(let data, let mimeType):
+                try container.encodeIfPresent(annotations, forKey: .annotations)
+                try container.encodeIfPresent(_meta, forKey: ._meta)
+            case .audio(let data, let mimeType, let annotations, let _meta):
                 try container.encode("audio", forKey: .type)
                 try container.encode(data, forKey: .data)
                 try container.encode(mimeType, forKey: .mimeType)
+                try container.encodeIfPresent(annotations, forKey: .annotations)
+                try container.encodeIfPresent(_meta, forKey: ._meta)
             case .resource(let resourceContent, let annotations, let _meta):
                 try container.encode("resource", forKey: .type)
                 try container.encode(resourceContent, forKey: .resource)
@@ -208,7 +253,7 @@ public struct Tool: Hashable, Codable, Sendable {
                 try container.encodeIfPresent(_meta, forKey: ._meta)
             case .resourceLink(
                 let uri, let name, let title, let description, let mimeType, let annotations):
-                try container.encode("resourceLink", forKey: .type)
+                try container.encode("resource_link", forKey: .type)
                 try container.encode(uri, forKey: .uri)
                 try container.encode(name, forKey: .name)
                 try container.encodeIfPresent(title, forKey: .title)
@@ -261,7 +306,7 @@ public struct Tool: Hashable, Codable, Sendable {
 // MARK: -
 
 /// To discover available tools, clients send a `tools/list` request.
-/// - SeeAlso: https://spec.modelcontextprotocol.io/specification/2025-06-18/server/tools/#listing-tools
+/// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/server/tools/#listing-tools
 public enum ListTools: Method {
     public static let name = "tools/list"
 

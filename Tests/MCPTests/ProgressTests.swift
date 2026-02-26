@@ -364,7 +364,7 @@ struct ProgressTests {
         }
 
         let server = Server(name: "testServer", version: "1")
-        let expectedToolCallResult = CallTool.Result(content: [.text("success")])
+        let expectedToolCallResult = CallTool.Result(content: [.text(text: "success", annotations: nil, _meta: nil)])
         await server.withMethodHandler(CallTool.self) { params in
             if let token = params._meta?.progressToken {
                 for i in 1...5 {
@@ -375,7 +375,7 @@ struct ProgressTests {
                 }
             }
 
-            return .init(content: [.text("success")])
+            return .init(content: [.text(text: "success", annotations: nil, _meta: nil)])
         }
 
         try await server.start(transport: pair.server)

@@ -15,13 +15,13 @@ public struct CancelledNotification: Notification {
         /// The ID of the request to cancel.
         ///
         /// This MUST correspond to the ID of a request previously issued
-        /// in the same direction.
-        public let requestId: ID
+        /// in the same direction. Optional per the spec (`requestId?`).
+        public let requestId: ID?
 
         /// An optional human-readable reason for the cancellation.
         public let reason: String?
 
-        public init(requestId: ID, reason: String? = nil) {
+        public init(requestId: ID? = nil, reason: String? = nil) {
             self.requestId = requestId
             self.reason = reason
         }

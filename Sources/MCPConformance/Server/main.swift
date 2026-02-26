@@ -45,11 +45,12 @@ actor ServerState {
 
 // MARK: - Server Setup
 
-func createConformanceServer(state: ServerState) async -> Server {
+func createConformanceServer(state: ServerState, transport: StatefulHTTPServerTransport) async -> Server {
     let server = Server(
         name: "mcp-conformance-test-server",
         version: "1.0.0",
         capabilities: Server.Capabilities(
+            completions: .init(),
             logging: .init(),
             prompts: .init(listChanged: true),
             resources: .init(subscribe: true, listChanged: true),
@@ -98,34 +99,34 @@ func createConformanceServer(state: ServerState) async -> Server {
         ])
     }
 
-    await server.withMethodHandler(CallTool.self) { [weak server] params in
+    await server.withMethodHandler(CallTool.self) { [weak server, transport] params in
         switch params.name {
         case "test_simple_text":
-            return .init(content: [.text("This is a simple text response for testing.")], isError: false)
+            return .init(content: [.text(text: "This is a simple text response for testing.", annotations: nil, _meta: nil)], isError: false)
         case "test_image_content":
-            return .init(content: [.image(data: testImageBase64, mimeType: "image/png", metadata: nil)], isError: false)
+            return .init(content: [.image(data: testImageBase64, mimeType: "image/png", annotations: nil, _meta: nil)], isError: false)
         case "test_audio_content":
-            return .init(content: [.audio(data: testAudioBase64, mimeType: "audio/wav")], isError: false)
+            return .init(content: [.audio(data: testAudioBase64, mimeType: "audio/wav", annotations: nil, _meta: nil)], isError: false)
         case "test_embedded_resource":
             return .init(content: [.resource(resource: .text("This is an embedded resource content.", uri: "test://embedded-resource", mimeType: "text/plain"))], isError: false)
         case "test_multiple_content_types":
             return .init(content: [
-                .text("Multiple content types test:"),
-                .image(data: testImageBase64, mimeType: "image/png", metadata: nil),
+                .text(text: "Multiple content types test:", annotations: nil, _meta: nil),
+                .image(data: testImageBase64, mimeType: "image/png", annotations: nil, _meta: nil),
                 .resource(resource: .text("{\"test\":\"data\",\"value\":123}", uri: "test://mixed-content-resource", mimeType: "application/json"))], isError: false)
         case "test_error_handling":
-            return .init(content: [.text("An error occurred during tool execution")], isError: true)
+            return .init(content: [.text(text: "An error occurred during tool execution", annotations: nil, _meta: nil)], isError: true)
         case "test_logging":
-            return .init(content: [.text("Logging test completed")], isError: false)
+            return .init(content: [.text(text: "Logging test completed", annotations: nil, _meta: nil)], isError: false)
         case "test_progress":
             let duration = params.arguments?["duration_ms"]?.intValue ?? 1000
             try? await Task.sleep(for: .milliseconds(duration))
-            return .init(content: [.text("Progress test completed")], isError: false)
+            return .init(content: [.text(text: "Progress test completed", annotations: nil, _meta: nil)], isError: false)
         case "add_numbers":
             guard let a = params.arguments?["a"]?.intValue, let b = params.arguments?["b"]?.intValue else {
-                return .init(content: [.text("Invalid arguments: expected numbers a and b")], isError: true)
+                return .init(content: [.text(text: "Invalid arguments: expected numbers a and b", annotations: nil, _meta: nil)], isError: true)
             }
-            return .init(content: [.text("\(a + b)")], isError: false)
+            return .init(content: [.text(text: "\(a + b)", annotations: nil, _meta: nil)], isError: false)
         case "test_tool_with_progress":
             if let token = params._meta?.progressToken {
                 let notification1 = ProgressNotification.message(
@@ -146,9 +147,9 @@ func createConformanceServer(state: ServerState) async -> Server {
                 try await server?.notify(notification3)
             }
 
-            return .init(content: [.text("This is a simple text response for testing.")], isError: false)
+            return .init(content: [.text(text: "This is a simple text response for testing.", annotations: nil, _meta: nil)], isError: false)
         case "json_schema_2020_12_tool":
-            return .init(content: [.text("This is a simple text response for testing.")], isError: false)
+            return .init(content: [.text(text: "This is a simple text response for testing.", annotations: nil, _meta: nil)], isError: false)
         case "test_tool_with_logging":
             // Send first log message
             let log1 = LogMessageNotification.message(
@@ -174,17 +175,22 @@ func createConformanceServer(state: ServerState) async -> Server {
             )
             try await server?.notify(log3)
 
-            return .init(content: [.text("Logging test completed")], isError: false)
+            return .init(content: [.text(text: "Logging test completed", annotations: nil, _meta: nil)], isError: false)
         case "test_reconnection":
-            // This tool tests SSE reconnection behavior (SEP-1699)
-            // In a full implementation, the server would close the SSE stream mid-call
-            // and the client would need to reconnect with Last-Event-ID to get the result.
-            // For now, we return a simple success response.
-            return .init(content: [.text("Reconnection test completed successfully")], isError: false)
+            // SEP-1699: Close the SSE stream mid-call to trigger client reconnection.
+            // The client should reconnect via GET with Last-Event-ID and receive the
+            // response on the new stream.
+            if let requestID = Server.currentRequestID {
+                
+                await transport.closeSSEStream(forRequestID: requestID.description)
+            }
+            // Wait briefly for the client to reconnect before sending the response.
+            try await Task.sleep(for: .milliseconds(100))
+            return .init(content: [.text(text: "Reconnection test completed successfully. If you received this, the client properly reconnected after stream closure.", annotations: nil, _meta: nil)], isError: false)
         case "test_sampling":
             // Test LLM sampling - request sampling/createMessage from client
             guard let prompt = params.arguments?["prompt"]?.stringValue else {
-                return .init(content: [.text("Missing required argument: prompt")], isError: true)
+                return .init(content: [.text(text: "Missing required argument: prompt", annotations: nil, _meta: nil)], isError: true)
             }
 
             let samplingResult = try await server?.requestSampling(
@@ -201,11 +207,11 @@ func createConformanceServer(state: ServerState) async -> Server {
                 }
                 .joined(separator: "\n") ?? "No response"
 
-            return .init(content: [.text(responseText)], isError: false)
+            return .init(content: [.text(text: responseText, annotations: nil, _meta: nil)], isError: false)
         case "test_elicitation":
             // Test elicitation - request user input for username and email
             guard let message = params.arguments?["message"]?.stringValue else {
-                return .init(content: [.text("Missing required argument: message")], isError: true)
+                return .init(content: [.text(text: "Missing required argument: message", annotations: nil, _meta: nil)], isError: true)
             }
 
             let elicitationResult = try await server?.requestElicitation(
@@ -220,7 +226,7 @@ func createConformanceServer(state: ServerState) async -> Server {
             )
 
             return .init(
-                content: [.text("Elicitation completed: action=\(elicitationResult?.action.rawValue ?? "unknown"), content=\(elicitationResult?.content ?? [:])")],
+                content: [.text(text: "Elicitation completed: action=\(elicitationResult?.action.rawValue ?? "unknown"), content=\(elicitationResult?.content ?? [:])", annotations: nil, _meta: nil)],
                 isError: false
             )
         case "test_elicitation_sep1034_defaults":
@@ -255,7 +261,7 @@ func createConformanceServer(state: ServerState) async -> Server {
             )
 
             return .init(
-                content: [.text("Elicitation completed: action=\(elicitationResult?.action.rawValue ?? "unknown"), content=\(elicitationResult?.content ?? [:])")],
+                content: [.text(text: "Elicitation completed: action=\(elicitationResult?.action.rawValue ?? "unknown"), content=\(elicitationResult?.content ?? [:])", annotations: nil, _meta: nil)],
                 isError: false
             )
         case "test_elicitation_sep1330_enums":
@@ -308,7 +314,7 @@ func createConformanceServer(state: ServerState) async -> Server {
             )
 
             return .init(
-                content: [.text("Elicitation completed: action=\(elicitationResult?.action.rawValue ?? "unknown"), content=\(elicitationResult?.content ?? [:])")],
+                content: [.text(text: "Elicitation completed: action=\(elicitationResult?.action.rawValue ?? "unknown"), content=\(elicitationResult?.content ?? [:])", annotations: nil, _meta: nil)],
                 isError: false
             )
         case "test_client_elicitation_defaults":
@@ -349,19 +355,19 @@ func createConformanceServer(state: ServerState) async -> Server {
                   let score = content["score"]?.doubleValue,
                   let status = content["status"]?.stringValue,
                   let verified = content["verified"]?.boolValue else {
-                return .init(content: [.text("Client did not provide all required fields with defaults")], isError: true)
+                return .init(content: [.text(text: "Client did not provide all required fields with defaults", annotations: nil, _meta: nil)], isError: true)
             }
 
             guard name == "John Doe", age == 30, score == 95.5, status == "active", verified == true else {
-                return .init(content: [.text("Client defaults do not match expected values")], isError: true)
+                return .init(content: [.text(text: "Client defaults do not match expected values", annotations: nil, _meta: nil)], isError: true)
             }
 
             return .init(
-                content: [.text("Client correctly applied all default values")],
+                content: [.text(text: "Client correctly applied all default values", annotations: nil, _meta: nil)],
                 isError: false
             )
         default:
-            return .init(content: [.text("Unknown tool: \(params.name)")], isError: true)
+            return .init(content: [.text(text: "Unknown tool: \(params.name)", annotations: nil, _meta: nil)], isError: true)
         }
     }
 
@@ -421,11 +427,11 @@ func createConformanceServer(state: ServerState) async -> Server {
         case "test_simple_prompt":
             return .init(description: "Simple prompt response", messages: [.user(.text(text: "This is a simple prompt for testing."))])
         case "test_prompt_with_arguments":
-            let arg1 = params.arguments?["arg1"]?.stringValue ?? "default1"
-            let arg2 = params.arguments?["arg2"]?.stringValue ?? "default2"
+            let arg1 = params.arguments?["arg1"] ?? "default1"
+            let arg2 = params.arguments?["arg2"] ?? "default2"
             return .init(description: "Prompt with arguments", messages: [.user(.text(text: "Prompt with arguments: arg1='\(arg1)', arg2='\(arg2)'"))])
         case "test_prompt_with_embedded_resource":
-            let resourceUri = params.arguments?["resourceUri"]?.stringValue ?? "test://default"
+            let resourceUri = params.arguments?["resourceUri"] ?? "test://default"
             return .init(description: "Prompt with embedded resource", messages: [
                 .user(.resource(resource: .text("Embedded resource content for testing.", uri: resourceUri, mimeType: "text/plain"))),
                 .user(.text(text: "Please process the embedded resource above."))
@@ -485,7 +491,8 @@ struct MCPHTTPServer {
             configuration: .init(
                 host: "127.0.0.1",
                 port: port,
-                endpoint: "/mcp"
+                endpoint: "/mcp",
+                retryInterval: 1000
             ),
             validationPipeline: StandardValidationPipeline(validators: [
                 OriginValidator.localhost(port: port),
@@ -494,9 +501,9 @@ struct MCPHTTPServer {
                 ProtocolVersionValidator(),
                 SessionValidator(),
             ]),
-            serverFactory: { sessionID in
+            serverFactory: { sessionID, transport in
                 logger.debug("Creating server for session", metadata: ["sessionID": "\(sessionID)"])
-                return await createConformanceServer(state: state)
+                return await createConformanceServer(state: state, transport: transport)
             },
             logger: logger
         )
