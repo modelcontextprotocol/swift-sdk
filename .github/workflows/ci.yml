@@ -25,6 +25,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Prepare Linux apt dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo -n apt-get update
+          sudo -n apt-get install -y --no-install-recommends libcurl4-openssl-dev
+
       - name: Setup Swift on Linux
         if: matrix.os == 'ubuntu-latest'
         uses: vapor/swiftly-action@v0.2
