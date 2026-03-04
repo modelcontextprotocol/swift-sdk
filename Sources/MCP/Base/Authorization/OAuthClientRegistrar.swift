@@ -29,9 +29,12 @@ struct OAuthClientRegistrar: Sendable {
 
     /// Attempts to register the client, if applicable.
     ///
-    /// Returns `nil` in any of these cases:
+    /// Returns `nil` if registration is not needed:
+    /// - Credentials are already configured (not `.none`)
     /// - CIMD is in use and the server supports it (pre-registered)
     /// - No registration endpoint is available and no CIMD mismatch error
+    ///
+    /// Throws if registration was attempted but failed (4xx, 5xx, or unexpected response).
     func register(
         configuration: OAuthConfiguration,
         asMetadata: OAuthAuthorizationServerMetadata,
@@ -97,9 +100,7 @@ struct OAuthClientRegistrar: Sendable {
             ]
         }
 
-        guard let httpBody = try? JSONSerialization.data(withJSONObject: registrationPayload) else {
-            return nil
-        }
+        let httpBody = try JSONSerialization.data(withJSONObject: registrationPayload)
 
         request.httpBody = httpBody
 
@@ -117,15 +118,16 @@ struct OAuthClientRegistrar: Sendable {
         guard let httpResponse = response as? HTTPURLResponse,
             (200..<300).contains(httpResponse.statusCode)
         else {
-            return nil
+            let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
+            let oauthError =
+                (try? JSONDecoder().decode(OAuthTokenErrorResponse.self, from: data))?.error
+            throw OAuthAuthorizationError.tokenRequestFailed(
+                statusCode: statusCode,
+                oauthError: oauthError
+            )
         }
 
-        guard
-            let registration = try? JSONDecoder().decode(
-                OAuthClientRegistrationResponse.self, from: data)
-        else {
-            return nil
-        }
+        let registration = try JSONDecoder().decode(OAuthClientRegistrationResponse.self, from: data)
 
         let updatedAuth = OAuthClientRegistrar.updatedAuthentication(
             from: registration, current: configuration.authentication)

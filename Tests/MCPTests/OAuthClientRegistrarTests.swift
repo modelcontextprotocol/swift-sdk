@@ -134,8 +134,8 @@ import Testing
             }
         }
 
-        @Test("Returns nil on non-2xx non-4xx response")
-        func testRegisterReturnsNilOn5xx() async throws {
+        @Test("Throws tokenRequestFailed on non-2xx non-4xx response")
+        func testRegisterThrowsOn5xx() async throws {
             let (session, key) = makeIsolatedSession()
             await IsolatedMockURLProtocol.setHandler(key: key) { _ in
                 let response = HTTPURLResponse(
@@ -145,12 +145,19 @@ import Testing
             }
 
             let config = makeConfig(authentication: .none(clientID: ""))
-            let result = try await registrar.register(
-                configuration: config,
-                asMetadata: makeASMetadata(registrationEndpoint: registrationEndpoint),
-                session: session
-            )
-            #expect(result == nil)
+            let error = await #expect(throws: OAuthAuthorizationError.self) {
+                try await registrar.register(
+                    configuration: config,
+                    asMetadata: makeASMetadata(registrationEndpoint: registrationEndpoint),
+                    session: session
+                )
+            }
+            guard case .tokenRequestFailed(let statusCode, let oauthError) = error else {
+                Issue.record("Expected tokenRequestFailed, got \(String(describing: error))")
+                return
+            }
+            #expect(statusCode == 503)
+            #expect(oauthError == nil)
         }
 
         // MARK: - updatedAuthentication helper
