@@ -48,13 +48,20 @@ private func makeResponseBody(id: String = "2") -> Data {
     return try! JSONSerialization.data(withJSONObject: json)
 }
 
-private func makeStatefulPOSTRequest(body: Data, sessionID: String? = nil) -> HTTPRequest {
+private func makeStatefulPOSTRequest(
+    body: Data,
+    sessionID: String? = nil,
+    authorization: String? = nil
+) -> HTTPRequest {
     var headers: [String: String] = [
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
     ]
     if let sessionID {
         headers["Mcp-Session-Id"] = sessionID
+    }
+    if let authorization {
+        headers[HTTPHeaderName.authorization] = authorization
     }
     return HTTPRequest(method: "POST", headers: headers, body: body)
 }
@@ -65,7 +72,7 @@ private func makeGETRequest(sessionID: String, lastEventID: String? = nil) -> HT
         "Mcp-Session-Id": sessionID,
     ]
     if let lastEventID {
-        headers["Last-Event-Id"] = lastEventID
+        headers["Last-Event-ID"] = lastEventID
     }
     return HTTPRequest(method: "GET", headers: headers)
 }
@@ -94,6 +101,28 @@ private func makeStatefulTransport(
     StatefulHTTPServerTransport(
         sessionIDGenerator: sessionIDGenerator,
         validationPipeline: StandardValidationPipeline(validators: [])
+    )
+}
+
+private let authResourceMetadataURL =
+    URL(string: "https://mcp.example.com/.well-known/oauth-protected-resource/mcp")!
+private let authResourceIdentifier = URL(string: "https://mcp.example.com/mcp")!
+
+private func makeAuthenticatedStatefulTransport(
+    challengeScopes: Set<String>? = nil,
+    tokenValidator: @escaping BearerTokenValidator.TokenValidator
+) -> StatefulHTTPServerTransport {
+    let validator = BearerTokenValidator(
+        resourceMetadataURL: authResourceMetadataURL,
+        resourceIdentifier: authResourceIdentifier,
+        tokenValidator: tokenValidator,
+        challengeScopeProvider: { _, _ in challengeScopes }
+    )
+    return StatefulHTTPServerTransport(
+        validationPipeline: StandardValidationPipeline(validators: [
+            validator,
+            SessionValidator(),
+        ])
     )
 }
 
@@ -625,6 +654,132 @@ struct StatefulHTTPServerTransportTests {
         )
 
         #expect(response.statusCode == 400)
+        await transport.disconnect()
+    }
+
+    // MARK: - OAuth Bearer Validation
+
+    @Test("Bearer auth validator returns 401 with challenge when authorization is missing")
+    func testBearerAuthValidatorMissingAuthorizationReturns401() async throws {
+        let transport = makeAuthenticatedStatefulTransport(
+            challengeScopes: ["files:read"]
+        ) { _, _, _ in
+            .valid(BearerTokenInfo())
+        }
+        try await transport.connect()
+
+        let response = await transport.handleRequest(
+            makeStatefulPOSTRequest(body: makeInitializeBody())
+        )
+
+        #expect(response.statusCode == 401)
+        let challenge = response.headers[HTTPHeaderName.wwwAuthenticate]
+        #expect(challenge?.contains("Bearer ") == true)
+        #expect(
+            challenge?.contains("resource_metadata=\"\(authResourceMetadataURL.absoluteString)\"")
+                == true
+        )
+        #expect(challenge?.contains("scope=\"files:read\"") == true)
+
+        await transport.disconnect()
+    }
+
+    @Test("Bearer auth validator returns 400 when authorization header is malformed")
+    func testBearerAuthValidatorMalformedAuthorizationReturns400() async throws {
+        let transport = makeAuthenticatedStatefulTransport { _, _, _ in .valid(BearerTokenInfo()) }
+        try await transport.connect()
+
+        let response = await transport.handleRequest(
+            makeStatefulPOSTRequest(
+                body: makeInitializeBody(),
+                authorization: "Basic dGVzdA=="
+            )
+        )
+
+        #expect(response.statusCode == 400)
+        #expect(response.headers[HTTPHeaderName.wwwAuthenticate] == nil)
+
+        await transport.disconnect()
+    }
+
+    @Test("Bearer auth validator returns 401 invalid_token for rejected token")
+    func testBearerAuthValidatorInvalidTokenReturns401() async throws {
+        let transport = makeAuthenticatedStatefulTransport { _, _, _ in
+            .invalidToken(errorDescription: "Token expired")
+        }
+        try await transport.connect()
+
+        let response = await transport.handleRequest(
+            makeStatefulPOSTRequest(
+                body: makeInitializeBody(),
+                authorization: "Bearer expired-token"
+            )
+        )
+
+        #expect(response.statusCode == 401)
+        let challenge = response.headers[HTTPHeaderName.wwwAuthenticate]
+        #expect(challenge?.contains("error=\"invalid_token\"") == true)
+        #expect(challenge?.contains("error_description=\"Token expired\"") == true)
+        #expect(
+            challenge?.contains("resource_metadata=\"\(authResourceMetadataURL.absoluteString)\"")
+                == true
+        )
+
+        await transport.disconnect()
+    }
+
+    @Test("Bearer auth validator returns 403 insufficient_scope with scope challenge")
+    func testBearerAuthValidatorInsufficientScopeReturns403() async throws {
+        let transport = makeAuthenticatedStatefulTransport { token, _, context in
+            if context.isInitializationRequest, token == "init-token" {
+                return .valid(BearerTokenInfo())
+            }
+            if token == "read-only-token" {
+                return .insufficientScope(
+                    requiredScopes: ["files:read", "files:write"],
+                    errorDescription: "Additional file write permission required"
+                )
+            }
+            return .invalidToken(errorDescription: "Unknown token")
+        }
+        try await transport.connect()
+
+        let initResponse = await transport.handleRequest(
+            makeStatefulPOSTRequest(
+                body: makeInitializeBody(),
+                authorization: "Bearer init-token"
+            )
+        )
+        let sessionID = initResponse.headers[HTTPHeaderName.sessionID]
+        #expect(sessionID != nil)
+
+        guard let sessionID else {
+            await transport.disconnect()
+            return
+        }
+
+        let response = await transport.handleRequest(
+            makeStatefulPOSTRequest(
+                body: makeNotificationBody(),
+                sessionID: sessionID,
+                authorization: "Bearer read-only-token"
+            )
+        )
+
+        #expect(response.statusCode == 403)
+        let challenge = response.headers[HTTPHeaderName.wwwAuthenticate]
+        #expect(challenge?.contains("error=\"insufficient_scope\"") == true)
+        #expect(challenge?.contains("scope=\"files:read files:write\"") == true)
+        #expect(
+            challenge?.contains("resource_metadata=\"\(authResourceMetadataURL.absoluteString)\"")
+                == true
+        )
+        #expect(
+            challenge?.contains(
+                "error_description=\"Additional file write permission required\""
+            ) == true
+        )
+
         await transport.disconnect()
     }
 

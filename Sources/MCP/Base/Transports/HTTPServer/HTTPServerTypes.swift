@@ -42,10 +42,15 @@ public struct HTTPRequest: Sendable {
     /// The request body data, if any.
     public let body: Data?
 
-    public init(method: String, headers: [String: String] = [:], body: Data? = nil) {
+    /// The request path (e.g., "/mcp", "/.well-known/oauth-protected-resource").
+    /// Used by validators that need to match on specific paths.
+    public let path: String?
+
+    public init(method: String, headers: [String: String] = [:], body: Data? = nil, path: String? = nil) {
         self.method = method
         self.headers = headers
         self.body = body
+        self.path = path
     }
 
     /// Case-insensitive header lookup.
@@ -139,9 +144,11 @@ public enum HTTPResponse: Sendable {
 public enum HTTPHeaderName {
     public static let sessionID = "MCP-Session-Id"
     public static let protocolVersion = "MCP-Protocol-Version"
-    public static let lastEventID = "Last-Event-Id"
+    public static let lastEventID = "Last-Event-ID"
     public static let accept = "Accept"
     public static let contentType = "Content-Type"
+    public static let authorization = "Authorization"
+    public static let wwwAuthenticate = "WWW-Authenticate"
     public static let origin = "Origin"
     public static let host = "Host"
     public static let cacheControl = "Cache-Control"

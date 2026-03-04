@@ -340,6 +340,353 @@ public struct OriginValidator: HTTPRequestValidator {
     }
 }
 
+// MARK: - Protected Resource Metadata Validator
+
+/// Serves the RFC 9728 Protected Resource Metadata document for discovery.
+///
+/// Per the MCP authorization specification, servers **MUST** serve Protected Resource
+/// Metadata at `/.well-known/oauth-protected-resource` so that clients can discover
+/// authorization server endpoints automatically.
+///
+/// Place this validator **before** ``BearerTokenValidator`` in the pipeline so that
+/// unauthenticated metadata discovery requests succeed.
+///
+/// ```swift
+/// let prmValidator = ProtectedResourceMetadataValidator(
+///     metadata: OAuthProtectedResourceServerMetadata(
+///         resource: "https://api.example.com",
+///         authorizationServers: [URL(string: "https://auth.example.com")!]
+///     )
+/// )
+/// let pipeline = StandardValidationPipeline(validators: [
+///     prmValidator,
+///     bearerTokenValidator,
+///     // ...
+/// ])
+/// ```
+public struct ProtectedResourceMetadataValidator: HTTPRequestValidator {
+    private let encodedMetadata: Data
+
+    public init(metadata: OAuthProtectedResourceServerMetadata) {
+        self.encodedMetadata = (try? JSONEncoder().encode(metadata)) ?? Data()
+    }
+
+    public func validate(_ request: HTTPRequest, context: HTTPValidationContext) -> HTTPResponse? {
+        guard context.httpMethod == "GET",
+            let path = request.path,
+            path == OAuthWellKnownPath.protectedResource
+                || path.hasPrefix("\(OAuthWellKnownPath.protectedResource)/")
+        else {
+            return nil
+        }
+        return .data(encodedMetadata, headers: [HTTPHeaderName.contentType: ContentType.json])
+    }
+}
+
+// MARK: - OAuth Bearer Validator
+
+/// Result produced by ``BearerTokenValidator`` when validating an access token.
+public enum BearerTokenValidationResult: Sendable, Equatable {
+    /// Access token is valid for this request, with its extracted claims.
+    ///
+    /// Supply a ``BearerTokenInfo`` with `audience` and `expiresAt` populated so that
+    /// ``BearerTokenValidator`` can enforce expiry and audience checks automatically.
+    /// Pass `BearerTokenInfo()` (all `nil`) to delegate all enforcement to the caller.
+    case valid(BearerTokenInfo)
+
+    /// Access token is missing required privileges, and new scopes are required.
+    case insufficientScope(requiredScopes: Set<String>, errorDescription: String? = nil)
+
+    /// Access token is invalid or expired.
+    case invalidToken(errorDescription: String? = nil)
+
+    /// Authorization request is malformed.
+    case malformedRequest(errorDescription: String? = nil)
+}
+
+/// Validates OAuth 2.1 Bearer authorization for protected MCP HTTP endpoints.
+///
+/// This validator implements resource-server error semantics aligned with the MCP auth spec:
+/// - `401` with `WWW-Authenticate: Bearer ...` for missing/invalid tokens
+/// - `403` with `error="insufficient_scope"` for insufficient permissions
+/// - `400` for malformed authorization requests
+///
+/// Include this validator early in your pipeline, before `SessionValidator`, so unauthenticated
+/// initialization requests can return a challenge.
+///
+/// ## Audience Validation (MUST)
+///
+/// Per the MCP authorization specification, **the resource server MUST validate the audience
+/// (`aud` claim) of the access token** to ensure it matches the resource server's own identifier.
+/// Failure to validate the audience allows token substitution attacks where a token intended
+/// for a different resource is replayed against your server.
+///
+/// Your ``TokenValidator`` closure **MUST** verify the audience. Example:
+///
+/// ```swift
+/// let validator = BearerTokenValidator(
+///     resourceMetadataURL: metadataURL,
+///     tokenValidator: { token, request, context in
+///         guard let claims = verifyAndDecode(token) else {
+///             return .invalidToken(errorDescription: "Token verification failed")
+///         }
+///         // MUST: Verify token audience matches this resource server
+///         guard claims.audience.contains("https://api.example.com") else {
+///             return .invalidToken(errorDescription: "Token audience mismatch")
+///         }
+///         return .valid
+///     }
+/// )
+/// ```
+public struct BearerTokenValidator: HTTPRequestValidator {
+    /// Validates a bearer token and returns token info for audience and expiry enforcement.
+    public typealias TokenValidator = @Sendable (
+        _ token: String,
+        _ request: HTTPRequest,
+        _ context: HTTPValidationContext
+    ) -> BearerTokenValidationResult
+
+    /// Closure that returns the scopes to advertise in `WWW-Authenticate` challenge headers.
+    ///
+    /// Return `nil` to omit the `scope` parameter from the challenge.
+    public typealias ChallengeScopeProvider = @Sendable (
+        _ request: HTTPRequest,
+        _ context: HTTPValidationContext
+    ) -> Set<String>?
+
+    /// Closure that decides whether a request requires Bearer authentication.
+    ///
+    /// Return `false` to allow a request through unauthenticated (e.g., public health-check endpoints).
+    /// Defaults to requiring authentication on all requests.
+    public typealias RequirementPredicate = @Sendable (
+        _ request: HTTPRequest,
+        _ context: HTTPValidationContext
+    ) -> Bool
+
+    public let resourceMetadataURL: URL
+    public let resourceIdentifier: URL
+    private let tokenValidator: TokenValidator
+    private let challengeScopeProvider: ChallengeScopeProvider?
+    private let requiresAuthentication: RequirementPredicate
+    private let metadataDiscovery: any OAuthMetadataDiscovering
+
+    /// Creates a `BearerTokenValidator`.
+    ///
+    /// - Parameters:
+    ///   - resourceMetadataURL: Included in `WWW-Authenticate` challenge headers as the
+    ///     `resource_metadata` parameter, pointing to the RFC 9728 Protected Resource Metadata document.
+    ///   - resourceIdentifier: The canonical URI of this resource server. Used to validate the
+    ///     `aud` claim in tokens that supply audience information via ``BearerTokenInfo``.
+    ///   - tokenValidator: Validates the Bearer token and returns ``BearerTokenInfo`` with
+    ///     claims for SDK-side expiry and audience enforcement.
+    ///   - challengeScopeProvider: Optional closure supplying scopes to include in challenge headers.
+    ///   - requiresAuthentication: Predicate controlling which requests require a Bearer token.
+    ///     Defaults to requiring authentication on all requests.
+    ///   - metadataDiscovery: Used for audience URL matching. Defaults to ``DefaultOAuthMetadataDiscovery``.
+    public init(
+        resourceMetadataURL: URL,
+        resourceIdentifier: URL,
+        tokenValidator: @escaping TokenValidator,
+        challengeScopeProvider: ChallengeScopeProvider? = nil,
+        requiresAuthentication: @escaping RequirementPredicate = { _, _ in true },
+        metadataDiscovery: any OAuthMetadataDiscovering = DefaultOAuthMetadataDiscovery()
+    ) {
+        self.resourceMetadataURL = resourceMetadataURL
+        self.resourceIdentifier = resourceIdentifier
+        self.tokenValidator = tokenValidator
+        self.challengeScopeProvider = challengeScopeProvider
+        self.requiresAuthentication = requiresAuthentication
+        self.metadataDiscovery = metadataDiscovery
+    }
+
+    public func validate(_ request: HTTPRequest, context: HTTPValidationContext) -> HTTPResponse? {
+        guard requiresAuthentication(request, context) else { return nil }
+
+        guard let authorizationHeader = request.header(HTTPHeaderName.authorization) else {
+            return unauthorizedResponse(
+                challengeScope: challengeScopeProvider?(request, context),
+                error: nil,
+                errorDescription: nil,
+                sessionID: context.sessionID
+            )
+        }
+
+        let parsedToken: String
+        switch parseBearerToken(from: authorizationHeader) {
+        case .success(let token):
+            parsedToken = token
+        case .failure(let error):
+            return .error(
+                statusCode: 400,
+                .invalidRequest("Bad Request: \(error.message)"),
+                sessionID: context.sessionID
+            )
+        }
+
+        switch tokenValidator(parsedToken, request, context) {
+        case .valid(let info):
+            // Expiry check
+            if let exp = info.expiresAt, exp <= Date() {
+                return unauthorizedResponse(
+                    challengeScope: challengeScopeProvider?(request, context),
+                    error: "invalid_token",
+                    errorDescription: "Token has expired",
+                    sessionID: context.sessionID
+                )
+            }
+            // Audience check — skipped for opaque tokens (audience == nil)
+            if let audience = info.audience {
+                let matches = audience.contains { audString in
+                    guard let audURL = URL(string: audString) else { return false }
+                    return metadataDiscovery.protectedResourceMatches(
+                        resource: audURL, endpoint: resourceIdentifier)
+                }
+                if !matches {
+                    return unauthorizedResponse(
+                        challengeScope: challengeScopeProvider?(request, context),
+                        error: "invalid_token",
+                        errorDescription: "Token audience mismatch",
+                        sessionID: context.sessionID
+                    )
+                }
+            }
+            return nil
+
+        case .invalidToken(let errorDescription):
+            return unauthorizedResponse(
+                challengeScope: challengeScopeProvider?(request, context),
+                error: "invalid_token",
+                errorDescription: errorDescription,
+                sessionID: context.sessionID
+            )
+
+        case .insufficientScope(let requiredScopes, let errorDescription):
+            return forbiddenInsufficientScopeResponse(
+                requiredScopes: requiredScopes,
+                errorDescription: errorDescription,
+                sessionID: context.sessionID
+            )
+
+        case .malformedRequest(let errorDescription):
+            let message = errorDescription ?? "Malformed authorization request"
+            return .error(
+                statusCode: 400,
+                .invalidRequest("Bad Request: \(message)"),
+                sessionID: context.sessionID
+            )
+        }
+    }
+
+    private func unauthorizedResponse(
+        challengeScope: Set<String>?,
+        error: String?,
+        errorDescription: String?,
+        sessionID: String?
+    ) -> HTTPResponse {
+        let challenge = makeBearerChallenge(
+            resourceMetadataURL: resourceMetadataURL,
+            scope: challengeScope,
+            error: error,
+            errorDescription: errorDescription
+        )
+        return .error(
+            statusCode: 401,
+            .invalidRequest("Unauthorized"),
+            sessionID: sessionID,
+            extraHeaders: [HTTPHeaderName.wwwAuthenticate: challenge]
+        )
+    }
+
+    private func forbiddenInsufficientScopeResponse(
+        requiredScopes: Set<String>,
+        errorDescription: String?,
+        sessionID: String?
+    ) -> HTTPResponse {
+        let challenge = makeBearerChallenge(
+            resourceMetadataURL: resourceMetadataURL,
+            scope: requiredScopes,
+            error: "insufficient_scope",
+            errorDescription: errorDescription
+        )
+        return .error(
+            statusCode: 403,
+            .invalidRequest("Forbidden: Insufficient scope"),
+            sessionID: sessionID,
+            extraHeaders: [HTTPHeaderName.wwwAuthenticate: challenge]
+        )
+    }
+
+    private func makeBearerChallenge(
+        resourceMetadataURL: URL,
+        scope: Set<String>?,
+        error: String?,
+        errorDescription: String?
+    ) -> String {
+        var parameters: [String] = []
+        parameters.append("resource_metadata=\"\(escapeAuthParameter(resourceMetadataURL.absoluteString))\"")
+
+        if let scope, !scope.isEmpty {
+            let serializedScope = scope.sorted().joined(separator: " ")
+            parameters.append("scope=\"\(escapeAuthParameter(serializedScope))\"")
+        }
+
+        if let error {
+            parameters.append("error=\"\(escapeAuthParameter(error))\"")
+        }
+
+        if let errorDescription, !errorDescription.isEmpty {
+            parameters.append("error_description=\"\(escapeAuthParameter(errorDescription))\"")
+        }
+
+        return "\(OAuthTokenType.bearer) " + parameters.joined(separator: ", ")
+    }
+
+    private func escapeAuthParameter(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+    }
+
+    private struct BearerTokenParseError: Swift.Error {
+        let message: String
+    }
+
+    private func parseBearerToken(
+        from authorizationHeader: String
+    ) -> Result<String, BearerTokenParseError> {
+        let trimmed = authorizationHeader.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return .failure(.init(message: "Authorization header is empty"))
+        }
+
+        let parts = trimmed.split(
+            maxSplits: 1,
+            whereSeparator: { $0.isWhitespace }
+        )
+
+        guard parts.count == 2 else {
+            return .failure(
+                .init(message: "Authorization header must be in the form: Bearer <token>")
+            )
+        }
+
+        guard String(parts[0]).caseInsensitiveCompare(OAuthTokenType.bearer) == .orderedSame else {
+            return .failure(.init(message: "Authorization scheme must be Bearer"))
+        }
+
+        let token = String(parts[1]).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !token.isEmpty else {
+            return .failure(.init(message: "Bearer token is empty"))
+        }
+
+        if token.contains(where: \.isWhitespace) {
+            return .failure(.init(message: "Bearer token must not contain whitespace"))
+        }
+
+        return .success(token)
+    }
+}
+
 // MARK: - Validation Pipeline Protocol
 
 /// Runs a validation pipeline against an HTTP request.
