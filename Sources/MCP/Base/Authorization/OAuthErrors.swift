@@ -79,6 +79,11 @@ public enum OAuthAuthorizationError: LocalizedError {
     /// loopback HTTP URI, or it contains a fragment.
     case invalidRedirectURI(String)
 
+    /// The authorization endpoint returned an HTTP error response during the authorization code flow.
+    ///
+    /// - Parameter statusCode: HTTP status code from the authorization endpoint.
+    case authorizationRequestFailed(statusCode: Int)
+
     /// The authorization response did not include a `Location` redirect header.
     case authorizationResponseMissingRedirectLocation
 
@@ -167,6 +172,8 @@ public enum OAuthAuthorizationError: LocalizedError {
         case .invalidRedirectURI(let url):
             return
                 "Redirect URI must use https or loopback http and must not include fragments: \(url)"
+        case .authorizationRequestFailed(let statusCode):
+            return "Authorization request failed with status \(statusCode)"
         case .authorizationResponseMissingRedirectLocation:
             return "Authorization response is missing redirect location"
         case .authorizationResponseRedirectMismatch(let expected, let actual):

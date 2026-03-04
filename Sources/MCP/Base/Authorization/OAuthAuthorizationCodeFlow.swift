@@ -147,13 +147,14 @@ public struct OAuthAuthorizationCodeFlow: Sendable {
         defer { noRedirectSession.invalidateAndCancel() }
 
         let (_, response) = try await noRedirectSession.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse,
-            (200..<400).contains(httpResponse.statusCode)
-        else {
-            throw OAuthAuthorizationError.authorizationServerMetadataDiscoveryFailed
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw OAuthAuthorizationError.authorizationResponseMissingRedirectLocation
         }
 
         guard (300..<400).contains(httpResponse.statusCode) else {
+            if httpResponse.statusCode >= 400 {
+                throw OAuthAuthorizationError.authorizationRequestFailed(statusCode: httpResponse.statusCode)
+            }
             throw OAuthAuthorizationError.authorizationResponseMissingRedirectLocation
         }
 

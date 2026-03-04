@@ -97,7 +97,11 @@ struct OAuthClientRegistrar: Sendable {
             ]
         }
 
-        request.httpBody = try? JSONSerialization.data(withJSONObject: registrationPayload)
+        guard let httpBody = try? JSONSerialization.data(withJSONObject: registrationPayload) else {
+            return nil
+        }
+
+        request.httpBody = httpBody
 
         let (data, response) = try await session.data(for: request)
         if let httpResponse = response as? HTTPURLResponse,
