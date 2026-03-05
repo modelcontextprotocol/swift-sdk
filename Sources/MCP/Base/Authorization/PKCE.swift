@@ -1,5 +1,4 @@
 import Foundation
-import Security
 
 #if canImport(CryptoKit)
     import CryptoKit
@@ -17,11 +16,11 @@ public enum PKCE {
         let charset = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
         // 66 characters; 256 % 66 == 52, so reject bytes > 252 to eliminate modulo bias.
         let limit = UInt8(255 - (255 % charset.count))  // 252
+        var rng = SystemRandomNumberGenerator()
         var result = ""
         result.reserveCapacity(length)
         while result.count < length {
-            var byte = UInt8(0)
-            _ = SecRandomCopyBytes(kSecRandomDefault, 1, &byte)
+            let byte = UInt8.random(in: 0...255, using: &rng)
             if byte <= limit {
                 result.append(charset[Int(byte % UInt8(charset.count))])
             }

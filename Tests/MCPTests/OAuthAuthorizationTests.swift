@@ -3,16 +3,18 @@ import Testing
 
 #if canImport(CryptoKit)
 import CryptoKit
-#else
-import Crypto
 #endif
 
 @testable import MCP
 
 @Suite("OAuth Authorization Helpers")
 struct OAuthAuthorizationTests {
-    // Generated fresh each test run — no hardcoded key material in source.
-    private static let testPrivateKeyPEM: String = P256.Signing.PrivateKey().pemRepresentation
+    #if canImport(CryptoKit)
+        // Generated fresh each test run — no hardcoded key material in source.
+        private static let testPrivateKeyPEM: String = P256.Signing.PrivateKey().pemRepresentation
+    #else
+        private static let testPrivateKeyPEM: String = ""
+    #endif
 
     private var metadataDiscovery: DefaultOAuthMetadataDiscovery { DefaultOAuthMetadataDiscovery() }
 

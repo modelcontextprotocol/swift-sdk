@@ -262,6 +262,7 @@ struct OAuthAuthorizerTests {
 
     // MARK: - handleChallenge (authorization_code)
 
+    #if canImport(CryptoKit)
     @Test("handleChallenge 401 calls authCodeFlow for authorization_code grant")
     func testHandleChallenge401AuthorizationCodeCallsFlow() async throws {
         let authCodeFlow = MockAuthCodeFlow()
@@ -294,6 +295,7 @@ struct OAuthAuthorizerTests {
         #expect(tokenClient.capturedParameters?["grant_type"] == "authorization_code")
         #expect(tokenClient.capturedParameters?["code"] == "mock-auth-code")
     }
+    #endif
 
     // MARK: - handleChallenge (403)
 

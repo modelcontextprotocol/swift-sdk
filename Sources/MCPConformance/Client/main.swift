@@ -14,6 +14,10 @@ import Foundation
 import Logging
 import MCP
 
+#if canImport(FoundationNetworking)
+    import FoundationNetworking
+#endif
+
 // MARK: - Scenario Handlers
 
 typealias ScenarioHandler = ([String]) async throws -> Void
