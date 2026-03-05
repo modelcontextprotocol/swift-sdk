@@ -72,7 +72,7 @@ jobs:
           swift build --product mcp-everything-server
 
       - name: Run client conformance tests
-        uses: modelcontextprotocol/conformance@v0.1.11
+        uses: modelcontextprotocol/conformance@v0.1.15
         with:
           mode: client
           command: '.build/debug/mcp-everything-client'
@@ -86,7 +86,7 @@ jobs:
           sleep 3
 
       - name: Run server conformance tests
-        uses: modelcontextprotocol/conformance@v0.1.11
+        uses: modelcontextprotocol/conformance@v0.1.15
         with:
           mode: server
           url: 'http://localhost:3001/mcp'
