@@ -61,11 +61,6 @@ jobs:
         with:
           swift-version: 6.1.0
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-
       - name: Build Swift executables
         run: |
           swift build --product mcp-everything-client
@@ -78,6 +73,7 @@ jobs:
           command: '.build/debug/mcp-everything-client'
           suite: 'core'
           expected-failures: './conformance-baseline.yml'
+          node-version: '22'
 
       - name: Start server for testing
         run: |
@@ -92,6 +88,7 @@ jobs:
           url: 'http://localhost:3001/mcp'
           suite: 'core'
           expected-failures: './conformance-baseline.yml'
+          node-version: '22'
 
       - name: Cleanup server
         if: always()
