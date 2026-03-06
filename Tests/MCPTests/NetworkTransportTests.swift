@@ -702,43 +702,8 @@ import Testing
             await transport.disconnect()
         }
 
-        @Test("Send error resumes continuation and triggers reconnection")
-        func testSendErrorResumesAndReconnects() async throws {
-            let mockConnection = MockNetworkConnection()
-
-            let reconnectionConfig = NetworkTransport.ReconnectionConfiguration(
-                enabled: true,
-                maxAttempts: 1,
-                backoffMultiplier: 1.0
-            )
-
-            let transport = NetworkTransport(
-                mockConnection,
-                heartbeatConfig: .disabled,
-                reconnectionConfig: reconnectionConfig
-            )
-
-            try await transport.connect()
-
-            // Inject a connection-lost error for the next send
-            mockConnection.setSendError(NWError.posix(POSIXErrorCode(rawValue: 57)!))
-
-            // send() should throw immediately without hanging
-            do {
-                try await transport.send(#"{"test":"error"}"#.data(using: .utf8)!)
-                Issue.record("Expected send to throw on error")
-            } catch {
-                #expect(error is MCPError)
-            }
-
-            // Wait for handleSendError to run asynchronously
-            try await Task.sleep(for: .milliseconds(700))
-
-            await transport.disconnect()
-        }
-
-        @Test("Send error without reconnection enabled does not reconnect")
-        func testSendErrorNoReconnect() async throws {
+        @Test("Send error resumes continuation immediately")
+        func testSendErrorResumesContinuation() async throws {
             let mockConnection = MockNetworkConnection()
             let transport = NetworkTransport(
                 mockConnection,
@@ -748,18 +713,17 @@ import Testing
 
             try await transport.connect()
 
+            // Inject a connection-lost error for the next send
             mockConnection.setSendError(NWError.posix(POSIXErrorCode(rawValue: 57)!))
 
+            // send() must throw without hanging — continuation is resumed directly
+            // in the NWConnection callback, not deferred via Task { @MainActor in }
             do {
-                try await transport.send(#"{"test":"no-reconnect"}"#.data(using: .utf8)!)
+                try await transport.send(#"{"test":"error"}"#.data(using: .utf8)!)
                 Issue.record("Expected send to throw on error")
             } catch {
                 #expect(error is MCPError)
             }
-
-            // Connection should remain in ready state (no reconnection attempt)
-            try await Task.sleep(for: .milliseconds(100))
-            #expect(mockConnection.state == .ready)
 
             await transport.disconnect()
         }

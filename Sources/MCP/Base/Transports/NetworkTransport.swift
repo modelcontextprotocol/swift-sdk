@@ -550,12 +550,14 @@ import Logging
 
             logger.warning("Connection appears broken, will attempt to reconnect...")
             setIsConnected(false)
-
-            try? await Task.sleep(for: .milliseconds(500))
+            connection.cancel()
 
             guard !isStopping else { return }
-            connection.cancel()
-            try? await connect()
+            do {
+                try await connect()
+            } catch {
+                logger.error("Reconnection failed: \(error)")
+            }
         }
 
         /// Receives data in an async sequence
