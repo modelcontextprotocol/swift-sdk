@@ -160,6 +160,18 @@ import Testing
             queueDataForReceiving(data)
         }
 
+        /// Set a send-only error that does not change connection state.
+        /// Unlike `simulateFailure`, this keeps the connection in `.ready` state
+        /// so that `send()` proceeds to the NWConnection callback path.
+        func setSendError(_ error: NWError?) {
+            mockError = error
+        }
+
+        /// Clear any injected error without changing connection state.
+        func clearError() {
+            mockError = nil
+        }
+
         /// Get all sent data
         func getSentData() -> [Data] {
             return sentData
@@ -660,6 +672,163 @@ import Testing
 
             // Verify connection is cleaned up
             #expect(weakConnection == nil, "Connection was not properly cleaned up")
+        }
+        @Test("Concurrent sends do not cause data races")
+        func testConcurrentSendsNoCrash() async throws {
+            let mockConnection = MockNetworkConnection()
+            let transport = NetworkTransport(
+                mockConnection,
+                heartbeatConfig: .disabled,
+                reconnectionConfig: .disabled
+            )
+
+            try await transport.connect()
+
+            // Fire many concurrent sends to surface any data race in continuation handling.
+            // Before the fix, mutable `var` flags captured by @Sendable closures could race.
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                for i in 0..<100 {
+                    group.addTask {
+                        let msg = #"{"id":\#(i)}"#.data(using: .utf8)!
+                        try await transport.send(msg)
+                    }
+                }
+                try await group.waitForAll()
+            }
+
+            let sentData = mockConnection.getSentData()
+            #expect(sentData.count == 100)
+
+            await transport.disconnect()
+        }
+
+        @Test("Send error resumes continuation and triggers reconnection")
+        func testSendErrorResumesAndReconnects() async throws {
+            let mockConnection = MockNetworkConnection()
+
+            let reconnectionConfig = NetworkTransport.ReconnectionConfiguration(
+                enabled: true,
+                maxAttempts: 1,
+                backoffMultiplier: 1.0
+            )
+
+            let transport = NetworkTransport(
+                mockConnection,
+                heartbeatConfig: .disabled,
+                reconnectionConfig: reconnectionConfig
+            )
+
+            try await transport.connect()
+
+            // Inject a connection-lost error for the next send
+            mockConnection.setSendError(NWError.posix(POSIXErrorCode(rawValue: 57)!))
+
+            // send() should throw immediately without hanging
+            do {
+                try await transport.send(#"{"test":"error"}"#.data(using: .utf8)!)
+                Issue.record("Expected send to throw on error")
+            } catch {
+                #expect(error is MCPError)
+            }
+
+            // Wait for handleSendError to run asynchronously
+            try await Task.sleep(for: .milliseconds(700))
+
+            await transport.disconnect()
+        }
+
+        @Test("Send error without reconnection enabled does not reconnect")
+        func testSendErrorNoReconnect() async throws {
+            let mockConnection = MockNetworkConnection()
+            let transport = NetworkTransport(
+                mockConnection,
+                heartbeatConfig: .disabled,
+                reconnectionConfig: .disabled
+            )
+
+            try await transport.connect()
+
+            mockConnection.setSendError(NWError.posix(POSIXErrorCode(rawValue: 57)!))
+
+            do {
+                try await transport.send(#"{"test":"no-reconnect"}"#.data(using: .utf8)!)
+                Issue.record("Expected send to throw on error")
+            } catch {
+                #expect(error is MCPError)
+            }
+
+            // Connection should remain in ready state (no reconnection attempt)
+            try await Task.sleep(for: .milliseconds(100))
+            #expect(mockConnection.state == .ready)
+
+            await transport.disconnect()
+        }
+
+        @Test("Receive error resumes continuation without crash")
+        func testReceiveErrorResumesContinuation() async throws {
+            let mockConnection = MockNetworkConnection()
+            let transport = NetworkTransport(
+                mockConnection,
+                heartbeatConfig: .disabled,
+                reconnectionConfig: .disabled
+            )
+
+            try await transport.connect()
+
+            // Inject receive error after connection is established
+            mockConnection.simulateFailure(error: NWError.posix(POSIXErrorCode.ECONNRESET))
+
+            let stream = await transport.receive()
+            var receivedError = false
+
+            do {
+                for try await _ in stream {
+                    break
+                }
+            } catch {
+                receivedError = true
+            }
+
+            #expect(receivedError, "Expected receive stream to surface the error")
+
+            await transport.disconnect()
+        }
+
+        @Test("Concurrent sends with intermittent errors")
+        func testConcurrentSendsWithErrors() async throws {
+            let mockConnection = MockNetworkConnection()
+            let transport = NetworkTransport(
+                mockConnection,
+                heartbeatConfig: .disabled,
+                reconnectionConfig: .disabled
+            )
+
+            try await transport.connect()
+
+            // Mix of successful and failing sends should not crash or deadlock.
+            // This tests that continuation resume is always called exactly once.
+            var successCount = 0
+            var errorCount = 0
+
+            for i in 0..<20 {
+                if i == 10 {
+                    mockConnection.setSendError(NWError.posix(POSIXErrorCode(rawValue: 57)!))
+                } else if i == 11 {
+                    mockConnection.clearError()
+                }
+
+                do {
+                    try await transport.send(#"{"id":\#(i)}"#.data(using: .utf8)!)
+                    successCount += 1
+                } catch {
+                    errorCount += 1
+                }
+            }
+
+            #expect(successCount > 0)
+            #expect(errorCount > 0)
+
+            await transport.disconnect()
         }
     }
 #endif
