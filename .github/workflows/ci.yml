@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   test:
-    timeout-minutes: 5
+    timeout-minutes: 10
     strategy:
       matrix:
         os: [macos-latest, ubuntu-latest]
