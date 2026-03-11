@@ -511,8 +511,8 @@ import Logging
             var messageWithNewline = message
             messageWithNewline.append(UInt8(ascii: "\n"))
 
-            // Use a local actor-isolated variable to track continuation state
-            var sendContinuationResumed = false
+            // Use a main-isolated variable to track continuation state
+            let sendContinuationResumed = MainFlag()
 
             try await withCheckedThrowingContinuation {
                 [weak self] (continuation: CheckedContinuation<Void, Swift.Error>) in
@@ -529,8 +529,8 @@ import Logging
                         guard let self = self else { return }
 
                         Task { @MainActor in
-                            if !sendContinuationResumed {
-                                sendContinuationResumed = true
+                            if !sendContinuationResumed.flag {
+                                sendContinuationResumed.flag = true
                                 if let error = error {
                                     self.logger.error("Send error: \(error)")
 
@@ -747,7 +747,8 @@ import Logging
         /// - Returns: The received data chunk
         /// - Throws: Network errors or transport failures
         private func receiveData() async throws -> Data {
-            var receiveContinuationResumed = false
+            // Use a main-isolated variable to track continuation state
+            let receiveContinuationResumed = MainFlag()
 
             return try await withCheckedThrowingContinuation {
                 [weak self] (continuation: CheckedContinuation<Data, Swift.Error>) in
@@ -760,8 +761,8 @@ import Logging
                 connection.receive(minimumIncompleteLength: 1, maximumLength: maxLength) {
                     content, _, isComplete, error in
                     Task { @MainActor in
-                        if !receiveContinuationResumed {
-                            receiveContinuationResumed = true
+                        if !receiveContinuationResumed.flag {
+                            receiveContinuationResumed.flag = true
                             if let error = error {
                                 continuation.resume(throwing: MCPError.transportError(error))
                             } else if let content = content {
@@ -787,6 +788,7 @@ import Logging
             self.isConnected = connected
         }
     }
+    @MainActor final class MainFlag { var flag = false }
 
     extension NWError {
         /// Whether this error indicates a connection has been lost or reset.
