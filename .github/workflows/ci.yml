@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   test:
-    timeout-minutes: 5
+    timeout-minutes: 10
     strategy:
       matrix:
         os: [macos-latest, ubuntu-latest]
@@ -61,23 +61,19 @@ jobs:
         with:
           swift-version: 6.1.0
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
       - name: Build Swift executables
         run: |
           swift build --product mcp-everything-client
           swift build --product mcp-everything-server
 
       - name: Run client conformance tests
-        uses: modelcontextprotocol/conformance@v0.1.11
+        uses: modelcontextprotocol/conformance@v0.1.15
         with:
           mode: client
           command: '.build/debug/mcp-everything-client'
           suite: 'core'
           expected-failures: './conformance-baseline.yml'
+          node-version: '22'
 
       - name: Start server for testing
         run: |
@@ -86,12 +82,13 @@ jobs:
           sleep 3
 
       - name: Run server conformance tests
-        uses: modelcontextprotocol/conformance@v0.1.11
+        uses: modelcontextprotocol/conformance@v0.1.15
         with:
           mode: server
           url: 'http://localhost:3001/mcp'
           suite: 'core'
           expected-failures: './conformance-baseline.yml'
+          node-version: '22'
 
       - name: Cleanup server
         if: always()
@@ -99,6 +96,18 @@ jobs:
           if [ -n "$SERVER_PID" ]; then
             kill $SERVER_PID 2>/dev/null || true
           fi
+
+  documentation:
+    name: Documentation
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: "6.1.0"
+      - name: Build Documentation
+        run: swift package generate-documentation --target MCP --warnings-as-errors
 
   static-linux-sdk-build:
     name: Linux Static SDK Build (${{ matrix.swift-version }} - ${{ matrix.os }})
