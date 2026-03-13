@@ -109,6 +109,16 @@ public struct Resource: Hashable, Codable, Sendable {
             .init(uri: uri, mimeType: mimeType, text: content, _meta: _meta)
         }
 
+        /// Creates a binary resource content value from raw data.
+        ///
+        /// The data is base64-encoded automatically. On the receiving end,
+        /// the `blob` property contains the base64-encoded string.
+        ///
+        /// - Parameters:
+        ///   - data: The raw binary data (e.g. image or audio bytes).
+        ///   - uri: The resource URI that identifies this content.
+        ///   - mimeType: Optional MIME type (e.g. `"image/png"`).
+        ///   - _meta: Optional metadata.
         public static func binary(
             _ data: Data,
             uri: String,

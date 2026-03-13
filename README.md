@@ -179,6 +179,12 @@ for item in content {
         print("Resource link: \(name) at \(uri), type: \(mimeType ?? "unknown")")
     }
 }
+
+// React when the server's tool list changes
+await client.onNotification(ToolListChangedNotification.self) { _ in
+    let (tools, _) = try await client.listTools()
+    print("Tool list updated: \(tools.map { $0.name })")
+}
 ```
 
 ### Resources
@@ -208,6 +214,32 @@ if result.capabilities.resources?.subscribe == true {
         print("Updated resource content received")
     }
 }
+
+// Unsubscribe from resource updates
+_ = try await client.send(ResourceUnsubscribe.request(.init(uri: "resource://example"))).value
+
+// Read a binary resource (the blob field contains base64-encoded data)
+let binaryContents = try await client.readResource(uri: "resource://image/logo")
+for content in binaryContents {
+    if let blob = content.blob {
+        let imageData = Data(base64Encoded: blob)!
+        // Use imageData as needed...
+    }
+}
+
+// List resource templates and read a resolved URI
+let (templates, _) = try await client.listResourceTemplates()
+print("Available templates: \(templates.map { $0.uriTemplate })")
+
+// Resolve a template by substituting variables, then read it
+let resolvedURI = "file:///Users/user/projects/readme.md"
+let templateContents = try await client.readResource(uri: resolvedURI)
+
+// React when the server's resource list changes
+await client.onNotification(ResourceListChangedNotification.self) { _ in
+    let (resources, _) = try await client.listResources()
+    print("Resource list updated: \(resources.map { $0.uri })")
+}
 ```
 
 ### Prompts
@@ -232,9 +264,30 @@ let (description, messages) = try await client.getPrompt(
 // Use the prompt messages in your application
 print("Prompt description: \(description)")
 for message in messages {
-    if case .text(text: let text) = message.content {
+    switch message.content {
+    case .text(let text):
         print("\(message.role): \(text)")
+    case .image(let data, let mimeType):
+        let imageData = Data(base64Encoded: data)!
+        print("Image (\(mimeType)): \(imageData.count) bytes")
+    case .audio(let data, let mimeType):
+        print("Audio (\(mimeType))")
+    case .resource(let resource, _, _):
+        // Inline resource content embedded in the prompt
+        if let text = resource.text {
+            print("Embedded resource \(resource.uri): \(text)")
+        } else if resource.blob != nil {
+            print("Embedded binary resource: \(resource.uri)")
+        }
+    case .resourceLink(let uri, let name, _, _, _, _):
+        print("Resource link: \(name) at \(uri)")
     }
+}
+
+// React when the server's prompt list changes
+await client.onNotification(PromptListChangedNotification.self) { _ in
+    let (prompts, _) = try await client.listPrompts()
+    print("Prompt list updated: \(prompts.map { $0.name })")
 }
 ```
 
@@ -745,6 +798,10 @@ await server.withMethodHandler(CallTool.self) { params in
         return .init(content: [.text("Unknown tool")], isError: true)
     }
 }
+
+// Notify clients that the tool list has changed
+// (Requires tools.listChanged: true in server capabilities)
+try await server.notify(ToolListChangedNotification.message())
 ```
 
 ### Resources
@@ -790,6 +847,12 @@ await server.withMethodHandler(ReadResource.self) { params in
             """
         return .init(contents: [Resource.Content.text(statusJson, uri: params.uri, mimeType: "application/json")])
 
+    case "resource://image/logo":
+        let imageData = loadLogoImage() // Your implementation — returns Data
+        return .init(contents: [
+            Resource.Content.binary(imageData, uri: params.uri, mimeType: "image/png")
+        ])
+
     default:
         throw MCPError.invalidParams("Unknown resource URI: \(params.uri)")
     }
@@ -804,6 +867,33 @@ await server.withMethodHandler(ResourceSubscribe.self) { params in
     print("Client subscribed to \(params.uri). Server needs to implement logic to track this subscription.")
     return .init()
 }
+
+// Register an unsubscribe handler
+await server.withMethodHandler(ResourceUnsubscribe.self) { params in
+    print("Client unsubscribed from \(params.uri)")
+    return .init()
+}
+
+// List resource templates so clients can discover parameterized resource URIs
+await server.withMethodHandler(ListResourceTemplates.self) { _ in
+    let templates = [
+        Resource.Template(
+            uriTemplate: "file:///{path}",
+            name: "Project Files",
+            description: "Access files in the project directory",
+            mimeType: "text/plain"
+        )
+    ]
+    return .init(templates: templates)
+}
+
+// Notify clients that the resource list has changed
+// (Requires resources.listChanged: true in server capabilities)
+try await server.notify(ResourceListChangedNotification.message())
+
+// Notify subscribed clients that a specific resource was updated
+// (Requires resources.subscribe: true in server capabilities)
+try await server.notify(ResourceUpdatedNotification.message(.init(uri: "resource://system/status")))
 ```
 
 ### Prompts
@@ -855,10 +945,29 @@ await server.withMethodHandler(GetPrompt.self) { params in
     case "customer-support":
         // Similar implementation for customer support prompt
 
+    case "image-analysis":
+        // Prompt messages can include image content and embedded resources
+        let imageBase64 = loadChartImage() // Your implementation — returns base64 string
+        let messages: [Prompt.Message] = [
+            .user(.text(text: "Please analyze the following chart:")),
+            .user(.image(data: imageBase64, mimeType: "image/png")),
+            .user(.resource(
+                resource: Resource.Content.text(
+                    "Chart data source: Q4 2025 sales figures",
+                    uri: "resource://charts/q4-metadata"
+                )
+            ))
+        ]
+        return .init(description: "Image analysis prompt", messages: messages)
+
     default:
         throw MCPError.invalidParams("Unknown prompt name: \(params.name)")
     }
 }
+
+// Notify clients that the prompt list has changed
+// (Requires prompts.listChanged: true in server capabilities)
+try await server.notify(PromptListChangedNotification.message())
 ```
 
 ### Completions
@@ -1034,6 +1143,49 @@ let result = try await server.requestElicitation(
     url: "https://example.com/oauth/authorize?client_id=...",
     elicitationId: UUID().uuidString
 )
+```
+
+Elicitation schemas support default values and enum constraints:
+
+```swift
+let configSchema = Elicitation.RequestSchema(
+    title: "Deployment Configuration",
+    properties: [
+        "environment": .object([
+            "type": .string("string"),
+            "title": .string("Target Environment"),
+            "enum": .array([.string("staging"), .string("production")]),
+            "default": .string("staging")
+        ]),
+        "replicas": .object([
+            "type": .string("integer"),
+            "title": .string("Number of Replicas"),
+            "minimum": .int(1),
+            "maximum": .int(10),
+            "default": .int(2)
+        ])
+    ],
+    required: ["environment"]
+)
+
+let deployResult = try await server.requestElicitation(
+    message: "Configure your deployment",
+    requestedSchema: configSchema
+)
+```
+
+For URL-based elicitation, send `ElicitationCompleteNotification` after the out-of-band flow finishes so the client knows the flow is done:
+
+```swift
+let elicitationId = UUID().uuidString
+_ = try await server.requestElicitation(
+    message: "Please authorize access",
+    url: "https://example.com/oauth/authorize?...",
+    elicitationId: elicitationId
+)
+
+// After the user completes the external flow, notify the client
+try await server.notify(ElicitationCompleteNotification.message(.init(elicitationId: elicitationId)))
 ```
 
 ### Roots
@@ -1306,6 +1458,78 @@ The Swift SDK provides multiple built-in transports:
 | [`InMemoryTransport`](/Sources/MCP/Base/Transports/InMemoryTransport.swift) | Custom in-memory transport for direct communication within the same process | All platforms | Testing, debugging, same-process client-server communication |
 | [`NetworkTransport`](/Sources/MCP/Base/Transports/NetworkTransport.swift) | Custom transport using Apple's Network framework for TCP/UDP connections | Apple platforms only | Low-level networking, custom protocols |
 
+
+### HTTP Server Transports
+
+Both server transports are framework-agnostic: you pass incoming `HTTPRequest` values and receive `HTTPResponse` values to convert to your HTTP framework's native types.
+
+#### Stateful (with SSE streaming)
+
+`StatefulHTTPServerTransport` supports full session management and Server-Sent Events for server-initiated messages such as resource update and tool list change notifications:
+
+```swift
+let server = Server(
+    name: "MyServer",
+    version: "1.0.0",
+    capabilities: .init(
+        resources: .init(subscribe: true, listChanged: true),
+        tools: .init(listChanged: true)
+    )
+)
+
+let transport = StatefulHTTPServerTransport()
+try await server.start(transport: transport)
+
+// In your HTTP framework handler:
+// let httpResponse = await transport.handleRequest(httpRequest)
+// Convert httpResponse to your framework's response type and return it
+```
+
+#### Stateless (request-response only)
+
+`StatelessHTTPServerTransport` provides simple request-response semantics with no session management or SSE streaming. Use this for serverless environments and edge functions:
+
+```swift
+let transport = StatelessHTTPServerTransport()
+try await server.start(transport: transport)
+
+// In your HTTP framework handler:
+// let httpResponse = await transport.handleRequest(httpRequest)
+```
+
+> [!NOTE]
+> The legacy SSE transport from the 2024-11-05 MCP specification (dedicated `GET /sse` and `POST /messages` endpoints) is not available as a separate transport type. Use `HTTPClientTransport` with `streaming: true` (the default) and `StatefulHTTPServerTransport` for SSE-capable Streamable HTTP connections.
+
+### Stdio Server Transport
+
+For local process communication, use `StdioTransport` on the server. The server reads MCP requests from standard input and writes responses to standard output:
+
+```swift
+let server = Server(
+    name: "MyServer",
+    version: "1.0.0",
+    capabilities: .init(tools: .init(listChanged: true))
+)
+
+let transport = StdioTransport()
+try await server.start(transport: transport)
+// The process now handles MCP messages via stdin/stdout
+```
+
+### Protocol Version Negotiation
+
+The SDK supports multiple protocol versions and negotiates automatically during the connection handshake. The client sends `Version.latest` in the `initialize` request; if the server responds with an older version, both sides use that version for the session:
+
+```swift
+// Versions supported by this SDK (newest to oldest):
+// "2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"
+// Version.latest == "2025-11-25"
+
+// The negotiated version is available from the initialization result:
+let result = try await client.connect(transport: transport)
+print("Negotiated protocol version: \(result.protocolVersion)")
+// e.g. "2025-06-18" when connecting to an older server
+```
 
 ### Custom Transport Implementation
 

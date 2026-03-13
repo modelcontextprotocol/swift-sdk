@@ -718,12 +718,28 @@ public actor Client {
         return (resources: result.resources, nextCursor: result.nextCursor)
     }
 
+    /// Subscribes to change notifications for a resource.
+    ///
+    /// After subscribing, the server will send `ResourceUpdatedNotification` messages
+    /// whenever the resource at `uri` changes. Use `onNotification(ResourceUpdatedNotification.self)`
+    /// to handle these notifications.
+    ///
+    /// - Parameter uri: The URI of the resource to subscribe to.
+    /// - Throws: If the server does not support the `resources.subscribe` capability.
     public func subscribeToResource(uri: String) async throws {
         try validateServerCapability(\.resources?.subscribe, "Resource subscription")
         let request = ResourceSubscribe.request(.init(uri: uri))
         _ = try await sendAndAwait(request)
     }
 
+    /// Lists the resource templates available on the server.
+    ///
+    /// Resource templates expose parameterized URI patterns (RFC 6570) that clients
+    /// can resolve to concrete resource URIs and then read with `readResource(uri:)`.
+    ///
+    /// - Parameter cursor: An opaque pagination cursor returned by a previous call.
+    ///   Pass `nil` to start from the beginning.
+    /// - Returns: A tuple of templates and an optional cursor for the next page.
     public func listResourceTemplates(cursor: String? = nil) async throws -> (
         templates: [Resource.Template], nextCursor: String?
     ) {
