@@ -39,7 +39,7 @@ struct ServerTests {
         try await server.start(transport: transport)
 
         // Wait for message processing and response
-        try await Task.sleep(for: .milliseconds(100))
+        try await Task.sleep(for: .milliseconds(200))
 
         #expect(await transport.sentMessages.count == 1)
 
@@ -143,28 +143,44 @@ struct ServerTests {
 
     @Test("JSON-RPC batch processing")
     func testJSONRPCBatchProcessing() async throws {
-        let transport = MockTransport()
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
         let server = Server(name: "TestServer", version: "1.0")
 
+        // Connect transports
+        try await clientTransport.connect()
+        try await serverTransport.connect()
+
+        // Start receiving messages on client side
+        let receiveTask = Task {
+            var responses: [String] = []
+            for try await data in await clientTransport.receive() {
+                if let response = String(data: data, encoding: .utf8) {
+                    responses.append(response)
+                }
+                // Stop after receiving 2 responses (initialize + batch)
+                if responses.count == 2 {
+                    break
+                }
+            }
+            return responses
+        }
+
         // Start the server
-        try await server.start(transport: transport)
+        try await server.start(transport: serverTransport)
 
         // Initialize the server first
-        try await transport.queue(
-            request: Initialize.request(
-                .init(
-                    protocolVersion: Version.latest,
-                    capabilities: .init(),
-                    clientInfo: .init(name: "TestClient", version: "1.0")
-                )
+        let initRequest = Initialize.request(
+            .init(
+                protocolVersion: Version.latest,
+                capabilities: .init(),
+                clientInfo: .init(name: "TestClient", version: "1.0")
             )
         )
+        let initData = try JSONEncoder().encode(AnyRequest(initRequest))
+        try await clientTransport.send(initData)
 
-        // Wait for server to initialize and respond
+        // Wait for initialization
         try await Task.sleep(for: .milliseconds(100))
-
-        // Clear sent messages
-        await transport.clearMessages()
 
         // Create a batch with multiple requests
         let batchJSON = """
@@ -173,19 +189,20 @@ struct ServerTests {
                 {"jsonrpc":"2.0","id":2,"method":"ping","params":{}}
             ]
             """
-        let batch = try JSONDecoder().decode([AnyRequest].self, from: batchJSON.data(using: .utf8)!)
-
-        // Send the batch request
-        try await transport.queue(batch: batch)
+        let batchData = batchJSON.data(using: .utf8)!
+        try await clientTransport.send(batchData)
 
         // Wait for batch processing
-        try await Task.sleep(for: .milliseconds(100))
+        try await Task.sleep(for: .milliseconds(200))
 
-        // Verify response
-        let sentMessages = await transport.sentMessages
-        #expect(sentMessages.count == 1)
+        // Get responses
+        let responses = try await receiveTask.value
+        #expect(responses.count == 2)
 
-        if let batchResponse = sentMessages.first {
+        // Verify the batch response (second response)
+        if responses.count >= 2 {
+            let batchResponse = responses[1]
+
             // Should be an array
             #expect(batchResponse.hasPrefix("["))
             #expect(batchResponse.hasSuffix("]"))
@@ -196,6 +213,7 @@ struct ServerTests {
         }
 
         await server.stop()
-        await transport.disconnect()
+        await clientTransport.disconnect()
+        await serverTransport.disconnect()
     }
 }

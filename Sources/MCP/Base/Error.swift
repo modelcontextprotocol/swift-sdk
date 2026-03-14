@@ -6,6 +6,25 @@ import Foundation
     @preconcurrency import SystemPackage
 #endif
 
+/// Information about a required URL elicitation
+public struct URLElicitationInfo: Codable, Hashable, Sendable {
+    /// Elicitation mode (must be "url")
+    public var mode: String
+    /// Unique identifier for this elicitation
+    public var elicitationId: String
+    /// URL for the user to visit
+    public var url: String
+    /// Message describing the elicitation
+    public var message: String
+
+    public init(mode: String = "url", elicitationId: String, url: String, message: String) {
+        self.mode = mode
+        self.elicitationId = elicitationId
+        self.url = url
+        self.message = message
+    }
+}
+
 /// A model context protocol error.
 public enum MCPError: Swift.Error, Sendable {
     // Standard JSON-RPC 2.0 errors (-32700 to -32603)
@@ -17,6 +36,9 @@ public enum MCPError: Swift.Error, Sendable {
 
     // Server errors (-32000 to -32099)
     case serverError(code: Int, message: String)
+
+    // MCP specific errors
+    case urlElicitationRequired(message: String, elicitations: [URLElicitationInfo])  // -32042
 
     // Transport specific errors
     case connectionClosed
@@ -31,6 +53,7 @@ public enum MCPError: Swift.Error, Sendable {
         case .invalidParams: return -32602
         case .internalError: return -32603
         case .serverError(let code, _): return code
+        case .urlElicitationRequired: return -32042
         case .connectionClosed: return -32000
         case .transportError: return -32001
         }
@@ -68,6 +91,8 @@ extension MCPError: LocalizedError {
             return "Internal error" + (detail.map { ": \($0)" } ?? "")
         case .serverError(_, let message):
             return "Server error: \(message)"
+        case .urlElicitationRequired(let message, _):
+            return "URL elicitation required: \(message)"
         case .connectionClosed:
             return "Connection closed"
         case .transportError(let error):
@@ -89,6 +114,8 @@ extension MCPError: LocalizedError {
             return "Internal JSON-RPC error"
         case .serverError:
             return "Server-defined error occurred"
+        case .urlElicitationRequired:
+            return "The server requires user authentication or input via external URL"
         case .connectionClosed:
             return "The connection to the server was closed"
         case .transportError(let error):
@@ -106,6 +133,11 @@ extension MCPError: LocalizedError {
             return "Check the method name and ensure it is supported by the server"
         case .invalidParams:
             return "Verify the parameters match the method's expected parameters"
+        case .urlElicitationRequired(_, let elicitations):
+            if let first = elicitations.first {
+                return "Visit \(first.url) to complete the required authentication or input"
+            }
+            return "Complete the required URL-based elicitation"
         case .connectionClosed:
             return "Try reconnecting to the server"
         default:
@@ -139,7 +171,6 @@ extension MCPError: Codable {
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(code, forKey: .code)
-        try container.encode(errorDescription ?? "Unknown error", forKey: .message)
 
         // Encode additional data if available
         switch self {
@@ -148,15 +179,34 @@ extension MCPError: Codable {
             .methodNotFound(let detail),
             .invalidParams(let detail),
             .internalError(let detail):
+            try container.encode(errorDescription ?? "Unknown error", forKey: .message)
             if let detail = detail {
                 try container.encode(["detail": detail], forKey: .data)
             }
         case .serverError(_, _):
             // No additional data for server errors
+            try container.encode(errorDescription ?? "Unknown error", forKey: .message)
             break
+        case .urlElicitationRequired(let message, let elicitations):
+            // Encode the raw message so decode can round-trip without prefix doubling
+            try container.encode(message, forKey: .message)
+            // Encode elicitations array as structured data
+            let elicitationsData = elicitations.map { info -> [String: Value] in
+                return [
+                    "mode": .string(info.mode),
+                    "elicitationId": .string(info.elicitationId),
+                    "url": .string(info.url),
+                    "message": .string(info.message)
+                ]
+            }
+            try container.encode(
+                ["elicitations": Value.array(elicitationsData.map { .object($0) })],
+                forKey: .data
+            )
         case .connectionClosed:
-            break
+            try container.encode(errorDescription ?? "Unknown error", forKey: .message)
         case .transportError(let error):
+            try container.encode(errorDescription ?? "Unknown error", forKey: .message)
             try container.encode(
                 ["error": error.localizedDescription],
                 forKey: .data
@@ -188,6 +238,25 @@ extension MCPError: Codable {
             self = .invalidParams(unwrapDetail(message))
         case -32603:
             self = .internalError(unwrapDetail(nil))
+        case -32042:
+            // Extract elicitations array from data
+            var elicitations: [URLElicitationInfo] = []
+            if case .array(let items) = data?["elicitations"] {
+                for item in items {
+                    if case .object(let dict) = item,
+                       case .string(let mode) = dict["mode"],
+                       case .string(let elicitationId) = dict["elicitationId"],
+                       case .string(let url) = dict["url"],
+                       case .string(let msg) = dict["message"] {
+                        elicitations.append(URLElicitationInfo(
+                            mode: mode,
+                            elicitationId: elicitationId,
+                            url: url,
+                            message: msg))
+                    }
+                }
+            }
+            self = .urlElicitationRequired(message: message, elicitations: elicitations)
         case -32000:
             self = .connectionClosed
         case -32001:
@@ -214,7 +283,21 @@ extension MCPError: Codable {
 
 extension MCPError: Equatable {
     public static func == (lhs: MCPError, rhs: MCPError) -> Bool {
-        lhs.code == rhs.code
+        switch (lhs, rhs) {
+        case (.parseError(let a), .parseError(let b)): return a == b
+        case (.invalidRequest(let a), .invalidRequest(let b)): return a == b
+        case (.methodNotFound(let a), .methodNotFound(let b)): return a == b
+        case (.invalidParams(let a), .invalidParams(let b)): return a == b
+        case (.internalError(let a), .internalError(let b)): return a == b
+        case (.serverError(let c1, let m1), .serverError(let c2, let m2)):
+            return c1 == c2 && m1 == m2
+        case (.urlElicitationRequired(let m1, let e1), .urlElicitationRequired(let m2, let e2)):
+            return m1 == m2 && e1 == e2
+        case (.connectionClosed, .connectionClosed): return true
+        case (.transportError(let a), .transportError(let b)):
+            return a.localizedDescription == b.localizedDescription
+        default: return false
+        }
     }
 }
 
@@ -236,6 +319,9 @@ extension MCPError: Hashable {
             hasher.combine(detail)
         case .serverError(_, let message):
             hasher.combine(message)
+        case .urlElicitationRequired(let message, let elicitations):
+            hasher.combine(message)
+            hasher.combine(elicitations)
         case .connectionClosed:
             break
         case .transportError(let error):

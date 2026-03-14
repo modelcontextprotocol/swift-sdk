@@ -37,7 +37,9 @@ struct AnyMethod: Method, Sendable {
 }
 
 extension Method where Parameters == Empty {
-    public static func request(id: ID = .random) -> Request<Self> {
+    public static func request(
+        id: ID = .random
+    ) -> Request<Self> {
         Request(id: id, method: name, params: Empty())
     }
 }
@@ -50,17 +52,26 @@ extension Method where Result == Empty {
 
 extension Method {
     /// Create a request with the given parameters.
-    public static func request(id: ID = .random, _ parameters: Self.Parameters) -> Request<Self> {
+    public static func request(
+        id: ID = .random,
+        _ parameters: Self.Parameters
+    ) -> Request<Self> {
         Request(id: id, method: name, params: parameters)
     }
 
     /// Create a response with the given result.
-    public static func response(id: ID, result: Self.Result) -> Response<Self> {
+    public static func response(
+        id: ID,
+        result: Self.Result
+    ) -> Response<Self> {
         Response(id: id, result: result)
     }
 
     /// Create a response with the given error.
-    public static func response(id: ID, error: MCPError) -> Response<Self> {
+    public static func response(
+        id: ID,
+        error: MCPError
+    ) -> Response<Self> {
         Response(id: id, error: error)
     }
 }
@@ -76,13 +87,17 @@ public struct Request<M: Method>: Hashable, Identifiable, Codable, Sendable {
     /// The request parameters.
     public let params: M.Parameters
 
-    init(id: ID = .random, method: String, params: M.Parameters) {
+    init(
+        id: ID = .random,
+        method: String,
+        params: M.Parameters
+    ) {
         self.id = id
         self.method = method
         self.params = params
     }
 
-    private enum CodingKeys: String, CodingKey {
+    private enum CodingKeys: String, CodingKey, CaseIterable {
         case jsonrpc, id, method, params
     }
 
@@ -197,17 +212,29 @@ public struct Response<M: Method>: Hashable, Identifiable, Codable, Sendable {
     /// The response result.
     public let result: Swift.Result<M.Result, MCPError>
 
-    public init(id: ID, result: M.Result) {
+    public init(
+        id: ID,
+        result: Swift.Result<M.Result, MCPError>
+    ) {
         self.id = id
-        self.result = .success(result)
+        self.result = result
     }
 
-    public init(id: ID, error: MCPError) {
-        self.id = id
-        self.result = .failure(error)
+    public init(
+        id: ID,
+        result: M.Result
+    ) {
+        self.init(id: id, result: .success(result))
     }
 
-    private enum CodingKeys: String, CodingKey {
+    public init(
+        id: ID,
+        error: MCPError
+    ) {
+        self.init(id: id, result: .failure(error))
+    }
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
         case jsonrpc, id, result, error
     }
 
@@ -215,6 +242,7 @@ public struct Response<M: Method>: Hashable, Identifiable, Codable, Sendable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(jsonrpc, forKey: .jsonrpc)
         try container.encode(id, forKey: .id)
+
         switch result {
         case .success(let result):
             try container.encode(result, forKey: .result)
@@ -249,18 +277,19 @@ typealias AnyResponse = Response<AnyMethod>
 
 extension AnyResponse {
     init<T: Method>(_ response: Response<T>) throws {
-        // Instead of re-encoding/decoding which might double-wrap the error,
-        // directly transfer the properties
-        self.id = response.id
         switch response.result {
         case .success(let result):
-            // For success, we still need to convert the result to a Value
             let data = try JSONEncoder().encode(result)
             let resultValue = try JSONDecoder().decode(Value.self, from: data)
-            self.result = .success(resultValue)
+            self = Response<AnyMethod>(
+                id: response.id,
+                result: .success(resultValue)
+            )
         case .failure(let error):
-            // Keep the original error without re-encoding/decoding
-            self.result = .failure(error)
+            self = Response<AnyMethod>(
+                id: response.id,
+                result: .failure(error)
+            )
         }
     }
 }
