@@ -345,12 +345,10 @@ struct ClientTests {
 
         let request1 = Ping.request()
         let request2 = Ping.request()
-        nonisolated(unsafe) var resultTask1: Task<Ping.Result, Swift.Error>?
-        nonisolated(unsafe) var resultTask2: Task<Ping.Result, Swift.Error>?
-
-        try await client.withBatch { batch in
-            resultTask1 = try await batch.addRequest(request1)
-            resultTask2 = try await batch.addRequest(request2)
+        let (resultTask1, resultTask2) = try await client.withBatch { batch in
+            let task1 = try await batch.addRequest(request1)
+            let task2 = try await batch.addRequest(request2)
+            return (task1, task2)
         }
 
         // Check if batch message was sent (after initialize and initialized notification)
@@ -381,13 +379,8 @@ struct ClientTests {
         try await transport.queue(batch: [anyResponse1, anyResponse2])
 
         // Wait for results and verify
-        guard let task1 = resultTask1, let task2 = resultTask2 else {
-            #expect(Bool(false), "Result tasks not created")
-            return
-        }
-
-        _ = try await task1.value  // Should succeed
-        _ = try await task2.value  // Should succeed
+        _ = try await resultTask1.value  // Should succeed
+        _ = try await resultTask2.value  // Should succeed
 
         #expect(Bool(true))  // Reaching here means success
 
@@ -426,11 +419,11 @@ struct ClientTests {
         let request1 = Ping.request()  // Success
         let request2 = Ping.request()  // Error
 
-        nonisolated(unsafe) var resultTasks: [Task<Ping.Result, Swift.Error>] = []
-
-        try await client.withBatch { batch in
-            resultTasks.append(try await batch.addRequest(request1))
-            resultTasks.append(try await batch.addRequest(request2))
+        let resultTasks = try await client.withBatch { batch in
+            [
+                try await batch.addRequest(request1),
+                try await batch.addRequest(request2),
+            ]
         }
 
         // Check if batch message was sent (after initialize and initialized notification)
@@ -510,6 +503,49 @@ struct ClientTests {
 
         // Check that only initialize message and initialized notification were sent
         #expect(await transport.sentMessages.count == 2)  // Initialize request + Initialized notification
+
+        await client.disconnect()
+    }
+
+    @Test("Batch request - empty with non-Void return")
+    func testBatchRequestEmptyNonVoid() async throws {
+        let transport = MockTransport()
+        let client = Client(name: "TestClient", version: "1.0")
+
+        // Set up a task to handle the initialize response
+        let initTask = Task {
+            try await Task.sleep(for: .milliseconds(10))
+            if let lastMessage = await transport.sentMessages.last,
+                let data = lastMessage.data(using: .utf8),
+                let request = try? JSONDecoder().decode(Request<Initialize>.self, from: data)
+            {
+                let response = Initialize.response(
+                    id: request.id,
+                    result: .init(
+                        protocolVersion: Version.latest,
+                        capabilities: .init(),
+                        serverInfo: .init(name: "TestServer", version: "1.0"),
+                        instructions: nil
+                    )
+                )
+                try await transport.queue(response: response)
+            }
+        }
+
+        try await client.connect(transport: transport)
+        try await Task.sleep(for: .milliseconds(10))
+        initTask.cancel()
+
+        // Call withBatch with non-Void return but don't add any requests
+        let result: Int = try await client.withBatch { _ in
+            42
+        }
+
+        // Verify the closure's return value is passed through
+        #expect(result == 42)
+
+        // Check that only initialize message and initialized notification were sent
+        #expect(await transport.sentMessages.count == 2)
 
         await client.disconnect()
     }

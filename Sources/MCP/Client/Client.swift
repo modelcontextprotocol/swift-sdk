@@ -592,7 +592,10 @@ public actor Client {
     ///                   Use this object to add requests to the batch.
     /// - Throws: `MCPError.internalError` if the client is not connected.
     ///           Can also rethrow errors from the `body` closure or from sending the batch request.
-    public func withBatch(body: @escaping @Sendable (Batch) async throws -> Void) async throws {
+    @discardableResult
+    public func withBatch<T: Sendable>(
+        body: @escaping @Sendable (Batch) async throws -> T
+    ) async throws -> T {
         guard let connection = connection else {
             throw MCPError.internalError("Client connection not initialized")
         }
@@ -600,8 +603,8 @@ public actor Client {
         // Create Batch actor, passing self (Client)
         let batch = Batch(client: self)
 
-        // Populate the batch actor by calling the user's closure.
-        try await body(batch)
+        // Populate the batch actor by calling the user's closure and capture result.
+        let result = try await body(batch)
 
         // Get the collected requests from the batch actor
         let requests = await batch.requests
@@ -609,7 +612,7 @@ public actor Client {
         // Check if there are any requests to send
         guard !requests.isEmpty else {
             await logger?.debug("Batch requested but no requests were added.")
-            return  // Nothing to send
+            return result  // Return result even if no requests
         }
 
         await logger?.debug(
@@ -620,6 +623,7 @@ public actor Client {
         try await connection.send(data)
 
         // Responses will be handled asynchronously by the message loop and handleBatchResponse/handleResponse.
+        return result
     }
 
     // MARK: - Lifecycle
