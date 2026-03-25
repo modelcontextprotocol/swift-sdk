@@ -184,6 +184,12 @@ public struct OAuthConfiguration: Sendable {
         #endif
     }
 
+    /// Returns a loopback redirect URI with a random ephemeral port.
+    ///
+    /// - Warning: The random port is selected from the ephemeral range (49152–65535) but is
+    ///   not bound immediately. Between URI generation and the callback server binding the
+    ///   port, another process could claim the same port and intercept the authorization code.
+    ///   For production deployments, prefer a fixed port or platform-specific custom URL scheme.
     static func defaultAuthorizationRedirectURI() -> URL {
         let port = Int.random(in: 49152...65535)
         return URL(string: "http://\(OAuthLoopbackHost.ipv4):\(port)/callback")!
