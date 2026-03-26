@@ -424,11 +424,6 @@ public actor Server {
         return requestTask
     }
 
-    /// Send a request and await its response
-    private func sendAndAwait<M: Method>(_ request: Request<M>) async throws -> M.Result {
-        let task = try send(request)
-        return try await task.value
-    }
 
     private func addPendingResponse<T: Sendable & Decodable>(
         id: ID,
@@ -499,7 +494,7 @@ public actor Server {
             )
         )
 
-        let result = try await sendAndAwait(request)
+        let result = try await send(request).value
         return result
     }
 
@@ -548,7 +543,7 @@ public actor Server {
             )
         )
 
-        let result = try await sendAndAwait(request)
+        let result = try await send(request).value
         return result
     }
 
@@ -588,7 +583,7 @@ public actor Server {
             )
         )
 
-        let result = try await sendAndAwait(request)
+        let result = try await send(request).value
         return result
     }
 
@@ -655,7 +650,7 @@ public actor Server {
         try validateClientCapability(\.roots, "Roots")
 
         let request = ListRoots.request()
-        let result = try await sendAndAwait(request)
+        let result = try await send(request).value
         return result.roots
     }
 
