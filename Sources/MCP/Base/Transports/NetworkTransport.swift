@@ -245,6 +245,11 @@ import Logging
         // Track connection state for continuations
         private var connectionContinuationResumed = false
 
+        // Generation counter to invalidate stale state handlers from previous connect() cycles.
+        // Prevents double-resume when a reconnection resets connectionContinuationResumed
+        // while old stateUpdateHandler closures (capturing a previous continuation) are still in flight.
+        private var connectGeneration: UInt64 = 0
+
         // Connection is marked nonisolated(unsafe) to allow access from closures
         private nonisolated(unsafe) var connection: NetworkConnectionProtocol
 
@@ -317,8 +322,10 @@ import Logging
             isStopping = false
             reconnectAttempt = 0
 
-            // Reset continuation state
+            // Reset continuation state and advance generation to invalidate stale handlers
             connectionContinuationResumed = false
+            connectGeneration &+= 1
+            let generation = connectGeneration
 
             // Wait for connection to be ready
             try await withCheckedThrowingContinuation {
@@ -334,12 +341,15 @@ import Logging
                     Task { @MainActor in
                         switch state {
                         case .ready:
-                            await self.handleConnectionReady(continuation: continuation)
+                            await self.handleConnectionReady(
+                                continuation: continuation, generation: generation)
                         case .failed(let error):
                             await self.handleConnectionFailed(
-                                error: error, continuation: continuation)
+                                error: error, continuation: continuation,
+                                generation: generation)
                         case .cancelled:
-                            await self.handleConnectionCancelled(continuation: continuation)
+                            await self.handleConnectionCancelled(
+                                continuation: continuation, generation: generation)
                         case .waiting(let error):
                             self.logger.debug("Connection waiting: \(error)")
                         case .preparing:
@@ -358,10 +368,20 @@ import Logging
 
         /// Handles when the connection reaches the ready state
         ///
-        /// - Parameter continuation: The continuation to resume when connection is ready
-        private func handleConnectionReady(continuation: CheckedContinuation<Void, Swift.Error>)
-            async
-        {
+        /// - Parameters:
+        ///   - continuation: The continuation to resume when connection is ready
+        ///   - generation: The connect generation that created this handler
+        private func handleConnectionReady(
+            continuation: CheckedContinuation<Void, Swift.Error>,
+            generation: UInt64
+        ) async {
+            guard generation == connectGeneration else {
+                logger.debug(
+                    "Ignoring stale connection ready (generation \(generation) != \(connectGeneration))"
+                )
+                return
+            }
+
             if !connectionContinuationResumed {
                 connectionContinuationResumed = true
                 isConnected = true
@@ -448,11 +468,20 @@ import Logging
         /// - Parameters:
         ///   - error: The error that caused the connection to fail
         ///   - continuation: The continuation to resume with the error
+        ///   - generation: The connect generation that created this handler
         private func handleConnectionFailed(
-            error: Swift.Error, continuation: CheckedContinuation<Void, Swift.Error>
+            error: Swift.Error,
+            continuation: CheckedContinuation<Void, Swift.Error>,
+            generation: UInt64
         ) async {
+            guard generation == connectGeneration else {
+                logger.debug(
+                    "Ignoring stale connection failure (generation \(generation) != \(connectGeneration))"
+                )
+                return
+            }
+
             if !connectionContinuationResumed {
-                connectionContinuationResumed = true
                 logger.error("Connection failed: \(error)")
 
                 await handleReconnection(
@@ -465,12 +494,21 @@ import Logging
 
         /// Handles connection cancellation
         ///
-        /// - Parameter continuation: The continuation to resume with cancellation error
-        private func handleConnectionCancelled(continuation: CheckedContinuation<Void, Swift.Error>)
-            async
-        {
+        /// - Parameters:
+        ///   - continuation: The continuation to resume with cancellation error
+        ///   - generation: The connect generation that created this handler
+        private func handleConnectionCancelled(
+            continuation: CheckedContinuation<Void, Swift.Error>,
+            generation: UInt64
+        ) async {
+            guard generation == connectGeneration else {
+                logger.debug(
+                    "Ignoring stale connection cancellation (generation \(generation) != \(connectGeneration))"
+                )
+                return
+            }
+
             if !connectionContinuationResumed {
-                connectionContinuationResumed = true
                 logger.warning("Connection cancelled")
 
                 await handleReconnection(
@@ -492,34 +530,30 @@ import Logging
             continuation: CheckedContinuation<Void, Swift.Error>,
             context: String
         ) async {
+            guard !connectionContinuationResumed else {
+                logger.warning(
+                    "handleReconnection called but continuation already resumed, skipping (\(context))"
+                )
+                return
+            }
+            connectionContinuationResumed = true
+
             if !isStopping,
                 reconnectionConfig.enabled,
                 reconnectAttempt < reconnectionConfig.maxAttempts
             {
-                // Try to reconnect with exponential backoff
                 reconnectAttempt += 1
                 logger.info(
                     "Attempting reconnection after \(context) (\(reconnectAttempt)/\(reconnectionConfig.maxAttempts))..."
                 )
 
-                // Calculate backoff delay
                 let delay = reconnectionConfig.backoffDelay(for: reconnectAttempt)
 
-                // Schedule reconnection attempt after delay
-                Task {
-                    try? await Task.sleep(for: .seconds(delay))
-                    if !isStopping {
-                        // Cancel the current connection before attempting to reconnect.
-                        self.connection.cancel()
-                        // Resume original continuation with error; outer logic or a new call to connect() will handle retry.
-                        continuation.resume(throwing: error)
-                    } else {
-                        continuation.resume(throwing: error)  // Stopping, so fail.
-                    }
-                }
+                self.connection.cancel()
+                try? await Task.sleep(for: .seconds(delay))
+                continuation.resume(throwing: error)
             } else {
-                // Not configured to reconnect, exceeded max attempts, or stopping
-                self.connection.cancel()  // Ensure connection is cancelled
+                self.connection.cancel()
                 continuation.resume(throwing: error)
             }
         }
