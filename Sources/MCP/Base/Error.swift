@@ -237,7 +237,7 @@ extension MCPError: Codable {
         case -32602:
             self = .invalidParams(unwrapDetail(message))
         case -32603:
-            self = .internalError(unwrapDetail(nil))
+            self = .internalError(unwrapDetail(message))
         case -32042:
             // Extract elicitations array from data
             var elicitations: [URLElicitationInfo] = []
