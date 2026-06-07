@@ -84,6 +84,29 @@ struct ResponseTests {
         }
     }
 
+    @Test("Internal error preserves the message from an external server")
+    func testInternalErrorPreservesMessage() throws {
+        // A peer sends a -32603 error with a message and no `data.detail`, like
+        // every other JSON-RPC error. Decoding should keep the message instead
+        // of dropping it, matching the other standard error cases.
+        let jsonString = """
+            {"jsonrpc":"2.0","id":"test-id","error":{"code":-32603,"message":"Database connection failed"}}
+            """
+        let data = jsonString.data(using: .utf8)!
+
+        let decoder = JSONDecoder()
+        let decoded = try decoder.decode(Response<TestMethod>.self, from: data)
+
+        if case .failure(let decodedError) = decoded.result {
+            #expect(decodedError.code == -32603)
+            #expect(
+                decodedError.localizedDescription
+                    == "Internal error: Database connection failed")
+        } else {
+            #expect(Bool(false), "Expected error result")
+        }
+    }
+
     @Test("Empty result response encoding")
     func testEmptyResultResponseEncoding() throws {
         let response = EmptyMethod.response(id: "test-id")
