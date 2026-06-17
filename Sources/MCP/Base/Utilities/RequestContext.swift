@@ -21,6 +21,9 @@ public struct RequestContext<Output: Sendable & Decodable>: Sendable {
     /// let context = try await client.send(request)
     /// let result = try await context.value
     /// ```
+    ///
+    /// - Throws: ``ResponseDecodingError`` if the server's response cannot be decoded into `Output`,
+    ///   or the error the request failed with otherwise.
     public var value: Output {
         get async throws {
             try await requestTask.value
