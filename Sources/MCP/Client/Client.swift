@@ -763,6 +763,8 @@ public actor Client {
     ///           the caller is requesting out-of-band progress notifications for this request.
     ///           Use `onNotification(ProgressNotification.self)` to receive progress updates.
     /// - Returns: A tuple containing the tool's content response and an optional error flag.
+    /// - Throws: ``ResponseDecodingError`` if the server's response cannot be decoded into the
+    ///           expected result type, or `MCPError` for protocol and transport failures.
     /// - Note: For advanced use cases requiring cancellation support, use `send()` directly to get a `RequestContext`.
     /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/server/tools/#calling-tools
     public func callTool(
