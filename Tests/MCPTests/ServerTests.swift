@@ -53,6 +53,53 @@ struct ServerTests {
         await transport.disconnect()
     }
 
+    @Test("Repeated initialize requests are idempotent")
+    func testServerHandleRepeatedInitialize() async throws {
+        let transport = MockTransport()
+
+        let server = Server(name: "TestServer", version: "1.0")
+        try await server.start(transport: transport)
+
+        // Wait for server to start receiving
+        try await Task.sleep(for: .milliseconds(10))
+
+        // First initialize request
+        try await transport.queue(
+            request: Initialize.request(
+                .init(
+                    protocolVersion: Version.latest,
+                    capabilities: .init(),
+                    clientInfo: .init(name: "TestClient", version: "1.0")
+                )
+            ))
+
+        try await Task.sleep(for: .milliseconds(200))
+
+        // Second initialize request on the same server connection should
+        // succeed rather than returning a "Server is already initialized" error
+        try await transport.queue(
+            request: Initialize.request(
+                .init(
+                    protocolVersion: Version.latest,
+                    capabilities: .init(),
+                    clientInfo: .init(name: "TestClient", version: "1.0")
+                )
+            ))
+
+        try await Task.sleep(for: .milliseconds(200))
+
+        let messages = await transport.sentMessages
+        #expect(messages.count == 2)
+        for response in messages {
+            #expect(response.contains("serverInfo"))
+            #expect(!response.contains("\"error\""))
+            #expect(!response.contains("already initialized"))
+        }
+
+        await server.stop()
+        await transport.disconnect()
+    }
+
     @Test("Initialize hook - successful")
     func testInitializeHookSuccess() async throws {
         let transport = MockTransport()
@@ -96,6 +143,44 @@ struct ServerTests {
         if let response = messages.first {
             #expect(response.contains("serverInfo"))
         }
+
+        await server.stop()
+        await transport.disconnect()
+    }
+
+    @Test("Initialize hook runs again on repeated initialize")
+    func testInitializeHookCalledOnRepeatedInitialize() async throws {
+        let transport = MockTransport()
+
+        actor TestState {
+            var callCount = 0
+            func increment() { callCount += 1 }
+            func count() -> Int { callCount }
+        }
+
+        let state = TestState()
+        let server = Server(name: "TestServer", version: "1.0")
+
+        try await server.start(transport: transport) { _, _ in
+            await state.increment()
+        }
+
+        try await Task.sleep(for: .milliseconds(10))
+
+        for _ in 0..<2 {
+            try await transport.queue(
+                request: Initialize.request(
+                    .init(
+                        protocolVersion: Version.latest,
+                        capabilities: .init(),
+                        clientInfo: .init(name: "TestClient", version: "1.0")
+                    )
+                ))
+            try await Task.sleep(for: .milliseconds(200))
+        }
+
+        #expect(await state.count() == 2)
+        #expect(await transport.sentMessages.count == 2)
 
         await server.stop()
         await transport.disconnect()
