@@ -188,11 +188,21 @@ public actor Server {
         name: String,
         version: String,
         title: String? = nil,
+        description: String? = nil,
+        websiteUrl: String? = nil,
+        icons: [Icon]? = nil,
         instructions: String? = nil,
         capabilities: Server.Capabilities = .init(),
         configuration: Configuration = .default
     ) {
-        self.serverInfo = Server.Info(name: name, version: version, title: title)
+        self.serverInfo = Server.Info(
+            name: name,
+            version: version,
+            title: title,
+            description: description,
+            websiteUrl: websiteUrl,
+            icons: icons
+        )
         self.capabilities = capabilities
         self.configuration = configuration
         self.instructions = instructions
