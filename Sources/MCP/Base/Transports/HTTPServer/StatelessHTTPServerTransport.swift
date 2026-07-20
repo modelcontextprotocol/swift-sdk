@@ -222,7 +222,15 @@ public actor StatelessHTTPServerTransport:
 
         // Handle by message type
         switch messageKind {
-        case .notification, .response:
+        case .notification(let method):
+            // Yield to server and return 202 Accepted
+            incomingContinuation.yield(body)
+            if method == CancelledNotification.name {
+                completeExchangeForCancelledRequest(body)
+            }
+            return .accepted()
+
+        case .response:
             // Yield to server and return 202 Accepted
             incomingContinuation.yield(body)
             return .accepted()
@@ -347,6 +355,34 @@ public actor StatelessHTTPServerTransport:
             exchangeIDsByRequestID.removeValue(forKey: requestID)
         } else {
             exchangeIDsByRequestID[requestID] = exchangeIDs
+        }
+    }
+
+    private func completeExchangeForCancelledRequest(_ body: Data) {
+        guard let notification = try? JSONDecoder().decode(
+            Message<CancelledNotification>.self, from: body),
+            let requestID = notification.params.requestId,
+            let exchangeIDs = exchangeIDsByRequestID[requestID],
+            exchangeIDs.count == 1,
+            let exchangeID = exchangeIDs.first,
+            let waiter = responseWaiters.removeValue(forKey: exchangeID)
+        else { return }
+
+        removeHTTPContext(exchangeID: exchangeID, requestID: waiter.originalID)
+        var message = "Request cancelled"
+        if let reason = notification.params.reason {
+            message += ": \(reason)"
+        }
+        let response = AnyMethod.response(
+            id: waiter.originalID,
+            error: .serverError(code: -32002, message: message)
+        )
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+            waiter.continuation.resume(returning: try encoder.encode(response))
+        } catch {
+            waiter.continuation.resume(throwing: error)
         }
     }
 
