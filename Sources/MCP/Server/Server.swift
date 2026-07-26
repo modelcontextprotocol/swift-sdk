@@ -783,7 +783,9 @@ public actor Server {
         // that don't carry HTTP context (stdio, in-memory) don't conform.
         let httpContext = await (connection as? any HTTPContextProviding)?
             .httpRequestContext(for: request.id)
-        let handlerContext = HandlerContext(id: request.id, httpContext: httpContext)
+        let handlerRequestID = await (connection as? any RoutedRequestIDProviding)?
+            .originalRequestID(for: request.id) ?? request.id
+        let handlerContext = HandlerContext(id: handlerRequestID, httpContext: httpContext)
 
         // Create a task to handle the request with cancellation support.
         // Set currentHandlerContext as a task local so handlers see it.
@@ -998,7 +1000,9 @@ public actor Server {
             }
 
             // Cancel the pending request task if it exists and remove from tracking
-            if let task = await self.removePendingRequest(id: requestId) {
+            if let pendingRequestID = await self.routedRequestID(for: requestId),
+                let task = await self.removePendingRequest(id: pendingRequestID)
+            {
                 task.cancel()
                 await self.logger?.debug(
                     "Cancelled request",
@@ -1013,6 +1017,13 @@ public actor Server {
                 )
             }
         }
+    }
+
+    private func routedRequestID(for originalID: ID) async -> ID? {
+        guard let provider = connection as? any RoutedRequestIDProviding else {
+            return originalID
+        }
+        return await provider.routedRequestID(for: originalID)
     }
 
     /// Cancel a request by sending a CancelledNotification to the client.
