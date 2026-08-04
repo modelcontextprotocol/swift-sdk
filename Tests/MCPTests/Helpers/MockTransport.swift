@@ -8,7 +8,7 @@ import struct Foundation.POSIXError
 @testable import MCP
 
 /// Mock transport for testing
-actor MockTransport: Transport {
+actor MockTransport: Transport, HTTPContextProviding {
     var logger: Logger
 
     let encoder = JSONEncoder()
@@ -31,6 +31,9 @@ actor MockTransport: Transport {
     private(set) var receivedMessages: [String] = []
 
     private var dataStreamContinuation: AsyncThrowingStream<Data, Swift.Error>.Continuation?
+  private var shouldBlockHTTPContext = false
+  private var requestedHTTPContextIDs: Set<ID> = []
+  private var httpContextContinuations: [ID: CheckedContinuation<Void, Never>] = [:]
 
     var shouldFailConnect = false
     var shouldFailSend = false
@@ -79,6 +82,33 @@ actor MockTransport: Transport {
     func setFailSend(_ shouldFail: Bool) {
         shouldFailSend = shouldFail
     }
+
+  func httpRequestContext(for id: ID) async -> HTTPRequest? {
+    requestedHTTPContextIDs.insert(id)
+    if shouldBlockHTTPContext {
+      await withCheckedContinuation { continuation in
+        httpContextContinuations[id] = continuation
+      }
+    }
+    return nil
+  }
+
+  func blockHTTPContext() {
+    shouldBlockHTTPContext = true
+  }
+
+  func hasRequestedHTTPContext() -> Bool {
+    !requestedHTTPContextIDs.isEmpty
+  }
+
+  func releaseHTTPContext() {
+    shouldBlockHTTPContext = false
+    let continuations = Array(httpContextContinuations.values)
+    httpContextContinuations.removeAll()
+    for continuation in continuations {
+        continuation.resume()
+    }
+  }
 
     func queue(data: Data) {
         if let continuation = dataStreamContinuation {

@@ -3,6 +3,49 @@ import Testing
 
 @testable import MCP
 
+private actor EarlyCancellationState {
+  private var handlerStarted = false
+  private var cancellationProcessed = false
+  private var applicationCancellationHandlerStarted = false
+
+  func markHandlerStarted() {
+    handlerStarted = true
+  }
+
+  func markCancellationProcessed() {
+    cancellationProcessed = true
+  }
+
+  func markApplicationCancellationHandlerStarted() {
+    applicationCancellationHandlerStarted = true
+  }
+
+  func didStartHandler() -> Bool {
+    handlerStarted
+  }
+
+  func didProcessCancellation() -> Bool {
+    cancellationProcessed
+  }
+
+  func didStartApplicationCancellationHandler() -> Bool {
+    applicationCancellationHandlerStarted
+  }
+}
+
+private func eventually(
+  timeout: Duration = .seconds(1),
+  condition: @escaping @Sendable () async -> Bool
+) async -> Bool {
+  let clock = ContinuousClock()
+  let deadline = clock.now.advanced(by: timeout)
+  while clock.now < deadline {
+    if await condition() { return true }
+    try? await Task.sleep(for: .milliseconds(5))
+  }
+  return await condition()
+}
+
 @Suite("Cancellation Tests")
 struct CancellationTests {
     @Test("Client sends CancelledNotification")
@@ -133,7 +176,9 @@ struct CancellationTests {
         }
 
         await server.withMethodHandler(CallTool.self) { params in
-            return .init(content: [.text(text: "Result for \(params.name)", annotations: nil, _meta: nil)], isError: false)
+      return .init(
+        content: [.text(text: "Result for \(params.name)", annotations: nil, _meta: nil)],
+        isError: false)
         }
 
         // Start server and connect client
@@ -142,7 +187,8 @@ struct CancellationTests {
         try await Task.sleep(for: .milliseconds(50))
 
         // Use the callTool overload that returns RequestContext (non-async version)
-        let context: RequestContext<CallTool.Result> = try await client.callTool(name: "testTool", arguments: ["test": "value"])
+    let context: RequestContext<CallTool.Result> = try await client.callTool(
+      name: "testTool", arguments: ["test": "value"])
 
         // Verify we got a context
         #expect(context.requestID != ID(stringLiteral: ""))
@@ -174,7 +220,9 @@ struct CancellationTests {
 
         await server.withMethodHandler(CallTool.self) { params in
             try await Task.sleep(for: .seconds(5))
-            return .init(content: [.text(text: "Should not reach here", annotations: nil, _meta: nil)], isError: false)
+      return .init(
+        content: [.text(text: "Should not reach here", annotations: nil, _meta: nil)],
+        isError: false)
         }
 
         // Start server and connect client
@@ -183,7 +231,8 @@ struct CancellationTests {
         try await Task.sleep(for: .milliseconds(50))
 
         // Use the callTool overload that returns RequestContext (non-async version)
-        let context: RequestContext<CallTool.Result> = try await client.callTool(name: "slowTool", arguments: [:])
+    let context: RequestContext<CallTool.Result> = try await client.callTool(
+      name: "slowTool", arguments: [:])
 
         // Cancel after a short delay
         try await Task.sleep(for: .milliseconds(50))
@@ -246,4 +295,104 @@ struct CancellationTests {
         await client.disconnect()
         await server.stop()
     }
+
+  @Test("A handler that swallows cancellation cannot send a late response")
+  func testSwallowedCancellationDoesNotSendResponse() async throws {
+    let transport = MockTransport()
+    let state = EarlyCancellationState()
+    let server = Server(name: "TestServer", version: "1.0")
+    try await server.start(transport: transport)
+    await server.withMethodHandler(Ping.self) { _ in
+      await state.markHandlerStarted()
+      do {
+        try await Task.sleep(for: .seconds(5))
+      } catch is CancellationError {
+        // Deliberately swallow cancellation to verify the outer dispatch still blocks send.
+      }
+      return Empty()
+    }
+    await server.onNotification(CancelledNotification.self) { _ in
+      await state.markCancellationProcessed()
+    }
+
+    let request = Ping.request()
+    try await transport.queue(request: request)
+    #expect(await eventually { await state.didStartHandler() })
+    try await transport.queue(
+      notification: CancelledNotification.message(
+        .init(requestId: request.id, reason: "test swallowed cancellation")
+      )
+    )
+
+    #expect(await eventually { await state.didProcessCancellation() })
+    #expect(await eventually { await server.trackedRequestTaskCount == 0 })
+    #expect(await transport.sentMessages.isEmpty)
+    await server.stop()
+  }
+
+  @Test("Duplicate outstanding request IDs are rejected without replacing tracking")
+  func testDuplicateOutstandingRequestIDIsRejected() async throws {
+    let transport = MockTransport()
+    let server = Server(name: "TestServer", version: "1.0")
+    await transport.blockHTTPContext()
+    try await server.start(transport: transport)
+
+    let request = Ping.request()
+    try await transport.queue(request: request)
+    #expect(await eventually { await transport.hasRequestedHTTPContext() })
+    try await transport.queue(request: request)
+
+    #expect(await eventually { await transport.sentMessages.count == 1 })
+    let duplicateResponse = try #require(await transport.sentMessages.first)
+    #expect(duplicateResponse.contains("Duplicate outstanding request ID"))
+    #expect(await server.trackedRequestTaskCount == 1)
+
+    let duplicateBatch = try JSONEncoder().encode([request])
+    await transport.queue(data: duplicateBatch)
+    #expect(await eventually { await transport.sentMessages.count == 2 })
+    let duplicateBatchResponse = try #require(await transport.sentMessages.last)
+    #expect(duplicateBatchResponse.contains("Duplicate outstanding request ID"))
+    #expect(await server.trackedRequestTaskCount == 1)
+
+    await transport.releaseHTTPContext()
+    #expect(await eventually { await server.trackedRequestTaskCount == 0 })
+    await server.stop()
+  }
+
+  @Test("Cancellation received before handler registration prevents handler start")
+  func testEarlyCancellationPreventsHandlerStart() async throws {
+    let transport = MockTransport()
+    let state = EarlyCancellationState()
+    let server = Server(name: "TestServer", version: "1.0")
+    await transport.blockHTTPContext()
+    await server.onNotification(CancelledNotification.self) { _ in
+      await state.markApplicationCancellationHandlerStarted()
+      try await Task.sleep(for: .milliseconds(200))
+      await state.markCancellationProcessed()
+    }
+    try await server.start(transport: transport)
+    await server.withMethodHandler(Ping.self) { _ in
+      await state.markHandlerStarted()
+      return Empty()
+    }
+
+    let request = Ping.request()
+    try await transport.queue(request: request)
+    #expect(await eventually { await transport.hasRequestedHTTPContext() })
+
+    try await transport.queue(
+      notification: CancelledNotification.message(
+        .init(requestId: request.id, reason: "cancel before registration")
+      )
+    )
+    #expect(await eventually { await state.didStartApplicationCancellationHandler() })
+    await transport.releaseHTTPContext()
+
+    #expect(await eventually { await server.trackedRequestTaskCount == 0 })
+    #expect(await state.didStartHandler() == false)
+    #expect(await transport.sentMessages.isEmpty)
+    #expect(await eventually { await state.didProcessCancellation() })
+
+    await server.stop()
+  }
 }
