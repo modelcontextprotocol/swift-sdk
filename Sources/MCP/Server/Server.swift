@@ -160,6 +160,8 @@ public actor Server {
     public var capabilities: Capabilities
     /// The server configuration
     public var configuration: Configuration
+    /// Bounds for exact inbound JSON retained by raw-aware handlers.
+    private let rawJSONLimits: RawJSONLimits
 
     /// Request handlers
     private var methodHandlers: [String: RequestHandlerBox] = [:]
@@ -190,12 +192,14 @@ public actor Server {
         title: String? = nil,
         instructions: String? = nil,
         capabilities: Server.Capabilities = .init(),
-        configuration: Configuration = .default
+        configuration: Configuration = .default,
+        rawJSONLimits: RawJSONLimits = .default
     ) {
         self.serverInfo = Server.Info(name: name, version: version, title: title)
         self.capabilities = capabilities
         self.configuration = configuration
         self.instructions = instructions
+        self.rawJSONLimits = rawJSONLimits
     }
 
     /// Start the server
@@ -224,33 +228,65 @@ public actor Server {
 
                     var requestID: ID?
                     do {
-                        // Attempt to decode as batch first, then as individual response, request, or notification
                         let decoder = JSONDecoder()
-                        if let batch = try? decoder.decode(Server.Batch.self, from: data) {
+                        if data.firstNonJSONWhitespaceByte == 0x5B {
+                            let batch = try self.decodeBatch(data)
                             try await handleBatch(batch)
                         } else if let response = try? decoder.decode(AnyResponse.self, from: data) {
                             await handleResponse(response)
-                        } else if let request = try? decoder.decode(AnyRequest.self, from: data) {
-                            // Handle request in a separate task to avoid blocking the receive loop
-                            Task {
-                                _ = try? await self.handleRequest(request, sendResponse: true)
-                            }
-                        } else if let message = try? decoder.decode(AnyMessage.self, from: data) {
-                            try await handleMessage(message)
                         } else {
-                            // Try to extract request ID from raw JSON if possible
-                            if let json = try? JSONDecoder().decode(
-                                [String: Value].self, from: data),
-                                let idValue = json["id"]
-                            {
-                                if let strValue = idValue.stringValue {
-                                    requestID = .string(strValue)
-                                } else if let intValue = idValue.intValue {
-                                    requestID = .number(intValue)
-                                }
+                            let route = try self.requestRoute(in: data)
+                            requestID = route?.id
+                            if route?.ambiguousRawMethod == true {
+                                throw MCPError.invalidRequest(
+                                    "Raw-aware requests must contain exactly one method"
+                                )
                             }
-                            throw MCPError.parseError("Invalid message format")
+                            if let route, route.hasID, let method = route.method,
+                                self.methodHandlers[method]?.requiresRawContext == true
+                            {
+                                let rawValue = try RawJSONValue.decode(
+                                    data,
+                                    limits: self.rawJSONLimits
+                                )
+                                guard case .object(let rawObject) = rawValue else {
+                                    throw MCPError.parseError("Invalid message format")
+                                }
+                                requestID = rawObject.jsonRPCRequestID ?? requestID
+
+                                guard let request = try? decoder.decode(AnyRequest.self, from: data)
+                                else {
+                                    throw MCPError.invalidRequest("Invalid request format")
+                                }
+                                let rawContext = RawRequestContext(request: rawObject)
+                                Task {
+                                    _ = try? await self.handleRequest(
+                                        request,
+                                        rawContext: rawContext,
+                                        sendResponse: true
+                                    )
+                                }
+                            } else if let request = try? decoder.decode(AnyRequest.self, from: data) {
+                                requestID = request.id
+                                Task {
+                                    _ = try? await self.handleRequest(
+                                        request,
+                                        rawContext: nil,
+                                        sendResponse: true
+                                    )
+                                }
+                            } else if let message = try? decoder.decode(AnyMessage.self, from: data) {
+                                try await handleMessage(message)
+                            } else {
+                                requestID = requestID
+                                    ?? (try? decoder.decode(InboundIDHeader.self, from: data).id)
+                                throw MCPError.parseError("Invalid message format")
+                            }
                         }
+                    } catch is CancellationError where Task.isCancelled {
+                        break
+                    } catch is CancellationError {
+                        continue
                     } catch let error where MCPError.isResourceTemporarilyUnavailable(error) {
                         // Resource temporarily unavailable, retry after a short delay
                         try? await Task.sleep(for: .milliseconds(10))
@@ -260,8 +296,7 @@ public actor Server {
                             "Error processing message", metadata: ["error": "\(error)"])
                         let response = AnyMethod.response(
                             id: requestID ?? .random,
-                            error: error as? MCPError
-                                ?? MCPError.internalError(error.localizedDescription)
+                            error: error.asMCPError
                         )
                         try? await send(response)
                     }
@@ -346,6 +381,26 @@ public actor Server {
             let result = try await handler(request.params)
             return Response(id: request.id, result: result)
         }
+        return self
+    }
+
+    /// Register a method handler that receives both the validated typed request
+    /// and its exact inbound JSON representation.
+    ///
+    /// This overload is additive: existing parameter-only handlers continue to
+    /// use the same semantic `Value` decoding behavior. Use the raw context when
+    /// object order, duplicate keys, exact Unicode scalar spellings, or strings
+    /// that resemble data URLs are significant.
+    @discardableResult
+    public func withMethodHandler<M: Method>(
+        _ type: M.Type,
+        handler:
+            @escaping @Sendable (Request<M>, RawRequestContext) async throws -> M.Result
+    ) -> Self {
+        methodHandlers[M.name] = TypedRequestHandler(rawAware: { request, rawContext in
+            let result = try await handler(request, rawContext)
+            return Response(id: request.id, result: result)
+        })
         return self
     }
 
@@ -663,9 +718,9 @@ public actor Server {
     struct Batch: Sendable {
         /// An item in a JSON-RPC batch
         enum Item: Sendable {
-            case request(Request<AnyMethod>)
+            case request(Request<AnyMethod>, RawRequestContext?)
             case notification(Message<AnyNotification>)
-
+            case invalid(ID, MCPError)
         }
 
         var items: [Item]
@@ -673,6 +728,96 @@ public actor Server {
         init(items: [Item]) {
             self.items = items
         }
+    }
+
+    private func decodeBatch(_ data: Data) throws -> Batch {
+        let ranges = try RawJSONValue.batchElementRanges(in: data)
+        return Batch(items: try ranges.map { range in
+            try self.decodeBatchItem(data[range])
+        })
+    }
+
+    private func decodeBatchItem(_ data: Data) throws -> Batch.Item {
+        let decoder = JSONDecoder()
+        let route: InboundRequestRoute?
+        do {
+            route = try self.requestRoute(in: data)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            return .invalid(.random, error.asMCPError)
+        }
+        if route?.ambiguousRawMethod == true {
+            return .invalid(
+                route?.id ?? .random,
+                MCPError.invalidRequest("Raw-aware requests must contain exactly one method")
+            )
+        }
+
+        if let route, route.hasID, let method = route.method,
+            self.methodHandlers[method]?.requiresRawContext == true
+        {
+            do {
+                let rawValue = try RawJSONValue.decode(data, limits: self.rawJSONLimits)
+                guard case .object(let object) = rawValue else {
+                    return .invalid(
+                        route.id ?? .random,
+                        MCPError.invalidRequest("Invalid batch item format")
+                    )
+                }
+                let request = try decoder.decode(AnyRequest.self, from: data)
+                return .request(request, RawRequestContext(request: object))
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch is DecodingError {
+                return .invalid(
+                    route.id ?? .random,
+                    MCPError.invalidRequest("Invalid batch item format")
+                )
+            } catch {
+                return .invalid(route.id ?? .random, error.asMCPError)
+            }
+        }
+
+        if route?.hasID == true, let request = try? decoder.decode(AnyRequest.self, from: data) {
+            return .request(request, nil)
+        }
+        if route?.hasID == false, let message = try? decoder.decode(AnyMessage.self, from: data) {
+            return .notification(message)
+        }
+
+        // Distinguish malformed JSON from a syntactically valid item with an
+        // invalid JSON-RPC shape, without imposing raw-aware limits on legacy traffic.
+        do {
+            _ = try RawJSONValue.decode(data, limits: .permittingDocument(data.count))
+            return .invalid(
+                route?.id ?? .random,
+                MCPError.invalidRequest("Invalid batch item format")
+            )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            return .invalid(route?.id ?? .random, error.asMCPError)
+        }
+    }
+
+    private func requestRoute(in data: Data) throws -> InboundRequestRoute? {
+        let rawAwareMethods = methodHandlers.compactMap { method, handler in
+            handler.requiresRawContext ? method : nil
+        }
+        guard let route = try RawJSONValue.requestRoute(
+            in: data,
+            rawAwareMethods: rawAwareMethods,
+            maximumIDBytes: max(rawJSONLimits.maximumStringBytes, 1024)
+        ) else {
+            return nil
+        }
+        return InboundRequestRoute(
+            method: route.rawAwareMethod,
+            hasID: route.hasID,
+            id: route.id,
+            ambiguousRawMethod: route.rawAwareMethod != nil && route.methodMemberCount != 1
+        )
     }
 
     /// Process a batch of requests and/or notifications
@@ -693,22 +838,27 @@ public actor Server {
         for item in batch.items {
             do {
                 switch item {
-                case .request(let request):
+                case .request(let request, let rawContext):
                     // For batched requests, collect responses instead of sending immediately
-                    if let response = try await handleRequest(request, sendResponse: false) {
+                    if let response = try await handleRequest(
+                        request,
+                        rawContext: rawContext,
+                        sendResponse: false
+                    ) {
                         responses.append(response)
                     }
 
                 case .notification(let notification):
                     // Handle notification (no response needed)
                     try await handleMessage(notification)
+
+                case .invalid(let id, let error):
+                    responses.append(AnyMethod.response(id: id, error: error))
                 }
             } catch {
                 // Only add errors to response for requests (notifications don't have responses)
-                if case .request(let request) = item {
-                    let mcpError =
-                        error as? MCPError ?? MCPError.internalError(error.localizedDescription)
-                    responses.append(AnyMethod.response(id: request.id, error: mcpError))
+                if case .request(let request, _) = item {
+                    responses.append(AnyMethod.response(id: request.id, error: error.asMCPError))
                 }
             }
         }
@@ -735,7 +885,11 @@ public actor Server {
     ///   - request: The request to handle
     ///   - sendResponse: Whether to send the response immediately (true) or return it (false)
     /// - Returns: The response when sendResponse is false
-    private func handleRequest(_ request: Request<AnyMethod>, sendResponse: Bool = true)
+    private func handleRequest(
+        _ request: Request<AnyMethod>,
+        rawContext: RawRequestContext?,
+        sendResponse: Bool = true
+    )
         async throws -> Response<AnyMethod>?
     {
         // Check if this is a pre-processed error request (empty method)
@@ -795,7 +949,7 @@ public actor Server {
                     try Task.checkCancellation()
 
                     // Handle request and get response
-                    let response = try await handler(request)
+                    let response = try await handler(request, rawContext: rawContext)
                     return response
                 } catch is CancellationError {
                     // Request was cancelled, don't send a response per MCP spec
@@ -1040,49 +1194,52 @@ public actor Server {
     }
 }
 
-extension Server.Batch: Codable {
-    init(from decoder: Decoder) throws {
-        let container = try decoder.singleValueContainer()
+private struct InboundIDHeader: Decodable {
+    let id: ID
 
-        let encoder = JSONEncoder()
-        let decoder = JSONDecoder()
-
-        var items: [Item] = []
-        for item in try container.decode([Value].self) {
-            let data = try encoder.encode(item)
-            try items.append(decoder.decode(Item.self, from: data))
-        }
-
-        self.items = items
-    }
-
-    func encode(to encoder: Encoder) throws {
-        var container = encoder.singleValueContainer()
-        try container.encode(items)
-    }
-}
-
-extension Server.Batch.Item: Codable {
     private enum CodingKeys: String, CodingKey {
         case id
     }
+}
 
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        // Check if it's a request (has id) or notification (no id)
-        if container.contains(.id) {
-            self = .request(try Request<AnyMethod>(from: decoder))
-        } else {
-            self = .notification(try Message<AnyNotification>(from: decoder))
+private struct InboundRequestRoute {
+    let method: String?
+    let hasID: Bool
+    let id: ID?
+    let ambiguousRawMethod: Bool
+}
+
+extension Data {
+    fileprivate var firstNonJSONWhitespaceByte: UInt8? {
+        first { byte in
+            byte != 0x20 && byte != 0x09 && byte != 0x0A && byte != 0x0D
         }
     }
+}
 
-    func encode(to encoder: Encoder) throws {
-        switch self {
-        case .request(let request):
-            try request.encode(to: encoder)
-        case .notification(let notification):
-            try notification.encode(to: encoder)
+extension ExactJSONObject {
+    fileprivate var jsonRPCRequestID: ID? {
+        guard let rawID = uniqueValue(forExactKey: "id") else { return nil }
+        switch rawID {
+        case .string(let value):
+            return .string(value)
+        case .number(let value):
+            guard let number = Int(value) else { return nil }
+            return .number(number)
+        default:
+            return nil
         }
+    }
+}
+
+extension Swift.Error {
+    fileprivate var asMCPError: MCPError {
+        if let error = self as? MCPError {
+            return error
+        }
+        if let error = self as? RawJSONError {
+            return .parseError(error.message)
+        }
+        return .internalError(localizedDescription)
     }
 }

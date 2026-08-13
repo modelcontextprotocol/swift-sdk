@@ -154,6 +154,35 @@ extension Request {
 /// A type-erased request for request/response handling
 typealias AnyRequest = Request<AnyMethod>
 
+/// The exact JSON representation retained alongside a typed inbound request.
+///
+/// Register a raw-aware server method handler to receive this context when
+/// object member order, duplicate keys, or data-URL strings must be preserved.
+/// The ordinary typed request remains the source of the method's validated
+/// parameters.
+public struct RawRequestContext: Hashable, Sendable {
+    /// The complete inbound JSON-RPC request object.
+    public let request: ExactJSONObject
+
+    /// Every exact `params` member in source order.
+    ///
+    /// Valid JSON-RPC requests normally contain at most one. Returning an
+    /// array keeps duplicate-member handling explicit instead of silently
+    /// selecting a first or last value.
+    public var parameters: [RawJSONValue] {
+        request.values(forExactKey: "params")
+    }
+
+    /// The exact `params` value when it occurs once, otherwise `nil`.
+    public var uniqueParameters: RawJSONValue? {
+        request.uniqueValue(forExactKey: "params")
+    }
+
+    public init(request: ExactJSONObject) {
+        self.request = request
+    }
+}
+
 extension AnyRequest {
     init<T: Method>(_ request: Request<T>) throws {
         let encoder = JSONEncoder()
@@ -166,21 +195,47 @@ extension AnyRequest {
 
 /// A box for request handlers that can be type-erased
 class RequestHandlerBox: @unchecked Sendable {
-    func callAsFunction(_ request: AnyRequest) async throws -> AnyResponse {
+    var requiresRawContext: Bool { false }
+
+    func callAsFunction(
+        _ request: AnyRequest,
+        rawContext: RawRequestContext? = nil
+    ) async throws -> AnyResponse {
         fatalError("Must override")
     }
 }
 
 /// A typed request handler that can be used to handle requests of a specific type
 final class TypedRequestHandler<M: Method>: RequestHandlerBox, @unchecked Sendable {
-    private let _handle: @Sendable (Request<M>) async throws -> Response<M>
+    private let _handle: @Sendable (Request<M>, RawRequestContext?) async throws -> Response<M>
+    private let isRawAware: Bool
+
+    override var requiresRawContext: Bool { isRawAware }
 
     init(_ handler: @escaping @Sendable (Request<M>) async throws -> Response<M>) {
-        self._handle = handler
+        self._handle = { request, _ in try await handler(request) }
+        self.isRawAware = false
         super.init()
     }
 
-    override func callAsFunction(_ request: AnyRequest) async throws -> AnyResponse {
+    init(
+        rawAware handler:
+            @escaping @Sendable (Request<M>, RawRequestContext) async throws -> Response<M>
+    ) {
+        self._handle = { request, rawContext in
+            guard let rawContext else {
+                throw MCPError.internalError("Raw request context is unavailable")
+            }
+            return try await handler(request, rawContext)
+        }
+        self.isRawAware = true
+        super.init()
+    }
+
+    override func callAsFunction(
+        _ request: AnyRequest,
+        rawContext: RawRequestContext? = nil
+    ) async throws -> AnyResponse {
         let encoder = JSONEncoder()
         let decoder = JSONDecoder()
 
@@ -189,7 +244,7 @@ final class TypedRequestHandler<M: Method>: RequestHandlerBox, @unchecked Sendab
         let request = try decoder.decode(Request<M>.self, from: data)
 
         // Handle with concrete type
-        let response = try await _handle(request)
+        let response = try await _handle(request, rawContext)
 
         // Convert result to AnyMethod response
         switch response.result {

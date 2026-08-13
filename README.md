@@ -42,6 +42,7 @@ of the MCP specification.
   - [Progress Tracking](#progress-tracking-1)
   - [Initialize Hook](#initialize-hook)
   - [HTTP Request Context in Handlers](#http-request-context-in-handlers)
+  - [Exact JSON in Method Handlers](#exact-json-in-method-handlers)
   - [Graceful Shutdown](#graceful-shutdown)
 - [Transports](#transports)
 - [Authentication](#authentication)
@@ -1213,6 +1214,55 @@ Task.detached { await doWork(with: ctx?.httpContext) }
 
 Custom HTTP transports can opt in by conforming to `HTTPContextProviding` and returning the
 `HTTPRequest` for a given JSON-RPC id while it is in flight.
+
+### Exact JSON in Method Handlers
+
+`Value` intentionally provides convenient semantic JSON values, including automatic data-URL
+decoding and dictionary-backed objects. If a handler must instead inspect source member order,
+duplicate names, Unicode-scalar-exact keys, or a data URL as a string, register the additive
+raw-aware method-handler overload:
+
+```swift
+await server.withMethodHandler(CallTool.self) { request, rawContext in
+    // `request` remains the usual validated, typed request.
+    guard let parameters = rawContext.uniqueParameters?.objectValue,
+          let arguments = parameters.uniqueValue(forExactKey: "arguments")?.objectValue
+    else {
+        throw MCPError.invalidParams("Expected one object-valued params member")
+    }
+
+    // Every duplicate is retained in source order. Lookup compares Unicode
+    // scalar sequences exactly and never normalizes object names.
+    let payloads = arguments.values(forExactKey: "payload")
+    if case .string(let dataURL)? = payloads.first {
+        // A string remains a string even when it is a valid data URL.
+        print(dataURL)
+    }
+
+    return .init(content: [.text("Handled \(request.params.name)")], isError: false)
+}
+```
+
+`RawJSONValue` uses a dedicated parser and serializer rather than `Codable`, because keyed
+decoding cannot retain duplicate object members. Raw-aware request parsing and encoding are
+bounded by `RawJSONLimits`; pass custom limits when constructing the server if the defaults are
+not suitable. These limits do not affect legacy handlers or inbound responses:
+
+```swift
+let server = Server(
+    name: "MyModelServer",
+    version: "1.0.0",
+    rawJSONLimits: .init(
+        maximumDocumentBytes: 8 * 1024 * 1024,
+        maximumStringBytes: 6 * 1024 * 1024,
+        maximumDepth: 64,
+        maximumContainerEntries: 50_000
+    )
+)
+```
+
+Inbound JSON strings always decode as `RawJSONValue.string`. The `data` case is reserved for
+programmatically constructed raw values and is size-checked before base64 storage is allocated.
 
 ### Graceful Shutdown
 
