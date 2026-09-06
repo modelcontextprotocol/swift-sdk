@@ -181,6 +181,14 @@ public actor Client {
 
     /// A dictionary of type-erased pending requests, keyed by request ID
     private var pendingRequests: [ID: AnyPendingRequest] = [:]
+    /// IDs cancelled before their continuation was registered.
+    ///
+    /// ``send(_:)`` registers the continuation from an unstructured task, so a
+    /// cancellation that lands before that task gets to run finds nothing to
+    /// resume. Without this set the continuation would be registered right
+    /// after and never resumed by anyone: the caller would hang forever on the
+    /// very cancellation meant to free it.
+    private var cancelledBeforeRegistration: Set<ID> = []
     // Add reusable JSON encoder/decoder
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
@@ -214,9 +222,9 @@ public actor Client {
         // Start message handling loop
         task = Task {
             guard let connection = self.connection else { return }
-            repeat {
+            readLoop: repeat {
                 // Check for cancellation before starting the iteration
-                if Task.isCancelled { break }
+                if Task.isCancelled { break readLoop }
 
                 do {
                     let stream = await connection.receive()
@@ -244,13 +252,21 @@ public actor Client {
                             )
                         }
                     }
+
+                    // The stream finished without throwing: the connection is over.
+                    // No transport reopens a stream once it has finished — every one
+                    // of them finishes it only on EOF, on error, or on disconnect.
+                    // Calling `receive()` again would hand back the very same
+                    // finished stream, so the loop would spin at 100% CPU forever
+                    // instead of terminating.
+                    break readLoop
                 } catch let error where MCPError.isResourceTemporarilyUnavailable(error) {
                     try? await Task.sleep(for: .milliseconds(10))
                     continue
                 } catch {
                     await logger?.error(
                         "Error in message handling loop", metadata: ["error": "\(error)"])
-                    break
+                    break readLoop
                 }
             } while true
             await self.logger?.debug("Client message handling loop task is terminating.")
@@ -295,6 +311,7 @@ public actor Client {
         self.task = nil
         self.connection = nil
         self.pendingRequests = [:]  // Use empty dictionary literal
+        self.cancelledBeforeRegistration = []
 
         // Part 2: Outside actor - Resume continuations, disconnect transport, await task
 
@@ -397,25 +414,35 @@ public actor Client {
         let requestData = try encoder.encode(request)
 
         let requestTask = Task<M.Result, Error> {
-            try await withCheckedThrowingContinuation { continuation in
-                Task {
-                    // Add the pending request before attempting to send
-                    self.addPendingRequest(
-                        id: request.id,
-                        continuation: continuation,
-                        type: M.Result.self
-                    )
+            // Cancellation of the request task removes the pending request,
+            // resumes its continuation with `CancellationError` and notifies
+            // the server (`cancelRequest`). Without this handler the
+            // continuation could only be resumed by a response, so a cancelled
+            // caller (`ping()` with a deadline, a connect with a timeout)
+            // stayed suspended forever.
+            try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { continuation in
+                    Task {
+                        // Add the pending request before attempting to send
+                        self.addPendingRequest(
+                            id: request.id,
+                            continuation: continuation,
+                            type: M.Result.self
+                        )
 
-                    // Send the request data
-                    do {
-                        try await connection.send(requestData)
-                    } catch {
-                        // If send fails, try to remove the pending request.
-                        if self.removePendingRequest(id: request.id) != nil {
-                            continuation.resume(throwing: error)
+                        // Send the request data
+                        do {
+                            try await connection.send(requestData)
+                        } catch {
+                            // If send fails, try to remove the pending request.
+                            if self.removePendingRequest(id: request.id) != nil {
+                                continuation.resume(throwing: error)
+                            }
                         }
                     }
                 }
+            } onCancel: {
+                Task { try? await self.cancelRequest(request.id, reason: "Task cancelled") }
             }
         }
 
@@ -443,6 +470,10 @@ public actor Client {
         // This ensures any response that arrives after cancellation is ignored
         if let pendingRequest = removePendingRequest(id: requestID) {
             pendingRequest.resume(throwing: CancellationError())
+        } else {
+            // Nothing registered yet: remember the cancellation so that the
+            // registration, when it happens, resumes immediately.
+            cancelledBeforeRegistration.insert(requestID)
         }
 
         // Send cancellation notification to server
@@ -469,6 +500,12 @@ public actor Client {
         continuation: CheckedContinuation<T, Swift.Error>,
         type: T.Type  // Keep type for AnyPendingRequest internal logic
     ) {
+        // Cancelled while this registration was still on its way: resume now,
+        // there is nobody else left to do it.
+        if cancelledBeforeRegistration.remove(id) != nil {
+            continuation.resume(throwing: CancellationError())
+            return
+        }
         pendingRequests[id] = AnyPendingRequest(
             PendingRequest(continuation: continuation)
         )
