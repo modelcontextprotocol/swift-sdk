@@ -685,6 +685,8 @@ import Logging
                                 break
                             } else {
                                 // We're not reconnecting, finish the message stream with error
+                                // and release the underlying socket so it doesn't leak in CLOSE_WAIT.
+                                connection.cancel()
                                 messageContinuation.finish(
                                     throwing: MCPError.transportError(error))
                                 break
@@ -728,6 +730,9 @@ import Logging
 
                             break
                         } else {
+                            // Not reconnecting: release the underlying socket so it doesn't
+                            // leak in CLOSE_WAIT (e.g. when the peer closes gracefully).
+                            connection.cancel()
                             messageContinuation.finish(throwing: error)
                         }
                     }
