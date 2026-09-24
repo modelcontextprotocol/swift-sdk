@@ -250,6 +250,7 @@ public actor HTTPClientTransport: Transport {
             )
             request.addValue(ContentType.json, forHTTPHeaderField: HTTPHeaderName.contentType)
             request.httpBody = data
+            addStandardRequestHeaders(to: &request, body: data)
 
             if let protocolVersion = protocolVersion {
                 request.addValue(protocolVersion, forHTTPHeaderField: HTTPHeaderName.protocolVersion)
@@ -302,6 +303,46 @@ public actor HTTPClientTransport: Transport {
                 throw mapAuthenticationChallengeError(authError)
             }
         }
+    }
+
+    /// Mirrors routing fields from a JSON-RPC request or notification into HTTP headers.
+    /// Responses and legacy batches have no single method to mirror.
+    private func addStandardRequestHeaders(to request: inout URLRequest, body: Data) {
+        guard let message = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+              let method = message["method"] as? String,
+              isSafeHTTPHeaderValue(method)
+        else { return }
+
+        request.setValue(method, forHTTPHeaderField: HTTPHeaderName.method)
+
+        let nameKey: String
+        switch method {
+        case "tools/call", "prompts/get": nameKey = "name"
+        case "resources/read": nameKey = "uri"
+        default: return
+        }
+
+        guard let params = message["params"] as? [String: Any],
+              let name = params[nameKey] as? String
+        else { return }
+
+        let headerValue: String
+        if isSafeHTTPHeaderValue(name),
+           !(name.hasPrefix("=?base64?") && name.hasSuffix("?="))
+        {
+            headerValue = name
+        } else {
+            headerValue = "=?base64?\(Data(name.utf8).base64EncodedString())?="
+        }
+        request.setValue(headerValue, forHTTPHeaderField: HTTPHeaderName.name)
+    }
+
+    private func isSafeHTTPHeaderValue(_ value: String) -> Bool {
+        let bytes = value.utf8
+        guard let first = bytes.first, let last = bytes.last,
+              first != 0x20, first != 0x09, last != 0x20, last != 0x09
+        else { return false }
+        return bytes.allSatisfy { $0 == 0x09 || (0x20...0x7E).contains($0) }
     }
 
     #if os(Linux)

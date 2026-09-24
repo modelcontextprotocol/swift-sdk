@@ -214,6 +214,52 @@ import Testing
             #expect(receivedData == responseData)
         }
 
+        @Test("POST request headers mirror the JSON-RPC method and name", .httpClientTransportSetup)
+        func testStandardRequestHeaders() async throws {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [MockURLProtocol.self]
+
+            let transport = HTTPClientTransport(
+                endpoint: testEndpoint,
+                configuration: configuration,
+                streaming: false
+            )
+            try await transport.connect()
+
+            let cases: [(body: String, method: String?, name: String?)] = [
+                (#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#, "initialize", nil),
+                (#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+                    "notifications/initialized", nil),
+                (#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"weather"}}"#,
+                    "tools/call", "weather"),
+                (#"{"jsonrpc":"2.0","id":3,"method":"prompts/get","params":{"name":"hello world"}}"#,
+                    "prompts/get", "hello world"),
+                (#"{"jsonrpc":"2.0","id":4,"method":"resources/read","params":{"uri":"file:///資料"}}"#,
+                    "resources/read", "=?base64?ZmlsZTovLy/os4fmlpk=?="),
+                (#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"=?base64?abc?="}}"#,
+                    "tools/call", "=?base64?PT9iYXNlNjQ/YWJjPz0=?="),
+                (#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":" weather "}}"#,
+                    "tools/call", "=?base64?IHdlYXRoZXIg?="),
+                (#"{"jsonrpc":"2.0","id":7,"result":{}}"#, nil, nil),
+            ]
+
+            for testCase in cases {
+                await MockURLProtocol.requestHandlerStorage.setHandler {
+                    [testEndpoint] request in
+                    #expect(request.url == testEndpoint)
+                    #expect(request.value(forHTTPHeaderField: "Mcp-Method") == testCase.method)
+                    #expect(request.value(forHTTPHeaderField: "Mcp-Name") == testCase.name)
+
+                    let response = HTTPURLResponse(
+                        url: testEndpoint, statusCode: 202, httpVersion: "HTTP/1.1",
+                        headerFields: [:])!
+                    return (response, Data())
+                }
+                try await transport.send(Data(testCase.body.utf8))
+            }
+            await transport.disconnect()
+        }
+
         @Test("Send and Receive Session ID", .httpClientTransportSetup)
         func testSendAndReceiveSessionID() async throws {
             let configuration = URLSessionConfiguration.ephemeral
