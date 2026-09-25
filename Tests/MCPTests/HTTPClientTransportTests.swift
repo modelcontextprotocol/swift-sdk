@@ -979,6 +979,84 @@ import Testing
 
         // Skip SSE tests on platforms that don't support streaming
         #if !canImport(FoundationNetworking)
+            @Test("POST event IDs do not resume the standalone GET stream", .httpClientTransportSetup)
+            func testPOSTEventIDDoesNotResumeGET() async throws {
+                actor Requests {
+                    private var getCount = 0
+                    private var postCount = 0
+                    private var postCompleted = false
+                    private var getAfterPOST: String??
+
+                    func recordGET(_ eventID: String?) {
+                        getCount += 1
+                        if postCompleted && getAfterPOST == nil {
+                            getAfterPOST = .some(eventID)
+                        }
+                    }
+
+                    func recordPOST() -> Bool {
+                        postCount += 1
+                        if postCount == 1 { return true }
+                        postCompleted = true
+                        return false
+                    }
+                    func hasReceivedGET() -> Bool { getCount > 0 }
+                    func resumedGETEventID() -> String?? { getAfterPOST }
+                }
+
+                let requests = Requests()
+                let configuration = URLSessionConfiguration.ephemeral
+                configuration.protocolClasses = [MockURLProtocol.self]
+
+                await MockURLProtocol.requestHandlerStorage.setHandler {
+                    [testEndpoint, requests] request in
+                    let headers = ["Content-Type": "text/event-stream"]
+                    let response = HTTPURLResponse(
+                        url: testEndpoint, statusCode: 200, httpVersion: "HTTP/1.1",
+                        headerFields: headers)!
+
+                    if request.httpMethod == "GET" {
+                        await requests.recordGET(request.value(forHTTPHeaderField: "Last-Event-ID"))
+                        return (response, Data("id: get-1\nretry: 10\ndata: {}\n\n".utf8))
+                    }
+
+                    if await requests.recordPOST() {
+                        let initialResponse = HTTPURLResponse(
+                            url: testEndpoint, statusCode: 200, httpVersion: "HTTP/1.1",
+                            headerFields: [
+                                "Content-Type": "text/plain",
+                                "Mcp-Session-Id": "test-session-123",
+                            ])!
+                        return (initialResponse, Data())
+                    }
+                    return (response, Data("id: post-1\ndata: {}\n\n".utf8))
+                }
+
+                let transport = HTTPClientTransport(
+                    endpoint: testEndpoint,
+                    configuration: configuration,
+                    streaming: true,
+                    sseInitializationTimeout: 0
+                )
+                try await transport.connect()
+                try await transport.send(Data())
+
+                for _ in 0..<200 where !(await requests.hasReceivedGET()) {
+                    try await Task.sleep(for: .milliseconds(10))
+                }
+                #expect(await requests.hasReceivedGET())
+
+                try await transport.send(Data(#"{"jsonrpc":"2.0","method":"ping","id":1}"#.utf8))
+
+                for _ in 0..<200 where (await requests.resumedGETEventID()) == nil {
+                    try await Task.sleep(for: .milliseconds(10))
+                }
+                let resumedID = await requests.resumedGETEventID()
+                #expect(resumedID != nil)
+                #expect(resumedID == .some("get-1"))
+                await transport.disconnect()
+            }
+
             @Test("Receive Server-Sent Event (SSE)", .httpClientTransportSetup)
             func testReceiveSSE() async throws {
                 let configuration = URLSessionConfiguration.ephemeral
