@@ -188,8 +188,8 @@ import Testing
             #expect(metadata == expectedMetadata)
         }
 
-        @Test("Uses metadata issuer as server identity when it differs from candidate URL")
-        func testFetchAuthorizationServerMetadataUsesMetadataIssuer() async throws {
+        @Test("Rejects metadata whose issuer differs from the discovery candidate")
+        func testFetchAuthorizationServerMetadataRejectsIssuerMismatch() async throws {
             let metadataIssuer = "https://other.example.com"
             let body = try makeASMetadataBody(issuer: metadataIssuer)
             let (session, key) = makeIsolatedSession()
@@ -200,11 +200,12 @@ import Testing
                 return (response, body)
             }
 
-            let (server, _) = try await makeClient().fetchAuthorizationServerMetadata(
-                candidates: [URL(string: "https://auth.example.com")!],
-                session: session
-            )
-            #expect(server == URL(string: metadataIssuer)!)
+            await #expect(throws: OAuthAuthorizationError.self) {
+                try await makeClient().fetchAuthorizationServerMetadata(
+                    candidates: [URL(string: "https://auth.example.com")!],
+                    session: session
+                )
+            }
         }
 
         @Test("Skips private IP candidates without making HTTP calls")
