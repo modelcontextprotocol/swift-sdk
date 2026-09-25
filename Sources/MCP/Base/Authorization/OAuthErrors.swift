@@ -105,6 +105,8 @@ public enum OAuthAuthorizationError: LocalizedError {
     ///   - expected: The `state` value sent in the authorization request.
     ///   - actual: The `state` value received in the authorization response.
     case authorizationResponseStateMismatch(expected: String, actual: String)
+    case authorizationResponseMissingIssuer
+    case authorizationResponseIssuerMismatch(expected: String, actual: String)
 
     /// The authorization response redirect URL is missing the `code` parameter.
     case authorizationResponseMissingCode
@@ -183,6 +185,10 @@ public enum OAuthAuthorizationError: LocalizedError {
             return "Authorization response is missing state"
         case .authorizationResponseStateMismatch(let expected, let actual):
             return "Authorization response state mismatch. Expected \(expected), got \(actual)"
+        case .authorizationResponseMissingIssuer:
+            return "Authorization response is missing the issuer"
+        case .authorizationResponseIssuerMismatch(let expected, let actual):
+            return "Authorization response issuer mismatch. Expected \(expected), got \(actual)"
         case .authorizationResponseMissingCode:
             return "Authorization response is missing the authorization code"
         case .pkceCodeChallengeMethodsMissing:

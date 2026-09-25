@@ -26,6 +26,7 @@ enum OAuthParameterName {
     static let clientAssertionType = "client_assertion_type"
     static let refreshToken = "refresh_token"
     static let state = "state"
+    static let issuer = "iss"
 }
 
 // MARK: - OAuth Well-Known Paths

@@ -101,6 +101,7 @@ import Testing
             }
 
             let config = makeConfig(authentication: .none(clientID: ""))
+            #expect(config.applicationType == .native)
             let result = try await registrar.register(
                 configuration: config,
                 asMetadata: makeASMetadata(registrationEndpoint: registrationEndpoint),
