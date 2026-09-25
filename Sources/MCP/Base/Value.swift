@@ -95,13 +95,7 @@ extension Value: Codable {
         } else if let value = try? container.decode(Double.self) {
             self = .double(value)
         } else if let value = try? container.decode(String.self) {
-            if Data.isDataURL(string: value),
-                case let (mimeType, data)? = Data.parseDataURL(value)
-            {
-                self = .data(mimeType: mimeType, data)
-            } else {
-                self = .string(value)
-            }
+            self = .string(value)
         } else if let value = try? container.decode([Value].self) {
             self = .array(value)
         } else if let value = try? container.decode([String: Value].self) {
