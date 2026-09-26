@@ -4,6 +4,7 @@ import struct Foundation.Data
 import struct Foundation.Date
 import class Foundation.JSONDecoder
 import class Foundation.JSONEncoder
+import struct Foundation.UUID
 
 /// Model Context Protocol server
 public actor Server {
@@ -172,8 +173,27 @@ public actor Server {
     private var methodHandlers: [String: RequestHandlerBox] = [:]
     /// Notification handlers
     private var notificationHandlers: [String: [NotificationHandlerBox]] = [:]
-    /// Pending request tasks (for cancellation support)
-    private var pendingRequestTasks: [ID: Task<Response<AnyMethod>, Error>] = [:]
+    /// Built-in cancellation handler, invoked before logging or application handlers.
+    private var cancellationHandler: NotificationHandlerBox?
+    private struct ActiveRequest {
+        let token: UUID
+        let task: Task<Response<AnyMethod>, Error>
+    }
+
+    /// Active request handler tasks keyed by request ID.
+    private var pendingRequestTasks: [ID: ActiveRequest] = [:]
+
+    private struct DispatchedRequest {
+        let token: UUID
+        let task: Task<Void, Never>
+    }
+
+    /// Request dispatch tasks that have not registered a handler task yet.
+    private var dispatchedRequests: [ID: DispatchedRequest] = [:]
+
+    var trackedRequestTaskCount: Int {
+        dispatchedRequests.count + pendingRequestTasks.count
+    }
 
     /// Pending requests sent to the client, awaiting responses
     private var pendingRequests: [ID: AnyPendingRequest] = [:]
@@ -215,7 +235,9 @@ public actor Server {
     ) async throws {
         self.connection = transport
         registerDefaultHandlers(initializeHook: initializeHook)
-        registerCancellationHandler()
+        if cancellationHandler == nil {
+            registerCancellationHandler()
+        }
         try await transport.connect()
 
         await logger?.debug(
@@ -237,10 +259,33 @@ public actor Server {
                         } else if let response = try? decoder.decode(AnyResponse.self, from: data) {
                             await handleResponse(response)
                         } else if let request = try? decoder.decode(AnyRequest.self, from: data) {
-                            // Handle request in a separate task to avoid blocking the receive loop
-                            Task {
-                                _ = try? await self.handleRequest(request, sendResponse: true)
+                            if dispatchedRequests[request.id] != nil
+                                || pendingRequestTasks[request.id] != nil
+                            {
+                                try await send(
+                                    AnyMethod.response(
+                                        id: request.id,
+                                        error: .invalidRequest("Duplicate outstanding request ID")
+                                    )
+                                )
+                                continue
                             }
+
+                            // Store the dispatch task before the actor can process a following
+                            // cancellation notification.
+                            let token = UUID()
+                            let dispatchTask = Task {
+                                _ = try? await self.handleRequest(
+                                    request,
+                                    sendResponse: true,
+                                    trackingToken: token
+                                )
+                                self.finishDispatch(id: request.id, token: token)
+                            }
+                            dispatchedRequests[request.id] = DispatchedRequest(
+                                token: token,
+                                task: dispatchTask
+                            )
                         } else if let message = try? decoder.decode(AnyMessage.self, from: data) {
                             try await handleMessage(message)
                         } else {
@@ -284,6 +329,18 @@ public actor Server {
     public func stop() async {
         task?.cancel()
         task = nil
+
+        let dispatchTasks = dispatchedRequests.values.map(\.task)
+        dispatchedRequests.removeAll()
+        for dispatchTask in dispatchTasks {
+            dispatchTask.cancel()
+        }
+
+        let handlerTasks = pendingRequestTasks.values.map(\.task)
+        pendingRequestTasks.removeAll()
+        for handlerTask in handlerTasks {
+            handlerTask.cancel()
+        }
 
         // Clear pending requests with errors
         let pendingRequestsToCancel = self.pendingRequests
@@ -725,9 +782,28 @@ public actor Server {
     ///   - request: The request to handle
     ///   - sendResponse: Whether to send the response immediately (true) or return it (false)
     /// - Returns: The response when sendResponse is false
-    private func handleRequest(_ request: Request<AnyMethod>, sendResponse: Bool = true)
-        async throws -> Response<AnyMethod>?
-    {
+    private func handleRequest(
+        _ request: Request<AnyMethod>,
+        sendResponse: Bool = true,
+        trackingToken: UUID = UUID()
+    ) async throws -> Response<AnyMethod>? {
+        try Task.checkCancellation()
+
+        let hasDifferentDispatch =
+            dispatchedRequests[request.id].map { $0.token != trackingToken } ?? false
+        if pendingRequestTasks[request.id] != nil || hasDifferentDispatch {
+            let response = AnyMethod.response(
+                id: request.id,
+                error: .invalidRequest("Duplicate outstanding request ID")
+            )
+            if sendResponse {
+                try Task.checkCancellation()
+                try await send(response)
+                return nil
+            }
+            return response
+        }
+
         // Check if this is a pre-processed error request (empty method)
         if request.method.isEmpty && !sendResponse {
             // This is a placeholder for an invalid request that couldn't be parsed in batch mode
@@ -743,6 +819,7 @@ public actor Server {
                 "method": "\(request.method)",
                 "id": "\(request.id)",
             ])
+        try Task.checkCancellation()
 
         if configuration.strict {
             // The client SHOULD NOT send requests other than pings
@@ -761,10 +838,12 @@ public actor Server {
             let response = AnyMethod.response(id: request.id, error: error)
 
             if sendResponse {
+                try Task.checkCancellation()
                 try await send(response)
                 return nil
             }
 
+            try Task.checkCancellation()
             return response
         }
 
@@ -773,9 +852,11 @@ public actor Server {
         // that don't carry HTTP context (stdio, in-memory) don't conform.
         let httpContext = await (connection as? any HTTPContextProviding)?
             .httpRequestContext(for: request.id)
-        let handlerRequestID = await (connection as? any RoutedRequestIDProviding)?
+        let handlerRequestID =
+            await (connection as? any RoutedRequestIDProviding)?
             .originalRequestID(for: request.id) ?? request.id
         let handlerContext = HandlerContext(id: handlerRequestID, httpContext: httpContext)
+        try Task.checkCancellation()
 
         // Create a task to handle the request with cancellation support.
         // Set currentHandlerContext as a task local so handlers see it.
@@ -804,16 +885,21 @@ public actor Server {
             }
         }
 
-        // Store the handler task for potential cancellation
-        pendingRequestTasks[request.id] = handlerTask
+        // Store the handler task for potential cancellation. The outer dispatch task remains tracked
+        // until the request finishes so stop/cancellation can prevent a late send after restart.
+        pendingRequestTasks[request.id] = ActiveRequest(token: trackingToken, task: handlerTask)
 
-        // Ensure cleanup happens regardless of success or failure
+        // Ensure cleanup happens regardless of success or failure, without removing a newer
+        // request that reused the same ID after cancellation or restart.
         defer {
-            pendingRequestTasks.removeValue(forKey: request.id)
+            if pendingRequestTasks[request.id]?.token == trackingToken {
+                pendingRequestTasks.removeValue(forKey: request.id)
+            }
         }
 
         do {
             let response = try await handlerTask.value
+            try Task.checkCancellation()
 
             if sendResponse {
                 try await send(response)
@@ -830,15 +916,29 @@ public actor Server {
             let response = AnyMethod.response(id: request.id, error: mcpError)
 
             if sendResponse {
+                try Task.checkCancellation()
                 try await send(response)
                 return nil
             }
 
+            try Task.checkCancellation()
             return response
         }
     }
 
     private func handleMessage(_ message: Message<AnyNotification>) async throws {
+        // Cancellation must be applied before logging or application handlers can suspend.
+        if message.method == CancelledNotification.name, let cancellationHandler {
+            do {
+                try await cancellationHandler(message)
+            } catch {
+                await logger?.error(
+                    "Error handling cancellation notification",
+                    metadata: ["error": "\(error)"]
+                )
+            }
+        }
+
         await logger?.trace(
             "Processing notification",
             metadata: ["method": "\(message.method)"])
@@ -958,24 +1058,40 @@ public actor Server {
         self.isInitialized = true
     }
 
-    /// Cancel and remove a pending request task
-    private func removePendingRequest(id: ID) -> Task<Response<AnyMethod>, Error>? {
-        pendingRequestTasks.removeValue(forKey: id)
+    private enum CancellationDisposition {
+        case active
+        case dispatched
+        case unknown
+    }
+
+    /// Cancel an active handler or a request that is still registering its handler.
+    private func cancelRequest(id: ID) -> CancellationDisposition {
+        var disposition = CancellationDisposition.unknown
+        if let active = pendingRequestTasks[id] {
+            active.task.cancel()
+            disposition = .active
+        }
+        if let dispatched = dispatchedRequests[id] {
+            dispatched.task.cancel()
+            if case .unknown = disposition {
+                disposition = .dispatched
+            }
+        }
+        return disposition
+    }
+
+    private func finishDispatch(id: ID, token: UUID) {
+        guard dispatchedRequests[id]?.token == token else { return }
+        dispatchedRequests.removeValue(forKey: id)
     }
 
     private func registerCancellationHandler() {
-        onNotification(CancelledNotification.self) { message in
+        cancellationHandler = TypedNotificationHandler<CancelledNotification> {
+            [weak self] message in
+            guard let self = self else { return }
 
             let requestId = message.params.requestId
             let reason = message.params.reason
-
-            await self.logger?.debug(
-                "Received cancellation notification",
-                metadata: [
-                    "requestId": requestId.map { "\($0)" } ?? "none",
-                    "reason": reason.map { "\($0)" } ?? "none",
-                ]
-            )
 
             guard let requestId = requestId else {
                 await self.logger?.warning(
@@ -985,18 +1101,38 @@ public actor Server {
                 return
             }
 
-            // Cancel the pending request task if it exists and remove from tracking
-            if let pendingRequestID = await self.routedRequestID(for: requestId),
-                let task = await self.removePendingRequest(id: pendingRequestID)
-            {
-                task.cancel()
+            // Route the wire ID before cancellation. An ambiguous ID must not pick one client.
+            guard let routedID = await self.routedRequestID(for: requestId) else { return }
+            let disposition = await self.cancelRequest(id: routedID)
+            switch disposition {
+            case .active, .dispatched:
+                await (self.connection as? any CancelledHTTPExchangeCompleting)?
+                    .completeCancelledExchange(for: routedID, reason: reason)
+            case .unknown:
+                break
+            }
+            await self.logger?.debug(
+                "Received cancellation notification",
+                metadata: [
+                    "requestId": "\(requestId)",
+                    "reason": reason.map { "\($0)" } ?? "none",
+                ]
+            )
+
+            switch disposition {
+            case .active:
                 await self.logger?.debug(
                     "Cancelled request",
                     metadata: ["requestId": "\(requestId)"]
                 )
-            } else {
-                // Request may have already completed or is unknown
-                // Per MCP spec, we should ignore this gracefully
+            case .dispatched:
+                await self.logger?.debug(
+                    "Cancelled request before handler registration",
+                    metadata: ["requestId": "\(requestId)"]
+                )
+            case .unknown:
+                // Request may have already completed or is unknown.
+                // Per MCP spec, ignore this gracefully.
                 await self.logger?.trace(
                     "Cancellation notification for unknown or completed request",
                     metadata: ["requestId": "\(requestId)"]

@@ -233,6 +233,10 @@ package protocol RoutedRequestIDProviding: Sendable {
     func routedRequestID(for originalID: ID) async -> ID?
 }
 
+package protocol CancelledHTTPExchangeCompleting: Sendable {
+    func completeCancelledExchange(for routedID: ID, reason: String?) async
+}
+
 // MARK: - JSON-RPC Message Classification
 
 /// Classifies a raw JSON-RPC message for routing purposes.

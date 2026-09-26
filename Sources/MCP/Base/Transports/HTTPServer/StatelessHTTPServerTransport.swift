@@ -30,7 +30,7 @@ import Logging
 ///
 /// For full streaming and session support, use ``StatefulHTTPServerTransport`` instead.
 public actor StatelessHTTPServerTransport:
-    Transport, HTTPContextProviding, RoutedRequestIDProviding
+    Transport, HTTPContextProviding, RoutedRequestIDProviding, CancelledHTTPExchangeCompleting
 {
     public nonisolated let logger: Logger
 
@@ -222,12 +222,9 @@ public actor StatelessHTTPServerTransport:
 
         // Handle by message type
         switch messageKind {
-        case .notification(let method):
+        case .notification:
             // Yield to server and return 202 Accepted
             incomingContinuation.yield(body)
-            if method == CancelledNotification.name {
-                completeExchangeForCancelledRequest(body)
-            }
             return .accepted()
 
         case .response:
@@ -264,11 +261,15 @@ public actor StatelessHTTPServerTransport:
         // Wait for the server to process and send a response
         let responseData: Data
         do {
-            responseData = try await withCheckedThrowingContinuation { continuation in
-                responseWaiters[exchangeID] = ResponseWaiter(
-                    originalID: originalID,
-                    continuation: continuation
-                )
+            responseData = try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { continuation in
+                    responseWaiters[exchangeID] = ResponseWaiter(
+                        originalID: originalID,
+                        continuation: continuation
+                    )
+                }
+            } onCancel: {
+                Task { await self.cancelWaitingExchange(exchangeID) }
             }
         } catch {
             removeHTTPContext(exchangeID: exchangeID, requestID: originalID)
@@ -358,24 +359,23 @@ public actor StatelessHTTPServerTransport:
         }
     }
 
-    private func completeExchangeForCancelledRequest(_ body: Data) {
-        guard let notification = try? JSONDecoder().decode(
-            Message<CancelledNotification>.self, from: body),
-            let requestID = notification.params.requestId,
-            let exchangeIDs = exchangeIDsByRequestID[requestID],
-            exchangeIDs.count == 1,
-            let exchangeID = exchangeIDs.first,
+    private func cancelWaitingExchange(_ exchangeID: String) {
+        guard let waiter = responseWaiters.removeValue(forKey: exchangeID) else { return }
+        removeHTTPContext(exchangeID: exchangeID, requestID: waiter.originalID)
+        waiter.continuation.resume(throwing: CancellationError())
+    }
+
+    package func completeCancelledExchange(for routedID: ID, reason: String?) {
+        guard case .string(let exchangeID) = routedID,
             let waiter = responseWaiters.removeValue(forKey: exchangeID)
         else { return }
 
         removeHTTPContext(exchangeID: exchangeID, requestID: waiter.originalID)
         var message = "Request cancelled"
-        if let reason = notification.params.reason {
-            message += ": \(reason)"
-        }
+        if let reason { message += ": \(reason)" }
         let response = AnyMethod.response(
             id: waiter.originalID,
-            error: .serverError(code: -32002, message: message)
+            error: .serverError(code: -32800, message: message)
         )
         do {
             let encoder = JSONEncoder()
@@ -394,7 +394,10 @@ public actor StatelessHTTPServerTransport:
         {
             return request
         }
-        guard let exchangeID = exchangeIDsByRequestID[id]?.last else {
+        guard let exchangeIDs = exchangeIDsByRequestID[id],
+            exchangeIDs.count == 1,
+            let exchangeID = exchangeIDs.first
+        else {
             return nil
         }
         return httpRequestContexts[exchangeID]
