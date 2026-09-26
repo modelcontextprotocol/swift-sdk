@@ -255,9 +255,13 @@ private func initializeSession(
                 let id = json["id"]
             {
                 let idString: String
-                if let s = id as? String { idString = s }
-                else if let n = id as? Int { idString = String(n) }
-                else { continue }
+                if let s = id as? String {
+                    idString = s
+                } else if let n = id as? Int {
+                    idString = String(n)
+                } else {
+                    continue
+                }
 
                 let responseJSON: [String: Any] = [
                     "jsonrpc": "2.0",
@@ -1344,6 +1348,33 @@ struct StatelessHTTPServerTransportTests {
         // Should return error (500 or similar) since waiter was cancelled
         #expect(response.statusCode == 500)
     }
+
+    @Test("Cancelled HTTP caller releases its request mapping")
+    func testCancelledHTTPCallerClearsExchange() async throws {
+        let transport = makeStatelessTransport()
+        try await transport.connect()
+        let stream = await transport.receive()
+        var iterator = stream.makeAsyncIterator()
+
+        let handleTask = Task {
+            await transport.handleRequest(
+                makeStatelessPOSTRequest(body: makeRequestBody(id: "gone"))
+            )
+        }
+        let routedBody = try #require(try await iterator.next())
+        let routedJSON = try #require(
+            JSONSerialization.jsonObject(with: routedBody) as? [String: Any]
+        )
+        let exchangeID = try #require(routedJSON["id"] as? String)
+
+        handleTask.cancel()
+        _ = await handleTask.value
+        #expect(await transport.routedRequestID(for: .string("gone")) == nil)
+        #expect(await transport.httpRequestContext(for: .string(exchangeID)) == nil)
+
+        try await transport.send(makeResponseBody(id: exchangeID))
+        await transport.disconnect()
+    }
 }
 
 // MARK: - HTTPContextProviding / Server.currentHandlerContext
@@ -1575,12 +1606,83 @@ struct ServerHandlerContextTests {
         await server.stop()
     }
 
+    @Test("Ambiguous cancellation leaves both HTTP requests running")
+    func testAmbiguousCancellationKeepsBothRequests() async throws {
+        actor Barrier {
+            let entered: AsyncStream<Void>
+            private let enteredContinuation: AsyncStream<Void>.Continuation
+            private var waiters: [CheckedContinuation<Void, Never>] = []
+
+            init() {
+                (entered, enteredContinuation) = AsyncStream.makeStream()
+            }
+
+            func wait() async {
+                await withCheckedContinuation { continuation in
+                    waiters.append(continuation)
+                    enteredContinuation.yield(())
+                }
+            }
+
+            func release() {
+                for waiter in waiters { waiter.resume() }
+                waiters.removeAll()
+            }
+        }
+
+        let barrier = Barrier()
+        let transport = makeStatelessTransport()
+        let server = Server(name: "TestServer", version: "1.0")
+        await server.withMethodHandler(CallTool.self) { _ in
+            await barrier.wait()
+            return CallTool.Result(content: [.text(text: "done", annotations: nil, _meta: nil)])
+        }
+        try await server.start(transport: transport)
+        let (processed, processedContinuation) = AsyncStream<Void>.makeStream()
+        await server.onNotification(CancelledNotification.self) { _ in
+            processedContinuation.yield(())
+        }
+
+        let body = try JSONSerialization.data(withJSONObject: [
+            "jsonrpc": "2.0", "id": "shared", "method": "tools/call",
+            "params": ["name": "slow-tool"],
+        ])
+        let first = Task { await transport.handleRequest(makeStatelessPOSTRequest(body: body)) }
+        let second = Task { await transport.handleRequest(makeStatelessPOSTRequest(body: body)) }
+        var entered = barrier.entered.makeAsyncIterator()
+        _ = try #require(await entered.next())
+        _ = try #require(await entered.next())
+
+        #expect(await transport.httpRequestContext(for: .string("shared")) == nil)
+        #expect(await transport.routedRequestID(for: .string("shared")) == nil)
+
+        let cancellation = await transport.handleRequest(
+            makeStatelessPOSTRequest(body: makeCancelledNotificationBody(requestID: "shared"))
+        )
+        #expect(cancellation.statusCode == 202)
+        var processedIterator = processed.makeAsyncIterator()
+        _ = try #require(await processedIterator.next())
+        await barrier.release()
+
+        for response in [await first.value, await second.value] {
+            #expect(response.statusCode == 200)
+            let data = try #require(response.bodyData)
+            let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            #expect(json["id"] as? String == "shared")
+            #expect(json["result"] != nil)
+        }
+        await server.stop()
+    }
+
     @Test("Non-HTTP transport yields nil httpContext")
     func testNonHTTPTransportNilContext() async throws {
         actor Captured {
             var httpContext: HTTPRequest?
             var sawDispatch = false
-            func set(_ v: HTTPRequest?) { httpContext = v; sawDispatch = true }
+            func set(_ v: HTTPRequest?) {
+                httpContext = v
+                sawDispatch = true
+            }
         }
         let captured = Captured()
 
@@ -1627,7 +1729,7 @@ struct StatelessHTTPServerTransportCancellationTests {
 
     /// The implementation-specific JSON-RPC error code the transport synthesizes
     /// for cancelled requests.
-    private static let requestCancelledCode = -32002
+    private static let requestCancelledCode = -32800
 
     private struct SlowRequestHarness {
         let transport: StatelessHTTPServerTransport
