@@ -1368,7 +1368,9 @@ struct StatelessHTTPServerTransportTests {
         let exchangeID = try #require(routedJSON["id"] as? String)
 
         handleTask.cancel()
-        _ = await handleTask.value
+        let completedInTime = await raceAgainstTimeout(.seconds(1)) { await handleTask.value }
+        if completedInTime == nil { await transport.disconnect() }
+        _ = try #require(completedInTime, "Cancelled HTTP caller kept its waiter until shutdown")
         #expect(await transport.routedRequestID(for: .string("gone")) == nil)
         #expect(await transport.httpRequestContext(for: .string(exchangeID)) == nil)
 
