@@ -169,6 +169,9 @@ public actor StatelessHTTPServerTransport:
     /// - **GET**: 405 Method Not Allowed
     /// - **DELETE**: 405 Method Not Allowed
     /// - Others: 405 Method Not Allowed
+    ///
+    /// If the adapter cancels this task because its HTTP exchange ended, it must not write the
+    /// returned response. The adapter owns disconnect and timeout behavior.
     public func handleRequest(_ request: HTTPRequest) async -> HTTPResponse {
         if terminated {
             return .error(
@@ -271,6 +274,9 @@ public actor StatelessHTTPServerTransport:
             } onCancel: {
                 Task { await self.cancelWaitingExchange(exchangeID) }
             }
+        } catch MCPError.connectionClosed {
+            removeHTTPContext(exchangeID: exchangeID, requestID: originalID)
+            return .error(statusCode: 503, .connectionClosed)
         } catch {
             removeHTTPContext(exchangeID: exchangeID, requestID: originalID)
             return .error(
