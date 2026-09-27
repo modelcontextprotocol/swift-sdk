@@ -1325,28 +1325,39 @@ struct StatelessHTTPServerTransportTests {
         #expect(response.statusCode == 404)
     }
 
-    @Test("Disconnect cancels waiting requests")
-    func testDisconnectCancelsWaitingRequests() async throws {
+    @Test("Shutdown completes waiting requests with 503")
+    func testShutdownCompletesWaitingRequests() async throws {
         let transport = makeStatelessTransport()
         try await transport.connect()
+        let stream = await transport.receive()
+        var iterator = stream.makeAsyncIterator()
 
         let requestBody = makeRequestBody(id: "cancel-test")
 
-        // Start a request that will block
         let handleTask = Task {
             await transport.handleRequest(
                 makeStatelessPOSTRequest(body: requestBody)
             )
         }
+        let routedBody = try #require(try await iterator.next())
+        let routedJSON = try #require(
+            JSONSerialization.jsonObject(with: routedBody) as? [String: Any]
+        )
+        let exchangeID = try #require(routedJSON["id"] as? String)
 
-        try await Task.sleep(for: .milliseconds(50))
-
-        // Disconnect while request is pending
         await transport.disconnect()
 
-        let response = await handleTask.value
-        // Should return error (500 or similar) since waiter was cancelled
-        #expect(response.statusCode == 500)
+        let response = try #require(
+            await raceAgainstTimeout(.seconds(1)) { await handleTask.value },
+            "Shutdown left the HTTP request waiting"
+        )
+        #expect(response.statusCode == 503)
+        let body = try #require(response.bodyData)
+        let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let error = try #require(json["error"] as? [String: Any])
+        #expect(error["code"] as? Int == MCPError.connectionClosed.code)
+        #expect(await transport.routedRequestID(for: .string("cancel-test")) == nil)
+        #expect(await transport.httpRequestContext(for: .string(exchangeID)) == nil)
     }
 
     @Test("Cancelled HTTP caller releases its request mapping")
