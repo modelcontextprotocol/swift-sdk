@@ -109,8 +109,8 @@ struct OAuthDiscoveryClient: Sendable {
                     let asMetadata = try decoder.decode(
                         OAuthAuthorizationServerMetadata.self, from: data)
 
-                    if let issuer = asMetadata.issuer,
-                       issuer.absoluteString != candidateServer.absoluteString {
+                    guard let issuer = asMetadata.issuer else { continue }
+                    if issuer.absoluteString != candidateServer.absoluteString {
                         issuerMismatch = .authorizationServerIssuerMismatch(
                             expected: candidateServer.absoluteString,
                             actual: issuer.absoluteString)
