@@ -96,6 +96,18 @@ public actor HTTPClientTransport: Transport {
     /// Used to trigger reconnection when a POST SSE stream closes without delivering data.
     private var activeGETSessionTask: URLSessionDataTask?
 
+    private struct RequestInfo: Decodable {
+        let id: ID?
+        let method: String?
+    }
+
+    private struct SSEOutcome {
+        let hadData: Bool
+        let lastEventID: String?
+        let retryInterval: Int?
+        let completed: Bool
+    }
+
     /// Creates a new HTTP transport client with the specified endpoint
     ///
     /// - Parameters:
@@ -271,7 +283,10 @@ public actor HTTPClientTransport: Transport {
                     try await processResponse(response: response, data: responseData)
                 #else
                     let (responseStream, response) = try await session.bytes(for: request)
-                    try await processResponse(response: response, stream: responseStream)
+                    let requestInfo = try? JSONDecoder().decode(RequestInfo.self, from: data)
+                    let requestID = requestInfo?.method == nil ? nil : requestInfo?.id
+                    try await processResponse(
+                        response: response, stream: responseStream, requestID: requestID)
                 #endif
                 return
             } catch let authError as HTTPAuthenticationChallengeError {
@@ -335,7 +350,9 @@ public actor HTTPClientTransport: Transport {
             }
         }
     #else
-        private func processResponse(response: URLResponse, stream: URLSession.AsyncBytes)
+        private func processResponse(
+            response: URLResponse, stream: URLSession.AsyncBytes, requestID: ID?
+        )
             async throws
         {
             guard let httpResponse = response as? HTTPURLResponse else {
@@ -358,9 +375,19 @@ public actor HTTPClientTransport: Transport {
 
             if contentType.contains(ContentType.sse) {
                 logger.trace("Received SSE response, processing in streaming task")
-                let hadData = try await self.processSSE(stream, recordsGETEventID: false)
+                let outcome = try await self.processSSE(
+                    stream, recordsGETEventID: false, expectedResponseID: requestID)
 
-                if !hadData {
+                if let requestID, !outcome.completed {
+                    guard let lastEventID = outcome.lastEventID else {
+                        throw MCPError.connectionClosed
+                    }
+                    try await resumePOSTStream(
+                        after: lastEventID, retryInterval: outcome.retryInterval, for: requestID)
+                    return
+                }
+
+                if !outcome.hadData {
                     logger.debug("POST SSE stream closed without data, triggering GET reconnection")
                     self.activeGETSessionTask?.cancel()
                 }
@@ -641,49 +668,121 @@ public actor HTTPClientTransport: Transport {
             try await self.processSSE(stream, recordsGETEventID: true)
         }
 
+        private func resumePOSTStream(
+            after eventID: String, retryInterval: Int?, for requestID: ID
+        ) async throws {
+            var lastEventID = eventID
+            var delayMilliseconds = retryInterval ?? 3000
+            for attempt in 0..<3 {
+                guard isConnected, !Task.isCancelled else { throw CancellationError() }
+                try await Task.sleep(for: .milliseconds(max(0, delayMilliseconds)))
+
+                var request = URLRequest(url: endpoint)
+                request.httpMethod = "GET"
+                request.addValue(ContentType.sse, forHTTPHeaderField: HTTPHeaderName.accept)
+                request.addValue(lastEventID, forHTTPHeaderField: HTTPHeaderName.lastEventID)
+                if let protocolVersion {
+                    request.addValue(protocolVersion, forHTTPHeaderField: HTTPHeaderName.protocolVersion)
+                }
+                if let sessionID {
+                    request.addValue(sessionID, forHTTPHeaderField: HTTPHeaderName.sessionID)
+                }
+                if let authValue = authorizer?.authorizationHeader(for: endpoint) {
+                    request.setValue(authValue, forHTTPHeaderField: HTTPHeaderName.authorization)
+                }
+                request = requestModifier(request)
+
+                do {
+                    let (stream, response) = try await session.bytes(for: request)
+                    guard let httpResponse = response as? HTTPURLResponse,
+                          httpResponse.statusCode == 200,
+                          httpResponse.value(forHTTPHeaderField: HTTPHeaderName.contentType)?
+                            .contains(ContentType.sse) == true
+                    else { throw MCPError.internalError("Unable to resume POST SSE stream") }
+
+                    let outcome = try await processSSE(
+                        stream, recordsGETEventID: false, expectedResponseID: requestID)
+                    if outcome.completed { return }
+                    if let eventID = outcome.lastEventID { lastEventID = eventID }
+                    if let retryInterval = outcome.retryInterval {
+                        delayMilliseconds = retryInterval
+                    }
+                } catch {
+                    if Task.isCancelled || attempt == 2 { throw error }
+                    logger.debug("POST SSE resume failed; retrying: \(error)")
+                }
+            }
+            throw MCPError.connectionClosed
+        }
+
         @discardableResult
         private func processSSE(
             _ stream: URLSession.AsyncBytes,
-            recordsGETEventID: Bool
-        ) async throws -> Bool {
+            recordsGETEventID: Bool,
+            expectedResponseID: ID? = nil
+        ) async throws -> SSEOutcome {
             logger.debug("📥 Starting SSE event processing")
             var eventCount = 0
             var hadDataEvent = false
+            var lastEventID: String?
+            var streamRetryInterval: Int?
 
-            for try await event in stream.events {
-                eventCount += 1
+            do {
+                for try await event in stream.events {
+                    eventCount += 1
 
-                if Task.isCancelled {
-                    logger.debug("⏹️ SSE processing cancelled", metadata: ["eventsProcessed": "\(eventCount)"])
-                    break
+                    if Task.isCancelled {
+                        logger.debug("⏹️ SSE processing cancelled", metadata: ["eventsProcessed": "\(eventCount)"])
+                        break
+                    }
+
+                    logger.trace(
+                        "SSE event received",
+                        metadata: [
+                            "type": "\(event.event ?? "message")",
+                            "id": "\(event.id ?? "none")",
+                        ]
+                    )
+
+                    if let eventID = event.id, !eventID.isEmpty {
+                        if recordsGETEventID { self.lastGETEventID = eventID }
+                        lastEventID = eventID
+                        logger.debug("Stored event ID for resumability", metadata: ["eventID": "\(eventID)"])
+                    }
+
+                    if let retry = event.retry {
+                        if recordsGETEventID { self.retryInterval = retry }
+                        streamRetryInterval = retry
+                        logger.debug("SSE retry interval updated", metadata: ["retryMs": "\(retry)"])
+                    }
+
+                    if !event.data.isEmpty, let data = event.data.data(using: .utf8) {
+                        hadDataEvent = true
+                        messageContinuation.yield(data)
+                        if let expectedResponseID,
+                           let message = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                           message["result"] != nil || message["error"] != nil,
+                           let idData = try? JSONSerialization.data(
+                            withJSONObject: message["id"] ?? NSNull(), options: .fragmentsAllowed),
+                           let responseID = try? JSONDecoder().decode(ID.self, from: idData),
+                           responseID == expectedResponseID
+                        {
+                            stream.task.cancel()
+                            return SSEOutcome(
+                                hadData: hadDataEvent, lastEventID: lastEventID,
+                                retryInterval: streamRetryInterval, completed: true)
+                        }
+                    }
                 }
-
-                logger.trace(
-                    "SSE event received",
-                    metadata: [
-                        "type": "\(event.event ?? "message")",
-                        "id": "\(event.id ?? "none")",
-                    ]
-                )
-
-                if recordsGETEventID, let eventID = event.id, !eventID.isEmpty {
-                    self.lastGETEventID = eventID
-                    logger.debug("Stored event ID for resumability", metadata: ["eventID": "\(eventID)"])
-                }
-
-                if let retry = event.retry {
-                    self.retryInterval = retry
-                    logger.debug("SSE retry interval updated", metadata: ["retryMs": "\(retry)"])
-                }
-
-                if !event.data.isEmpty, let data = event.data.data(using: .utf8) {
-                    hadDataEvent = true
-                    messageContinuation.yield(data)
-                }
+            } catch {
+                if expectedResponseID == nil || lastEventID == nil { throw error }
+                logger.debug("POST SSE stream closed before its response: \(error)")
             }
 
             logger.debug("✓ SSE event stream completed", metadata: ["eventsProcessed": "\(eventCount)", "hadData": "\(hadDataEvent)"])
-            return hadDataEvent
+            return SSEOutcome(
+                hadData: hadDataEvent, lastEventID: lastEventID,
+                retryInterval: streamRetryInterval, completed: false)
         }
     #endif
 }

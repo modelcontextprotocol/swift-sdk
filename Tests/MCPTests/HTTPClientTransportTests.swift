@@ -1029,7 +1029,8 @@ import Testing
                             ])!
                         return (initialResponse, Data())
                     }
-                    return (response, Data("id: post-1\ndata: {}\n\n".utf8))
+                    return (response, Data(
+                        "id: post-1\ndata: {}\n\nid: post-2\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n".utf8))
                 }
 
                 let transport = HTTPClientTransport(
@@ -1054,6 +1055,103 @@ import Testing
                 let resumedID = await requests.resumedGETEventID()
                 #expect(resumedID != nil)
                 #expect(resumedID == .some("get-1"))
+                await transport.disconnect()
+            }
+
+            @Test("An interrupted POST SSE stream resumes with its own event ID", .httpClientTransportSetup)
+            func testPOSTSSEResumesWithItsOwnEventID() async throws {
+                actor Requests {
+                    private(set) var resumedID: String?
+                    func record(_ id: String?) { resumedID = id }
+                }
+                let requests = Requests()
+                let configuration = URLSessionConfiguration.ephemeral
+                configuration.protocolClasses = [MockURLProtocol.self]
+                await MockURLProtocol.requestHandlerStorage.setHandler {
+                    [testEndpoint, requests] request in
+                    let response = HTTPURLResponse(
+                        url: testEndpoint, statusCode: 200, httpVersion: "HTTP/1.1",
+                        headerFields: ["Content-Type": "text/event-stream"])!
+                    if request.httpMethod == "GET" {
+                        await requests.record(request.value(forHTTPHeaderField: "Last-Event-ID"))
+                        return (response, Data(
+                            "id: post-2\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n".utf8))
+                    }
+                    return (response, Data("id: post-1\nretry: 10\ndata: {}\n\n".utf8))
+                }
+
+                let transport = HTTPClientTransport(
+                    endpoint: testEndpoint, configuration: configuration, streaming: false)
+                try await transport.connect()
+                try await transport.send(Data(#"{"jsonrpc":"2.0","method":"ping","id":1}"#.utf8))
+                #expect(await requests.resumedID == "post-1")
+
+                var iterator = await transport.receive().makeAsyncIterator()
+                #expect(try await iterator.next() == Data("{}".utf8))
+                #expect(try await iterator.next() == Data(
+                    #"{"jsonrpc":"2.0","id":1,"result":{}}"#.utf8))
+                await transport.disconnect()
+            }
+
+            @Test("Concurrent POST streams resume independently", .httpClientTransportSetup)
+            func testConcurrentPOSTSSEResumption() async throws {
+                actor Requests {
+                    private(set) var resumedIDs: Set<String> = []
+                    func record(_ id: String) { resumedIDs.insert(id) }
+                }
+                let requests = Requests()
+                let configuration = URLSessionConfiguration.ephemeral
+                configuration.protocolClasses = [MockURLProtocol.self]
+                await MockURLProtocol.requestHandlerStorage.setHandler {
+                    [testEndpoint, requests] request in
+                    let response = HTTPURLResponse(
+                        url: testEndpoint, statusCode: 200, httpVersion: "HTTP/1.1",
+                        headerFields: ["Content-Type": "text/event-stream"])!
+                    if request.httpMethod == "GET" {
+                        let id = try #require(request.value(forHTTPHeaderField: "Last-Event-ID"))
+                        await requests.record(id)
+                        let requestID = id == "post-a" ? 1 : 2
+                        return (response, Data(
+                            "data: {\"jsonrpc\":\"2.0\",\"id\":\(requestID),\"result\":{}}\n\n".utf8))
+                    }
+                    let body = try #require(request.readBody())
+                    let requestID = try #require(
+                        (JSONSerialization.jsonObject(with: body) as? [String: Any])?["id"] as? Int)
+                    let id = requestID == 1 ? "post-a" : "post-b"
+                    return (response, Data("id: \(id)\nretry: 10\ndata: {}\n\n".utf8))
+                }
+
+                let transport = HTTPClientTransport(
+                    endpoint: testEndpoint, configuration: configuration, streaming: false)
+                try await transport.connect()
+                async let first: Void = transport.send(Data(
+                    #"{"jsonrpc":"2.0","method":"ping","id":1}"#.utf8))
+                async let second: Void = transport.send(Data(
+                    #"{"jsonrpc":"2.0","method":"ping","id":2}"#.utf8))
+                try await first
+                try await second
+                #expect(await requests.resumedIDs == ["post-a", "post-b"])
+                await transport.disconnect()
+            }
+
+            @Test("POST SSE without a response or event ID fails promptly", .httpClientTransportSetup)
+            func testNonresumablePOSTSSEFails() async throws {
+                let configuration = URLSessionConfiguration.ephemeral
+                configuration.protocolClasses = [MockURLProtocol.self]
+                await MockURLProtocol.requestHandlerStorage.setHandler { [testEndpoint] _ in
+                    let response = HTTPURLResponse(
+                        url: testEndpoint, statusCode: 200, httpVersion: "HTTP/1.1",
+                        headerFields: ["Content-Type": "text/event-stream"])!
+                    return (response, Data("data: {}\n\n".utf8))
+                }
+
+                let transport = HTTPClientTransport(
+                    endpoint: testEndpoint, configuration: configuration, streaming: false)
+                try await transport.connect()
+                await #expect(throws: MCPError.self) {
+                    try await transport.send(Data(
+                        #"{"jsonrpc":"2.0","method":"ping","id":1}"#.utf8))
+                }
                 await transport.disconnect()
             }
 
