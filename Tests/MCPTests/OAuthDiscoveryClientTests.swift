@@ -208,6 +208,29 @@ import Testing
             }
         }
 
+        @Test("Rejects authorization server metadata without an issuer")
+        func testFetchAuthorizationServerMetadataRejectsMissingIssuer() async throws {
+            let body = Data(#"{"token_endpoint":"https://auth.example.com/token"}"#.utf8)
+            let (session, key) = makeIsolatedSession()
+            await IsolatedMockURLProtocol.setHandler(key: key) { request in
+                let response = HTTPURLResponse(
+                    url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                return (response, body)
+            }
+
+            do {
+                _ = try await makeClient().fetchAuthorizationServerMetadata(
+                    candidates: [URL(string: "https://auth.example.com")!],
+                    session: session
+                )
+                Issue.record("Metadata without an issuer was accepted")
+            } catch OAuthAuthorizationError.authorizationServerMetadataDiscoveryFailed {
+                // The document is invalid, so no candidate was accepted.
+            } catch {
+                Issue.record("Unexpected error: \(error)")
+            }
+        }
+
         @Test("Skips private IP candidates without making HTTP calls")
         func testFetchAuthorizationServerMetadataSkipsPrivateIP() async throws {
             let (session, _) = makeIsolatedSession()
