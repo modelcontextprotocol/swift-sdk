@@ -29,6 +29,7 @@ import Logging
 /// - Session management is handled externally or not needed
 ///
 /// For full streaming and session support, use ``StatefulHTTPServerTransport`` instead.
+/// A cancelled request ends with an empty SSE response so no JSON-RPC reply is sent.
 public actor StatelessHTTPServerTransport:
     Transport, HTTPContextProviding, RoutedRequestIDProviding, CancelledHTTPExchangeCompleting
 {
@@ -50,9 +51,14 @@ public actor StatelessHTTPServerTransport:
 
     // MARK: - Response waiters
 
+    private enum ResponseOutcome {
+        case data(Data)
+        case cancelled
+    }
+
     private struct ResponseWaiter {
         let originalID: ID
-        let continuation: CheckedContinuation<Data, any Error>
+        let continuation: CheckedContinuation<ResponseOutcome, any Error>
     }
 
     /// Maps a transport-private exchange ID to the matching HTTP response waiter.
@@ -136,7 +142,7 @@ public actor StatelessHTTPServerTransport:
             }
             do {
                 let response = try restoringResponseID(in: data, to: waiter.originalID)
-                waiter.continuation.resume(returning: response)
+                waiter.continuation.resume(returning: .data(response))
             } catch {
                 waiter.continuation.resume(throwing: error)
                 throw error
@@ -262,9 +268,9 @@ public actor StatelessHTTPServerTransport:
         incomingContinuation.yield(routedBody)
 
         // Wait for the server to process and send a response
-        let responseData: Data
+        let outcome: ResponseOutcome
         do {
-            responseData = try await withTaskCancellationHandler {
+            outcome = try await withTaskCancellationHandler {
                 try await withCheckedThrowingContinuation { continuation in
                     responseWaiters[exchangeID] = ResponseWaiter(
                         originalID: originalID,
@@ -286,7 +292,15 @@ public actor StatelessHTTPServerTransport:
         }
 
         removeHTTPContext(exchangeID: exchangeID, requestID: originalID)
-        return .data(responseData, headers: [HTTPHeaderName.contentType: ContentType.json])
+        switch outcome {
+        case .data(let responseData):
+            return .data(responseData, headers: [HTTPHeaderName.contentType: ContentType.json])
+        case .cancelled:
+            return .stream(
+                AsyncThrowingStream { $0.finish() },
+                headers: [HTTPHeaderName.contentType: ContentType.sse]
+            )
+        }
     }
 
     private func makeExchangeID(excluding requestID: String) -> String {
@@ -377,19 +391,8 @@ public actor StatelessHTTPServerTransport:
         else { return }
 
         removeHTTPContext(exchangeID: exchangeID, requestID: waiter.originalID)
-        var message = "Request cancelled"
-        if let reason { message += ": \(reason)" }
-        let response = AnyMethod.response(
-            id: waiter.originalID,
-            error: .serverError(code: -32800, message: message)
-        )
-        do {
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-            waiter.continuation.resume(returning: try encoder.encode(response))
-        } catch {
-            waiter.continuation.resume(throwing: error)
-        }
+        logger.debug("Completed cancelled HTTP exchange", metadata: ["reason": "\(reason ?? "none")"])
+        waiter.continuation.resume(returning: .cancelled)
     }
 
     // MARK: - HTTPContextProviding
