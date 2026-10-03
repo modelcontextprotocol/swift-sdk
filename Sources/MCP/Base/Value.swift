@@ -2,13 +2,15 @@ import struct Foundation.Data
 import class Foundation.JSONDecoder
 import class Foundation.JSONEncoder
 
-/// A codable value.
+/// A JSON value. Encoding `.data` produces a data-URL string; decoding that JSON
+/// produces `.string`, since an ordinary JSON string does not carry a binary type.
 public enum Value: Hashable, Sendable {
     case null
     case bool(Bool)
     case int(Int)
     case double(Double)
     case string(String)
+    /// Encodes as a data-URL string. Decode the string explicitly when binary data is expected.
     case data(mimeType: String? = nil, Data)
     case array([Value])
     case object([String: Value])

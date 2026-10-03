@@ -24,6 +24,9 @@ struct ValueDecodingTests {
         let string = try JSONDecoder().decode(String.self, from: json)
         #expect(string == "data:application/octet-stream;base64,AAEC")
         #expect(try JSONDecoder().decode(Value.self, from: json) == .string(string))
+        let parsed = try #require(Data.parseDataURL(string))
+        #expect(parsed.mimeType == "application/octet-stream")
+        #expect(parsed.data == Data([0, 1, 2]))
     }
 
     @Test("Tool text content survives Value erasure")
