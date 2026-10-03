@@ -17,6 +17,10 @@ import Foundation
 /// Supports both `authorization_code` (interactive, browser-based) and `client_credentials`
 /// (machine-to-machine) grant types via the ``grantType`` property.
 public struct OAuthConfiguration: Sendable {
+    public enum ApplicationType: String, Sendable {
+        case native
+        case web
+    }
     /// The OAuth 2.1 grant type to use for token acquisition.
     public enum GrantType: Sendable {
         /// OAuth 2.1 authorization_code flow with PKCE.
@@ -331,6 +335,8 @@ public struct OAuthConfiguration: Sendable {
     /// The `client_name` sent during dynamic client registration (RFC 7591).
     /// Defaults to `"mcp-swift-sdk"`. Override with your application's name.
     public let clientName: String
+    /// The RFC 7591 application type sent during dynamic client registration.
+    public let applicationType: ApplicationType
 
     /// Optional provider for externally acquired access tokens.
     public let accessTokenProvider: AccessTokenProvider?
@@ -370,6 +376,7 @@ public struct OAuthConfiguration: Sendable {
         endpointOverrides: EndpointOverrides = .none,
         authorizationRedirectURI: URL? = nil,
         clientName: String = "mcp-swift-sdk",
+        applicationType: ApplicationType = .native,
         additionalTokenRequestParameters: [String: String] = [:],
         accessTokenProvider: AccessTokenProvider? = nil,
         authorizationDelegate: (any OAuthAuthorizationDelegate)? = nil,
@@ -383,6 +390,7 @@ public struct OAuthConfiguration: Sendable {
         self.authorizationRedirectURI =
             authorizationRedirectURI ?? Self.defaultAuthorizationRedirectURI()
         self.clientName = clientName
+        self.applicationType = applicationType
         self.additionalTokenRequestParameters = additionalTokenRequestParameters
         self.accessTokenProvider = accessTokenProvider
         self.authorizationDelegate = authorizationDelegate
