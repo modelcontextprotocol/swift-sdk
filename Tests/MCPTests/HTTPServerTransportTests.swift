@@ -98,7 +98,7 @@ private func makeStatelessPOSTRequest(body: Data) -> HTTPRequest {
         method: "POST",
         headers: [
             "Content-Type": "application/json",
-            "Accept": "application/json",
+            "Accept": "application/json, text/event-stream",
         ],
         body: body
     )
@@ -1729,10 +1729,7 @@ struct ServerHandlerContextTests {
 //
 // Covers the fix for https://github.com/modelcontextprotocol/swift-sdk/issues/255:
 // a request cancelled via `notifications/cancelled` gets no JSON-RPC response from
-// `Server` (per the cancellation spec), so the transport itself must complete the
-// hung HTTP exchange with a synthesized "Request cancelled" JSON-RPC error to
-// satisfy the Streamable HTTP requirement that a request POST receive one JSON
-// object or an SSE stream.
+// `Server`. The transport completes the HTTP exchange with an empty SSE stream.
 //
 // Companion to fix/254-response-waiter-collision, which covers the separate
 // "colliding JSON-RPC ids overwrite each other's waiter" gap (#254) — not an
@@ -1740,9 +1737,16 @@ struct ServerHandlerContextTests {
 @Suite("StatelessHTTPServerTransport Cancellation Tests")
 struct StatelessHTTPServerTransportCancellationTests {
 
-    /// The implementation-specific JSON-RPC error code the transport synthesizes
-    /// for cancelled requests.
-    private static let requestCancelledCode = -32800
+    private func expectEmptySSE(_ response: HTTPResponse) async throws {
+        #expect(response.statusCode == 200)
+        #expect(response.headers["Content-Type"] == "text/event-stream")
+        guard case .stream(let stream, _) = response else {
+            Issue.record("Expected an SSE response")
+            return
+        }
+        var iterator = stream.makeAsyncIterator()
+        #expect(try await iterator.next() == nil)
+    }
 
     private struct SlowRequestHarness {
         let transport: StatelessHTTPServerTransport
@@ -1807,8 +1811,8 @@ struct StatelessHTTPServerTransportCancellationTests {
         ])
     }
 
-    @Test("Cancelled request completes its POST with a Request cancelled error")
-    func testCancelledRequestCompletesWithError() async throws {
+    @Test("Cancelled request completes its POST without a JSON-RPC response")
+    func testCancelledRequestCompletesWithoutResponse() async throws {
         let harness = try await startSlowRequest(requestBody: makeToolCallBody(id: "slow-1"))
         defer { Task { await harness.server.stop() } }
 
@@ -1823,19 +1827,7 @@ struct StatelessHTTPServerTransportCancellationTests {
             "Original POST never completed after its request was cancelled"
         )
 
-        #expect(response.statusCode == 200)
-        #expect(response.headers["Content-Type"] == "application/json")
-
-        let body = try #require(response.bodyData)
-        let json = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
-        #expect(json["jsonrpc"] as? String == "2.0")
-        #expect(json["id"] as? String == "slow-1")
-        #expect(json["result"] == nil)
-
-        let error = try #require(json["error"] as? [String: Any])
-        #expect(error["code"] as? Int == Self.requestCancelledCode)
-        let message = try #require(error["message"] as? String)
-        #expect(message.contains("Request cancelled"))
+        try await expectEmptySSE(response)
 
         // The transport must still forward the notification to the Server: the slow
         // handler observes CancellationError, not just the HTTP exchange completing.
@@ -1849,8 +1841,8 @@ struct StatelessHTTPServerTransportCancellationTests {
         )
     }
 
-    @Test("Cancellation reason is included in the synthesized error message")
-    func testCancellationReasonIncludedInErrorMessage() async throws {
+    @Test("Cancellation with a reason still finishes without a response")
+    func testCancellationReasonDoesNotProduceResponse() async throws {
         let harness = try await startSlowRequest(requestBody: makeToolCallBody(id: "slow-2"))
         defer { Task { await harness.server.stop() } }
 
@@ -1863,15 +1855,11 @@ struct StatelessHTTPServerTransportCancellationTests {
 
         let completedInTime = await raceAgainstTimeout(.seconds(1)) { await harness.inFlight.value }
         let response = try #require(completedInTime)
-        let body = try #require(response.bodyData)
-        let json = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
-        let error = try #require(json["error"] as? [String: Any])
-        let message = try #require(error["message"] as? String)
-        #expect(message.contains("User requested cancellation"))
+        try await expectEmptySSE(response)
     }
 
-    @Test("Integer request id is preserved in the synthesized error response")
-    func testIntegerRequestIDPreserved() async throws {
+    @Test("Integer request id can be cancelled without a response")
+    func testIntegerRequestIDCancelled() async throws {
         let harness = try await startSlowRequest(requestBody: makeToolCallBody(id: 7))
         defer { Task { await harness.server.stop() } }
 
@@ -1882,12 +1870,7 @@ struct StatelessHTTPServerTransportCancellationTests {
 
         let completedInTime = await raceAgainstTimeout(.seconds(1)) { await harness.inFlight.value }
         let response = try #require(completedInTime)
-        let body = try #require(response.bodyData)
-        let json = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
-        // The id must round-trip as a JSON number, not the string "7".
-        #expect(json["id"] as? Int == 7)
-        let error = try #require(json["error"] as? [String: Any])
-        #expect(error["code"] as? Int == Self.requestCancelledCode)
+        try await expectEmptySSE(response)
     }
 
     @Test("Cancellation for unknown or completed requests is ignored")
@@ -1956,9 +1939,6 @@ struct StatelessHTTPServerTransportCancellationTests {
 
         let completedInTime = await raceAgainstTimeout(.seconds(1)) { await harness.inFlight.value }
         let response = try #require(completedInTime)
-        let body = try #require(response.bodyData)
-        let json = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
-        let error = try #require(json["error"] as? [String: Any])
-        #expect(error["code"] as? Int == Self.requestCancelledCode)
+        try await expectEmptySSE(response)
     }
 }
