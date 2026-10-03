@@ -29,7 +29,10 @@ import Logging
 /// - Session management is handled externally or not needed
 ///
 /// For full streaming and session support, use ``StatefulHTTPServerTransport`` instead.
-public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
+/// A cancelled request ends with an empty SSE response so no JSON-RPC reply is sent.
+public actor StatelessHTTPServerTransport:
+    Transport, HTTPContextProviding, RoutedRequestIDProviding, CancelledHTTPExchangeCompleting
+{
     public nonisolated let logger: Logger
 
     // MARK: - Dependencies
@@ -48,14 +51,27 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
 
     // MARK: - Response waiters
 
-    /// Maps request ID → continuation waiting for the server's response.
-    /// When the server calls `send()` with a response, the matching continuation is resumed.
-    private var responseWaiters: [String: CheckedContinuation<Data, any Error>] = [:]
+    private enum ResponseOutcome {
+        case data(Data)
+        case cancelled
+    }
+
+    private struct ResponseWaiter {
+        let originalID: ID
+        let continuation: CheckedContinuation<ResponseOutcome, any Error>
+    }
+
+    /// Maps a transport-private exchange ID to the matching HTTP response waiter.
+    private var responseWaiters: [String: ResponseWaiter] = [:]
 
     /// Maps request ID → originating HTTP request, surfaced to handlers via
     /// ``Server/currentHTTPContext``. Entries live only while a JSON-RPC request
     /// is in flight.
     private var httpRequestContexts: [String: HTTPRequest] = [:]
+
+    /// Preserves the existing raw-ID context lookup for callers outside `Server`.
+    /// Multiple entries are possible because JSON-RPC IDs are scoped to each client.
+    private var exchangeIDsByRequestID: [ID: [String]] = [:]
 
     // MARK: - Init
 
@@ -117,14 +133,20 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
 
         switch kind {
         case .response(let id):
-            guard let continuation = responseWaiters.removeValue(forKey: id) else {
+            guard let waiter = responseWaiters.removeValue(forKey: id) else {
                 logger.debug(
                     "No waiter for response, may have timed out",
                     metadata: ["requestID": "\(id)"]
                 )
                 return
             }
-            continuation.resume(returning: data)
+            do {
+                let response = try restoringResponseID(in: data, to: waiter.originalID)
+                waiter.continuation.resume(returning: .data(response))
+            } catch {
+                waiter.continuation.resume(throwing: error)
+                throw error
+            }
 
         case .notification(let method):
             logger.debug(
@@ -153,6 +175,9 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
     /// - **GET**: 405 Method Not Allowed
     /// - **DELETE**: 405 Method Not Allowed
     /// - Others: 405 Method Not Allowed
+    ///
+    /// If the adapter cancels this task because its HTTP exchange ended, it must not write the
+    /// returned response. The adapter owns disconnect and timeout behavior.
     public func handleRequest(_ request: HTTPRequest) async -> HTTPResponse {
         if terminated {
             return .error(
@@ -206,7 +231,12 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
 
         // Handle by message type
         switch messageKind {
-        case .notification, .response:
+        case .notification:
+            // Yield to server and return 202 Accepted
+            incomingContinuation.yield(body)
+            return .accepted()
+
+        case .response:
             // Yield to server and return 202 Accepted
             incomingContinuation.yield(body)
             return .accepted()
@@ -221,32 +251,180 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
         requestID: String,
         request: HTTPRequest
     ) async -> HTTPResponse {
-        httpRequestContexts[requestID] = request
+        let exchangeID = makeExchangeID(excluding: requestID)
+        let routedBody: Data
+        let originalID: ID
+        do {
+            (routedBody, originalID) = try routingRequest(body, as: exchangeID)
+        } catch {
+            return .error(
+                statusCode: 400,
+                .parseError("Invalid JSON-RPC request id")
+            )
+        }
+
+        registerHTTPContext(request, exchangeID: exchangeID, requestID: originalID)
         // Yield the incoming message to the server
-        incomingContinuation.yield(body)
+        incomingContinuation.yield(routedBody)
 
         // Wait for the server to process and send a response
-        let responseData: Data
+        let outcome: ResponseOutcome
         do {
-            responseData = try await withCheckedThrowingContinuation { continuation in
-                responseWaiters[requestID] = continuation
+            outcome = try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { continuation in
+                    responseWaiters[exchangeID] = ResponseWaiter(
+                        originalID: originalID,
+                        continuation: continuation
+                    )
+                }
+            } onCancel: {
+                Task { await self.cancelWaitingExchange(exchangeID) }
             }
+        } catch MCPError.connectionClosed {
+            removeHTTPContext(exchangeID: exchangeID, requestID: originalID)
+            return .error(statusCode: 503, .connectionClosed)
         } catch {
-            httpRequestContexts.removeValue(forKey: requestID)
+            removeHTTPContext(exchangeID: exchangeID, requestID: originalID)
             return .error(
                 statusCode: 500,
                 .internalError("Error processing request: \(error.localizedDescription)")
             )
         }
 
-        httpRequestContexts.removeValue(forKey: requestID)
-        return .data(responseData, headers: [HTTPHeaderName.contentType: ContentType.json])
+        removeHTTPContext(exchangeID: exchangeID, requestID: originalID)
+        switch outcome {
+        case .data(let responseData):
+            return .data(responseData, headers: [HTTPHeaderName.contentType: ContentType.json])
+        case .cancelled:
+            return .stream(
+                AsyncThrowingStream { $0.finish() },
+                headers: [HTTPHeaderName.contentType: ContentType.sse]
+            )
+        }
+    }
+
+    private func makeExchangeID(excluding requestID: String) -> String {
+        var exchangeID: String
+        repeat {
+            exchangeID = UUID().uuidString
+        } while exchangeID == requestID
+            || responseWaiters[exchangeID] != nil
+            || httpRequestContexts[exchangeID] != nil
+            || exchangeIDsByRequestID[.string(exchangeID)] != nil
+        return exchangeID
+    }
+
+    private func routingRequest(_ body: Data, as exchangeID: String) throws -> (Data, ID) {
+        guard var json = try JSONSerialization.jsonObject(with: body) as? [String: Any] else {
+            throw MCPError.parseError("Invalid JSON-RPC request")
+        }
+
+        guard let originalID = requestID(from: json["id"]) else {
+            throw MCPError.parseError("Invalid JSON-RPC request id")
+        }
+
+        json["id"] = exchangeID
+        let routedBody = try JSONSerialization.data(
+            withJSONObject: json,
+            options: [.sortedKeys, .withoutEscapingSlashes]
+        )
+        return (routedBody, originalID)
+    }
+
+    private func requestID(from value: Any?) -> ID? {
+        if let stringID = value as? String {
+            return .string(stringID)
+        }
+        if let numberID = value as? Int {
+            return .number(numberID)
+        }
+        return nil
+    }
+
+    private func restoringResponseID(in data: Data, to originalID: ID) throws -> Data {
+        guard var json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw MCPError.parseError("Invalid JSON-RPC response")
+        }
+
+        switch originalID {
+        case .string(let value):
+            json["id"] = value
+        case .number(let value):
+            json["id"] = value
+        }
+
+        return try JSONSerialization.data(
+            withJSONObject: json,
+            options: [.sortedKeys, .withoutEscapingSlashes]
+        )
+    }
+
+    private func registerHTTPContext(
+        _ request: HTTPRequest,
+        exchangeID: String,
+        requestID: ID
+    ) {
+        httpRequestContexts[exchangeID] = request
+        exchangeIDsByRequestID[requestID, default: []].append(exchangeID)
+    }
+
+    private func removeHTTPContext(exchangeID: String, requestID: ID) {
+        httpRequestContexts.removeValue(forKey: exchangeID)
+        guard var exchangeIDs = exchangeIDsByRequestID[requestID] else { return }
+        exchangeIDs.removeAll { $0 == exchangeID }
+        if exchangeIDs.isEmpty {
+            exchangeIDsByRequestID.removeValue(forKey: requestID)
+        } else {
+            exchangeIDsByRequestID[requestID] = exchangeIDs
+        }
+    }
+
+    private func cancelWaitingExchange(_ exchangeID: String) {
+        guard let waiter = responseWaiters.removeValue(forKey: exchangeID) else { return }
+        removeHTTPContext(exchangeID: exchangeID, requestID: waiter.originalID)
+        waiter.continuation.resume(throwing: CancellationError())
+    }
+
+    package func completeCancelledExchange(for routedID: ID, reason: String?) {
+        guard case .string(let exchangeID) = routedID,
+            let waiter = responseWaiters.removeValue(forKey: exchangeID)
+        else { return }
+
+        removeHTTPContext(exchangeID: exchangeID, requestID: waiter.originalID)
+        logger.debug("Completed cancelled HTTP exchange", metadata: ["reason": "\(reason ?? "none")"])
+        waiter.continuation.resume(returning: .cancelled)
     }
 
     // MARK: - HTTPContextProviding
 
     public func httpRequestContext(for id: ID) -> HTTPRequest? {
-        httpRequestContexts[id.description]
+        if case .string(let exchangeID) = id,
+            let request = httpRequestContexts[exchangeID]
+        {
+            return request
+        }
+        guard let exchangeIDs = exchangeIDsByRequestID[id],
+            exchangeIDs.count == 1,
+            let exchangeID = exchangeIDs.first
+        else {
+            return nil
+        }
+        return httpRequestContexts[exchangeID]
+    }
+
+    package func originalRequestID(for routedID: ID) -> ID? {
+        guard case .string(let exchangeID) = routedID else { return nil }
+        return responseWaiters[exchangeID]?.originalID
+    }
+
+    package func routedRequestID(for originalID: ID) -> ID? {
+        guard let exchangeIDs = exchangeIDsByRequestID[originalID],
+            exchangeIDs.count == 1,
+            let exchangeID = exchangeIDs.first
+        else {
+            return nil
+        }
+        return .string(exchangeID)
     }
 
     // MARK: - Termination
@@ -258,12 +436,19 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
         logger.debug("Stateless HTTP server transport terminated")
 
         // Cancel all waiting continuations
-        for (id, continuation) in responseWaiters {
-            continuation.resume(throwing: MCPError.connectionClosed)
-            logger.debug("Cancelled waiter for request", metadata: ["requestID": "\(id)"])
+        for (exchangeID, waiter) in responseWaiters {
+            waiter.continuation.resume(throwing: MCPError.connectionClosed)
+            logger.debug(
+                "Cancelled waiter for request",
+                metadata: [
+                    "exchangeID": "\(exchangeID)",
+                    "requestID": "\(waiter.originalID)",
+                ]
+            )
         }
         responseWaiters.removeAll()
         httpRequestContexts.removeAll()
+        exchangeIDsByRequestID.removeAll()
 
         // Close incoming stream
         incomingContinuation.finish()
