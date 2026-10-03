@@ -240,6 +240,8 @@ import Testing
                     "tools/call", "=?base64?PT9iYXNlNjQ/YWJjPz0=?="),
                 (#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":" weather "}}"#,
                     "tools/call", "=?base64?IHdlYXRoZXIg?="),
+                (#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"foo\tbar"}}"#,
+                    "tools/call", "=?base64?Zm9vCWJhcg==?="),
                 (#"{"jsonrpc":"2.0","id":7,"result":{}}"#, nil, nil),
             ]
 

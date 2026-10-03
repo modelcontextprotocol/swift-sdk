@@ -342,7 +342,7 @@ public actor HTTPClientTransport: Transport {
         guard let first = bytes.first, let last = bytes.last,
               first != 0x20, first != 0x09, last != 0x20, last != 0x09
         else { return false }
-        return bytes.allSatisfy { $0 == 0x09 || (0x20...0x7E).contains($0) }
+        return bytes.allSatisfy { (0x20...0x7E).contains($0) }
     }
 
     #if os(Linux)
