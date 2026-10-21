@@ -257,8 +257,7 @@ public actor Client {
         }
 
         // Register cancellation notification handler
-        await self.onNotification(CancelledNotification.self) { [weak self] message in
-            guard let self = self else { return }
+        await self.onNotification(CancelledNotification.self) { message in
 
             let requestId = message.params.requestId
             let reason = message.params.reason
