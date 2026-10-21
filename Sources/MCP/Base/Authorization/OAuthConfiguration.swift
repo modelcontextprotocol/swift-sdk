@@ -69,7 +69,11 @@ public struct OAuthConfiguration: Sendable {
         ) async throws {
             switch self {
             case .clientSecretBasic(let clientID, let clientSecret):
-                let basic = Data("\(clientID):\(clientSecret)".utf8).base64EncodedString()
+                // RFC 6749 §2.3.1: percent-encode client_id and client_secret with
+                // application/x-www-form-urlencoded before concatenation.
+                let encodedID = clientID.rfc6749PercentEncoded()
+                let encodedSecret = clientSecret.rfc6749PercentEncoded()
+                let basic = Data("\(encodedID):\(encodedSecret)".utf8).base64EncodedString()
                 request.setValue("Basic \(basic)", forHTTPHeaderField: HTTPHeaderName.authorization)
             case .clientSecretPost(let clientID, let clientSecret):
                 bodyParameters[OAuthParameterName.clientID] = clientID
@@ -412,4 +416,18 @@ public protocol OAuthAuthorizationDelegate: Sendable {
     /// Presents the authorization URL to the user and returns the redirect URL containing
     /// the authorization code.
     func presentAuthorizationURL(_ url: URL) async throws -> URL
+}
+
+// MARK: - RFC 6749 Percent-Encoding
+
+extension String {
+    /// Percent-encodes the string per RFC 6749 §2.3.1 (application/x-www-form-urlencoded).
+    ///
+    /// Only unreserved characters (A-Z, a-z, 0-9, `-`, `.`, `_`, `~`) are left unencoded.
+    func rfc6749PercentEncoded() -> String {
+        // CharacterSet for RFC 3986 unreserved characters.
+        var allowed = CharacterSet()
+        allowed.insert(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+        return addingPercentEncoding(withAllowedCharacters: allowed) ?? self
+    }
 }
