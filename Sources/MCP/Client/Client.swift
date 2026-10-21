@@ -451,17 +451,6 @@ public actor Client {
         try await notify(notification)
     }
 
-    /// Send a request and receive its response immediately.
-    ///
-    /// Internal convenience method for cases where cancellation tracking is not needed.
-    ///
-    /// - Parameter request: The request to send
-    /// - Returns: The result of the request
-    /// - Throws: MCPError if the client is not connected
-    func sendAndAwait<M: Method>(_ request: Request<M>) async throws -> M.Result {
-        let context = try send(request)
-        return try await context.value
-    }
 
     private func addPendingRequest<T: Sendable & Decodable>(
         id: ID,
@@ -647,7 +636,7 @@ public actor Client {
                 clientInfo: clientInfo
             ))
 
-        let result = try await sendAndAwait(request)
+        let result = try await send(request).value
 
         self.serverCapabilities = result.capabilities
         self.serverVersion = result.protocolVersion
@@ -666,7 +655,7 @@ public actor Client {
 
     public func ping() async throws {
         let request = Ping.request()
-        _ = try await sendAndAwait(request)
+        _ = try await send(request).value
     }
 
     // MARK: - Prompts
@@ -676,7 +665,7 @@ public actor Client {
     {
         try validateServerCapability(\.prompts, "Prompts")
         let request = GetPrompt.request(.init(name: name, arguments: arguments))
-        let result = try await sendAndAwait(request)
+        let result = try await send(request).value
         return (description: result.description, messages: result.messages)
     }
 
@@ -690,7 +679,7 @@ public actor Client {
         } else {
             request = ListPrompts.request(.init())
         }
-        let result = try await sendAndAwait(request)
+        let result = try await send(request).value
         return (prompts: result.prompts, nextCursor: result.nextCursor)
     }
 
@@ -699,7 +688,7 @@ public actor Client {
     public func readResource(uri: String) async throws -> [Resource.Content] {
         try validateServerCapability(\.resources, "Resources")
         let request = ReadResource.request(.init(uri: uri))
-        let result = try await sendAndAwait(request)
+        let result = try await send(request).value
         return result.contents
     }
 
@@ -713,14 +702,14 @@ public actor Client {
         } else {
             request = ListResources.request(.init())
         }
-        let result = try await sendAndAwait(request)
+        let result = try await send(request).value
         return (resources: result.resources, nextCursor: result.nextCursor)
     }
 
     public func subscribeToResource(uri: String) async throws {
         try validateServerCapability(\.resources?.subscribe, "Resource subscription")
         let request = ResourceSubscribe.request(.init(uri: uri))
-        _ = try await sendAndAwait(request)
+        _ = try await send(request).value
     }
 
     public func listResourceTemplates(cursor: String? = nil) async throws -> (
@@ -733,7 +722,7 @@ public actor Client {
         } else {
             request = ListResourceTemplates.request(.init())
         }
-        let result = try await sendAndAwait(request)
+        let result = try await send(request).value
         return (templates: result.templates, nextCursor: result.nextCursor)
     }
 
@@ -749,7 +738,7 @@ public actor Client {
         } else {
             request = ListTools.request(.init())
         }
-        let result = try await sendAndAwait(request)
+        let result = try await send(request).value
         return (tools: result.tools, nextCursor: result.nextCursor)
     }
 
@@ -771,7 +760,7 @@ public actor Client {
     ) async throws -> (content: [Tool.Content], isError: Bool?) {
         try validateServerCapability(\.tools, "Tools")
         let request = CallTool.request(.init(name: name, arguments: arguments, meta: meta))
-        let result = try await sendAndAwait(request)
+        let result = try await send(request).value
         return (content: result.content, isError: result.isError)
     }
 
@@ -889,7 +878,7 @@ public actor Client {
     public func setLoggingLevel(_ level: LogLevel) async throws {
         try validateServerCapability(\.logging, "Logging")
         let request = SetLoggingLevel.request(.init(level: level))
-        _ = try await sendAndAwait(request)
+        _ = try await send(request).value
     }
 
     // MARK: - Completions
@@ -921,7 +910,7 @@ public actor Client {
                 context: context.map { .init(arguments: $0) }
             )
         )
-        let result = try await sendAndAwait(request)
+        let result = try await send(request).value
         return result.completion
     }
 
@@ -952,7 +941,7 @@ public actor Client {
                 context: context.map { .init(arguments: $0) }
             )
         )
-        let result = try await sendAndAwait(request)
+        let result = try await send(request).value
         return result.completion
     }
 
