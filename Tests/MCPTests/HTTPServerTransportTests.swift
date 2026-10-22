@@ -158,6 +158,25 @@ private func drainSSEStream(
     return await collector.getChunks()
 }
 
+private func nextValue<T: Sendable>(
+    from stream: AsyncStream<T>,
+    timeout: Duration = .seconds(1)
+) async -> T? {
+    await withTaskGroup(of: T?.self) { group in
+        group.addTask {
+            var iterator = stream.makeAsyncIterator()
+            return await iterator.next()
+        }
+        group.addTask {
+            try? await Task.sleep(for: timeout)
+            return nil
+        }
+        let value = await group.next() ?? nil
+        group.cancelAll()
+        return value
+    }
+}
+
 /// Initializes a stateful transport session and returns the session ID.
 /// Spawns a background task to consume the receive stream and send the init response.
 private func initializeSession(
@@ -590,6 +609,173 @@ struct StatefulHTTPServerTransportTests {
         )
 
         #expect(response.statusCode == 404)
+    }
+
+    @Test("Session manager creates a new server after DELETE")
+    func testServerInitializeAfterDelete() async throws {
+        let manager = StatefulHTTPServerSessionManager(
+            validationPipeline: StandardValidationPipeline(validators: [SessionValidator()])
+        ) { _, _ in Server(name: "test", version: "1.0") }
+
+        func responseText(_ response: HTTPResponse) async throws -> String {
+            guard case .stream(let stream, _) = response else {
+                Issue.record("Expected an SSE response")
+                return ""
+            }
+            var text = ""
+            for try await chunk in stream {
+                text += String(decoding: chunk, as: UTF8.self)
+            }
+            return text
+        }
+
+        let first = await manager.handleRequest(
+            makeStatefulPOSTRequest(body: makeInitializeBody(id: "first"))
+        )
+        let firstText = try await responseText(first)
+        #expect(firstText.contains("serverInfo"))
+        guard let firstSessionID = first.headers[HTTPHeaderName.sessionID] else {
+            Issue.record("Expected first session ID")
+            return
+        }
+
+        let deleted = await manager.handleRequest(makeDELETERequest(sessionID: firstSessionID))
+        #expect(deleted.statusCode == 200)
+
+        let second = await manager.handleRequest(
+            makeStatefulPOSTRequest(body: makeInitializeBody(id: "second"))
+        )
+        let secondText = try await responseText(second)
+        #expect(secondText.contains("serverInfo"))
+        #expect(!secondText.contains("\"error\""))
+        #expect(second.headers[HTTPHeaderName.sessionID] != firstSessionID)
+
+        let stale = await manager.handleRequest(
+            makeStatefulPOSTRequest(body: makeRequestBody(), sessionID: firstSessionID)
+        )
+        #expect(stale.statusCode == 404)
+        await manager.stop()
+    }
+
+    @Test("Concurrent sessions with the same request ID stay isolated")
+    func testConcurrentSessionsAreIsolated() async throws {
+        let manager = StatefulHTTPServerSessionManager(
+            validationPipeline: StandardValidationPipeline(validators: [SessionValidator()])
+        ) { sessionID, _ in Server(name: sessionID, version: "1.0") }
+
+        async let first = manager.handleRequest(
+            makeStatefulPOSTRequest(body: makeInitializeBody(id: "shared"))
+        )
+        async let second = manager.handleRequest(
+            makeStatefulPOSTRequest(body: makeInitializeBody(id: "shared"))
+        )
+        let responses = await [first, second]
+        #expect(responses[0].statusCode == 200)
+        #expect(responses[1].statusCode == 200)
+
+        guard let firstID = responses[0].headers[HTTPHeaderName.sessionID],
+            let secondID = responses[1].headers[HTTPHeaderName.sessionID]
+        else {
+            Issue.record("Expected session IDs")
+            await manager.stop()
+            return
+        }
+        #expect(firstID != secondID)
+
+        for (response, sessionID) in zip(responses, [firstID, secondID]) {
+            guard case .stream(let stream, _) = response else {
+                Issue.record("Expected an SSE response")
+                continue
+            }
+            var body = ""
+            for try await chunk in stream {
+                body += String(decoding: chunk, as: UTF8.self)
+            }
+            #expect(body.contains(sessionID))
+        }
+        await manager.stop()
+    }
+
+    @Test("Deleting a slow session cannot send its response to a new session")
+    func testDeletedSessionCannotLeakResponse() async throws {
+        actor SessionOrder {
+            private var count = 0
+            func next() -> Int {
+                count += 1
+                return count
+            }
+        }
+        let order = SessionOrder()
+        let (entered, enteredContinuation) = AsyncStream<Void>.makeStream()
+        let (cancelled, cancelledContinuation) = AsyncStream<Void>.makeStream()
+
+        let manager = StatefulHTTPServerSessionManager(
+            validationPipeline: StandardValidationPipeline(validators: [SessionValidator()])
+        ) { _, _ in
+            let number = await order.next()
+            let server = Server(name: "server-\(number)", version: "1.0")
+            await server.withMethodHandler(CallTool.self) { _ in
+                if number == 1 {
+                    enteredContinuation.yield(())
+                    do {
+                        try await Task.sleep(for: .seconds(5))
+                    } catch is CancellationError {
+                        cancelledContinuation.yield(())
+                        throw CancellationError()
+                    }
+                }
+                return CallTool.Result(content: [
+                    .text(text: "server-\(number)", annotations: nil, _meta: nil)
+                ])
+            }
+            return server
+        }
+
+        func textOf(_ response: HTTPResponse) async throws -> String {
+            guard case .stream(let stream, _) = response else {
+                Issue.record("Expected SSE response")
+                return ""
+            }
+            var text = ""
+            for try await chunk in stream {
+                text += String(decoding: chunk, as: UTF8.self)
+            }
+            return text
+        }
+        let callBody = try JSONSerialization.data(withJSONObject: [
+            "jsonrpc": "2.0", "id": "shared", "method": "tools/call",
+            "params": ["name": "test"] as [String: Any],
+        ])
+
+        let first = await manager.handleRequest(
+            makeStatefulPOSTRequest(body: makeInitializeBody())
+        )
+        _ = try await textOf(first)
+        let oldID = try #require(first.headers[HTTPHeaderName.sessionID])
+        let oldCall = await manager.handleRequest(
+            makeStatefulPOSTRequest(body: callBody, sessionID: oldID)
+        )
+        let oldText = Task { try await textOf(oldCall) }
+        _ = try #require(await nextValue(from: entered))
+
+        let deleted = await manager.handleRequest(makeDELETERequest(sessionID: oldID))
+        #expect(deleted.statusCode == 200)
+        _ = try #require(await nextValue(from: cancelled))
+
+        let second = await manager.handleRequest(
+            makeStatefulPOSTRequest(body: makeInitializeBody())
+        )
+        _ = try await textOf(second)
+        let newID = try #require(second.headers[HTTPHeaderName.sessionID])
+        #expect(newID != oldID)
+        let newCall = await manager.handleRequest(
+            makeStatefulPOSTRequest(body: callBody, sessionID: newID)
+        )
+        let newText = try await textOf(newCall)
+        #expect(newText.contains("server-2"))
+        #expect(!newText.contains("server-1"))
+        #expect(!(try await oldText.value).contains("server-1"))
+        await manager.stop()
     }
 
     // MARK: - Terminated State
