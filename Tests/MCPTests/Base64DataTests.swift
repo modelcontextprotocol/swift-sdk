@@ -128,6 +128,16 @@ struct Base64DataTests {
         }
     }
 
+    @Test("Parse data URL with charset and ;base64,")
+    func testParseDataURLCharsetAndBase64() {
+        let result = Data.parseDataURL("data:text/plain;charset=utf-8;base64,SGk=")
+        #expect(result != nil)
+        if let (mimeType, data) = result {
+            #expect(mimeType == "text/plain;charset=utf-8")
+            #expect(String(data: data, encoding: .utf8) == "Hi")
+        }
+    }
+
     @Test("Test data URL encoding")
     func testDataURLEncoding() {
         let testData = "Hello, world!".data(using: .utf8)!
