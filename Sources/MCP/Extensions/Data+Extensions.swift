@@ -65,14 +65,44 @@ extension Data {
             guard let base64Data = Data(base64Encoded: String(encodedData)) else { return nil }
             decodedData = base64Data
         } else {
-            guard
-                let percentDecodedData = String(encodedData).removingPercentEncoding?.data(
-                    using: .utf8)
-            else { return nil }
+            guard let percentDecodedData = percentDecoded(encodedData) else { return nil }
             decodedData = percentDecodedData
         }
 
         return (mimeType: mimeType, data: decodedData)
+    }
+
+    /// Decodes `%XX` escapes directly into bytes, so any byte value is accepted.
+    ///
+    /// - Parameter string: The percent-encoded string.
+    /// - Returns: The decoded bytes, or `nil` if an escape is malformed.
+    private static func percentDecoded(_ string: Substring) -> Data? {
+        let utf8 = Array(string.utf8)
+        var bytes = Data(capacity: utf8.count)
+        var index = 0
+        while index < utf8.count {
+            guard utf8[index] == UInt8(ascii: "%") else {
+                bytes.append(utf8[index])
+                index += 1
+                continue
+            }
+            guard index + 2 < utf8.count,
+                let high = hexValue(utf8[index + 1]),
+                let low = hexValue(utf8[index + 2])
+            else { return nil }
+            bytes.append(high << 4 | low)
+            index += 3
+        }
+        return bytes
+    }
+
+    private static func hexValue(_ byte: UInt8) -> UInt8? {
+        switch byte {
+        case UInt8(ascii: "0")...UInt8(ascii: "9"): return byte - UInt8(ascii: "0")
+        case UInt8(ascii: "a")...UInt8(ascii: "f"): return byte - UInt8(ascii: "a") + 10
+        case UInt8(ascii: "A")...UInt8(ascii: "F"): return byte - UInt8(ascii: "A") + 10
+        default: return nil
+        }
     }
 
     /// Encodes the data as a data URL string with an optional MIME type.

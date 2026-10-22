@@ -88,6 +88,16 @@ struct Base64DataTests {
         }
     }
 
+    @Test("Parse percent-encoded bytes that are not valid UTF-8")
+    func testParseDataURLNonUTF8PercentEncoding() {
+        let result = Data.parseDataURL("data:application/octet-stream,%FF%00")
+        #expect(result != nil)
+        if let (mimeType, data) = result {
+            #expect(mimeType == "application/octet-stream")
+            #expect(data == Data([0xFF, 0x00]))
+        }
+    }
+
     @Test("Parse invalid data URLs")
     func testParseInvalidDataURLs() {
         // Not a data URL
