@@ -1051,6 +1051,104 @@ struct StatelessHTTPServerTransportTests {
         // Should return error (500 or similar) since waiter was cancelled
         #expect(response.statusCode == 500)
     }
+
+    // MARK: - Concurrent colliding JSON-RPC ids (issues #254, #265)
+
+    @Test(
+        "Colliding in-flight JSON-RPC ids: duplicate is rejected; first request's context and response stay intact",
+        .timeLimit(.minutes(1))
+    )
+    func testCollidingInFlightRequestIDsRejected() async throws {
+        let transport = makeStatelessTransport()
+        try await transport.connect()
+
+        // Track which request bodies actually reach the server via receive().
+        // The rejected duplicate must never be dispatched.
+        actor SeenIDs {
+            private(set) var ids: [String] = []
+            func add(_ id: String) { ids.append(id) }
+        }
+        let seen = SeenIDs()
+        let drain = Task {
+            let stream = await transport.receive()
+            for try await data in stream {
+                if case .request(let id, _)? = JSONRPCMessageKind(data: data) {
+                    await seen.add(id)
+                }
+            }
+        }
+
+        // Request A — id "1", Authorization "Bearer A". Parks until we respond.
+        let requestA = HTTPRequest(
+            method: "POST",
+            headers: [
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "Authorization": "Bearer A",
+            ],
+            body: makeRequestBody(id: "1", method: "tools/list"),
+            path: "/mcp"
+        )
+        let taskA = Task { await transport.handleRequest(requestA) }
+
+        // Let A register its context + waiter and park.
+        try await Task.sleep(for: .milliseconds(50))
+
+        // The in-flight context for id "1" is A's.
+        let ctxDuringA = await transport.httpRequestContext(for: .string("1"))
+        #expect(ctxDuringA?.header("Authorization") == "Bearer A")
+
+        // Request B — SAME id "1", Authorization "Bearer B". Must be rejected promptly,
+        // NOT overwrite A's waiter/context, and NOT hang.
+        let requestB = HTTPRequest(
+            method: "POST",
+            headers: [
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "Authorization": "Bearer B",
+            ],
+            body: makeRequestBody(id: "1", method: "tools/list"),
+            path: "/mcp"
+        )
+        actor ResponseBox {
+            private(set) var response: HTTPResponse?
+            func set(_ value: HTTPResponse) { response = value }
+        }
+        let box = ResponseBox()
+        let taskB = Task { await box.set(await transport.handleRequest(requestB)) }
+
+        // Poll up to ~2s: B must return, not hang.
+        var responseB: HTTPResponse?
+        for _ in 0..<200 {
+            if let r = await box.response {
+                responseB = r
+                break
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(responseB != nil, "duplicate-id request must return promptly, not hang")
+        #expect(responseB?.statusCode == 409)
+
+        // A's context is untouched — B never overwrote it (no auth cross-talk, #265).
+        let ctxStillA = await transport.httpRequestContext(for: .string("1"))
+        #expect(ctxStillA?.header("Authorization") == "Bearer A")
+
+        // Respond to A — it completes normally with its own response (#254: waiter not lost).
+        // Capture the body once: JSONSerialization key order isn't stable across calls.
+        let responseBodyA = makeResponseBody(id: "1")
+        try await transport.send(responseBodyA)
+        let resultA = await taskA.value
+        #expect(resultA.statusCode == 200)
+        #expect(resultA.bodyData == responseBodyA)
+
+        // Only A's body ever reached the server; B was rejected pre-dispatch.
+        let seenIDs = await seen.ids
+        #expect(seenIDs == ["1"])
+
+        _ = await taskB.value
+        drain.cancel()
+        await transport.disconnect()
+    }
 }
 
 // MARK: - HTTPContextProviding / Server.currentHandlerContext

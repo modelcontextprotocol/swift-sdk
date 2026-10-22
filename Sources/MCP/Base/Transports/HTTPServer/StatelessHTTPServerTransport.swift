@@ -29,6 +29,13 @@ import Logging
 /// - Session management is handled externally or not needed
 ///
 /// For full streaming and session support, use ``StatefulHTTPServerTransport`` instead.
+///
+/// ## Concurrency
+///
+/// In-flight requests are correlated to their HTTP exchange by JSON-RPC id. Because ids are
+/// client-scoped, a concurrent request that reuses an id already in flight is rejected with
+/// HTTP 409 and a JSON-RPC `-32600` error rather than silently displacing the first request.
+/// Clients must therefore keep ids unique among their own concurrent in-flight requests.
 public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
     public nonisolated let logger: Logger
 
@@ -221,6 +228,30 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
         requestID: String,
         request: HTTPRequest
     ) async -> HTTPResponse {
+        // Reject a second request that reuses a JSON-RPC id already in flight.
+        //
+        // JSON-RPC ids are client-scoped, and this transport is explicitly multi-client, so
+        // colliding ids across concurrent POSTs are legal and common (most clients start their
+        // id sequence at 1). Keying per-request state on the raw id means a second request
+        // would silently overwrite the first's response waiter (the first POST hangs forever
+        // and its continuation leaks — issue #254) and its HTTP context (a handler could then
+        // read another client's `Authorization` header — issue #265). Failing the duplicate
+        // fast keeps every in-flight exchange isolated. Transparent support for concurrent
+        // colliding ids arrives with the stateless core (SEP-2575).
+        guard httpRequestContexts[requestID] == nil else {
+            logger.warning(
+                "Rejecting request: a JSON-RPC id is already in flight for another concurrent request",
+                metadata: ["requestID": "\(requestID)"]
+            )
+            return .error(
+                statusCode: 409,
+                .invalidRequest(
+                    "Duplicate in-flight JSON-RPC request id '\(requestID)'; "
+                        + "ids must be unique among concurrent in-flight requests"
+                )
+            )
+        }
+
         httpRequestContexts[requestID] = request
         // Yield the incoming message to the server
         incomingContinuation.yield(body)
