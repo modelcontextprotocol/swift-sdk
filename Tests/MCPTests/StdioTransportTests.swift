@@ -43,6 +43,50 @@ struct StdioTransportTests {
         await transport.disconnect()
     }
 
+    @Test("Concurrent sends preserve message framing under backpressure")
+    func testConcurrentSendsPreserveMessageFramingUnderBackpressure() async throws {
+        let (reader, output) = try FileDescriptor.pipe()
+        let (input, _) = try FileDescriptor.pipe()
+        let transport = StdioTransport(input: input, output: output, logger: nil)
+        try await transport.connect()
+
+        let largeMessage = Data(repeating: UInt8(ascii: "a"), count: 512 * 1024)
+        let smallMessage = Data(#"{"id":2}"#.utf8)
+        let expected =
+            largeMessage + Data([UInt8(ascii: "\n")])
+            + smallMessage + Data([UInt8(ascii: "\n")])
+
+        let firstSend = Task {
+            try await transport.send(largeMessage)
+        }
+
+        // Leave the pipe undrained until the first send has filled its buffer
+        // and suspended in the EAGAIN retry path.
+        try await Task.sleep(for: .milliseconds(50))
+
+        let secondSend = Task {
+            try await transport.send(smallMessage)
+        }
+
+        let received = try await Task.detached {
+            var received = Data()
+            var buffer = [UInt8](repeating: 0, count: 4096)
+            while received.count < expected.count {
+                let count = try buffer.withUnsafeMutableBufferPointer { pointer in
+                    try reader.read(into: UnsafeMutableRawBufferPointer(pointer))
+                }
+                received.append(contentsOf: buffer[..<count])
+            }
+            return received
+        }.value
+
+        try await firstSend.value
+        try await secondSend.value
+        #expect(received == expected)
+
+        await transport.disconnect()
+    }
+
     @Test("Receive Message")
     func testStdioTransportReceiveMessage() async throws {
         let (input, writer) = try FileDescriptor.pipe()
