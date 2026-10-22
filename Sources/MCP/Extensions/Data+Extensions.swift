@@ -4,7 +4,7 @@ import RegexBuilder
 extension Data {
     /// Regex pattern for data URLs
     @inline(__always) private static var dataURLRegex:
-        Regex<(Substring, Substring, Substring?, Substring)>
+        Regex<(Substring, Substring, Substring?, Substring?, Substring)>
     {
         Regex {
             "data:"
@@ -21,7 +21,9 @@ extension Data {
                     }
                 }
             }
-            Optionally { ";base64" }
+            Optionally {
+                Capture { ";base64" }
+            }
             ","
             Capture {
                 ZeroOrMore { .any }
@@ -49,9 +51,9 @@ extension Data {
         }
 
         // Extract components using strongly typed captures
-        let (_, mediatype, charset, encodedData) = match.output
+        let (_, mediatype, charset, base64Marker, encodedData) = match.output
 
-        let isBase64 = string.contains(";base64,")
+        let isBase64 = base64Marker != nil
 
         // Process MIME type
         var mimeType = mediatype.isEmpty ? "text/plain" : String(mediatype)

@@ -105,6 +105,29 @@ struct Base64DataTests {
         }
     }
 
+    @Test("Parse plain-text data URL whose payload contains ;base64,")
+    func testParseDataURLBase64MarkerInPayload() {
+        let dataURL = "data:text/plain,hello;base64,world"
+        #expect(Data.isDataURL(string: dataURL))
+
+        let result = Data.parseDataURL(dataURL)
+        #expect(result != nil)
+        if let (mimeType, data) = result {
+            #expect(mimeType == "text/plain")
+            #expect(String(data: data, encoding: .utf8) == "hello;base64,world")
+        }
+    }
+
+    @Test("Parse data URL with ;base64, header still decodes base64")
+    func testParseDataURLBase64HeaderRegression() {
+        let result = Data.parseDataURL("data:application/octet-stream;base64,/wA=")
+        #expect(result != nil)
+        if let (mimeType, data) = result {
+            #expect(mimeType == "application/octet-stream")
+            #expect(data == Data([0xFF, 0x00]))
+        }
+    }
+
     @Test("Test data URL encoding")
     func testDataURLEncoding() {
         let testData = "Hello, world!".data(using: .utf8)!
