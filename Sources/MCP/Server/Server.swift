@@ -285,6 +285,11 @@ public actor Server {
         task?.cancel()
         task = nil
 
+        for (_, requestTask) in pendingRequestTasks {
+            requestTask.cancel()
+        }
+        pendingRequestTasks.removeAll()
+
         // Clear pending requests with errors
         let pendingRequestsToCancel = self.pendingRequests
         self.pendingRequests = [:]
