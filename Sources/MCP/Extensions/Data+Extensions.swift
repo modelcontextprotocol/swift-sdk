@@ -77,21 +77,17 @@ extension Data {
     /// - Parameter string: The percent-encoded string.
     /// - Returns: The decoded bytes, or `nil` if an escape is malformed.
     private static func percentDecoded(_ string: Substring) -> Data? {
-        let utf8 = Array(string.utf8)
-        var bytes = Data(capacity: utf8.count)
-        var index = 0
-        while index < utf8.count {
-            guard utf8[index] == UInt8(ascii: "%") else {
-                bytes.append(utf8[index])
-                index += 1
+        var bytes = Data(capacity: string.utf8.count)
+        var iterator = string.utf8.makeIterator()
+        while let byte = iterator.next() {
+            guard byte == UInt8(ascii: "%") else {
+                bytes.append(byte)
                 continue
             }
-            guard index + 2 < utf8.count,
-                let high = hexValue(utf8[index + 1]),
-                let low = hexValue(utf8[index + 2])
+            guard let high = iterator.next().flatMap(hexValue),
+                let low = iterator.next().flatMap(hexValue)
             else { return nil }
             bytes.append(high << 4 | low)
-            index += 3
         }
         return bytes
     }
