@@ -29,7 +29,9 @@ import Logging
 /// - Session management is handled externally or not needed
 ///
 /// For full streaming and session support, use ``StatefulHTTPServerTransport`` instead.
-public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
+public actor StatelessHTTPServerTransport:
+    Transport, HTTPContextProviding, RoutedRequestIDProviding
+{
     public nonisolated let logger: Logger
 
     // MARK: - Dependencies
@@ -48,14 +50,22 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
 
     // MARK: - Response waiters
 
-    /// Maps request ID → continuation waiting for the server's response.
-    /// When the server calls `send()` with a response, the matching continuation is resumed.
-    private var responseWaiters: [String: CheckedContinuation<Data, any Error>] = [:]
+    private struct ResponseWaiter {
+        let originalID: ID
+        let continuation: CheckedContinuation<Data, any Error>
+    }
+
+    /// Maps a transport-private exchange ID to the matching HTTP response waiter.
+    private var responseWaiters: [String: ResponseWaiter] = [:]
 
     /// Maps request ID → originating HTTP request, surfaced to handlers via
     /// ``Server/currentHTTPContext``. Entries live only while a JSON-RPC request
     /// is in flight.
     private var httpRequestContexts: [String: HTTPRequest] = [:]
+
+    /// Preserves the existing raw-ID context lookup for callers outside `Server`.
+    /// Multiple entries are possible because JSON-RPC IDs are scoped to each client.
+    private var exchangeIDsByRequestID: [ID: [String]] = [:]
 
     // MARK: - Init
 
@@ -117,14 +127,20 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
 
         switch kind {
         case .response(let id):
-            guard let continuation = responseWaiters.removeValue(forKey: id) else {
+            guard let waiter = responseWaiters.removeValue(forKey: id) else {
                 logger.debug(
                     "No waiter for response, may have timed out",
                     metadata: ["requestID": "\(id)"]
                 )
                 return
             }
-            continuation.resume(returning: data)
+            do {
+                let response = try restoringResponseID(in: data, to: waiter.originalID)
+                waiter.continuation.resume(returning: response)
+            } catch {
+                waiter.continuation.resume(throwing: error)
+                throw error
+            }
 
         case .notification(let method):
             logger.debug(
@@ -221,32 +237,146 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
         requestID: String,
         request: HTTPRequest
     ) async -> HTTPResponse {
-        httpRequestContexts[requestID] = request
+        let exchangeID = makeExchangeID(excluding: requestID)
+        let routedBody: Data
+        let originalID: ID
+        do {
+            (routedBody, originalID) = try routingRequest(body, as: exchangeID)
+        } catch {
+            return .error(
+                statusCode: 400,
+                .parseError("Invalid JSON-RPC request id")
+            )
+        }
+
+        registerHTTPContext(request, exchangeID: exchangeID, requestID: originalID)
         // Yield the incoming message to the server
-        incomingContinuation.yield(body)
+        incomingContinuation.yield(routedBody)
 
         // Wait for the server to process and send a response
         let responseData: Data
         do {
             responseData = try await withCheckedThrowingContinuation { continuation in
-                responseWaiters[requestID] = continuation
+                responseWaiters[exchangeID] = ResponseWaiter(
+                    originalID: originalID,
+                    continuation: continuation
+                )
             }
         } catch {
-            httpRequestContexts.removeValue(forKey: requestID)
+            removeHTTPContext(exchangeID: exchangeID, requestID: originalID)
             return .error(
                 statusCode: 500,
                 .internalError("Error processing request: \(error.localizedDescription)")
             )
         }
 
-        httpRequestContexts.removeValue(forKey: requestID)
+        removeHTTPContext(exchangeID: exchangeID, requestID: originalID)
         return .data(responseData, headers: [HTTPHeaderName.contentType: ContentType.json])
+    }
+
+    private func makeExchangeID(excluding requestID: String) -> String {
+        var exchangeID: String
+        repeat {
+            exchangeID = UUID().uuidString
+        } while exchangeID == requestID
+            || responseWaiters[exchangeID] != nil
+            || httpRequestContexts[exchangeID] != nil
+            || exchangeIDsByRequestID[.string(exchangeID)] != nil
+        return exchangeID
+    }
+
+    private func routingRequest(_ body: Data, as exchangeID: String) throws -> (Data, ID) {
+        guard var json = try JSONSerialization.jsonObject(with: body) as? [String: Any] else {
+            throw MCPError.parseError("Invalid JSON-RPC request")
+        }
+
+        guard let originalID = requestID(from: json["id"]) else {
+            throw MCPError.parseError("Invalid JSON-RPC request id")
+        }
+
+        json["id"] = exchangeID
+        let routedBody = try JSONSerialization.data(
+            withJSONObject: json,
+            options: [.sortedKeys, .withoutEscapingSlashes]
+        )
+        return (routedBody, originalID)
+    }
+
+    private func requestID(from value: Any?) -> ID? {
+        if let stringID = value as? String {
+            return .string(stringID)
+        }
+        if let numberID = value as? Int {
+            return .number(numberID)
+        }
+        return nil
+    }
+
+    private func restoringResponseID(in data: Data, to originalID: ID) throws -> Data {
+        guard var json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw MCPError.parseError("Invalid JSON-RPC response")
+        }
+
+        switch originalID {
+        case .string(let value):
+            json["id"] = value
+        case .number(let value):
+            json["id"] = value
+        }
+
+        return try JSONSerialization.data(
+            withJSONObject: json,
+            options: [.sortedKeys, .withoutEscapingSlashes]
+        )
+    }
+
+    private func registerHTTPContext(
+        _ request: HTTPRequest,
+        exchangeID: String,
+        requestID: ID
+    ) {
+        httpRequestContexts[exchangeID] = request
+        exchangeIDsByRequestID[requestID, default: []].append(exchangeID)
+    }
+
+    private func removeHTTPContext(exchangeID: String, requestID: ID) {
+        httpRequestContexts.removeValue(forKey: exchangeID)
+        guard var exchangeIDs = exchangeIDsByRequestID[requestID] else { return }
+        exchangeIDs.removeAll { $0 == exchangeID }
+        if exchangeIDs.isEmpty {
+            exchangeIDsByRequestID.removeValue(forKey: requestID)
+        } else {
+            exchangeIDsByRequestID[requestID] = exchangeIDs
+        }
     }
 
     // MARK: - HTTPContextProviding
 
     public func httpRequestContext(for id: ID) -> HTTPRequest? {
-        httpRequestContexts[id.description]
+        if case .string(let exchangeID) = id,
+            let request = httpRequestContexts[exchangeID]
+        {
+            return request
+        }
+        guard let exchangeID = exchangeIDsByRequestID[id]?.last else {
+            return nil
+        }
+        return httpRequestContexts[exchangeID]
+    }
+
+    package func originalRequestID(for routedID: ID) -> ID? {
+        guard case .string(let exchangeID) = routedID else { return nil }
+        return responseWaiters[exchangeID]?.originalID
+    }
+
+    package func routedRequestID(for originalID: ID) -> ID? {
+        guard let exchangeIDs = exchangeIDsByRequestID[originalID],
+            exchangeIDs.count == 1,
+            let exchangeID = exchangeIDs.first
+        else {
+            return nil
+        }
+        return .string(exchangeID)
     }
 
     // MARK: - Termination
@@ -258,12 +388,19 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
         logger.debug("Stateless HTTP server transport terminated")
 
         // Cancel all waiting continuations
-        for (id, continuation) in responseWaiters {
-            continuation.resume(throwing: MCPError.connectionClosed)
-            logger.debug("Cancelled waiter for request", metadata: ["requestID": "\(id)"])
+        for (exchangeID, waiter) in responseWaiters {
+            waiter.continuation.resume(throwing: MCPError.connectionClosed)
+            logger.debug(
+                "Cancelled waiter for request",
+                metadata: [
+                    "exchangeID": "\(exchangeID)",
+                    "requestID": "\(waiter.originalID)",
+                ]
+            )
         }
         responseWaiters.removeAll()
         httpRequestContexts.removeAll()
+        exchangeIDsByRequestID.removeAll()
 
         // Close incoming stream
         incomingContinuation.finish()
