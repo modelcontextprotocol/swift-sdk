@@ -703,9 +703,16 @@ await server.withMethodHandler(ListTools.self) { _ in
             name: "weather",
             description: "Get current weather for a location",
             inputSchema: .object([
+                "type": "object",
                 "properties": .object([
-                    "location": .string("City name or coordinates"),
-                    "units": .string("Units of measurement, e.g., metric, imperial")
+                    "location": .object([
+                        "type": "string",
+                        "description": "City name or coordinates"
+                    ]),
+                    "units": .object([
+                        "type": "string",
+                        "description": "Units of measurement, e.g., metric, imperial"
+                    ])
                 ])
             ])
         ),
@@ -713,8 +720,12 @@ await server.withMethodHandler(ListTools.self) { _ in
             name: "calculator",
             description: "Perform calculations",
             inputSchema: .object([
+                "type": "object",
                 "properties": .object([
-                    "expression": .string("Mathematical expression to evaluate")
+                    "expression": .object([
+                        "type": "string",
+                        "description": "Mathematical expression to evaluate"
+                    ])
                 ])
             ])
         )

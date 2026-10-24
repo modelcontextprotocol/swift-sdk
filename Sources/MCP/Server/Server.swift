@@ -143,6 +143,13 @@ public actor Server {
         }
     }
 
+    private let encoder: JSONEncoder = {
+        let e = JSONEncoder()
+        e.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        return e
+    }()
+    private let decoder = JSONDecoder()
+
     /// The server name
     public nonisolated var name: String { serverInfo.name }
     /// A human-readable server title
@@ -225,7 +232,6 @@ public actor Server {
                     var requestID: ID?
                     do {
                         // Attempt to decode as batch first, then as individual response, request, or notification
-                        let decoder = JSONDecoder()
                         if let batch = try? decoder.decode(Server.Batch.self, from: data) {
                             try await handleBatch(batch)
                         } else if let response = try? decoder.decode(AnyResponse.self, from: data) {
@@ -239,7 +245,7 @@ public actor Server {
                             try await handleMessage(message)
                         } else {
                             // Try to extract request ID from raw JSON if possible
-                            if let json = try? JSONDecoder().decode(
+                            if let json = try? decoder.decode(
                                 [String: Value].self, from: data),
                                 let idValue = json["id"]
                             {
@@ -368,9 +374,6 @@ public actor Server {
             throw MCPError.internalError("Server connection not initialized")
         }
 
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-
         let responseData = try encoder.encode(response)
         try await connection.send(responseData)
     }
@@ -380,9 +383,6 @@ public actor Server {
         guard let connection = connection else {
             throw MCPError.internalError("Server connection not initialized")
         }
-
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
 
         let notificationData = try encoder.encode(notification)
         try await connection.send(notificationData)
@@ -394,8 +394,6 @@ public actor Server {
             throw MCPError.internalError("Server connection not initialized")
         }
 
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         let requestData = try encoder.encode(request)
 
         let requestTask = Task<M.Result, Error> {
@@ -424,11 +422,6 @@ public actor Server {
         return requestTask
     }
 
-    /// Send a request and await its response
-    private func sendAndAwait<M: Method>(_ request: Request<M>) async throws -> M.Result {
-        let task = try send(request)
-        return try await task.value
-    }
 
     private func addPendingResponse<T: Sendable & Decodable>(
         id: ID,
@@ -499,7 +492,7 @@ public actor Server {
             )
         )
 
-        let result = try await sendAndAwait(request)
+        let result = try await send(request).value
         return result
     }
 
@@ -548,7 +541,7 @@ public actor Server {
             )
         )
 
-        let result = try await sendAndAwait(request)
+        let result = try await send(request).value
         return result
     }
 
@@ -588,7 +581,7 @@ public actor Server {
             )
         )
 
-        let result = try await sendAndAwait(request)
+        let result = try await send(request).value
         return result
     }
 
@@ -655,7 +648,7 @@ public actor Server {
         try validateClientCapability(\.roots, "Roots")
 
         let request = ListRoots.request()
-        let result = try await sendAndAwait(request)
+        let result = try await send(request).value
         return result.roots
     }
 
@@ -715,8 +708,6 @@ public actor Server {
 
         // Send collected responses if any
         if !responses.isEmpty {
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
             let responseData = try encoder.encode(responses)
 
             guard let connection = connection else {
@@ -920,10 +911,7 @@ public actor Server {
         initializeHook: (@Sendable (Client.Info, Client.Capabilities) async throws -> Void)?
     ) {
         // Initialize
-        withMethodHandler(Initialize.self) { [weak self] params in
-            guard let self = self else {
-                throw MCPError.internalError("Server was deallocated")
-            }
+        withMethodHandler(Initialize.self) { params in
 
             guard await !self.isInitialized else {
                 throw MCPError.invalidRequest("Server is already initialized")
@@ -975,8 +963,7 @@ public actor Server {
     }
 
     private func registerCancellationHandler() {
-        onNotification(CancelledNotification.self) { [weak self] message in
-            guard let self = self else { return }
+        onNotification(CancelledNotification.self) { message in
 
             let requestId = message.params.requestId
             let reason = message.params.reason
