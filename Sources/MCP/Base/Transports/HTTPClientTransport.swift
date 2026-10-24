@@ -1,7 +1,7 @@
 import Foundation
 import Logging
 
-#if !os(Linux)
+#if !os(Linux) && !os(Windows)
     import EventSource
 #endif
 
@@ -266,7 +266,7 @@ public actor HTTPClientTransport: Transport {
             request = requestModifier(request)
 
             do {
-                #if os(Linux)
+                #if os(Linux) || os(Windows)
                     let (responseData, response) = try await session.data(for: request)
                     try await processResponse(response: response, data: responseData)
                 #else
@@ -304,7 +304,7 @@ public actor HTTPClientTransport: Transport {
         }
     }
 
-    #if os(Linux)
+    #if os(Linux) || os(Windows)
         private func processResponse(response: URLResponse, data: Data) async throws {
             guard let httpResponse = response as? HTTPURLResponse else {
                 throw MCPError.internalError("Invalid HTTP response")
@@ -467,7 +467,7 @@ public actor HTTPClientTransport: Transport {
     // MARK: - SSE
 
     private func startListeningForServerEvents() async {
-        #if os(Linux)
+        #if os(Linux) || os(Windows)
             if streaming {
                 logger.warning(
                     "SSE streaming was requested but is not fully supported on Linux. SSE connection will not be attempted."
@@ -563,7 +563,7 @@ public actor HTTPClientTransport: Transport {
         #endif
     }
 
-    #if !os(Linux)
+    #if !os(Linux) && !os(Windows)
         private func connectToEventStream() async throws {
             guard isConnected else {
                 logger.debug("⚠️ Skipping connectToEventStream - transport not connected")
