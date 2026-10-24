@@ -611,9 +611,12 @@ import Testing
                 interval: 0.1
             )
 
+            // Disable reconnection so that nothing cancels the connection after
+            // the simulated failure and changes its state to `.cancelled`
             let transport = NetworkTransport(
                 mockConnection,
-                heartbeatConfig: heartbeatConfig
+                heartbeatConfig: heartbeatConfig,
+                reconnectionConfig: .disabled
             )
 
             try await transport.connect()
