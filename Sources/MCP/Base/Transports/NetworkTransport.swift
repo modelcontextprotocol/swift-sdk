@@ -610,6 +610,12 @@ import Logging
                             // Check connection state
                             if connection.state != .ready {
                                 logger.warning("Connection no longer ready, exiting receive loop")
+                                if !isStopping {
+                                    // Release the underlying socket and finish the stream so
+                                    // receive() callers don't hang.
+                                    connection.cancel()
+                                    messageContinuation.finish(throwing: MCPError.connectionClosed)
+                                }
                                 break
                             }
                         }
@@ -685,6 +691,8 @@ import Logging
                                 break
                             } else {
                                 // We're not reconnecting, finish the message stream with error
+                                // and release the underlying socket so it doesn't leak in CLOSE_WAIT.
+                                connection.cancel()
                                 messageContinuation.finish(
                                     throwing: MCPError.transportError(error))
                                 break
@@ -728,6 +736,9 @@ import Logging
 
                             break
                         } else {
+                            // Not reconnecting: release the underlying socket so it doesn't
+                            // leak in CLOSE_WAIT (e.g. when the peer closes gracefully).
+                            connection.cancel()
                             messageContinuation.finish(throwing: error)
                         }
                     }
