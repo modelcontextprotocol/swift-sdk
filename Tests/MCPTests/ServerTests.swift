@@ -5,6 +5,32 @@ import Testing
 
 @Suite("Server Tests")
 struct ServerTests {
+    @Test("Server capabilities preserve experimental and extension objects")
+    func testServerCapabilityObjects() throws {
+        let capabilities = Server.Capabilities(
+            tools: .init(),
+            experimental: ["example/feature": .object(["enabled": .bool(true)])],
+            extensions: ["io.modelcontextprotocol/tasks": .object([:])]
+        )
+        let result = Initialize.Result(
+            protocolVersion: Version.latest,
+            capabilities: capabilities,
+            serverInfo: .init(name: "TestServer", version: "1.0")
+        )
+
+        let encoded = try JSONEncoder().encode(result)
+        let decoded = try JSONDecoder().decode(Initialize.Result.self, from: encoded)
+        #expect(decoded.capabilities == capabilities)
+
+        let json = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        let encodedCapabilities = try #require(json["capabilities"] as? [String: Any])
+        let experimental = try #require(encodedCapabilities["experimental"] as? [String: Any])
+        let feature = try #require(experimental["example/feature"] as? [String: Any])
+        #expect(feature["enabled"] as? Bool == true)
+        let extensions = try #require(encodedCapabilities["extensions"] as? [String: Any])
+        #expect(extensions["io.modelcontextprotocol/tasks"] is [String: Any])
+    }
+
     @Test("Start and stop server")
     func testServerStartAndStop() async throws {
         let transport = MockTransport()
