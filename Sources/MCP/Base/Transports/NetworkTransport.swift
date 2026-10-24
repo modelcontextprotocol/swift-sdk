@@ -610,6 +610,12 @@ import Logging
                             // Check connection state
                             if connection.state != .ready {
                                 logger.warning("Connection no longer ready, exiting receive loop")
+                                if !isStopping {
+                                    // Release the underlying socket and finish the stream so
+                                    // receive() callers don't hang.
+                                    connection.cancel()
+                                    messageContinuation.finish(throwing: MCPError.connectionClosed)
+                                }
                                 break
                             }
                         }

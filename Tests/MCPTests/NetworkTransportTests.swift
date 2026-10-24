@@ -429,6 +429,37 @@ import Testing
             await transport.disconnect()
         }
 
+        @Test("Receive failure with reconnection disabled cancels the connection")
+        func testReceiveFailureWithReconnectionDisabledCancelsConnection() async throws {
+            let mockConnection = MockNetworkConnection()
+            let transport = NetworkTransport(
+                mockConnection,
+                heartbeatConfig: .disabled,
+                reconnectionConfig: .disabled
+            )
+
+            try await transport.connect()
+
+            let receiveTask = Task {
+                for try await _ in await transport.receive() {}
+            }
+
+            // Let the receive loop start, then fail the connection
+            try await Task.sleep(for: .milliseconds(100))
+            mockConnection.simulateFailure(error: NWError.posix(POSIXErrorCode.ECONNRESET))
+
+            // The stream should finish with an error rather than hang
+            let result = await receiveTask.result
+            if case .success = result {
+                Issue.record("Expected receive stream to throw after connection failure")
+            }
+
+            // The underlying connection should be released, not left open
+            #expect(mockConnection.state == .cancelled)
+
+            await transport.disconnect()
+        }
+
         @Test("Multiple Messages")
         func testNetworkTransportMultipleMessages() async throws {
             let mockConnection = MockNetworkConnection()
