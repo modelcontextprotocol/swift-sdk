@@ -19,24 +19,35 @@ public actor StatefulHTTPServerSessionManager {
     }
 
     private let serverFactory: ServerFactory
-    private let validationPipeline: (any HTTPRequestValidationPipeline)?
+    private let validationPipeline: any HTTPRequestValidationPipeline
     private let retryInterval: Int?
     private let sessionTimeout: TimeInterval
+    private let maxSessions: Int
     private let logger: Logger
     private var sessions: [String: Session] = [:]
+    private var creatingSessions = 0
     private var cleanupTask: Task<Void, Never>?
     private var stopped = false
 
     /// `serverFactory` must return a new `Server` for each session.
+    /// `maxSessions` limits active sessions, including sessions still being created.
     public init(
         sessionTimeout: TimeInterval = 3600,
+        maxSessions: Int = 100,
         validationPipeline: (any HTTPRequestValidationPipeline)? = nil,
         retryInterval: Int? = nil,
         logger: Logger? = nil,
         serverFactory: @escaping ServerFactory
     ) {
         self.sessionTimeout = sessionTimeout
-        self.validationPipeline = validationPipeline
+        self.maxSessions = max(0, maxSessions)
+        self.validationPipeline = validationPipeline ?? StandardValidationPipeline(validators: [
+            OriginValidator.localhost(),
+            AcceptHeaderValidator(mode: .sseRequired),
+            ContentTypeValidator(),
+            ProtocolVersionValidator(),
+            SessionValidator(),
+        ])
         self.retryInterval = retryInterval
         self.logger = logger ?? Logger(
             label: "mcp.transport.http.server.sessions",
@@ -96,6 +107,21 @@ public actor StatefulHTTPServerSessionManager {
             return .error(statusCode: 400, .invalidRequest("Missing session ID"))
         }
 
+        let context = HTTPValidationContext(
+            httpMethod: "POST",
+            isInitializationRequest: true,
+            supportedProtocolVersions: Version.supported
+        )
+        if let errorResponse = validationPipeline.validate(request, context: context) {
+            return errorResponse
+        }
+
+        guard sessions.count + creatingSessions < maxSessions else {
+            return .error(statusCode: 503, .internalError("Session limit reached"))
+        }
+        creatingSessions += 1
+        defer { creatingSessions -= 1 }
+
         let sessionID = UUID().uuidString
         let transport = StatefulHTTPServerTransport(
             sessionIDGenerator: FixedSessionIDGenerator(sessionID: sessionID),
@@ -130,10 +156,8 @@ public actor StatefulHTTPServerSessionManager {
             } else {
                 await transport.disconnect()
             }
-            return .error(
-                statusCode: 500,
-                .internalError("Failed to create session: \(error.localizedDescription)")
-            )
+            logger.error("Failed to create session: \(error)")
+            return .error(statusCode: 500, .internalError("Failed to create session"))
         }
     }
 

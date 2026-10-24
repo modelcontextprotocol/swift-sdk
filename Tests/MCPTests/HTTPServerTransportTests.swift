@@ -657,6 +657,140 @@ struct StatefulHTTPServerTransportTests {
         await manager.stop()
     }
 
+    @Test("Session manager validates initialize before creating a server")
+    func testSessionManagerValidatesBeforeFactory() async throws {
+        actor FactoryCalls {
+            var count = 0
+            func record() { count += 1 }
+        }
+        let calls = FactoryCalls()
+        let bearer = BearerTokenValidator(
+            resourceMetadataURL: authResourceMetadataURL,
+            resourceIdentifier: authResourceIdentifier,
+            tokenValidator: { _, _, _ in .valid(BearerTokenInfo()) }
+        )
+        let manager = StatefulHTTPServerSessionManager(
+            validationPipeline: StandardValidationPipeline(validators: [bearer, SessionValidator()])
+        ) { _, _ in
+            await calls.record()
+            return Server(name: "test", version: "1.0")
+        }
+
+        let unauthorized = await manager.handleRequest(
+            makeStatefulPOSTRequest(body: makeInitializeBody())
+        )
+        #expect(unauthorized.statusCode == 401)
+        #expect(await calls.count == 0)
+
+        let authorized = await manager.handleRequest(
+            makeStatefulPOSTRequest(
+                body: makeInitializeBody(), authorization: "Bearer valid-token"
+            )
+        )
+        #expect(authorized.statusCode == 200)
+        #expect(await calls.count == 1)
+        await manager.stop()
+    }
+
+    @Test("Session manager limits active sessions and frees a slot after DELETE")
+    func testSessionManagerLimitsSessions() async throws {
+        actor FactoryCalls {
+            var count = 0
+            func record() { count += 1 }
+        }
+        let calls = FactoryCalls()
+        let manager = StatefulHTTPServerSessionManager(
+            maxSessions: 1,
+            validationPipeline: StandardValidationPipeline(validators: [SessionValidator()])
+        ) { _, _ in
+            await calls.record()
+            return Server(name: "test", version: "1.0")
+        }
+
+        let first = await manager.handleRequest(
+            makeStatefulPOSTRequest(body: makeInitializeBody(id: "first"))
+        )
+        #expect(first.statusCode == 200)
+        let firstID = try #require(first.headers[HTTPHeaderName.sessionID])
+
+        let rejected = await manager.handleRequest(
+            makeStatefulPOSTRequest(body: makeInitializeBody(id: "second"))
+        )
+        #expect(rejected.statusCode == 503)
+        #expect(await calls.count == 1)
+
+        let deleted = await manager.handleRequest(makeDELETERequest(sessionID: firstID))
+        #expect(deleted.statusCode == 200)
+        let next = await manager.handleRequest(
+            makeStatefulPOSTRequest(body: makeInitializeBody(id: "third"))
+        )
+        #expect(next.statusCode == 200)
+        #expect(next.headers[HTTPHeaderName.sessionID] != firstID)
+        #expect(await calls.count == 2)
+        await manager.stop()
+    }
+
+    @Test("Session manager counts sessions while their servers are being created")
+    func testSessionManagerLimitsPendingSessions() async throws {
+        actor FactoryGate {
+            var didStart = false
+            var started: CheckedContinuation<Void, Never>?
+            var release: CheckedContinuation<Void, Never>?
+
+            func waitForFactory() async {
+                if didStart { return }
+                await withCheckedContinuation { started = $0 }
+            }
+
+            func pauseFactory() async {
+                didStart = true
+                started?.resume()
+                await withCheckedContinuation { release = $0 }
+            }
+
+            func resumeFactory() { release?.resume() }
+        }
+        let gate = FactoryGate()
+        let manager = StatefulHTTPServerSessionManager(
+            maxSessions: 1,
+            validationPipeline: StandardValidationPipeline(validators: [SessionValidator()])
+        ) { _, _ in
+            await gate.pauseFactory()
+            return Server(name: "test", version: "1.0")
+        }
+
+        let first = Task {
+            await manager.handleRequest(makeStatefulPOSTRequest(body: makeInitializeBody()))
+        }
+        await gate.waitForFactory()
+        let rejected = await manager.handleRequest(
+            makeStatefulPOSTRequest(body: makeInitializeBody(id: "second"))
+        )
+        #expect(rejected.statusCode == 503)
+        await gate.resumeFactory()
+        #expect(await first.value.statusCode == 200)
+        await manager.stop()
+    }
+
+    @Test("Session manager does not expose a server factory error")
+    func testSessionManagerFactoryError() async {
+        struct FactoryError: Error, LocalizedError {
+            var errorDescription: String? { "private factory details" }
+        }
+        let manager = StatefulHTTPServerSessionManager(
+            validationPipeline: StandardValidationPipeline(validators: [SessionValidator()])
+        ) { _, _ in
+            throw FactoryError()
+        }
+        let response = await manager.handleRequest(
+            makeStatefulPOSTRequest(body: makeInitializeBody())
+        )
+        #expect(response.statusCode == 500)
+        let body = String(decoding: response.bodyData ?? Data(), as: UTF8.self)
+        #expect(!body.contains("private factory details"))
+        await manager.stop()
+    }
+
     @Test("Concurrent sessions with the same request ID stay isolated")
     func testConcurrentSessionsAreIsolated() async throws {
         let manager = StatefulHTTPServerSessionManager(
