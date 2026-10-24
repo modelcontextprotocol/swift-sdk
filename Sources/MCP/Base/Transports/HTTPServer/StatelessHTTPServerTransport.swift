@@ -215,6 +215,12 @@ public actor StatelessHTTPServerTransport:
                 .parseError("Invalid JSON-RPC message")
             )
         }
+        if case .notification = messageKind,
+            let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+            json.keys.contains("id")
+        {
+            return .error(statusCode: 400, .parseError("Invalid JSON-RPC request id"))
+        }
 
         // Build validation context
         let context = HTTPValidationContext(
@@ -296,10 +302,20 @@ public actor StatelessHTTPServerTransport:
         case .data(let responseData):
             return .data(responseData, headers: [HTTPHeaderName.contentType: ContentType.json])
         case .cancelled:
-            return .stream(
-                AsyncThrowingStream { $0.finish() },
-                headers: [HTTPHeaderName.contentType: ContentType.sse]
+            if request.header(HTTPHeaderName.accept)?.lowercased().contains(ContentType.sse) == true {
+                return .stream(
+                    AsyncThrowingStream { $0.finish() },
+                    headers: [HTTPHeaderName.contentType: ContentType.sse]
+                )
+            }
+            let cancellation = AnyMethod.response(
+                id: originalID,
+                error: .serverError(code: -32800, message: "Request cancelled")
             )
+            guard let data = try? JSONEncoder().encode(cancellation) else {
+                return .error(statusCode: 500, .internalError("Failed to encode cancellation"))
+            }
+            return .data(data, headers: [HTTPHeaderName.contentType: ContentType.json])
         }
     }
 
@@ -315,48 +331,103 @@ public actor StatelessHTTPServerTransport:
     }
 
     private func routingRequest(_ body: Data, as exchangeID: String) throws -> (Data, ID) {
-        guard var json = try JSONSerialization.jsonObject(with: body) as? [String: Any] else {
-            throw MCPError.parseError("Invalid JSON-RPC request")
-        }
-
-        guard let originalID = requestID(from: json["id"]) else {
-            throw MCPError.parseError("Invalid JSON-RPC request id")
-        }
-
-        json["id"] = exchangeID
-        let routedBody = try JSONSerialization.data(
-            withJSONObject: json,
-            options: [.sortedKeys, .withoutEscapingSlashes]
-        )
-        return (routedBody, originalID)
-    }
-
-    private func requestID(from value: Any?) -> ID? {
-        if let stringID = value as? String {
-            return .string(stringID)
-        }
-        if let numberID = value as? Int {
-            return .number(numberID)
-        }
-        return nil
+        try replacingTopLevelID(in: body, with: .string(exchangeID))
     }
 
     private func restoringResponseID(in data: Data, to originalID: ID) throws -> Data {
-        guard var json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw MCPError.parseError("Invalid JSON-RPC response")
+        try replacingTopLevelID(in: data, with: originalID).0
+    }
+
+    /// Replace only the top-level ID. Re-encoding the whole message can change numeric payloads.
+    private func replacingTopLevelID(in data: Data, with replacement: ID) throws -> (Data, ID) {
+        guard (try JSONSerialization.jsonObject(with: data)) is [String: Any] else {
+            throw MCPError.parseError("Invalid JSON-RPC object")
         }
 
-        switch originalID {
-        case .string(let value):
-            json["id"] = value
-        case .number(let value):
-            json["id"] = value
+        let bytes = Array(data)
+        var index = 0
+        func skipWhitespace() {
+            while index < bytes.count && [9, 10, 13, 32].contains(bytes[index]) { index += 1 }
+        }
+        func stringEnd() throws -> Int {
+            guard index < bytes.count, bytes[index] == 34 else {
+                throw MCPError.parseError("Invalid JSON-RPC member")
+            }
+            index += 1
+            var escaped = false
+            while index < bytes.count {
+                let byte = bytes[index]
+                index += 1
+                if escaped { escaped = false }
+                else if byte == 92 { escaped = true }
+                else if byte == 34 { return index }
+            }
+            throw MCPError.parseError("Invalid JSON string")
         }
 
-        return try JSONSerialization.data(
-            withJSONObject: json,
-            options: [.sortedKeys, .withoutEscapingSlashes]
-        )
+        skipWhitespace()
+        index += 1 // Opening brace, checked by JSONSerialization above.
+        var idRange: Range<Int>?
+        while index < bytes.count {
+            skipWhitespace()
+            if bytes[index] == 125 { break }
+            let keyStart = index
+            let keyEnd = try stringEnd()
+            let key = try JSONDecoder().decode(String.self, from: Data(bytes[keyStart..<keyEnd]))
+            skipWhitespace()
+            guard index < bytes.count, bytes[index] == 58 else {
+                throw MCPError.parseError("Invalid JSON-RPC member")
+            }
+            index += 1
+            skipWhitespace()
+            let valueStart = index
+            var depth = 0
+            while index < bytes.count {
+                let byte = bytes[index]
+                if byte == 34 {
+                    _ = try stringEnd()
+                    continue
+                }
+                if byte == 91 || byte == 123 { depth += 1 }
+                if byte == 93 || byte == 125 {
+                    if depth == 0 { break }
+                    depth -= 1
+                }
+                if byte == 44 && depth == 0 { break }
+                index += 1
+            }
+            var valueEnd = index
+            while valueEnd > valueStart && [9, 10, 13, 32].contains(bytes[valueEnd - 1]) {
+                valueEnd -= 1
+            }
+            if key == "id" {
+                guard idRange == nil else {
+                    throw MCPError.parseError("Duplicate JSON-RPC request id")
+                }
+                idRange = valueStart..<valueEnd
+            }
+            if index < bytes.count, bytes[index] == 44 { index += 1 }
+        }
+
+        guard let idRange else { throw MCPError.parseError("Missing JSON-RPC request id") }
+        let idData = Data(bytes[idRange])
+        let originalID: ID
+        if let value = try? JSONDecoder().decode(String.self, from: idData) {
+            originalID = .string(value)
+        } else if let first = idData.first,
+            (first == 45 || (48...57).contains(first)),
+            !idData.contains(46), !idData.contains(69), !idData.contains(101),
+            let value = try? JSONDecoder().decode(Int.self, from: idData)
+        {
+            originalID = .number(value)
+        } else {
+            throw MCPError.parseError("Invalid JSON-RPC request id")
+        }
+        let replacementData = try JSONEncoder().encode(replacement)
+        var result = Data(bytes[..<idRange.lowerBound])
+        result.append(replacementData)
+        result.append(contentsOf: bytes[idRange.upperBound...])
+        return (result, originalID)
     }
 
     private func registerHTTPContext(

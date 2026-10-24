@@ -933,6 +933,42 @@ struct StatefulHTTPServerTransportTests {
 @Suite("StatelessHTTPServerTransport Tests")
 struct StatelessHTTPServerTransportTests {
 
+    @Test("Routing changes only the top-level ID, preserving numeric payloads")
+    func testRoutingPreservesPayloadBytes() async throws {
+        let transport = makeStatelessTransport()
+        try await transport.connect()
+        let stream = await transport.receive()
+        var iterator = stream.makeAsyncIterator()
+        let request = Data(#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"amounts":[0.1,19.99,0.3],"id":"nested"}}"#.utf8)
+        let pending = Task {
+            await transport.handleRequest(makeStatelessPOSTRequest(body: request))
+        }
+        let routed = try #require(try await iterator.next())
+        let routedText = String(decoding: routed, as: UTF8.self)
+        #expect(routedText.contains(#""amounts":[0.1,19.99,0.3],"id":"nested""#))
+        let json = try #require(JSONSerialization.jsonObject(with: routed) as? [String: Any])
+        let routedID = try #require(json["id"] as? String)
+        #expect(routedID != "7")
+
+        let response = Data(#"{"jsonrpc":"2.0","id":"\#(routedID)","result":{"amounts":[0.1,19.99,0.3],"id":"nested"}}"#.utf8)
+        try await transport.send(response)
+        let completed = await pending.value
+        #expect(completed.statusCode == 200)
+        #expect(String(decoding: completed.bodyData ?? Data(), as: UTF8.self)
+            == #"{"jsonrpc":"2.0","id":7,"result":{"amounts":[0.1,19.99,0.3],"id":"nested"}}"#)
+        await transport.disconnect()
+    }
+
+    @Test("Boolean and fractional request IDs are rejected")
+    func testInvalidRequestIDs() async {
+        let transport = makeStatelessTransport()
+        for id in ["true", "0.1", "1.0", "null"] {
+            let body = Data(#"{"jsonrpc":"2.0","id":\#(id),"method":"tools/list"}"#.utf8)
+            let response = await transport.handleRequest(makeStatelessPOSTRequest(body: body))
+            #expect(response.statusCode == 400)
+        }
+    }
+
     // MARK: - Lifecycle
 
     @Test("Connect succeeds")
@@ -1763,7 +1799,10 @@ struct StatelessHTTPServerTransportCancellationTests {
     /// entry is causally downstream of the transport yielding the request body, and
     /// the waiter is registered in the same synchronous actor turn as that yield, so
     /// any cancellation POSTed after this returns is guaranteed to find the waiter.
-    private func startSlowRequest(requestBody: Data) async throws -> SlowRequestHarness {
+    private func startSlowRequest(
+        requestBody: Data,
+        accept: String = "application/json, text/event-stream"
+    ) async throws -> SlowRequestHarness {
         let transport = makeStatelessTransport()
         let server = Server(name: "TestServer", version: "1.0")
 
@@ -1786,7 +1825,11 @@ struct StatelessHTTPServerTransportCancellationTests {
         try await server.start(transport: transport)
 
         let inFlight = Task {
-            await transport.handleRequest(makeStatelessPOSTRequest(body: requestBody))
+            await transport.handleRequest(HTTPRequest(
+                method: "POST",
+                headers: ["Content-Type": "application/json", "Accept": accept],
+                body: requestBody
+            ))
         }
 
         // Suspend until the handler has actually started (yields are buffered, so
@@ -1871,6 +1914,29 @@ struct StatelessHTTPServerTransportCancellationTests {
         let completedInTime = await raceAgainstTimeout(.seconds(1)) { await harness.inFlight.value }
         let response = try #require(completedInTime)
         try await expectEmptySSE(response)
+    }
+
+    @Test("JSON-only client gets a cancellation error with its original ID")
+    func testJSONOnlyCancellation() async throws {
+        let harness = try await startSlowRequest(
+            requestBody: makeToolCallBody(id: 7), accept: "application/json"
+        )
+        defer { Task { await harness.server.stop() } }
+
+        let cancelResponse = await harness.transport.handleRequest(
+            makeStatelessPOSTRequest(body: makeCancelledNotificationBody(requestId: 7))
+        )
+        #expect(cancelResponse.statusCode == 202)
+        let completed = try #require(
+            await raceAgainstTimeout(.seconds(1)) { await harness.inFlight.value }
+        )
+        #expect(completed.statusCode == 200)
+        #expect(completed.headers[HTTPHeaderName.contentType] == ContentType.json)
+        let body = try #require(completed.bodyData)
+        let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        #expect(json["id"] as? Int == 7)
+        let error = try #require(json["error"] as? [String: Any])
+        #expect(error["code"] as? Int == -32800)
     }
 
     @Test("Cancellation for unknown or completed requests is ignored")
