@@ -88,6 +88,43 @@ struct Base64DataTests {
         }
     }
 
+    @Test("Parse percent-encoded bytes that are not valid UTF-8")
+    func testParseDataURLNonUTF8PercentEncoding() {
+        let result = Data.parseDataURL("data:application/octet-stream,%FF%00")
+        #expect(result != nil)
+        if let (mimeType, data) = result {
+            #expect(mimeType == "application/octet-stream")
+            #expect(data == Data([0xFF, 0x00]))
+        }
+    }
+
+    @Test("Parse RFC 2397 example with non-UTF-8 charset")
+    func testParseDataURLRFCCharsetExample() {
+        // Example from RFC 2397: ISO-8859-7 bytes that are not valid UTF-8
+        let result = Data.parseDataURL("data:text/plain;charset=iso-8859-7,%be%d3%be")
+        #expect(result != nil)
+        if let (mimeType, data) = result {
+            #expect(mimeType == "text/plain;charset=iso-8859-7")
+            #expect(data == Data([0xBE, 0xD3, 0xBE]))
+        }
+    }
+
+    @Test("Parse data URL with malformed percent escapes")
+    func testParseDataURLMalformedPercentEscapes() {
+        // Truncated escape at end of payload
+        #expect(Data.parseDataURL("data:,%") == nil)
+        #expect(Data.parseDataURL("data:,%F") == nil)
+
+        // Non-hex digit
+        #expect(Data.parseDataURL("data:,%fg") == nil)
+    }
+
+    @Test("Parse data URL preserves literal plus sign")
+    func testParseDataURLPreservesPlus() {
+        // RFC 2397 uses URL percent-encoding, not form encoding, so `+` is not a space
+        #expect(Data.parseDataURL("data:,a+b%2B")?.data == Data("a+b+".utf8))
+    }
+
     @Test("Parse invalid data URLs")
     func testParseInvalidDataURLs() {
         // Not a data URL
