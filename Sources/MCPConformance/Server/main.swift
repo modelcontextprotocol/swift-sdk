@@ -180,8 +180,7 @@ func createConformanceServer(state: ServerState, transport: StatefulHTTPServerTr
             // SEP-1699: Close the SSE stream mid-call to trigger client reconnection.
             // The client should reconnect via GET with Last-Event-ID and receive the
             // response on the new stream.
-            if let requestID = Server.currentRequestID {
-                
+            if let requestID = Server.currentHandlerContext?.id {
                 await transport.closeSSEStream(forRequestID: requestID.description)
             }
             // Wait briefly for the client to reconnect before sending the response.

@@ -352,10 +352,13 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             body = nil
         }
 
+        let path = String(state.head.uri.split(separator: "?").first ?? Substring(state.head.uri))
+
         return HTTPRequest(
             method: state.head.method.rawValue,
             headers: headers,
-            body: body
+            body: body,
+            path: path
         )
     }
 

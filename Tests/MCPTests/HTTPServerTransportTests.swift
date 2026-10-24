@@ -48,13 +48,20 @@ private func makeResponseBody(id: String = "2") -> Data {
     return try! JSONSerialization.data(withJSONObject: json)
 }
 
-private func makeStatefulPOSTRequest(body: Data, sessionID: String? = nil) -> HTTPRequest {
+private func makeStatefulPOSTRequest(
+    body: Data,
+    sessionID: String? = nil,
+    authorization: String? = nil
+) -> HTTPRequest {
     var headers: [String: String] = [
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
     ]
     if let sessionID {
         headers["Mcp-Session-Id"] = sessionID
+    }
+    if let authorization {
+        headers[HTTPHeaderName.authorization] = authorization
     }
     return HTTPRequest(method: "POST", headers: headers, body: body)
 }
@@ -65,7 +72,7 @@ private func makeGETRequest(sessionID: String, lastEventID: String? = nil) -> HT
         "Mcp-Session-Id": sessionID,
     ]
     if let lastEventID {
-        headers["Last-Event-Id"] = lastEventID
+        headers["Last-Event-ID"] = lastEventID
     }
     return HTTPRequest(method: "GET", headers: headers)
 }
@@ -94,6 +101,28 @@ private func makeStatefulTransport(
     StatefulHTTPServerTransport(
         sessionIDGenerator: sessionIDGenerator,
         validationPipeline: StandardValidationPipeline(validators: [])
+    )
+}
+
+private let authResourceMetadataURL =
+    URL(string: "https://mcp.example.com/.well-known/oauth-protected-resource/mcp")!
+private let authResourceIdentifier = URL(string: "https://mcp.example.com/mcp")!
+
+private func makeAuthenticatedStatefulTransport(
+    challengeScopes: Set<String>? = nil,
+    tokenValidator: @escaping BearerTokenValidator.TokenValidator
+) -> StatefulHTTPServerTransport {
+    let validator = BearerTokenValidator(
+        resourceMetadataURL: authResourceMetadataURL,
+        resourceIdentifier: authResourceIdentifier,
+        tokenValidator: tokenValidator,
+        challengeScopeProvider: { _, _ in challengeScopes }
+    )
+    return StatefulHTTPServerTransport(
+        validationPipeline: StandardValidationPipeline(validators: [
+            validator,
+            SessionValidator(),
+        ])
     )
 }
 
@@ -628,6 +657,132 @@ struct StatefulHTTPServerTransportTests {
         await transport.disconnect()
     }
 
+    // MARK: - OAuth Bearer Validation
+
+    @Test("Bearer auth validator returns 401 with challenge when authorization is missing")
+    func testBearerAuthValidatorMissingAuthorizationReturns401() async throws {
+        let transport = makeAuthenticatedStatefulTransport(
+            challengeScopes: ["files:read"]
+        ) { _, _, _ in
+            .valid(BearerTokenInfo())
+        }
+        try await transport.connect()
+
+        let response = await transport.handleRequest(
+            makeStatefulPOSTRequest(body: makeInitializeBody())
+        )
+
+        #expect(response.statusCode == 401)
+        let challenge = response.headers[HTTPHeaderName.wwwAuthenticate]
+        #expect(challenge?.contains("Bearer ") == true)
+        #expect(
+            challenge?.contains("resource_metadata=\"\(authResourceMetadataURL.absoluteString)\"")
+                == true
+        )
+        #expect(challenge?.contains("scope=\"files:read\"") == true)
+
+        await transport.disconnect()
+    }
+
+    @Test("Bearer auth validator returns 400 when authorization header is malformed")
+    func testBearerAuthValidatorMalformedAuthorizationReturns400() async throws {
+        let transport = makeAuthenticatedStatefulTransport { _, _, _ in .valid(BearerTokenInfo()) }
+        try await transport.connect()
+
+        let response = await transport.handleRequest(
+            makeStatefulPOSTRequest(
+                body: makeInitializeBody(),
+                authorization: "Basic dGVzdA=="
+            )
+        )
+
+        #expect(response.statusCode == 400)
+        #expect(response.headers[HTTPHeaderName.wwwAuthenticate] == nil)
+
+        await transport.disconnect()
+    }
+
+    @Test("Bearer auth validator returns 401 invalid_token for rejected token")
+    func testBearerAuthValidatorInvalidTokenReturns401() async throws {
+        let transport = makeAuthenticatedStatefulTransport { _, _, _ in
+            .invalidToken(errorDescription: "Token expired")
+        }
+        try await transport.connect()
+
+        let response = await transport.handleRequest(
+            makeStatefulPOSTRequest(
+                body: makeInitializeBody(),
+                authorization: "Bearer expired-token"
+            )
+        )
+
+        #expect(response.statusCode == 401)
+        let challenge = response.headers[HTTPHeaderName.wwwAuthenticate]
+        #expect(challenge?.contains("error=\"invalid_token\"") == true)
+        #expect(challenge?.contains("error_description=\"Token expired\"") == true)
+        #expect(
+            challenge?.contains("resource_metadata=\"\(authResourceMetadataURL.absoluteString)\"")
+                == true
+        )
+
+        await transport.disconnect()
+    }
+
+    @Test("Bearer auth validator returns 403 insufficient_scope with scope challenge")
+    func testBearerAuthValidatorInsufficientScopeReturns403() async throws {
+        let transport = makeAuthenticatedStatefulTransport { token, _, context in
+            if context.isInitializationRequest, token == "init-token" {
+                return .valid(BearerTokenInfo())
+            }
+            if token == "read-only-token" {
+                return .insufficientScope(
+                    requiredScopes: ["files:read", "files:write"],
+                    errorDescription: "Additional file write permission required"
+                )
+            }
+            return .invalidToken(errorDescription: "Unknown token")
+        }
+        try await transport.connect()
+
+        let initResponse = await transport.handleRequest(
+            makeStatefulPOSTRequest(
+                body: makeInitializeBody(),
+                authorization: "Bearer init-token"
+            )
+        )
+        let sessionID = initResponse.headers[HTTPHeaderName.sessionID]
+        #expect(sessionID != nil)
+
+        guard let sessionID else {
+            await transport.disconnect()
+            return
+        }
+
+        let response = await transport.handleRequest(
+            makeStatefulPOSTRequest(
+                body: makeNotificationBody(),
+                sessionID: sessionID,
+                authorization: "Bearer read-only-token"
+            )
+        )
+
+        #expect(response.statusCode == 403)
+        let challenge = response.headers[HTTPHeaderName.wwwAuthenticate]
+        #expect(challenge?.contains("error=\"insufficient_scope\"") == true)
+        #expect(challenge?.contains("scope=\"files:read files:write\"") == true)
+        #expect(
+            challenge?.contains("resource_metadata=\"\(authResourceMetadataURL.absoluteString)\"")
+                == true
+        )
+        #expect(
+            challenge?.contains(
+                "error_description=\"Additional file write permission required\""
+            ) == true
+        )
+
+        await transport.disconnect()
+    }
+
     // MARK: - Resumability
 
     @Test("GET with Last-Event-ID replays stored events")
@@ -895,5 +1050,220 @@ struct StatelessHTTPServerTransportTests {
         let response = await handleTask.value
         // Should return error (500 or similar) since waiter was cancelled
         #expect(response.statusCode == 500)
+    }
+}
+
+// MARK: - HTTPContextProviding / Server.currentHandlerContext
+
+@Suite("Server.currentHandlerContext Tests")
+struct ServerHandlerContextTests {
+
+    // MARK: Stateful transport — HTTPContextProviding
+
+    @Test("Stateful: httpRequestContext returns in-flight request, cleared after response")
+    func testStatefulContextLifecycle() async throws {
+        let sessionID = "test-session"
+        let transport = makeStatefulTransport(
+            sessionIDGenerator: FixedSessionIDGenerator(sessionID: sessionID)
+        )
+        _ = try await initializeSession(transport: transport, sessionID: sessionID)
+
+        // POST a tools/list request with a distinctive Authorization header and path.
+        let body = makeRequestBody(id: "42", method: "tools/list")
+        let httpRequest = HTTPRequest(
+            method: "POST",
+            headers: [
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+                "Mcp-Session-Id": sessionID,
+                "Authorization": "Bearer token-xyz",
+            ],
+            body: body,
+            path: "/mcp"
+        )
+        let response = await transport.handleRequest(httpRequest)
+        #expect(response.statusCode == 200)
+
+        // In-flight: context surfaces through the protocol lookup.
+        let inFlight = await transport.httpRequestContext(for: .string("42"))
+        #expect(inFlight != nil)
+        #expect(inFlight?.header("Authorization") == "Bearer token-xyz")
+        #expect(inFlight?.path == "/mcp")
+
+        // Drain the SSE stream in the background so the response routes cleanly.
+        if case .stream(let stream, _) = response {
+            Task { for try await _ in stream {} }
+        }
+
+        // Send the response — transport clears the context alongside the SSE map.
+        try await transport.send(makeResponseBody(id: "42"))
+        try await Task.sleep(for: .milliseconds(50))
+
+        let afterResponse = await transport.httpRequestContext(for: .string("42"))
+        #expect(afterResponse == nil)
+    }
+
+    @Test("Stateful: context cleared on session termination")
+    func testStatefulContextClearedOnTerminate() async throws {
+        let sessionID = "term-session"
+        let transport = makeStatefulTransport(
+            sessionIDGenerator: FixedSessionIDGenerator(sessionID: sessionID)
+        )
+        _ = try await initializeSession(transport: transport, sessionID: sessionID)
+
+        // Register an in-flight request to populate the context map.
+        let body = makeRequestBody(id: "7", method: "tools/list")
+        _ = await transport.handleRequest(
+            makeStatefulPOSTRequest(
+                body: body,
+                sessionID: sessionID,
+                authorization: "Bearer keep"
+            )
+        )
+        #expect(await transport.httpRequestContext(for: .string("7")) != nil)
+
+        // DELETE terminates the session.
+        _ = await transport.handleRequest(makeDELETERequest(sessionID: sessionID))
+
+        #expect(await transport.httpRequestContext(for: .string("7")) == nil)
+    }
+
+    // MARK: Stateless transport — HTTPContextProviding
+
+    @Test("Stateless: context available during handling, cleared after response")
+    func testStatelessContextLifecycle() async throws {
+        let transport = makeStatelessTransport()
+        try await transport.connect()
+
+        let httpRequest = HTTPRequest(
+            method: "POST",
+            headers: [
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "Authorization": "Bearer stateless-token",
+            ],
+            body: makeRequestBody(id: "99", method: "tools/list"),
+            path: "/mcp"
+        )
+
+        // handleRequest blocks until a response is sent — run it concurrently.
+        let handleTask = Task { await transport.handleRequest(httpRequest) }
+
+        // Give the handler time to register its waiter (and store the context).
+        try await Task.sleep(for: .milliseconds(50))
+
+        let inFlight = await transport.httpRequestContext(for: .string("99"))
+        #expect(inFlight != nil)
+        #expect(inFlight?.header("Authorization") == "Bearer stateless-token")
+        #expect(inFlight?.path == "/mcp")
+
+        // Send the response to unblock the waiter.
+        try await transport.send(makeResponseBody(id: "99"))
+        _ = await handleTask.value
+
+        let afterResponse = await transport.httpRequestContext(for: .string("99"))
+        #expect(afterResponse == nil)
+
+        await transport.disconnect()
+    }
+
+    @Test("Stateless: unknown request id returns nil")
+    func testStatelessContextUnknownID() async throws {
+        let transport = makeStatelessTransport()
+        try await transport.connect()
+        let none = await transport.httpRequestContext(for: .string("does-not-exist"))
+        #expect(none == nil)
+        await transport.disconnect()
+    }
+
+    // MARK: Server integration — end-to-end
+
+    @Test("Server handler reads HTTP context via Server.currentHandlerContext")
+    func testServerHandlerReadsHTTPContext() async throws {
+        actor Captured {
+            var auth: String?
+            var path: String?
+            var id: ID?
+            func record(auth: String?, path: String?, id: ID?) {
+                self.auth = auth
+                self.path = path
+                self.id = id
+            }
+        }
+        let captured = Captured()
+
+        let transport = makeStatelessTransport()
+        let server = Server(name: "TestServer", version: "1.0")
+
+        await server.withMethodHandler(CallTool.self) { _ in
+            let ctx = Server.currentHandlerContext
+            await captured.record(
+                auth: ctx?.httpContext?.header("Authorization"),
+                path: ctx?.httpContext?.path,
+                id: ctx?.id
+            )
+            return CallTool.Result(content: [.text(text: "ok", annotations: nil, _meta: nil)])
+        }
+
+        try await server.start(transport: transport)
+        defer { Task { await server.stop() } }
+
+        let body = try JSONSerialization.data(withJSONObject: [
+            "jsonrpc": "2.0",
+            "id": "call-1",
+            "method": "tools/call",
+            "params": ["name": "whoami"] as [String: Any],
+        ])
+        let httpRequest = HTTPRequest(
+            method: "POST",
+            headers: [
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "Authorization": "Bearer server-integration-token",
+            ],
+            body: body,
+            path: "/mcp"
+        )
+
+        let httpResponse = await transport.handleRequest(httpRequest)
+        #expect(httpResponse.statusCode == 200)
+
+        #expect(await captured.auth == "Bearer server-integration-token")
+        #expect(await captured.path == "/mcp")
+        #expect(await captured.id == .string("call-1"))
+    }
+
+    @Test("Non-HTTP transport yields nil httpContext")
+    func testNonHTTPTransportNilContext() async throws {
+        actor Captured {
+            var httpContext: HTTPRequest?
+            var sawDispatch = false
+            func set(_ v: HTTPRequest?) { httpContext = v; sawDispatch = true }
+        }
+        let captured = Captured()
+
+        let transport = MockTransport()
+        let server = Server(name: "TestServer", version: "1.0")
+
+        // Start first — `start` calls registerDefaultHandlers which would otherwise
+        // clobber our override.
+        try await server.start(transport: transport)
+
+        // Override the Ping handler so we can observe the task-local during dispatch.
+        await server.withMethodHandler(Ping.self) { _ in
+            await captured.set(Server.currentHandlerContext?.httpContext)
+            return Empty()
+        }
+
+        try await transport.queue(request: Ping.request(.init()))
+
+        // Wait for dispatch.
+        try await Task.sleep(for: .milliseconds(100))
+
+        #expect(await captured.sawDispatch == true)
+        #expect(await captured.httpContext == nil)
+
+        await server.stop()
+        await transport.disconnect()
     }
 }

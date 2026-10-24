@@ -29,7 +29,7 @@ import Logging
 /// - Session management is handled externally or not needed
 ///
 /// For full streaming and session support, use ``StatefulHTTPServerTransport`` instead.
-public actor StatelessHTTPServerTransport: Transport {
+public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
     public nonisolated let logger: Logger
 
     // MARK: - Dependencies
@@ -51,6 +51,11 @@ public actor StatelessHTTPServerTransport: Transport {
     /// Maps request ID → continuation waiting for the server's response.
     /// When the server calls `send()` with a response, the matching continuation is resumed.
     private var responseWaiters: [String: CheckedContinuation<Data, any Error>] = [:]
+
+    /// Maps request ID → originating HTTP request, surfaced to handlers via
+    /// ``Server/currentHTTPContext``. Entries live only while a JSON-RPC request
+    /// is in flight.
+    private var httpRequestContexts: [String: HTTPRequest] = [:]
 
     // MARK: - Init
 
@@ -207,11 +212,16 @@ public actor StatelessHTTPServerTransport: Transport {
             return .accepted()
 
         case .request(let id, _):
-            return await handleJSONRPCRequest(body, requestID: id)
+            return await handleJSONRPCRequest(body, requestID: id, request: request)
         }
     }
 
-    private func handleJSONRPCRequest(_ body: Data, requestID: String) async -> HTTPResponse {
+    private func handleJSONRPCRequest(
+        _ body: Data,
+        requestID: String,
+        request: HTTPRequest
+    ) async -> HTTPResponse {
+        httpRequestContexts[requestID] = request
         // Yield the incoming message to the server
         incomingContinuation.yield(body)
 
@@ -222,13 +232,21 @@ public actor StatelessHTTPServerTransport: Transport {
                 responseWaiters[requestID] = continuation
             }
         } catch {
+            httpRequestContexts.removeValue(forKey: requestID)
             return .error(
                 statusCode: 500,
                 .internalError("Error processing request: \(error.localizedDescription)")
             )
         }
 
+        httpRequestContexts.removeValue(forKey: requestID)
         return .data(responseData, headers: [HTTPHeaderName.contentType: ContentType.json])
+    }
+
+    // MARK: - HTTPContextProviding
+
+    public func httpRequestContext(for id: ID) -> HTTPRequest? {
+        httpRequestContexts[id.description]
     }
 
     // MARK: - Termination
@@ -245,6 +263,7 @@ public actor StatelessHTTPServerTransport: Transport {
             logger.debug("Cancelled waiter for request", metadata: ["requestID": "\(id)"])
         }
         responseWaiters.removeAll()
+        httpRequestContexts.removeAll()
 
         // Close incoming stream
         incomingContinuation.finish()

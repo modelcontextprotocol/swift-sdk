@@ -41,8 +41,18 @@ of the MCP specification.
   - [Logging](#logging-1)
   - [Progress Tracking](#progress-tracking-1)
   - [Initialize Hook](#initialize-hook)
+  - [HTTP Request Context in Handlers](#http-request-context-in-handlers)
   - [Graceful Shutdown](#graceful-shutdown)
 - [Transports](#transports)
+- [Authentication](#authentication)
+  - [Client: Client Credentials Flow](#client-client-credentials-flow)
+  - [Client: Authorization Code Flow](#client-authorization-code-flow)
+  - [Client: Custom Token Provider](#client-custom-token-provider)
+  - [Client: Custom Token Storage](#client-custom-token-storage)
+  - [Client: private\_key\_jwt Authentication](#client-private_key_jwt-authentication)
+  - [Client: Endpoint Overrides](#client-endpoint-overrides)
+  - [Server: Serving Protected Resource Metadata](#server-serving-protected-resource-metadata)
+  - [Server: Validating Bearer Tokens](#server-validating-bearer-tokens)
 - [Platform Availability](#platform-availability)
 - [Debugging and Logging](#debugging-and-logging)
 - [Additional Resources](#additional-resources)
@@ -693,9 +703,16 @@ await server.withMethodHandler(ListTools.self) { _ in
             name: "weather",
             description: "Get current weather for a location",
             inputSchema: .object([
+                "type": "object",
                 "properties": .object([
-                    "location": .string("City name or coordinates"),
-                    "units": .string("Units of measurement, e.g., metric, imperial")
+                    "location": .object([
+                        "type": "string",
+                        "description": "City name or coordinates"
+                    ]),
+                    "units": .object([
+                        "type": "string",
+                        "description": "Units of measurement, e.g., metric, imperial"
+                    ])
                 ])
             ])
         ),
@@ -703,8 +720,12 @@ await server.withMethodHandler(ListTools.self) { _ in
             name: "calculator",
             description: "Perform calculations",
             inputSchema: .object([
+                "type": "object",
                 "properties": .object([
-                    "expression": .string("Mathematical expression to evaluate")
+                    "expression": .object([
+                        "type": "string",
+                        "description": "Mathematical expression to evaluate"
+                    ])
                 ])
             ])
         )
@@ -1175,6 +1196,35 @@ try await server.start(transport: transport) { clientInfo, clientCapabilities in
 }
 ```
 
+### HTTP Request Context in Handlers
+
+When a server is connected over `StatefulHTTPServerTransport` or `StatelessHTTPServerTransport`,
+method handlers can observe the originating HTTP request (headers, body, path, method) via
+`Server.currentHandlerContext` — a task-local set automatically before each handler runs:
+
+```swift
+await server.withMethodHandler(CallTool.self) { params in
+    let httpRequest = Server.currentHandlerContext?.httpContext
+    let authHeader = httpRequest?.headers["Authorization"]
+    // …use the header to scope the response, audit, etc.
+    return .init(content: [.text("ok")], isError: false)
+}
+```
+
+`httpContext` is `nil` for transports that don't carry HTTP context (e.g. `StdioTransport`,
+`InMemoryTransport`) and for handlers reached off the dispatch path.
+
+Task-locals are not inherited by `Task.detached`. If you spawn a detached task from a handler,
+capture the context up front:
+
+```swift
+let ctx = Server.currentHandlerContext
+Task.detached { await doWork(with: ctx?.httpContext) }
+```
+
+Custom HTTP transports can opt in by conforming to `HTTPContextProviding` and returning the
+`HTTPRequest` for a given JSON-RPC id while it is in flight.
+
 ### Graceful Shutdown
 
 We recommend using
@@ -1339,6 +1389,195 @@ public actor MyCustomTransport: Transport {
         return messageStream
     }
 }
+```
+
+## Authentication
+
+`HTTPClientTransport` supports OAuth 2.1 Bearer token authorization per the
+[MCP authorization specification](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization).
+When a server returns `401 Unauthorized` or `403 Forbidden`, the transport automatically:
+
+1. Discovers Protected Resource Metadata (RFC 9728) at `/.well-known/oauth-protected-resource`
+2. Discovers Authorization Server Metadata (RFC 8414 / OIDC Discovery 1.0)
+3. Registers the client dynamically (RFC 7591) if needed
+4. Acquires a Bearer token using the configured grant flow (PKCE enforced)
+5. Retries the original request with the token attached
+
+Authorization is opt-in and disabled by default.
+Pass an `OAuthAuthorizer` to `HTTPClientTransport(authorizer:)` to enable it.
+
+### Client: Client Credentials Flow
+
+Machine-to-machine authentication using a pre-shared client secret:
+
+```swift
+let config = OAuthConfiguration(
+    grantType: .clientCredentials,
+    authentication: .clientSecretBasic(clientID: "my-app", clientSecret: "s3cr3t")
+)
+let authorizer = OAuthAuthorizer(configuration: config)
+let transport = HTTPClientTransport(
+    endpoint: URL(string: "https://api.example.com/mcp")!,
+    authorizer: authorizer
+)
+let client = Client(name: "MyClient", version: "1.0.0")
+try await client.connect(transport: transport)
+```
+
+### Client: Authorization Code Flow
+
+Interactive, browser-based authentication with PKCE.
+Implement `OAuthAuthorizationDelegate` to open the authorization URL and capture the redirect:
+
+```swift
+struct MyAuthDelegate: OAuthAuthorizationDelegate {
+    func presentAuthorizationURL(_ url: URL) async throws -> URL {
+        // Open the URL in a browser/webview and wait for the callback redirect URI.
+        // The returned URL must include the authorization code and state parameters.
+        return try await openBrowserAndWaitForCallback(url)
+    }
+}
+
+let config = OAuthConfiguration(
+    grantType: .authorizationCode,
+    authentication: .none(clientID: "my-app"),
+    authorizationDelegate: MyAuthDelegate()
+)
+let authorizer = OAuthAuthorizer(configuration: config)
+let transport = HTTPClientTransport(
+    endpoint: URL(string: "https://api.example.com/mcp")!,
+    authorizer: authorizer
+)
+```
+
+### Client: Custom Token Provider
+
+Supply an externally acquired token (e.g., from a system credential store) via `accessTokenProvider`.
+The SDK calls this closure after discovery completes. Return `nil` to fall back to the configured grant flow:
+
+```swift
+let config = OAuthConfiguration(
+    grantType: .clientCredentials,
+    authentication: .none(clientID: "my-app"),
+    accessTokenProvider: { context, session in
+        // context contains the discovered resource URI, token endpoint, scopes, etc.
+        return try await KeychainTokenStore.shared.loadToken(for: context.resource)
+    }
+)
+```
+
+### Client: Custom Token Storage
+
+By default, tokens are stored in memory and lost when the process exits.
+To persist tokens across sessions, implement `TokenStorage` and pass it to `OAuthAuthorizer`:
+
+```swift
+final class KeychainTokenStorage: TokenStorage {
+    func save(_ token: OAuthAccessToken) {
+        // Encode and store token.value in the system Keychain
+    }
+
+    func load() -> OAuthAccessToken? {
+        // Load and decode token from the Keychain
+        return nil
+    }
+
+    func clear() {
+        // Delete from the Keychain
+    }
+}
+
+let authorizer = OAuthAuthorizer(
+    configuration: config,
+    tokenStorage: KeychainTokenStorage()
+)
+```
+
+### Client: `private_key_jwt` Authentication
+
+Authenticate to the token endpoint using an asymmetric key (RFC 7523).
+The SDK provides a built-in ES256 helper for P-256 keys:
+
+```swift
+let config = OAuthConfiguration(
+    grantType: .clientCredentials,
+    authentication: .privateKeyJWT(
+        clientID: "my-app",
+        assertionFactory: { tokenEndpoint, clientID in
+            try OAuthConfiguration.makePrivateKeyJWTAssertion(
+                clientID: clientID,
+                tokenEndpoint: tokenEndpoint,
+                privateKeyPEM: myEC256PrivateKeyPEM  // PEM-encoded P-256 private key
+            )
+        }
+    )
+)
+```
+
+### Client: Endpoint Overrides
+
+Skip automatic discovery by providing explicit endpoint URLs.
+Useful when the server does not publish well-known metadata documents:
+
+```swift
+let config = OAuthConfiguration(
+    grantType: .clientCredentials,
+    authentication: .clientSecretBasic(clientID: "app", clientSecret: "secret"),
+    endpointOverrides: OAuthConfiguration.EndpointOverrides(
+        tokenEndpoint: URL(string: "https://auth.example.com/oauth/token")!
+    )
+)
+```
+
+### Server: Serving Protected Resource Metadata
+
+Per the MCP authorization specification, servers **MUST** serve Protected Resource Metadata
+at `/.well-known/oauth-protected-resource` so clients can discover authorization server endpoints.
+
+Use `ProtectedResourceMetadataValidator` as the first validator in your pipeline so that
+unauthenticated discovery requests are handled before the bearer token check:
+
+```swift
+let metadata = OAuthProtectedResourceServerMetadata(
+    resource: "https://api.example.com",
+    authorizationServers: [URL(string: "https://auth.example.com")!],
+    scopesSupported: ["read", "write"]
+)
+let metadataValidator = ProtectedResourceMetadataValidator(metadata: metadata)
+```
+
+### Server: Validating Bearer Tokens
+
+Use `BearerTokenValidator` to authenticate incoming requests.
+Your `tokenValidator` closure **MUST** verify the token's `aud` claim to prevent
+token substitution attacks where a token intended for another resource is replayed against your server:
+
+```swift
+let resourceIdentifier = URL(string: "https://api.example.com")!
+
+let bearerValidator = BearerTokenValidator(
+    resourceMetadataURL: URL(string: "https://api.example.com/.well-known/oauth-protected-resource")!,
+    resourceIdentifier: resourceIdentifier,
+    tokenValidator: { token, request, context in
+        guard let claims = try? verifyAndDecodeJWT(token) else {
+            return .invalidToken(errorDescription: "Token verification failed")
+        }
+        // Pass audience and expiry to BearerTokenInfo; the SDK validates the
+        // audience claim against resourceIdentifier automatically.
+        return .valid(BearerTokenInfo(
+            audience: claims.audience,
+            expiresAt: claims.expiresAt
+        ))
+    }
+)
+
+let pipeline = StandardValidationPipeline(validators: [
+    metadataValidator,            // serves /.well-known/oauth-protected-resource unauthenticated
+    bearerValidator,              // validates Bearer tokens on all other requests
+    AcceptHeaderValidator(mode: .sseRequired),
+    ContentTypeValidator(),
+    SessionValidator(),
+])
 ```
 
 ## Platform Availability

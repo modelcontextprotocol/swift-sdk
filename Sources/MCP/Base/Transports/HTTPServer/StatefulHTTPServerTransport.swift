@@ -29,7 +29,7 @@ import Logging
 /// and receive `HTTPResponse` values to convert to your framework's native types.
 /// For SSE responses, the `.stream` case provides an `AsyncThrowingStream<Data, Error>`
 /// to pipe to the client.
-public actor StatefulHTTPServerTransport: Transport {
+public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
     public nonisolated let logger: Logger
 
     // MARK: - Dependencies
@@ -53,6 +53,11 @@ public actor StatefulHTTPServerTransport: Transport {
 
     /// Maps request ID → SSE stream continuation for active POST request streams.
     private var requestSSEContinuations: [String: AsyncThrowingStream<Data, Swift.Error>.Continuation] = [:]
+
+    /// Maps request ID → originating HTTP request, surfaced to handlers via
+    /// ``Server/currentHTTPContext``. Cleared when the response is routed,
+    /// the stream is closed, or the session terminates.
+    private var httpRequestContexts: [String: HTTPRequest] = [:]
 
     // MARK: - Standalone GET SSE stream
 
@@ -280,6 +285,7 @@ public actor StatefulHTTPServerTransport: Transport {
         // Create SSE stream for this request
         let (sseStream, sseContinuation) = AsyncThrowingStream<Data, Swift.Error>.makeStream()
         requestSSEContinuations[requestID] = sseContinuation
+        httpRequestContexts[requestID] = request
 
         // Extract protocol version for priming event decision
         let protocolVersion = extractProtocolVersion(from: body, request: request)
@@ -406,6 +412,7 @@ public actor StatefulHTTPServerTransport: Transport {
             continuation.finish()
             requestSSEContinuations.removeValue(forKey: requestID)
         }
+        httpRequestContexts.removeValue(forKey: requestID)
     }
 
     private func routeServerInitiatedMessage(_ data: Data) {
@@ -535,6 +542,13 @@ public actor StatefulHTTPServerTransport: Transport {
         guard let continuation = requestSSEContinuations[requestID] else { return }
         continuation.finish()
         requestSSEContinuations.removeValue(forKey: requestID)
+        httpRequestContexts.removeValue(forKey: requestID)
+    }
+
+    // MARK: - HTTPContextProviding
+
+    public func httpRequestContext(for id: ID) -> HTTPRequest? {
+        httpRequestContexts[id.description]
     }
 
     // MARK: - Termination
@@ -552,6 +566,7 @@ public actor StatefulHTTPServerTransport: Transport {
             continuation.finish()
         }
         requestSSEContinuations.removeAll()
+        httpRequestContexts.removeAll()
 
         // Close standalone GET stream
         standaloneSSEContinuation?.finish()
