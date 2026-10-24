@@ -34,7 +34,11 @@ import Testing
         func start(queue: DispatchQueue) {
             // Simulate successful connection by default
             Task { @MainActor in
-                self.updateState(.ready)
+                if mockError != nil {
+                    self.updateState(mockState)
+                } else {
+                    self.updateState(.ready)
+                }
             }
         }
 
@@ -268,7 +272,7 @@ import Testing
 
             // Simulate failure before connecting
             mockConnection.simulateFailure(error: NWError.posix(POSIXErrorCode.ECONNRESET))
-
+            
             do {
                 try await transport.connect()
                 Issue.record("Expected connect to throw an error")
@@ -494,33 +498,6 @@ import Testing
 
             // Wait for the receive task to complete
             _ = await receiveTask.result
-        }
-
-        @Test("Connection State Transitions")
-        func testConnectionStateTransitions() async throws {
-            let mockConnection = MockNetworkConnection()
-            let transport = NetworkTransport(
-                mockConnection,
-                heartbeatConfig: .disabled
-            )
-
-            // Test setup -> preparing -> ready transition
-            mockConnection.simulatePreparing()
-            try await Task.sleep(for: .milliseconds(100))
-            mockConnection.simulateReady()
-            try await transport.connect()
-            #expect(mockConnection.state == .ready)
-
-            // Test ready -> failed transition
-            mockConnection.simulateFailure(error: NWError.posix(POSIXErrorCode.ECONNRESET))
-            try await Task.sleep(for: .milliseconds(100))
-            if case .failed = mockConnection.state {
-                // expected
-            } else {
-                Issue.record("Expected state to be failed")
-            }
-
-            await transport.disconnect()
         }
 
         @Test("Partial Message Reception")

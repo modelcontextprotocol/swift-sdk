@@ -20,7 +20,7 @@ import struct Foundation.Data
 #if canImport(Darwin) || canImport(Glibc) || canImport(Musl)
     /// An implementation of the MCP stdio transport protocol.
     ///
-    /// This transport implements the [stdio transport](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#stdio)
+    /// This transport implements the [stdio transport](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#stdio)
     /// specification from the Model Context Protocol.
     ///
     /// The stdio transport works by:

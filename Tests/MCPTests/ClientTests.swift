@@ -3,7 +3,7 @@ import Testing
 
 @testable import MCP
 
-@Suite("Client Tests")
+@Suite("Client Tests", .timeLimit(.minutes(1)))
 struct ClientTests {
     @Test("Client connect and disconnect")
     func testClientConnectAndDisconnect() async throws {
@@ -345,8 +345,8 @@ struct ClientTests {
 
         let request1 = Ping.request()
         let request2 = Ping.request()
-        var resultTask1: Task<Ping.Result, Swift.Error>?
-        var resultTask2: Task<Ping.Result, Swift.Error>?
+        nonisolated(unsafe) var resultTask1: Task<Ping.Result, Swift.Error>?
+        nonisolated(unsafe) var resultTask2: Task<Ping.Result, Swift.Error>?
 
         try await client.withBatch { batch in
             resultTask1 = try await batch.addRequest(request1)
@@ -426,7 +426,7 @@ struct ClientTests {
         let request1 = Ping.request()  // Success
         let request2 = Ping.request()  // Error
 
-        var resultTasks: [Task<Ping.Result, Swift.Error>] = []
+        nonisolated(unsafe) var resultTasks: [Task<Ping.Result, Swift.Error>] = []
 
         try await client.withBatch { batch in
             resultTasks.append(try await batch.addRequest(request1))

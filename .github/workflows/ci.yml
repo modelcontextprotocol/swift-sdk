@@ -12,13 +12,21 @@ permissions:
 
 jobs:
   test:
-    timeout-minutes: 5
+    timeout-minutes: 10
     strategy:
       matrix:
-        os: [macos-latest, ubuntu-latest]
-        swift-version:
-          - 6.0.3
-          - 6.1.0
+        include:
+          # macOS uses the Swift toolchain bundled with Xcode: a standalone toolchain
+          # cannot build against a newer Xcode's macOS SDK.
+          # Pinned leg: Xcode 16.3 ships Swift 6.1, matching the Linux job.
+          - os: macos-15
+            xcode: "16.3"
+            swift-version: 6.1 (Xcode 16.3)
+          # Current leg: catches breakage from new Xcode and SDK releases.
+          - os: macos-latest
+            swift-version: Xcode default
+          - os: ubuntu-latest
+            swift-version: 6.1.0
 
     runs-on: ${{ matrix.os }}
     name: Test (${{ matrix.os }}, Swift ${{ matrix.swift-version }})
@@ -26,22 +34,87 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Prepare Linux apt dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo -n apt-get update
+          sudo -n apt-get install -y --no-install-recommends libcurl4-openssl-dev
+
       - name: Setup Swift on Linux
         if: matrix.os == 'ubuntu-latest'
         uses: vapor/swiftly-action@v0.2
         with:
           toolchain: ${{ matrix.swift-version }}
-      - name: Setup Swift on macOS
-        if: matrix.os == 'macos-latest'
-        uses: swift-actions/setup-swift@v2
-        with:
-          swift-version: ${{ matrix.swift-version }}
+      - name: Select Xcode
+        if: matrix.xcode
+        run: sudo xcode-select -s /Applications/Xcode_${{ matrix.xcode }}.app
+
+      - name: Show Swift version
+        run: swift --version
 
       - name: Build
         run: swift build -v
 
       - name: Run tests
         run: swift test -v
+
+  conformance:
+    timeout-minutes: 10
+    runs-on: macos-latest
+    name: MCP Conformance Tests
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show Swift version
+        run: swift --version
+
+      - name: Build Swift executables
+        run: |
+          swift build --product mcp-everything-client
+          swift build --product mcp-everything-server
+
+      - name: Run client conformance tests
+        uses: modelcontextprotocol/conformance@v0.1.15
+        with:
+          mode: client
+          command: '.build/debug/mcp-everything-client'
+          suite: 'core'
+          expected-failures: './conformance-baseline.yml'
+          node-version: '22'
+
+      - name: Start server for testing
+        run: |
+          .build/debug/mcp-everything-server &
+          echo "SERVER_PID=$!" >> $GITHUB_ENV
+          sleep 3
+
+      - name: Run server conformance tests
+        uses: modelcontextprotocol/conformance@v0.1.15
+        with:
+          mode: server
+          url: 'http://localhost:3001/mcp'
+          suite: 'core'
+          expected-failures: './conformance-baseline.yml'
+          node-version: '22'
+
+      - name: Cleanup server
+        if: always()
+        run: |
+          if [ -n "$SERVER_PID" ]; then
+            kill $SERVER_PID 2>/dev/null || true
+          fi
+
+  documentation:
+    name: Documentation
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show Swift version
+        run: swift --version
+      - name: Build Documentation
+        run: swift package generate-documentation --target MCP --warnings-as-errors
 
   static-linux-sdk-build:
     name: Linux Static SDK Build (${{ matrix.swift-version }} - ${{ matrix.os }})
