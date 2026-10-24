@@ -116,6 +116,8 @@ public struct OAuthAuthorizationCodeFlow: Sendable {
     ///   - authorizationURL: The full authorization request URL.
     ///   - redirectURI: The expected redirect URI base for validation.
     ///   - state: The CSRF state nonce to verify in the redirect.
+    ///   - expectedIssuer: Authorization server issuer to verify in the redirect.
+    ///   - requireIssuer: Whether the redirect must include an issuer.
     ///   - delegate: Optional user-facing delegate for browser-based flows.
     ///   - session: The `URLSession` used for the no-redirect path.
     /// - Returns: The extracted authorization code.
@@ -186,6 +188,8 @@ public struct OAuthAuthorizationCodeFlow: Sendable {
     ///   - redirectURL: The redirect URL received from the authorization server.
     ///   - expectedRedirectURI: The redirect URI used in the authorization request.
     ///   - expectedState: The CSRF state nonce sent in the authorization request.
+    ///   - expectedIssuer: Authorization server issuer to verify in the redirect.
+    ///   - requireIssuer: Whether the redirect must include an issuer.
     /// - Returns: The authorization code.
     public func extractCode(
         from redirectURL: URL,

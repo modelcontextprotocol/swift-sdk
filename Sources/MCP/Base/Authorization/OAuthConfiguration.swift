@@ -372,6 +372,7 @@ public struct OAuthConfiguration: Sendable {
     ///   - authorizationRedirectURI: Redirect URI for the `authorization_code` flow.
     ///     Defaults to a random loopback URI (`http://127.0.0.1:<port>/callback`).
     ///   - clientName: The `client_name` sent during dynamic client registration. Defaults to `"mcp-swift-sdk"`.
+    ///   - applicationType: The RFC 7591 application type sent during registration.
     ///   - additionalTokenRequestParameters: Extra form fields appended to every token request.
     ///   - accessTokenProvider: Optional closure invoked after discovery, allowing the host app
     ///     to supply an externally acquired token (e.g., from a system credential store).
