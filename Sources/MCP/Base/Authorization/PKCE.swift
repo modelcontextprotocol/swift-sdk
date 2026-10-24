@@ -14,8 +14,9 @@ public enum PKCE {
     /// - Returns: A URL-safe random string suitable for use as a PKCE code verifier.
     public static func makeVerifier(length: Int = 64) -> String {
         let charset = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
-        // 66 characters; 256 % 66 == 52, so reject bytes > 252 to eliminate modulo bias.
-        let limit = UInt8(255 - (255 % charset.count))  // 252
+        // 66 characters; 256 % 66 == 58, so the largest usable byte is 66*3 - 1 = 197.
+        // Bytes 0...197 map uniformly to 0..<66; bytes >= 198 are rejected.
+        let limit = UInt8(charset.count * (256 / charset.count) - 1)  // 197
         var rng = SystemRandomNumberGenerator()
         var result = ""
         result.reserveCapacity(length)
