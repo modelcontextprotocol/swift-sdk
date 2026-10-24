@@ -1,7 +1,7 @@
 import Foundation
 import Logging
 
-/// A stateful HTTP server transport that manages sessions and uses SSE for streaming responses.
+/// A stateful HTTP server transport for one session, using SSE for responses.
 ///
 /// This transport implements the MCP Streamable HTTP specification with full session management:
 /// - Assigns a session ID during initialization (via `Mcp-Session-Id` header)
@@ -13,15 +13,17 @@ import Logging
 /// ## Usage
 ///
 /// ```swift
-/// let transport = StatefulHTTPServerTransport()  // Uses UUID by default
+/// let transport = StatefulHTTPServerTransport()  // One transport per session
 ///
 /// // Start the MCP server with this transport
 /// try await server.start(transport: transport)
 ///
-/// // In your HTTP framework handler:
+/// // In your HTTP framework handler for this session:
 /// let response = await transport.handleRequest(httpRequest)
 /// // Convert response to your framework's response type and return it
 /// ```
+/// Use ``StatefulHTTPServerSessionManager`` for an endpoint that creates new
+/// sessions after DELETE. A terminated transport cannot be reused.
 ///
 /// ## Framework Integration
 ///
