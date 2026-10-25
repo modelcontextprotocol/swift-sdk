@@ -165,6 +165,44 @@ import Testing
             await transport.disconnect()
         }
 
+        @Test("At 2026-07-28 a stream that ends early fails without a GET")
+        func statelessDoesNotResume() async throws {
+            let (transport, key) = makeTransport()
+            let requests = Requests()
+            await IsolatedMockURLProtocol.setHandler(key: key) { request in
+                await requests.append(request)
+                return sse("id: e1\nretry: 10\ndata: \n\n")
+            }
+            try await transport.connect()
+            await transport.useStatelessProtocol("2026-07-28")
+            try await transport.send(request)
+            let delivered = try await messages(transport, 1)
+            let error = try JSONSerialization.jsonObject(with: Data(delivered[0].utf8)) as? [String: Any]
+            #expect(error?["id"] as? String == "r1")
+            #expect((error?["error"] as? [String: Any])?["code"] as? Int == -32603)
+            #expect(await requests.gets.isEmpty)
+            await transport.disconnect()
+        }
+
+        @Test("A request that names 2026-07-28 in _meta is not resumed before the switch")
+        func statelessRequestDoesNotResume() async throws {
+            let (transport, key) = makeTransport()
+            let requests = Requests()
+            await IsolatedMockURLProtocol.setHandler(key: key) { request in
+                await requests.append(request)
+                return sse("id: e1\nretry: 10\ndata: \n\n")
+            }
+            try await transport.connect()
+            try await transport.send(
+                Data(
+                    #"{"jsonrpc":"2.0","id":"r1","method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}"#
+                        .utf8))
+            let delivered = try await messages(transport, 1)
+            #expect(delivered[0].contains("without a response"))
+            #expect(await requests.gets.isEmpty)
+            await transport.disconnect()
+        }
+
         @Test("A request cancelled during its last resumption does not fail", .timeLimit(.minutes(1)))
         func cancelledDuringLastResumption() async throws {
             let key = UUID().uuidString

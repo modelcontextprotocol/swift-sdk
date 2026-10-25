@@ -120,6 +120,40 @@ if result.capabilities.tools != nil {
 > This return value is discardable, 
 > so you can ignore it if you don't need to check server capabilities.
 
+### Protocol Versions
+
+`Client.Configuration.protocolMode` selects how a connection opens:
+
+| Mode | Behavior |
+|---|---|
+| `.handshake` | `initialize` handshake (2025-11-25 and earlier) |
+| `.automatic` | `server/discover` at 2026-07-28; on -32022 retries once with a version the server lists; falls back to `initialize` for servers without a stateless revision |
+| `.stateless(version)` | `server/discover` at `version` only; fails if the server does not serve it |
+
+`.automatic` falls back to `initialize` when the server answers
+`server/discover` with a JSON-RPC error, lists only handshake revisions,
+refuses the request with HTTP 400, 404 or 405, or does not answer within
+`discoveryTimeout` (10 seconds by default). Transport failures, such as
+authorization errors, 429 and 5xx, are rethrown. Other requests and
+`connect` as a whole have no timeout.
+
+```swift
+let client = Client(
+    name: "MyApp", version: "1.0.0",
+    configuration: .init(protocolMode: .automatic, logLevel: .warning)
+)
+let result = try await client.connect(transport: transport)
+print(result.protocolVersion, await client.isStateless)
+```
+
+On a stateless connection every request carries
+`io.modelcontextprotocol/protocolVersion`, `clientCapabilities`,
+`clientInfo` and the configured `logLevel` in `_meta`, and
+`HTTPClientTransport` sends no session ID and opens no GET stream.
+`ping()` sends `server/discover`, and `setLoggingLevel(_:)` changes the
+level sent in `_meta`. After connecting, `negotiatedProtocolVersion`,
+`serverInfo` and `serverCapabilities` describe the server.
+
 ### Transport Options for Clients
 
 #### Stdio Transport

@@ -1,0 +1,318 @@
+@preconcurrency import Foundation
+import Logging
+import Testing
+
+@testable import MCP
+
+#if canImport(FoundationNetworking)
+    import FoundationNetworking
+#endif
+
+// Error bodies on non-2xx replies, and how `.automatic` tells a server that
+// serves only the handshake from a failure.
+
+/// A transport that records sent methods, answers nothing by itself, and
+/// fails sends of selected methods with a given error.
+private actor ScriptedTransport: Transport {
+    nonisolated let logger = Logger(label: "scripted", factory: { _ in SwiftLogNoOpLogHandler() })
+    private var failures: [String: Swift.Error] = [:]
+    private(set) var sent: [[String: Value]] = []
+    private let stream: AsyncThrowingStream<Data, Swift.Error>
+    private let continuation: AsyncThrowingStream<Data, Swift.Error>.Continuation
+
+    init() {
+        (stream, continuation) = AsyncThrowingStream.makeStream()
+    }
+
+    func fail(_ method: String, with error: Swift.Error) { failures[method] = error }
+
+    func connect() async throws {}
+    func disconnect() async { continuation.finish() }
+    func receive() -> AsyncThrowingStream<Data, Swift.Error> { stream }
+
+    func send(_ data: Data) async throws {
+        let message = try JSONDecoder().decode(Value.self, from: data).objectValue ?? [:]
+        sent.append(message)
+        if let method = message["method"]?.stringValue, let error = failures[method] { throw error }
+    }
+
+    var methods: [String] { sent.compactMap { $0["method"]?.stringValue } }
+
+    /// Waits until `count` messages were sent and returns the last one.
+    func message(_ count: Int) async throws -> [String: Value] {
+        for _ in 0..<400 where sent.count < count {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        return try #require(sent.dropFirst(count - 1).first)
+    }
+
+    func reply(to message: [String: Value], _ body: String) throws {
+        let id = try #require(message["id"])
+        let idJSON = String(decoding: try JSONEncoder().encode(id), as: UTF8.self)
+        continuation.yield(Data(#"{"jsonrpc":"2.0","id":\#(idJSON),\#(body)}"#.utf8))
+    }
+}
+
+private let initializeResult =
+    #""result":{"protocolVersion":"2025-11-25","capabilities":{},"serverInfo":{"name":"old","version":"0"}}"#
+
+@Suite("Automatic connection failures")
+struct AutomaticConnectionFailureTests {
+    private func client(timeout: Duration? = .seconds(10), mode: Client.ProtocolMode = .automatic) -> Client {
+        Client(
+            name: "probe", version: "1.0",
+            configuration: .init(protocolMode: mode, discoveryTimeout: timeout))
+    }
+
+    @Test("A transport error on server/discover is rethrown without initialize")
+    func rethrowsTransportErrors() async throws {
+        let transport = ScriptedTransport()
+        await transport.fail("server/discover", with: MCPError.internalError("Too many requests"))
+        let client = client()
+        await #expect {
+            _ = try await client.connect(transport: transport)
+        } throws: { error in
+            (error as? MCPError) == .internalError("Too many requests")
+        }
+        #expect(await transport.methods == ["server/discover"])
+        await client.disconnect()
+    }
+
+    @Test("An authorization failure on server/discover is rethrown")
+    func rethrowsAuthorizationFailures() async throws {
+        let transport = ScriptedTransport()
+        await transport.fail("server/discover", with: MCPError.internalError("Authentication required"))
+        let client = client()
+        await #expect(throws: MCPError.self) { _ = try await client.connect(transport: transport) }
+        #expect(await transport.methods == ["server/discover"])
+        await client.disconnect()
+    }
+
+    @Test(
+        "An HTTP 400, 404 or 405 refusal falls back to initialize",
+        arguments: ["Bad request", "Endpoint not found", "Method not allowed"])
+    func fallsBackOnRefusal(detail: String) async throws {
+        let transport = ScriptedTransport()
+        await transport.fail("server/discover", with: MCPError.internalError(detail))
+        let client = client()
+        let connecting = Task { try await client.connect(transport: transport) }
+        let initialize = try await transport.message(2)
+        #expect(initialize["method"] == "initialize")
+        try await transport.reply(to: initialize, initializeResult)
+        #expect(try await connecting.value.serverInfo.name == "old")
+        await client.disconnect()
+    }
+
+    @Test("An unanswered server/discover falls back to initialize after the timeout")
+    func fallsBackOnTimeout() async throws {
+        let transport = ScriptedTransport()
+        let client = client(timeout: .milliseconds(50))
+        let connecting = Task { try await client.connect(transport: transport) }
+        #expect(try await transport.message(1)["method"] == "server/discover")
+        let initialize = try await transport.message(2)
+        #expect(initialize["method"] == "initialize")
+        try await transport.reply(to: initialize, initializeResult)
+        #expect(try await connecting.value.serverInfo.name == "old")
+        #expect(await !client.isStateless)
+        await client.disconnect()
+    }
+
+    @Test("A late answer to a timed-out server/discover is ignored")
+    func ignoresLateAnswer() async throws {
+        let transport = ScriptedTransport()
+        let client = client(timeout: .milliseconds(50))
+        let connecting = Task { try await client.connect(transport: transport) }
+        let discover = try await transport.message(1)
+        let initialize = try await transport.message(2)
+        try await transport.reply(
+            to: discover,
+            #""result":{"supportedVersions":["2026-07-28"],"capabilities":{},"resultType":"complete"}"#)
+        try await transport.reply(to: initialize, initializeResult)
+        #expect(try await connecting.value.protocolVersion == Version.v2025_11_25)
+        #expect(await !client.isStateless)
+        await client.disconnect()
+    }
+
+    @Test("A pinned revision is not retried with another on -32022")
+    func pinnedRevisionIsNotRetried() async throws {
+        let transport = ScriptedTransport()
+        let client = client(mode: .stateless(Version.v2026_07_28))
+        let connecting = Task { try await client.connect(transport: transport) }
+        let discover = try await transport.message(1)
+        try await transport.reply(
+            to: discover,
+            #""error":{"code":-32022,"message":"Unsupported","data":{"supported":["2026-07-28"]}}"#)
+        await #expect(throws: MCPError.self) { _ = try await connecting.value }
+        #expect(await transport.methods == ["server/discover"])
+        await client.disconnect()
+    }
+
+    @Test("A pinned revision the server does not list is not replaced")
+    func pinnedRevisionIsNotReplaced() async throws {
+        let transport = ScriptedTransport()
+        let client = client(mode: .stateless("2027-01-01"))
+        let connecting = Task { try await client.connect(transport: transport) }
+        let discover = try await transport.message(1)
+        try await transport.reply(
+            to: discover,
+            #""result":{"supportedVersions":["2026-07-28"],"capabilities":{},"resultType":"complete"}"#)
+        await #expect {
+            _ = try await connecting.value
+        } throws: { error in
+            guard case .unsupportedProtocolVersion(let supported, let requested) = error as? MCPError else {
+                return false
+            }
+            return supported == ["2026-07-28"] && requested == "2027-01-01"
+        }
+        #expect(await !client.isStateless)
+        await client.disconnect()
+    }
+}
+
+@Suite("Client configuration coding")
+struct ClientConfigurationCodingTests {
+    @Test("A configuration encoded before protocol modes still decodes")
+    func decodesOldConfiguration() throws {
+        let configuration = try JSONDecoder().decode(
+            Client.Configuration.self, from: Data(#"{"strict":true}"#.utf8))
+        #expect(configuration.strict)
+        #expect(configuration.protocolMode == .handshake)
+        #expect(configuration.logLevel == nil)
+        #expect(configuration.discoveryTimeout == .seconds(10))
+    }
+
+    @Test("A configuration round-trips, including a nil discovery timeout")
+    func roundTrips() throws {
+        for configuration in [
+            Client.Configuration(protocolMode: .automatic, logLevel: .info, discoveryTimeout: nil),
+            Client.Configuration(strict: true, protocolMode: .stateless("2026-07-28"), discoveryTimeout: .seconds(2)),
+        ] {
+            let data = try JSONEncoder().encode(configuration)
+            #expect(try JSONDecoder().decode(Client.Configuration.self, from: data) == configuration)
+        }
+    }
+}
+
+@Suite("Outgoing message fields")
+struct OutgoingMessageTests {
+    @Test("A request's fields are read in one pass")
+    func readsRequest() {
+        let message = OutgoingMessage(
+            Data(
+                #"{"jsonrpc":"2.0","id":7,"method":" tools/call ","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}"#
+                    .utf8))
+        #expect(message.requestID == "7")
+        #expect(message.method == "tools/call")
+        #expect(message.protocolVersion == "2026-07-28")
+        #expect(message.cancelledRequestID == nil)
+    }
+
+    @Test("Responses, notifications and cancellations are not requests")
+    func readsOthers() {
+        let response = OutgoingMessage(Data(#"{"jsonrpc":"2.0","id":"a","result":{}}"#.utf8))
+        #expect(response.requestID == nil)
+        #expect(response.method == nil)
+        let cancelled = OutgoingMessage(
+            Data(#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"r1"}}"#.utf8))
+        #expect(cancelled.requestID == nil)
+        #expect(cancelled.cancelledRequestID == "r1")
+        let batch = OutgoingMessage(Data(#"[{"jsonrpc":"2.0","id":1,"method":"ping"}]"#.utf8))
+        #expect(batch.requestID == nil)
+    }
+}
+
+#if swift(>=6.1) && !os(Linux)
+    @Suite("HTTP error bodies")
+    struct HTTPErrorBodyTests {
+        let endpoint = URL(string: "http://127.0.0.1:9/mcp")!
+        let request = Data(#"{"jsonrpc":"2.0","id":"r1","method":"tools/call","params":{"name":"x"}}"#.utf8)
+
+        func makeTransport(
+            _ handler: @escaping @Sendable (URLRequest) async throws -> (HTTPURLResponse, Data)
+        ) async -> HTTPClientTransport {
+            let key = UUID().uuidString
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [IsolatedMockURLProtocol.self]
+            configuration.httpAdditionalHeaders = [IsolatedMockURLProtocol.sessionKeyHeader: key]
+            await IsolatedMockURLProtocol.setHandler(key: key, handler)
+            return HTTPClientTransport(endpoint: endpoint, configuration: configuration, streaming: false)
+        }
+
+        func reply(_ status: Int, _ body: String, session: String? = nil) -> (HTTPURLResponse, Data) {
+            var headers = ["Content-Type": "application/json"]
+            headers["Mcp-Session-Id"] = session
+            return (
+                HTTPURLResponse(url: endpoint, statusCode: status, httpVersion: "HTTP/1.1", headerFields: headers)!,
+                Data(body.utf8)
+            )
+        }
+
+        @Test("An error with another request's ID fails the request with the status")
+        func foreignIDFails() async throws {
+            let transport = await makeTransport { _ in
+                reply(400, #"{"jsonrpc":"2.0","id":"server-error","error":{"code":-32600,"message":"Bad"}}"#)
+            }
+            try await transport.connect()
+            await #expect {
+                try await transport.send(request)
+            } throws: { error in
+                (error as? MCPError) == .internalError("Bad request")
+            }
+            await transport.disconnect()
+        }
+
+        @Test("A result on a non-2xx reply is not delivered")
+        func resultOnErrorStatusFails() async throws {
+            let transport = await makeTransport { _ in
+                reply(500, #"{"jsonrpc":"2.0","id":"r1","result":{"content":[]}}"#)
+            }
+            try await transport.connect()
+            await #expect(throws: MCPError.self) { try await transport.send(request) }
+            await transport.disconnect()
+        }
+
+        @Test("An error for the request is delivered")
+        func matchingErrorIsDelivered() async throws {
+            let body = #"{"jsonrpc":"2.0","id":"r1","error":{"code":-32602,"message":"Bad params"}}"#
+            let transport = await makeTransport { _ in reply(400, body) }
+            try await transport.connect()
+            try await transport.send(request)
+            var iterator = await transport.receive().makeAsyncIterator()
+            #expect(try await iterator.next() == Data(body.utf8))
+            await transport.disconnect()
+        }
+
+        @Test("A notification's non-2xx reply fails with the status")
+        func notificationErrorFails() async throws {
+            let transport = await makeTransport { _ in
+                reply(400, #"{"jsonrpc":"2.0","id":"r1","error":{"code":-32600,"message":"Bad"}}"#)
+            }
+            try await transport.connect()
+            await #expect(throws: MCPError.self) {
+                try await transport.send(Data(#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#.utf8))
+            }
+            await transport.disconnect()
+        }
+
+        @Test("A 404 clears the session ID with or without an error body for the request")
+        func notFoundClearsSession() async throws {
+            for body in [
+                #"{"jsonrpc":"2.0","id":"r1","error":{"code":-32001,"message":"Session not found"}}"#,
+                #"{"jsonrpc":"2.0","id":"server-error","error":{"code":-32001,"message":"Session not found"}}"#,
+            ] {
+                let transport = await makeTransport { request in
+                    if request.value(forHTTPHeaderField: "Mcp-Session-Id") == nil {
+                        return reply(200, #"{"jsonrpc":"2.0","id":"r0","result":{}}"#, session: "s1")
+                    }
+                    return reply(404, body)
+                }
+                try await transport.connect()
+                try await transport.send(Data(#"{"jsonrpc":"2.0","id":"r0","method":"ping"}"#.utf8))
+                #expect(await transport.sessionID == "s1")
+                try? await transport.send(request)
+                #expect(await transport.sessionID == nil)
+                await transport.disconnect()
+            }
+        }
+    }
+#endif
