@@ -64,4 +64,4 @@ New to the SDK: start with the [quick start](quick_start.md).
 
 - [Examples](../Examples): runnable hello and HTTP servers, and the snippet sources.
 - [Design notes](../design/design.md): why the SDK is built the way it is.
-- [Roadmap](../ROADMAP.md), [versioning](../VERSIONING.md), [dependency policy](../DEPENDENCY_POLICY.md), [contributing](../CONTRIBUTING.md).
+- [Roadmap](../ROADMAP.md), [changelog](../CHANGELOG.md), [versioning](../VERSIONING.md), [dependency policy](../DEPENDENCY_POLICY.md), [contributing](../CONTRIBUTING.md).

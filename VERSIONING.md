@@ -12,10 +12,9 @@ Releases are git tags `MAJOR.MINOR.PATCH` and follow [Semantic Versioning](https
 - **Minor**: new features and every non-breaking change.
 - **Patch**: bug fixes only.
 
-The package is before 1.0. Under SemVer, a 0.x release may break in a minor increment, so while
-the version starts with `0.`, the minor number plays the role of the major number: a breaking
-change increments `0.X.0`, and anything else increments the patch number. In this document,
-"major" means that position. Depend on the package with `.upToNextMinor(from:)` while it is 0.x.
+Depend on the package with `.upToNextMajor(from: "1.0.0")`. Before 1.0 the minor number played
+the role of the major number; [docs/migration.md](docs/migration.md) lists the changes from 0.12
+to 1.0.0.
 
 ## The public API
 
@@ -122,7 +121,7 @@ type.
 ## Deprecation
 
 - A public API on its way out is marked `@available(*, deprecated, message:)` with its
-  replacement (for example `Client.initialize()`, replaced by `connect(transport:)`).
+  replacement (for example `Version.latest`, replaced by `Version.latestHandshake`).
 - A deprecated API keeps working for at least one minor release and is removed only in a major.
 - Every removal and every breaking change between majors is described in
   [docs/migration.md](docs/migration.md), with before and after code, in the same change.
@@ -130,5 +129,5 @@ type.
 ## Release notes
 
 Each release lists breaking changes first, then features, fixes, dependency changes and
-deprecations. Pull requests with a breaking change say so in their description
+deprecations, in [CHANGELOG.md](CHANGELOG.md). Pull requests with a breaking change say so in their description
 ([CONTRIBUTING.md](CONTRIBUTING.md#pull-requests)).

@@ -2,11 +2,10 @@
 
 # Migration guide
 
-This guide lists every public API change between 0.12 (commit `2a44bfd`)
-and 0.13.0: the changes that break source code, the changes in behavior and
-on the wire, and the new opt-in features.
-Under the package's 0.x rules ([VERSIONING.md](../VERSIONING.md)), 0.13.0 is
-the major version that carries them.
+This guide lists every public API change between 0.12 (`main` at `2a44bfd`)
+and 1.0.0: the changes that break source code, the changes in behavior and
+on the wire, and the new opt-in features. From 1.0.0 on, only a major release
+breaks source compatibility ([VERSIONING.md](../VERSIONING.md)).
 Most code compiles unchanged; the breaking changes are in `MCPError`,
 `HTTPResponse`, `Client.Capabilities.experimental`, `OAuthAuthorizationError`,
 the enums that became open structs, and `HTTPClientAuthorizer`.
@@ -20,8 +19,8 @@ the enums that became open structs, and `HTTPClientAuthorizer`.
 | `HTTPResponse` | `.data` and `.error` have new associated values | Update patterns |
 | `Client.Capabilities.experimental` | `[String: String]?` became `[String: Value]?` | Pass `Value`s |
 | `OAuthAuthorizationError` | A struct with a `code`, not an enum; eight new codes | Read details from properties instead of binding associated values |
-| `GrantType`, `TokenEndpointAuthentication`, `PrivateKeyJWTSigningAlgorithm` | Structs, not enums; new grant type `.jwtBearer` | Add a `default` to `switch` statements |
-| `BearerTokenValidationResult`, `Elicitation.Mode`, `ToolChoice.Mode` | Structs, not enums | Add a `default` to `switch` statements |
+| `GrantType`, `TokenEndpointAuthentication`, `PrivateKeyJWTSigningAlgorithm` | Structs, not enums; new grant type `.jwtBearer` | Add a `default` to `switch` statements; write `.ES256` instead of `init(rawValue:)` |
+| `BearerTokenValidationResult`, `Elicitation.Mode`, `ToolChoice.Mode` | Structs, not enums; `Mode(rawValue:)` is not optional | Add a `default` to `switch` statements; drop the optional binding |
 | Content blocks, `InputRequest`, `InputResponse`, `CreateElicitation.Parameters` | New case `.unknown` for kinds from a later revision | Add it, or a `default`, to `switch` statements |
 | `HTTPClientAuthorizer` | `authorizationHeader(for:)` became `authorizationHeaders(for:method:)` | Update custom authorizers |
 | `Client` convenience methods | Return the result type, not a tuple; `startToolCall` replaces the `RequestContext` overload of `callTool`; `initialize()` is removed | Read the result's properties |
@@ -253,11 +252,13 @@ minor release can add values (`VERSIONING.md`):
 
 `.clientSecretBasic(clientID:clientSecret:)`, `.valid(info)`, `.url` and the
 others are written as before, and `==` works as before. A `switch` needs a
-`default`, and a pattern that binds associated values does not compile:
+`default`. A pattern that binds associated values does not compile:
 `TokenEndpointAuthentication` has `clientID` and `methodName`, and
-`BearerTokenValidationResult` has `tokenInfo`, the `BearerTokenInfo` of a
-`.valid(info)` result. The two `Mode` types decode a mode the SDK does not know
-instead of failing.
+`BearerTokenValidationResult`, which validators return, has `tokenInfo`, the
+`BearerTokenInfo` of a `.valid(info)` result. `Elicitation.Mode(rawValue:)` and `ToolChoice.Mode(rawValue:)` are no
+longer optional, and the two `Mode` types decode a mode the SDK does not know
+instead of failing. `PrivateKeyJWTSigningAlgorithm` has no public initializer:
+use `.ES256`.
 
 ```swift
 /// A `switch` over an open struct needs a `default`.

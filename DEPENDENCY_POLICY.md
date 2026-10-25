@@ -18,7 +18,7 @@ Notes:
 
 - No target of the `MCP` library product depends on swift-nio. HTTP server transports take and
   return `HTTPRequest`/`HTTPResponse`, so applications choose their own HTTP server.
-- swift-crypto was added in 0.13.0 for `requestState` sealing
+- swift-crypto was added in 1.0.0 for `requestState` sealing
   ([design/mrtr.md](design/mrtr.md)). Its range spans majors 3 and 4; the APIs used (`AES.GCM`,
   `HKDF`, `SHA256`, `SymmetricKey`, `P256.Signing`) exist in both. CI resolves 4.x. OAuth uses
   it for PKCE and `private_key_jwt`, so those work on Linux too.

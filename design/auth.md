@@ -12,7 +12,7 @@ The SDK implements the client side in `Sources/MCP/Base/Authorization/`. On the 
 provides HTTP validators: `ProtectedResourceMetadataValidator` serves PRM and
 `BearerTokenValidator` checks tokens with an application closure.
 
-0.13.0 adds issuer checks (RFC 8414 §3.3, RFC 9207, SEP-2468),
+1.0.0 adds issuer checks (RFC 8414 §3.3, RFC 9207, SEP-2468),
 `application_type` (SEP-837), authorization server migration (SEP-2352) and the 2025-03-26
 fallback endpoints.
 
