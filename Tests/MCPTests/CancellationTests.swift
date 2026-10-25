@@ -10,7 +10,7 @@ struct CancellationTests {
     func testClientSendsCancellation() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
-        let client = Client(name: "TestClient", version: "1.0")
+        let client = Client(name: "TestClient", version: "1.0", configuration: .handshake)
         let server = Server(
             name: "TestServer",
             version: "1.0",
@@ -46,7 +46,7 @@ struct CancellationTests {
     func testClientReceivesCancellation() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
-        let client = Client(name: "TestClient", version: "1.0")
+        let client = Client(name: "TestClient", version: "1.0", configuration: .handshake)
         let server = Server(
             name: "TestServer",
             version: "1.0",
@@ -90,7 +90,7 @@ struct CancellationTests {
     func testRequestContextStructure() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
-        let client = Client(name: "TestClient", version: "1.0")
+        let client = Client(name: "TestClient", version: "1.0", configuration: .handshake)
         let server = Server(
             name: "TestServer",
             version: "1.0",
@@ -121,7 +121,7 @@ struct CancellationTests {
     func testCallToolWithRequestContext() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
-        let client = Client(name: "TestClient", version: "1.0")
+        let client = Client(name: "TestClient", version: "1.0", configuration: .handshake)
         let server = Server(
             name: "TestServer",
             version: "1.0",
@@ -161,7 +161,7 @@ struct CancellationTests {
     func testCancelCallToolWithRequestContext() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
-        let client = Client(name: "TestClient", version: "1.0")
+        let client = Client(name: "TestClient", version: "1.0", configuration: .handshake)
         let server = Server(
             name: "TestServer",
             version: "1.0",
@@ -208,7 +208,7 @@ struct CancellationTests {
     func testCancellationPreventsResponse() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
-        let client = Client(name: "TestClient", version: "1.0")
+        let client = Client(name: "TestClient", version: "1.0", configuration: .handshake)
         let server = Server(
             name: "TestServer",
             version: "1.0",

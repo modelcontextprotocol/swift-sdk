@@ -20,7 +20,7 @@ This guide covers the `Client` actor: connecting at either protocol era, calling
 
 ## Connecting
 
-`Client(name:version:title:description:websiteUrl:icons:capabilities:configuration:)` describes the client. `connect(transport:)` connects the transport, starts the receive loop, opens the protocol connection and returns an `Initialize.Result`. The result is discardable.
+`Client(name:version:title:description:websiteUrl:icons:capabilities:configuration:)` describes the client. `connect(transport:)` connects the transport, starts the receive loop, opens the protocol connection and returns an `Initialize.Result`. The result is discardable. With the default configuration the client sends `server/discover` and connects at 2026-07-28 when the server serves it, and otherwise falls back to `initialize`.
 
 ```swift
 let client = Client(name: "my-client", version: "1.0.0")
@@ -37,7 +37,7 @@ if result.capabilities.tools != nil {
 | Setting | Default | Effect |
 |---|---|---|
 | `strict` | `false` | Check the server's capabilities before sending. See [Strict mode](#strict-mode). |
-| `protocolMode` | `.handshake` | How `connect` opens the connection. See [Protocol modes](#protocol-modes). |
+| `protocolMode` | `.automatic` | How `connect` opens the connection. See [Protocol modes](#protocol-modes). |
 | `logLevel` | `nil` | The lowest log level requested in the `_meta` of each 2026-07-28 request. See [Logging](#logging). |
 | `discoveryTimeout` | 10 seconds | How long `.automatic` waits for the answer to `server/discover` before it sends `initialize`. `nil` waits indefinitely. |
 | `multiRoundTrip` | `.init()` (enabled, 10 rounds) | How input-required results are answered. See [Multi round-trip requests](#multi-round-trip-requests). |
@@ -48,8 +48,8 @@ if result.capabilities.tools != nil {
 
 | Mode | First request | Result |
 |---|---|---|
-| `.handshake` (default) | `initialize` with `Version.latest` (2025-11-25), then `notifications/initialized` | The version the server returns. |
-| `.automatic` | `server/discover` at `Version.stateless[0]` (2026-07-28) | 2026-07-28 when the server serves it; otherwise falls back to `initialize`. |
+| `.automatic` (default) | `server/discover` at `Version.stateless[0]` (2026-07-28) | 2026-07-28 when the server serves it; otherwise falls back to `initialize`. |
+| `.handshake` | `initialize` with `Version.latest` (2025-11-25), then `notifications/initialized` | The version the server returns. |
 | `.stateless(version)` | `server/discover` at `version` | `version`, or an error. Never retries with another version and never falls back. |
 
 `.automatic` falls back to `initialize` when:
@@ -91,7 +91,7 @@ do {
 }
 ```
 
-The defaults are transitional. 2026-07-28 is in `Version.stateless` but not in `Version.supported`, and `Version.latest` is 2025-11-25, so a default client never uses 2026-07-28. An SDK server serves both eras by default (`Server.Configuration.protocolVersions` is `Version.stateless + Version.handshake`). See [protocol_versions.md](protocol_versions.md).
+Use `.handshake` for a server that answers `server/discover` incorrectly, or to keep the 2025-11-25 behavior, such as server-to-client requests and session-based HTTP. An SDK server serves both eras by default (`Server.Configuration.protocolVersions` is `Version.stateless + Version.handshake`). See [protocol_versions.md](protocol_versions.md).
 
 ### Connection state
 
@@ -148,7 +148,7 @@ With `strict: true`, `listTools`, `callTool`, `listPrompts`, `getPrompt`, `listR
 ```swift
 let client = Client(
     name: "my-client", version: "1.0.0",
-    configuration: .init(strict: true, protocolMode: .automatic))
+    configuration: .strict)
 try await client.connect(transport: transport)
 do {
     _ = try await client.listPrompts()
@@ -502,7 +502,7 @@ With the loop disabled, inspect `resultType`, fulfill `inputRequests` and retry:
 let client = Client(
     name: "my-client", version: "1.0.0",
     capabilities: .init(sampling: .init(), elicitation: .init(), roots: .init()),
-    configuration: .init(protocolMode: .automatic, multiRoundTrip: .init(isEnabled: false)))
+    configuration: .init(multiRoundTrip: .init(isEnabled: false)))
 try await client.connect(transport: transport)
 
 var params = CallTool.Parameters(name: "deploy", arguments: ["env": "prod"])

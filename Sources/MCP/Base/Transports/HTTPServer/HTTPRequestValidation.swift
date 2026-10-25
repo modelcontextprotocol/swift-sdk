@@ -41,11 +41,14 @@ public struct HTTPValidationContext: Sendable {
     /// The set of protocol versions this server supports.
     public let supportedProtocolVersions: Set<String>
 
+    /// Creates a context. `supportedProtocolVersions` defaults to the
+    /// handshake revisions, which session-based transports serve; a
+    /// stateless transport passes `Version.stateless` too.
     public init(
         httpMethod: String,
         sessionID: String? = nil,
         isInitializationRequest: Bool = false,
-        supportedProtocolVersions: Set<String> = Version.supported
+        supportedProtocolVersions: Set<String> = Set(Version.handshake)
     ) {
         self.httpMethod = httpMethod
         self.sessionID = sessionID

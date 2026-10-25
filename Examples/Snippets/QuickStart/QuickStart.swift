@@ -62,9 +62,7 @@ func respond(to request: HTTPRequest, using transport: StatelessHTTPServerTransp
 /// Connects to an MCP server over Streamable HTTP.
 func connectOverHTTP(to endpoint: URL) async throws -> Client {
     let transport = HTTPClientTransport(endpoint: endpoint)
-    let client = Client(
-        name: "hello-client", version: "1.0.0",
-        configuration: .init(protocolMode: .automatic))
+    let client = Client(name: "hello-client", version: "1.0.0")
     try await client.connect(transport: transport)
     return client
 }

@@ -20,10 +20,12 @@ public enum Version {
     /// protocol version and client capabilities in `_meta`, newest first.
     public static let stateless: [String] = [v2026_07_28]
 
-    /// All protocol versions supported by this implementation.
-    public static let supported: Set<String> = Set(handshake)
+    /// All protocol versions supported by this implementation: the handshake
+    /// and the stateless revisions.
+    public static let supported: Set<String> = Set(handshake + stateless)
 
-    /// The latest protocol version supported by this implementation.
+    /// The newest handshake revision: the version `initialize` requests and
+    /// the default `MCP-Protocol-Version` of session-based HTTP.
     public static let latest: String = v2025_11_25
 
     /// Negotiates the protocol version of an `initialize` request.

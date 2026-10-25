@@ -136,7 +136,7 @@ struct ElicitationTests {
 
     @Test("Client elicitation handler registration")
     func testClientElicitationHandlerRegistration() async throws {
-        let client = Client(name: "TestClient", version: "1.0")
+        let client = Client(name: "TestClient", version: "1.0", configuration: .handshake)
 
         let handlerClient = await client.withElicitationHandler { parameters in
             if case .form(let formParams) = parameters {
@@ -255,7 +255,8 @@ struct ElicitationIntegrationTests {
         let client = Client(
             name: "FormTestClient",
             version: "1.0",
-            capabilities: .init(elicitation: .init())
+            capabilities: .init(elicitation: .init()),
+            configuration: .handshake
         )
 
         // Register handler on client that validates parameters
@@ -319,7 +320,8 @@ struct ElicitationIntegrationTests {
         let client = Client(
             name: "URLTestClient",
             version: "1.0",
-            capabilities: .init(elicitation: .init(url: .init()))
+            capabilities: .init(elicitation: .init(url: .init())),
+            configuration: .handshake
         )
 
         // Register handler on client that validates URL parameters
@@ -372,7 +374,8 @@ struct ElicitationIntegrationTests {
         let client = Client(
             name: "DeclineTestClient",
             version: "1.0",
-            capabilities: .init(elicitation: .init())
+            capabilities: .init(elicitation: .init()),
+            configuration: .handshake
         )
 
         // Register handler that declines
@@ -406,7 +409,8 @@ struct ElicitationIntegrationTests {
 
         let client = Client(
             name: "ErrorTestClient",
-            version: "1.0"
+            version: "1.0",
+            configuration: .handshake
         )
 
         try await server.start(transport: serverTransport)
@@ -438,7 +442,7 @@ struct ElicitationIntegrationTests {
             name: "StrictTestClient",
             version: "1.0",
             capabilities: .init(elicitation: .init()),
-            configuration: .strict
+            configuration: .strictHandshake
         )
 
         // Register elicitation handler
@@ -480,7 +484,7 @@ struct ElicitationIntegrationTests {
             name: "StrictTestClient",
             version: "1.0",
             capabilities: .init(),
-            configuration: .strict
+            configuration: .strictHandshake
         )
 
         try await server.start(transport: serverTransport)
@@ -513,7 +517,7 @@ struct ElicitationIntegrationTests {
             name: "NonStrictTestClient",
             version: "1.0",
             capabilities: .init(),
-            configuration: .default
+            configuration: .handshake
         )
 
         // Register elicitation handler anyway
@@ -594,7 +598,8 @@ struct ElicitationIntegrationTests {
         let client = Client(
             name: "SequentialTestClient",
             version: "1.0",
-            capabilities: .init(elicitation: .init())
+            capabilities: .init(elicitation: .init()),
+            configuration: .handshake
         )
 
         // Register handler that echoes the message

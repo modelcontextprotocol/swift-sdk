@@ -491,7 +491,8 @@ struct PromptIntegrationTests {
 
         let client = Client(
             name: "PromptTestClient",
-            version: "1.0"
+            version: "1.0",
+            configuration: .handshake
         )
 
         try await server.start(transport: serverTransport)
@@ -544,7 +545,8 @@ struct PromptIntegrationTests {
 
         let client = Client(
             name: "PromptTestClient",
-            version: "1.0"
+            version: "1.0",
+            configuration: .handshake
         )
 
         try await server.start(transport: serverTransport)
@@ -587,7 +589,8 @@ struct PromptIntegrationTests {
 
         let client = Client(
             name: "PromptTestClient",
-            version: "1.0"
+            version: "1.0",
+            configuration: .handshake
         )
 
         try await server.start(transport: serverTransport)
@@ -634,7 +637,8 @@ struct PromptIntegrationTests {
 
         let client = Client(
             name: "PromptTestClient",
-            version: "1.0"
+            version: "1.0",
+            configuration: .handshake
         )
 
         try await server.start(transport: serverTransport)
@@ -681,7 +685,8 @@ struct PromptIntegrationTests {
 
         let client = Client(
             name: "PromptTestClient",
-            version: "1.0"
+            version: "1.0",
+            configuration: .handshake
         )
 
         try await server.start(transport: serverTransport)
@@ -730,7 +735,8 @@ struct PromptIntegrationTests {
 
         let client = Client(
             name: "PromptTestClient",
-            version: "1.0"
+            version: "1.0",
+            configuration: .handshake
         )
 
         try await server.start(transport: serverTransport)
@@ -766,7 +772,8 @@ struct PromptIntegrationTests {
 
         let client = Client(
             name: "PromptTestClient",
-            version: "1.0"
+            version: "1.0",
+            configuration: .handshake
         )
 
         try await server.start(transport: serverTransport)
@@ -804,7 +811,7 @@ struct PromptIntegrationTests {
         let client = Client(
             name: "StrictPromptTestClient",
             version: "1.0",
-            configuration: .strict
+            configuration: .strictHandshake
         )
 
         try await server.start(transport: serverTransport)
@@ -835,7 +842,7 @@ struct PromptIntegrationTests {
         let client = Client(
             name: "StrictPromptTestClient",
             version: "1.0",
-            configuration: .strict
+            configuration: .strictHandshake
         )
 
         try await server.start(transport: serverTransport)
@@ -874,7 +881,7 @@ struct PromptIntegrationTests {
         let client = Client(
             name: "NonStrictPromptTestClient",
             version: "1.0",
-            configuration: .default
+            configuration: .handshake
         )
 
         try await server.start(transport: serverTransport)

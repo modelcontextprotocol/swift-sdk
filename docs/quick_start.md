@@ -136,7 +136,9 @@ for case .text(let text, _, _) in content {
 ```
 
 - `connect(transport:)` opens the protocol connection. With the default
-  configuration it sends `initialize` and `notifications/initialized`.
+  configuration it sends `server/discover` and connects at 2026-07-28. A
+  server that does not serve 2026-07-28 gets `initialize` and
+  `notifications/initialized` instead.
 - `listTools()` and `callTool(name:arguments:meta:)` return tuples. See
   [client.md](client.md) for the full results.
 - `FileDescriptor` comes from `System` on Apple platforms and from
@@ -220,17 +222,15 @@ func respond(to request: HTTPRequest, using transport: StatelessHTTPServerTransp
 }
 ```
 
-`HTTPClientTransport` connects to a Streamable HTTP endpoint. With
-`.automatic`, the client discovers 2026-07-28 with `server/discover` and falls
-back to `initialize` for older servers:
+`HTTPClientTransport` connects to a Streamable HTTP endpoint. The client
+discovers 2026-07-28 with `server/discover` and falls back to `initialize` for
+older servers:
 
 ```swift
 /// Connects to an MCP server over Streamable HTTP.
 func connectOverHTTP(to endpoint: URL) async throws -> Client {
     let transport = HTTPClientTransport(endpoint: endpoint)
-    let client = Client(
-        name: "hello-client", version: "1.0.0",
-        configuration: .init(protocolMode: .automatic))
+    let client = Client(name: "hello-client", version: "1.0.0")
     try await client.connect(transport: transport)
     return client
 }

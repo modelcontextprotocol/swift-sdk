@@ -58,11 +58,10 @@ struct GuidesSnippetTests {
         let lists = versionLists()
         #expect(lists.handshake == ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"])
         #expect(lists.stateless == ["2026-07-28"])
-        #expect(lists.supported == Set(Version.handshake))
-        #expect(!lists.supported.contains(Version.v2026_07_28))
+        #expect(lists.supported == Set(Version.handshake + Version.stateless))
         #expect(lists.latest == "2025-11-25")
         #expect(Server.Configuration().protocolVersions == Version.stateless + Version.handshake)
-        #expect(Client.Configuration().protocolMode == .handshake)
+        #expect(Client.Configuration().protocolMode == .automatic)
     }
 
     @Test("Profiles flip at 2026-07-28")
@@ -190,7 +189,7 @@ struct GuidesSnippetTests {
         let refusing = await eraServer(statelessOnly)
         let (clientEnd, serverEnd) = await InMemoryTransport.createConnectedPair()
         try await refusing.start(transport: serverEnd)
-        let legacy = Client(name: "c", version: "1")
+        let legacy = Client(name: "c", version: "1", configuration: .init(protocolMode: .handshake))
         await #expect(throws: MCPError.unsupportedProtocolVersion(
             supported: Version.stateless, requested: Version.v2025_11_25)
         ) {
@@ -261,10 +260,19 @@ struct GuidesSnippetTests {
         await server.withMethodHandler(ListTools.self) { _ in .init(tools: []) }
         let (clientEnd, serverEnd) = await InMemoryTransport.createConnectedPair()
         try await server.start(transport: serverEnd)
-        let client = makeAutomaticClient()
+        let client = makeHandshakeClient()
         #expect(try await client.connect(transport: clientEnd).protocolVersion == Version.v2025_11_25)
         await client.disconnect()
         await server.stop()
+
+        let both = await eraServer()
+        let (bothClientEnd, bothServerEnd) = await InMemoryTransport.createConnectedPair()
+        try await both.start(transport: bothServerEnd)
+        let handshake = makeHandshakeClient()
+        #expect(try await handshake.connect(transport: bothClientEnd).protocolVersion == Version.v2025_11_25)
+        #expect(await handshake.isStateless == false)
+        await handshake.disconnect()
+        await both.stop()
     }
 
     @Test("Invalid params now fail with -32602")
@@ -348,7 +356,7 @@ struct GuidesSnippetTests {
 
     // MARK: troubleshooting.md
 
-    @Test("WireLog records the handshake")
+    @Test("WireLog records the discovery")
     func wireLog() async throws {
         let server = await makeCalculatorServer()
         let (clientEnd, serverEnd) = await InMemoryTransport.createConnectedPair()
@@ -358,8 +366,8 @@ struct GuidesSnippetTests {
         try await client.connect(transport: log)
         let lines = await log.lines
         #expect(lines.first?.hasPrefix("send: ") == true)
-        #expect(lines.first?.contains(#""method":"initialize""#) == true)
-        #expect(lines.contains { $0.hasPrefix("receive: ") && $0.contains("protocolVersion") })
+        #expect(lines.first?.contains(#"discover""#) == true)
+        #expect(lines.contains { $0.hasPrefix("receive: ") && $0.contains("supportedVersions") })
         await client.disconnect()
         await server.stop()
         _ = await makeLoggedTransports()

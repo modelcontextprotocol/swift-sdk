@@ -17,6 +17,8 @@ Most code compiles unchanged; the breaking changes are in `MCPError`,
 | `Client.Capabilities.experimental` | `[String: String]?` became `[String: Value]?` | Pass `Value`s |
 | `OAuthAuthorizationError` | Two new cases | Update exhaustive `switch` statements |
 | `Server` | Serves 2026-07-28 requests by default | Nothing, or opt out |
+| `Client` | Connects at 2026-07-28 by default, with a fallback to `initialize` | Nothing, or opt out |
+| `Version.supported` | Lists 2026-07-28 | Read `Version.handshake` for the `initialize` revisions |
 | Handlers | Undecodable parameters fail with -32602, not -32603 | Update tests that check the code |
 | HTTP transports | New error bodies, status codes and streaming | See below |
 | `HTTPClientTransport` | Default per-host connection limit 64; POST streams resume per stream | Raise `httpMaximumConnectionsPerHost` in custom configurations |
@@ -151,6 +153,30 @@ Requests without that key are served as before. To keep the previous behavior:
 
 See [protocol_versions.md](protocol_versions.md) for what changes per request.
 
+### Clients connect at 2026-07-28
+
+`Client.Configuration.protocolMode` defaults to `.automatic`. `connect`
+sends `server/discover` at 2026-07-28. When the server serves that revision,
+the connection is stateless: every request carries `_meta`, there is no
+session, and the server cannot send requests to the client; it returns
+input-required results, which the client answers with the same handlers. When
+the server does not serve it, or answers -32601 like a server that predates
+`server/discover`, the client sends `initialize` as before. To keep the
+previous behavior:
+
+%include Examples/Snippets/Guides/Migration.swift migration-handshake-client
+
+`Version.supported` now contains 2026-07-28. Code that used it as the list of
+`initialize` revisions reads `Version.handshake`. `Version.latest` is still
+2025-11-25. `HTTPValidationContext` defaults `supportedProtocolVersions` to
+`Version.handshake`, the revisions that sessions serve; a custom stateless
+pipeline passes `Version.stateless + Version.handshake`.
+
+Against a server that serves only the handshake, a default client sends one
+extra request per connection: `server/discover`, answered with an error, then
+`initialize`. Clients that open many short connections to such servers use
+`.handshake`.
+
 ### Handlers
 
 - A request whose parameters do not decode fails with -32602
@@ -248,7 +274,7 @@ It seals `requestState` with AES-GCM.
 
 | Feature | API | Guide |
 |---|---|---|
-| Connect at 2026-07-28 | `Client.Configuration.protocolMode`: `.automatic`, `.stateless(_:)` | [protocol_versions.md](protocol_versions.md#protocol-modes) |
+| Choose the protocol era | `Client.Configuration.protocolMode`: `.automatic` (default), `.handshake`, `.stateless(_:)` | [protocol_versions.md](protocol_versions.md#protocol-modes) |
 | Connection state | `Client.negotiatedProtocolVersion`, `serverInfo`, `serverCapabilities`, `isStateless` | [client.md](client.md#connection-state) |
 | Per-request log level | `Client.Configuration.logLevel` | [client.md](client.md#logging) |
 | Version model | `Version.handshake`, `Version.stateless`, `Version.profile(for:)`, `ProtocolProfile` | [protocol_versions.md](protocol_versions.md#version-lists) |
@@ -267,10 +293,3 @@ It seals `requestState` with AES-GCM.
 | Log level order | `LogLevel: Comparable` | [server.md](server.md#logging) |
 | OAuth | `OAuthConfiguration.ApplicationType`, `OAuthAuthorizationCodeFlow.ExpectedIssuer` | [protocol.md](protocol.md#authorization) |
 
-To opt a client in to 2026-07-28 with a fallback for older servers:
-
-%include Examples/Snippets/Guides/Migration.swift migration-opt-in-client
-
-The client's default mode is still `.handshake`. A later release makes
-`.automatic` the default and adds 2026-07-28 to `Version.supported`; see
-[rough_edges.md](rough_edges.md#defaults-that-will-change).

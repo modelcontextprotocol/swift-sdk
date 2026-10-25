@@ -208,7 +208,7 @@ struct LoggingTests {
     func testClientSetLoggingLevel() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
-        let client = Client(name: "TestClient", version: "1.0")
+        let client = Client(name: "TestClient", version: "1.0", configuration: .handshake)
         let server = Server(
             name: "TestServer",
             version: "1.0",
@@ -252,7 +252,7 @@ struct LoggingTests {
     func testClientSetLoggingLevelFailsWithoutCapability() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
-        let client = Client(name: "TestClient", version: "1.0", configuration: .strict)
+        let client = Client(name: "TestClient", version: "1.0", configuration: .strictHandshake)
         let server = Server(
             name: "TestServer",
             version: "1.0",
@@ -280,7 +280,7 @@ struct LoggingTests {
     func testServerLogMethod() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
-        let client = Client(name: "TestClient", version: "1.0")
+        let client = Client(name: "TestClient", version: "1.0", configuration: .handshake)
         let server = Server(
             name: "TestServer",
             version: "1.0",
@@ -341,7 +341,7 @@ struct LoggingTests {
 
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
-        let client = Client(name: "TestClient", version: "1.0")
+        let client = Client(name: "TestClient", version: "1.0", configuration: .handshake)
         let server = Server(
             name: "TestServer",
             version: "1.0",
@@ -405,7 +405,7 @@ struct LoggingTests {
     func testServerLogWithoutLoggerName() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
-        let client = Client(name: "TestClient", version: "1.0")
+        let client = Client(name: "TestClient", version: "1.0", configuration: .handshake)
         let server = Server(
             name: "TestServer",
             version: "1.0",
@@ -455,7 +455,7 @@ struct LoggingTests {
     func testMultipleLogLevels() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
-        let client = Client(name: "TestClient", version: "1.0")
+        let client = Client(name: "TestClient", version: "1.0", configuration: .handshake)
         let server = Server(
             name: "TestServer",
             version: "1.0",

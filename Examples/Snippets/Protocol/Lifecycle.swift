@@ -28,7 +28,9 @@ func connectWithHandshake(server: Server) async throws -> String {
     let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
     try await server.start(transport: serverTransport)
     // snippet: lifecycle-handshake
-    let client = Client(name: "example-client", version: "1.0.0")  // protocolMode: .handshake
+    let client = Client(
+        name: "example-client", version: "1.0.0",
+        configuration: .init(protocolMode: .handshake))
     let result = try await client.connect(transport: clientTransport)
     print(result.protocolVersion)  // 2025-11-25
     print(await client.isStateless)  // false
@@ -52,9 +54,7 @@ func startWithInitializeHook(_ server: Server, transport: any Transport) async t
 /// Connects with `server/discover`. Returns the negotiated version.
 func connectAutomatically(server: Server) async throws -> String {
     // snippet: lifecycle-automatic
-    let client = Client(
-        name: "example-client", version: "1.0.0",
-        configuration: .init(protocolMode: .automatic))
+    let client = Client(name: "example-client", version: "1.0.0")  // protocolMode: .automatic
 
     let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
     try await server.start(transport: serverTransport)

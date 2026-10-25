@@ -15,13 +15,13 @@ The SDK speaks two protocol eras at once:
 
 Current defaults:
 
-- `Client.Configuration.protocolMode` defaults to `.handshake`.
-- `Version.supported` and `Version.latest` contain handshake revisions only (`latest` is 2025-11-25). 2026-07-28 is in `Version.stateless`.
+- `Client.Configuration.protocolMode` defaults to `.automatic`: `server/discover` at 2026-07-28, with a fallback to `initialize`.
 - `Server.Configuration.protocolVersions` defaults to `Version.stateless + Version.handshake`, so a server serves both eras.
+- `Version.supported` lists both eras. `Version.latest`, the version `initialize` requests, is 2025-11-25.
 
 ### The initialize handshake
 
-With the default configuration the client sends `initialize` with `Version.latest`, then `notifications/initialized`. The server negotiates: it answers with the requested version when it serves it, and otherwise with its newest handshake revision.
+With `.handshake`, or after an `.automatic` fallback, the client sends `initialize` with `Version.latest`, then `notifications/initialized`. The server negotiates: it answers with the requested version when it serves it, and otherwise with its newest handshake revision.
 
 %include Examples/Snippets/Protocol/Lifecycle.swift lifecycle-handshake
 
@@ -43,8 +43,8 @@ At 2026-07-28 there is no handshake. A client may send `server/discover` to lear
 
 | Mode | Behavior |
 |---|---|
-| `.handshake` (default) | `initialize` with `Version.latest`. |
-| `.automatic` | `server/discover` at `Version.stateless[0]`. On -32022 it retries once with the first version in `data.supported` that is in `Version.stateless`. Falls back to `initialize` (see below). |
+| `.automatic` (default) | `server/discover` at `Version.stateless[0]`. On -32022 it retries once with the first version in `data.supported` that is in `Version.stateless`. Falls back to `initialize` (see below). |
+| `.handshake` | `initialize` with `Version.latest`. |
 | `.stateless(v)` | `server/discover` at `v`, with the same single retry on -32022. No fallback: the error is thrown. |
 
 `.automatic` falls back to `initialize` when:

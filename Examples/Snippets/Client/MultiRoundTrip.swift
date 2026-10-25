@@ -42,7 +42,7 @@ func deployManually(transport: any Transport) async throws -> CallTool.Result {
     let client = Client(
         name: "my-client", version: "1.0.0",
         capabilities: .init(sampling: .init(), elicitation: .init(), roots: .init()),
-        configuration: .init(protocolMode: .automatic, multiRoundTrip: .init(isEnabled: false)))
+        configuration: .init(multiRoundTrip: .init(isEnabled: false)))
     try await client.connect(transport: transport)
 
     var params = CallTool.Parameters(name: "deploy", arguments: ["env": "prod"])

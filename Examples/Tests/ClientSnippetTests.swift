@@ -207,14 +207,24 @@ private let bothEras: [Client.ProtocolMode] = [.handshake, .automatic]
 struct ClientSnippetTests {
     // MARK: Connecting
 
-    @Test("connect uses the initialize handshake by default")
+    @Test("connect discovers 2026-07-28 by default")
     func connect() async throws {
         let server = await makeDemoServer()
-        let (client, result) = try await connectWithHandshake(transport: try await start(server))
-        #expect(result.protocolVersion == Version.v2025_11_25)
+        let (client, result) = try await connectWithDefaults(transport: try await start(server))
+        #expect(result.protocolVersion == Version.v2026_07_28)
         #expect(result.serverInfo.name == "demo")
-        #expect(await client.isStateless == false)
+        #expect(await client.isStateless)
         try await pingAndDisconnect(client)
+        await server.stop()
+    }
+
+    @Test("connect falls back to initialize by default")
+    func connectDefaultFallback() async throws {
+        let server = await makeDemoServer(configuration: .init(protocolVersions: Version.handshake))
+        let (client, result) = try await connectWithDefaults(transport: try await start(server))
+        #expect(result.protocolVersion == Version.v2025_11_25)
+        #expect(await client.isStateless == false)
+        await client.disconnect()
         await server.stop()
     }
 
@@ -299,7 +309,7 @@ struct ClientSnippetTests {
 
     @Test("roots at 2025-11-25: server request and list-changed notification")
     func rootsHandshake() async throws {
-        let server = await makeDemoServer()
+        let server = await makeDemoServer(configuration: .init(protocolVersions: Version.handshake))
         let changed = Flag()
         await server.onNotification(RootsListChangedNotification.self) { _ in await changed.set() }
         let workspace = Workspace()

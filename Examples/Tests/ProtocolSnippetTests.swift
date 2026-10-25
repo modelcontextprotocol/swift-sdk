@@ -18,8 +18,7 @@ struct ProtocolSnippetTests {
 
     @Test func handlerContextReportsTheEra() async throws {
         let server = await makeLifecycleServer()
-        let client = Client(
-            name: "example-client", version: "1.0.0", configuration: .init(protocolMode: .automatic))
+        let client = Client(name: "example-client", version: "1.0.0")
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
         try await server.start(transport: serverTransport)
         try await client.connect(transport: clientTransport)
@@ -33,7 +32,7 @@ struct ProtocolSnippetTests {
         let server = Server(name: "example", version: "1.0.0")
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
         try await startWithInitializeHook(server, transport: serverTransport)
-        let client = Client(name: "blocked", version: "1.0.0")
+        let client = Client(name: "blocked", version: "1.0.0", configuration: .init(protocolMode: .handshake))
         await #expect(throws: MCPError.self) { try await client.connect(transport: clientTransport) }
         await client.disconnect()
         await server.stop()

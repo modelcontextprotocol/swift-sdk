@@ -1142,7 +1142,7 @@ import Testing
                     logger: nil
                 )
 
-                let client = Client(name: "TestClient", version: "1.0.0")
+                let client = Client(name: "TestClient", version: "1.0.0", configuration: .handshake)
 
                 // Use an actor to track request sequence
                 actor RequestTracker {

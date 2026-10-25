@@ -58,11 +58,11 @@ func makeHandshakeOnlyServer() -> Server {
 }
 // endsnippet
 
-// snippet: migration-opt-in-client
-/// Opts a client in to 2026-07-28, with a fallback for older servers.
-func makeAutomaticClient() -> Client {
+// snippet: migration-handshake-client
+/// Keeps the previous behavior: connect with `initialize` only.
+func makeHandshakeClient() -> Client {
     Client(
         name: "app", version: "1.0.0",
-        configuration: .init(protocolMode: .automatic, logLevel: .warning))
+        configuration: .init(protocolMode: .handshake))
 }
 // endsnippet
