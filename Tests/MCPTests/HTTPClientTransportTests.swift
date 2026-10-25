@@ -39,6 +39,7 @@ import Testing
         var requestHandler:
             (@Sendable (URLRequest) async throws -> (HTTPURLResponse, Data))?
         private var callCounts: [URL: Int] = [:]
+        private var capturedRequests: [URLRequest] = []
 
         func setHandler(
             _ handler: @Sendable @escaping (URLRequest) async throws -> (HTTPURLResponse, Data)
@@ -49,6 +50,7 @@ import Testing
         func clearHandler() {
             requestHandler = nil
             callCounts = [:]
+            capturedRequests = []
         }
 
         func executeHandler(for request: URLRequest) async throws -> (HTTPURLResponse, Data) {
@@ -59,6 +61,7 @@ import Testing
                         NSLocalizedDescriptionKey: "No request handler set"
                     ])
             }
+            capturedRequests.append(request)
             if let url = request.url {
                 callCounts[url, default: 0] += 1
             }
@@ -67,6 +70,10 @@ import Testing
 
         func callCount(for url: URL) -> Int {
             callCounts[url, default: 0]
+        }
+
+        func requests() -> [URLRequest] {
+            capturedRequests
         }
     }
 
@@ -172,6 +179,23 @@ import Testing
             await transport.disconnect()
         }
 
+        #if os(Linux)
+            @Test("Linux rejects modern HTTP mode while per-request SSE is unsupported", .httpClientTransportSetup)
+            func linuxModernModeFailsBeforeConnectSucceeds() async throws {
+                let transport = HTTPClientTransport(
+                    endpoint: testEndpoint,
+                    streaming: false,
+                    protocolVersion: "2026-07-28"
+                )
+                do {
+                    try await transport.connect()
+                    Issue.record("Expected unsupported modern POST SSE error on Linux")
+                } catch let error as MCPError {
+                    #expect(error.localizedDescription.contains("Linux"))
+                }
+            }
+        #endif
+
         @Test("Send and Receive JSON Response", .httpClientTransportSetup)
         func testSendAndReceiveJSON() async throws {
             let configuration = URLSessionConfiguration.ephemeral
@@ -212,6 +236,128 @@ import Testing
             let receivedData = try await iterator.next()
 
             #expect(receivedData == responseData)
+        }
+
+        @Test("Client identity remains stable across request and cancellation POSTs", .httpClientTransportSetup)
+        func testClientIdentityRemainsStableAcrossRequests() async throws {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [MockURLProtocol.self]
+
+            let transport = HTTPClientTransport(
+                endpoint: testEndpoint,
+                configuration: configuration,
+                streaming: false,
+                logger: nil
+            )
+            try await transport.connect()
+
+            await MockURLProtocol.setHandler { [testEndpoint] request in
+                let response = HTTPURLResponse(
+                    url: testEndpoint,
+                    statusCode: 202,
+                    httpVersion: "HTTP/1.1",
+                    headerFields: ["Content-Type": "application/json"]
+                )!
+                let body = request.readBody() ?? Data()
+                let isRequest = body.range(of: Data(#""id""#.utf8)) != nil
+                let responseBody = isRequest
+                    ? #"{"jsonrpc":"2.0","result":{},"id":1}"#.data(using: .utf8)!
+                    : Data()
+                return (response, responseBody)
+            }
+
+            try await transport.send(#"{"jsonrpc":"2.0","method":"test/request","id":1}"#.data(using: .utf8)!)
+            try await transport.send(#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}}"#.data(using: .utf8)!)
+
+            let requests = await MockURLProtocol.requestHandlerStorage.requests()
+            #expect(requests.count == 2)
+            let identities = requests.compactMap {
+                $0.value(forHTTPHeaderField: "MCP-Client-Identity")
+            }
+            #expect(identities.count == 2)
+            #expect(identities.first == identities.last)
+            await transport.disconnect()
+        }
+
+        @Test("Modern POST mirrors method and routing name into standard headers", .httpClientTransportSetup)
+        func modernPOSTMirrorsRoutingHeaders() async throws {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [MockURLProtocol.self]
+            let transport = HTTPClientTransport(
+                endpoint: testEndpoint,
+                configuration: configuration,
+                streaming: false,
+                protocolVersion: "2026-07-28"
+            )
+            try await transport.connect()
+            let body = try JSONSerialization.data(withJSONObject: [
+                "jsonrpc": "2.0", "id": 8, "method": "tools/call",
+                "params": ["name": "echo", "arguments": [:] as [String: Any], "_meta": [
+                    ProtocolMetaKey.protocolVersion: "2026-07-28",
+                ]],
+            ] as [String: Any])
+            await MockURLProtocol.setHandler { [testEndpoint] request in
+                #expect(request.value(forHTTPHeaderField: "Mcp-Method") == "tools/call")
+                #expect(request.value(forHTTPHeaderField: "Mcp-Name") == "echo")
+                return (HTTPURLResponse(
+                    url: testEndpoint, statusCode: 200, httpVersion: "HTTP/1.1",
+                    headerFields: ["Content-Type": "application/json"]
+                )!, #"{"jsonrpc":"2.0","id":8,"result":{}}"#.data(using: .utf8)!)
+            }
+            try await transport.send(body)
+            await transport.disconnect()
+        }
+
+        @Test("Modern tool calls mirror x-mcp-header arguments")
+        func modernToolCallMirrorsCustomParameterHeader() async throws {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [MockURLProtocol.self]
+            let transport = HTTPClientTransport(endpoint: testEndpoint, configuration: configuration, streaming: false, protocolVersion: "2026-07-28")
+            try await transport.connect()
+            _ = await transport.updateToolDefinitions([Tool(
+                name: "lookup", description: nil,
+                inputSchema: .object(["type": .string("object"), "properties": .object([
+                    "settings": .object(["type": .string("object"), "properties": .object([
+                        "tenant": .object(["type": .string("string"), "x-mcp-header": .string("Tenant")]),
+                    ])]),
+                ])])
+            )], reset: true)
+            _ = await transport.updateToolDefinitions([Tool(
+                name: "later-page", description: nil,
+                inputSchema: .object(["type": .string("object"), "properties": .object([
+                    "region": .object(["type": .string("string"), "x-mcp-header": .string("Region")]),
+                ])])
+            )], reset: false)
+            let body = try JSONSerialization.data(withJSONObject: [
+                "jsonrpc": "2.0", "id": 18, "method": "tools/call",
+                "params": ["name": "lookup", "arguments": ["settings": ["tenant": "acme"]], "_meta": [ProtocolMetaKey.protocolVersion: "2026-07-28"]],
+            ] as [String: Any])
+            await MockURLProtocol.setHandler { [testEndpoint] request in
+                #expect(request.value(forHTTPHeaderField: "Mcp-Param-Tenant") == "acme")
+                return (HTTPURLResponse(url: testEndpoint, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!, #"{"jsonrpc":"2.0","id":18,"result":{}}"#.data(using: .utf8)!)
+            }
+            try await transport.send(body)
+            await transport.disconnect()
+        }
+
+        @Test("Modern tool discovery excludes invalid custom-header annotations")
+        func invalidCustomHeaderToolIsFiltered() async throws {
+            let transport = HTTPClientTransport(endpoint: testEndpoint, protocolVersion: "2026-07-28")
+            let invalid = Tool(name: "invalid", description: nil, inputSchema: .object([
+                "type": .string("object"), "properties": .object([
+                    "score": .object(["type": .string("number"), "x-mcp-header": .string("Score")]),
+                ]),
+            ]))
+            let valid = Tool(name: "valid", description: nil, inputSchema: .object([
+                "type": .string("object"), "properties": .object([
+                    "tenant": .object(["type": .string("string"), "x-mcp-header": .string("Tenant")]),
+                ]),
+            ]))
+            let duplicate = Tool(name: "valid", description: nil, inputSchema: .object([
+                "type": .string("object"), "properties": .object([:]),
+            ]))
+            let filtered = await transport.updateToolDefinitions([invalid, valid, duplicate], reset: true)
+            #expect(filtered.map(\.name) == ["valid"])
         }
 
         @Test("Send and Receive Session ID", .httpClientTransportSetup)
@@ -333,6 +479,26 @@ import Testing
                 Issue.record("Expected MCPError, got \(error)")
                 throw error
             }
+        }
+
+        @Test("HTTP 404 preserves a matching JSON-RPC method-not-found error", .httpClientTransportSetup)
+        func testHTTP404DecodesMatchingJSONRPCError() async throws {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [MockURLProtocol.self]
+            let requestBody = #"{"jsonrpc":"2.0","method":"unknown/method","id":44}"#.data(using: .utf8)!
+            let errorBody = #"{"jsonrpc":"2.0","id":44,"error":{"code":-32601,"message":"Method not found"}}"#.data(using: .utf8)!
+            await MockURLProtocol.setHandler { [testEndpoint] _ in
+                (HTTPURLResponse(url: testEndpoint, statusCode: 404, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!, errorBody)
+            }
+            let transport = HTTPClientTransport(endpoint: testEndpoint, configuration: configuration, streaming: false)
+            try await transport.connect()
+            do {
+                try await transport.send(requestBody)
+                Issue.record("Expected JSON-RPC method-not-found error")
+            } catch let error as MCPError {
+                #expect(error.code == -32601)
+            }
+            await transport.disconnect()
         }
 
         @Test("HTTP 500 Server Error", .httpClientTransportSetup)
@@ -1178,7 +1344,7 @@ import Testing
 
                         let requestID = json["id"] as! String
                         let result = Initialize.Result(
-                            protocolVersion: Version.latest,
+                            protocolVersion: Version.latestLegacy,
                             capabilities: .init(tools: .init()),
                             serverInfo: .init(name: "Mock Server", version: "0.0.1"),
                             instructions: nil
@@ -1231,7 +1397,7 @@ import Testing
 
                 // Step 1: Initialize client
                 let initResult = try await client.connect(transport: transport)
-                #expect(initResult.protocolVersion == Version.latest)
+                #expect(initResult.protocolVersion == Version.latestLegacy)
                 #expect(initResult.capabilities.tools != nil)
 
                 // Step 2: Call a tool

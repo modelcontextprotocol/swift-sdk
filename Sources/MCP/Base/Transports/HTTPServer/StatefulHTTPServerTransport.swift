@@ -29,7 +29,7 @@ import Logging
 /// and receive `HTTPResponse` values to convert to your framework's native types.
 /// For SSE responses, the `.stream` case provides an `AsyncThrowingStream<Data, Error>`
 /// to pipe to the client.
-public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
+public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding, HTTPToolSchemaProviderInstalling {
     public nonisolated let logger: Logger
 
     // MARK: - Dependencies
@@ -43,6 +43,8 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
     private var sessionID: String?
     private var terminated = false
     private var started = false
+    private var toolSchemas = MCPToolSchemaRegistry()
+    private var toolSchemaProvider: (@Sendable (HTTPRequest) async -> Data?)?
 
     // MARK: - Incoming message stream (client → server)
 
@@ -53,6 +55,28 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
 
     /// Maps request ID → SSE stream continuation for active POST request streams.
     private var requestSSEContinuations: [String: AsyncThrowingStream<Data, Swift.Error>.Continuation] = [:]
+
+    /// Generation counters so a delayed `onTermination` for an old stream cannot
+    /// cancel a newer request that reused the same JSON-RPC id string.
+    private var requestSSEGenerations: [String: UInt64] = [:]
+    private var sseGenerationCounter: UInt64 = 0
+
+    /// Original JSON-RPC request ids (preserving string vs number) keyed by the
+    /// transport's string form of the id.
+    private var requestJSONRPCIds: [String: ID] = [:]
+
+    /// Whether the active POST stream is a modern-profile request (cancel on SSE close).
+    private var requestIsModern: [String: Bool] = [:]
+
+    /// Maps modern request progress tokens to their active POST SSE streams.
+    private var progressTokenRequestIDs: [ProgressToken: String] = [:]
+
+    /// Active `subscriptions/listen` request streams and their filters.
+    private var listenFilters: [String: SubscriptionsListen.NotificationFilter] = [:]
+    private var pendingListenFilters: [String: SubscriptionsListen.NotificationFilter] = [:]
+
+    /// True once this session was opened by a modern-profile request.
+    private var isModernSession = false
 
     /// Maps request ID → originating HTTP request, surfaced to handlers via
     /// ``Server/currentHTTPContext``. Cleared when the response is routed,
@@ -105,6 +129,7 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
             AcceptHeaderValidator(mode: .sseRequired),
             ContentTypeValidator(),
             ProtocolVersionValidator(),
+            MCPRoutingHeaderValidator(),
             SessionValidator(),
         ])
         self.retryInterval = retryInterval
@@ -132,6 +157,12 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
         terminate()
     }
 
+    package func setToolSchemaProvider(
+        _ provider: (@Sendable (HTTPRequest) async -> Data?)?
+    ) async {
+        toolSchemaProvider = provider
+    }
+
     /// Routes outgoing server messages to the appropriate client connection.
     ///
     /// - Responses are routed to the SSE stream matching the response's JSON-RPC ID.
@@ -144,6 +175,14 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
         guard let kind = JSONRPCMessageKind(data: data) else {
             logger.warning("Could not classify outgoing message for routing")
             return
+        }
+
+        if case .notification(let method) = kind, method == ToolListChangedNotification.name {
+            toolSchemas.invalidateAll()
+        }
+
+        if case .response(let id) = kind, let context = httpRequestContexts[id] {
+            toolSchemas.record(responseData: data, for: context)
         }
 
         switch kind {
@@ -178,7 +217,7 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
 
         switch request.method.uppercased() {
         case "POST":
-            return handlePost(request)
+            return await handlePost(request)
         case "GET":
             return handleGet(request)
         case "DELETE":
@@ -195,7 +234,7 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
 
     // MARK: - POST Handler
 
-    private func handlePost(_ request: HTTPRequest) -> HTTPResponse {
+    private func handlePost(_ request: HTTPRequest) async -> HTTPResponse {
         // Parse body first so we can determine if it's an initialization request
         guard let body = request.body, !body.isEmpty else {
             return .error(
@@ -213,17 +252,54 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
             )
         }
 
+        let bodyProtocolVersion = JSONRPCMessageKind.protocolVersion(inBody: body)
+        let headerProtocolVersion = request.header(HTTPHeaderName.protocolVersion)
+        let isModern = JSONRPCMessageKind.isModernProfile(
+            kind: messageKind,
+            body: body,
+            headerProtocolVersion: headerProtocolVersion
+        )
+
         // Build validation context
         let context = HTTPValidationContext(
             httpMethod: "POST",
-            sessionID: sessionID,
+            sessionID: isModern ? nil : sessionID,
             isInitializationRequest: messageKind.isInitializeRequest,
-            supportedProtocolVersions: Version.supported
+            isDiscoverRequest: messageKind.isDiscoverRequest,
+            isModernRequest: isModern,
+            bodyProtocolVersion: bodyProtocolVersion,
+            // Modern-classified POSTs must only accept modern revisions so
+            // UnsupportedProtocolVersionError is returned as HTTP 400.
+            supportedProtocolVersions: isModern ? Version.modern : Version.supported
         )
 
         // Run validation pipeline
         if let errorResponse = validationPipeline.validate(request, context: context) {
-            return errorResponse
+            return Self.responsePreservingRequestID(errorResponse, body: body)
+        }
+
+        if isModern, messageKind.methodName == CallTool.name {
+            var schemas = toolSchemas.schemas(for: request)
+            if let toolName = MCPToolHeaderSupport.toolName(in: body), schemas[toolName] == nil,
+                !toolSchemas.isComplete(for: request)
+            {
+                guard let provider = toolSchemaProvider,
+                    let responseData = await provider(request)
+                else {
+                    return Self.responsePreservingRequestID(
+                        .error(statusCode: 400, .serverError(code: -32020, message: "Unable to resolve tool schema for custom-header validation"), sessionID: nil),
+                        body: body
+                    )
+                }
+                toolSchemas.record(responseData: responseData, for: request)
+                schemas = toolSchemas.schemas(for: request)
+            }
+            if let mismatch = MCPToolHeaderSupport.validateCall(body: body, request: request, schemas: schemas) {
+                return Self.responsePreservingRequestID(
+                    .error(statusCode: 400, .serverError(code: -32020, message: mismatch), sessionID: nil),
+                    body: body
+                )
+            }
         }
 
         // Handle initialization request specially
@@ -231,12 +307,18 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
             return handleInitializationRequest(body, request: request)
         }
 
+        // Modern requests are sessionless on the wire, even when this transport
+        // also retains legacy initialize-session state internally.
+        if isModern {
+            self.isModernSession = true
+        }
+
         // Handle by message type
         switch messageKind {
         case .notification, .response:
             // Yield to server and return 202 Accepted
             incomingContinuation.yield(body)
-            return .accepted(headers: sessionHeaders())
+            return .accepted(headers: sessionHeaders(includeSessionID: !isModern))
 
         case .request(let id, _):
             return handleJSONRPCRequest(body, requestID: id, request: request)
@@ -282,10 +364,66 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
     }
 
     private func handleJSONRPCRequest(_ body: Data, requestID: String, request: HTTPRequest) -> HTTPResponse {
+        let bodyVersion = JSONRPCMessageKind.protocolVersion(inBody: body)
+        let method = JSONRPCMessageKind(data: body)?.methodName
+        let isModern = method == Discover.name || method == SubscriptionsListen.name
+            || (bodyVersion.map(Version.isModern) ?? false)
+        let listenFilter: SubscriptionsListen.NotificationFilter?
+        if method == SubscriptionsListen.name {
+            guard let filter = Self.notificationFilter(fromBody: body) else {
+                return Self.responsePreservingRequestID(.error(
+                    statusCode: 400,
+                    .invalidParams(
+                        "subscriptions/listen requires params.notifications"
+                    ),
+                    sessionID: isModern ? nil : sessionID
+                ), body: body)
+            }
+            listenFilter = filter
+        } else {
+            listenFilter = nil
+        }
+
+        // Do not let a concurrent duplicate replace the continuation and
+        // request context of an already active request.
+        guard requestSSEContinuations[requestID] == nil else {
+            return Self.responsePreservingRequestID(
+                .error(
+                    statusCode: 409,
+                    .invalidRequest("A request with this JSON-RPC id is already active"),
+                    sessionID: isModern ? nil : sessionID
+                ),
+                body: body
+            )
+        }
+
         // Create SSE stream for this request
         let (sseStream, sseContinuation) = AsyncThrowingStream<Data, Swift.Error>.makeStream()
+        sseGenerationCounter &+= 1
+        let generation = sseGenerationCounter
         requestSSEContinuations[requestID] = sseContinuation
+        requestSSEGenerations[requestID] = generation
+        requestJSONRPCIds[requestID] = JSONRPCMessageKind.jsonRPCID(inBody: body) ?? .string(requestID)
+        requestIsModern[requestID] =
+            method == Discover.name
+            || method == SubscriptionsListen.name
+            || (bodyVersion.map(Version.isModern) ?? false)
+        if let progressToken = JSONRPCMessageKind.progressToken(inBody: body) {
+            progressTokenRequestIDs[progressToken] = requestID
+        }
+        if let listenFilter {
+            pendingListenFilters[requestID] = listenFilter
+            // A modern listen on this session owns notification delivery — do not
+            // also store/push on the legacy GET channel (must-hold dual-era).
+            isModernSession = true
+        }
         httpRequestContexts[requestID] = request
+        // Client closing the SSE cancels the in-flight request (MCP: closing the
+        // stream cancels that request). Intentional finish after a response clears
+        // the generation so a delayed onTermination cannot cancel a reused id.
+        sseContinuation.onTermination = { [weak self] _ in
+            Task { await self?.handleRequestSSETerminated(requestID, generation: generation) }
+        }
 
         // Extract protocol version for priming event decision
         let protocolVersion = extractProtocolVersion(from: body, request: request)
@@ -301,7 +439,7 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
         incomingContinuation.yield(body)
 
         // Build response headers
-        var headers = sessionHeaders()
+        var headers = sessionHeaders(includeSessionID: !isModern)
         headers[HTTPHeaderName.contentType] = ContentType.sse
         headers[HTTPHeaderName.cacheControl] = "no-cache, no-transform"
         headers[HTTPHeaderName.connection] = "keep-alive"
@@ -309,15 +447,70 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
         return .stream(sseStream, headers: headers)
     }
 
+    /// Invoked when a POST request SSE stream ends. If this generation is still
+    /// the active stream for `requestID`, the client disconnected before a final
+    /// response — inject `notifications/cancelled` so the server cancels the handler.
+    private func handleRequestSSETerminated(_ requestID: String, generation: UInt64) {
+        guard requestSSEGenerations[requestID] == generation else { return }
+        let wasModern = requestIsModern[requestID] ?? false
+        requestSSEGenerations.removeValue(forKey: requestID)
+        requestSSEContinuations.removeValue(forKey: requestID)
+        let jsonRPCID = requestJSONRPCIds.removeValue(forKey: requestID)
+        requestIsModern.removeValue(forKey: requestID)
+        progressTokenRequestIDs = progressTokenRequestIDs.filter { $0.value != requestID }
+        listenFilters.removeValue(forKey: requestID)
+        pendingListenFilters.removeValue(forKey: requestID)
+        httpRequestContexts.removeValue(forKey: requestID)
+        // Legacy SEP-1699 expects reconnect/resume, not cancel-on-drop.
+        guard wasModern else { return }
+        injectClientCancellation(
+            id: jsonRPCID ?? .string(requestID),
+            reason: "SSE stream closed"
+        )
+    }
+
+    private func injectClientCancellation(id: ID, reason: String) {
+        let notification = CancelledNotification.message(
+            .init(requestId: id, reason: reason)
+        )
+        guard let data = try? JSONEncoder().encode(notification) else { return }
+        incomingContinuation.yield(data)
+        logger.debug(
+            "Injected cancellation after SSE close",
+            metadata: ["requestID": "\(id)"]
+        )
+    }
+
+    private func clearRequestStreamState(_ requestID: String) {
+        requestSSEContinuations.removeValue(forKey: requestID)
+        requestSSEGenerations.removeValue(forKey: requestID)
+        requestJSONRPCIds.removeValue(forKey: requestID)
+        requestIsModern.removeValue(forKey: requestID)
+        progressTokenRequestIDs = progressTokenRequestIDs.filter { $0.value != requestID }
+        listenFilters.removeValue(forKey: requestID)
+        pendingListenFilters.removeValue(forKey: requestID)
+        httpRequestContexts.removeValue(forKey: requestID)
+    }
+
     // MARK: - GET Handler
 
     private func handleGet(_ request: HTTPRequest) -> HTTPResponse {
+        if isModernSession {
+            return .error(
+                statusCode: 405,
+                .invalidRequest(
+                    "Modern sessions use subscriptions/listen; legacy GET SSE is not available"
+                ),
+                sessionID: sessionID
+            )
+        }
+
         // Build validation context (GET is never an initialization request)
         let context = HTTPValidationContext(
             httpMethod: "GET",
             sessionID: sessionID,
             isInitializationRequest: false,
-            supportedProtocolVersions: Version.supported
+            supportedProtocolVersions: Version.legacy
         )
 
         // Run validation pipeline
@@ -344,7 +537,7 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
         standaloneSSEContinuation = sseContinuation
 
         // Extract protocol version for priming event
-        let protocolVersion = request.header(HTTPHeaderName.protocolVersion) ?? Version.latest
+        let protocolVersion = request.header(HTTPHeaderName.protocolVersion) ?? Version.latestLegacy
 
         // Send priming event
         sendPrimingEvent(
@@ -407,15 +600,59 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
     private func routeResponse(_ data: Data, requestID: String) {
         routeToRequestStream(data, requestID: requestID)
 
-        // Response means the request is complete — close the stream
+        // Response means the request is complete — close the stream.
+        // Clear generation before finish so onTermination does not inject cancel.
         if let continuation = requestSSEContinuations[requestID] {
+            clearRequestStreamState(requestID)
             continuation.finish()
-            requestSSEContinuations.removeValue(forKey: requestID)
+        } else {
+            clearRequestStreamState(requestID)
         }
-        httpRequestContexts.removeValue(forKey: requestID)
     }
 
     private func routeServerInitiatedMessage(_ data: Data) {
+        if JSONRPCMessageKind(data: data)?.methodName == "notifications/progress",
+            let token = JSONRPCMessageKind.progressToken(inBody: data),
+            let requestID = progressTokenRequestIDs[token]
+        {
+            routeToRequestStream(data, requestID: requestID)
+            return
+        }
+
+        // Modern subscriptions/listen streams receive filtered notifications.
+        // Do not store listen deliveries in the legacy resumability event log.
+        let method = JSONRPCMessageKind(data: data)?.methodName
+        if method == SubscriptionsAcknowledgedNotification.name {
+            guard let subscriptionID = JSONRPCMessageKind.subscriptionID(inBody: data),
+                let requestID = requestJSONRPCIds.first(where: { $0.value == subscriptionID })?.key,
+                let continuation = requestSSEContinuations[requestID]
+            else { return }
+            guard let requestedFilter = pendingListenFilters.removeValue(forKey: requestID),
+                let acceptedFilter = Self.notificationFilter(fromBody: data)
+            else { return }
+            listenFilters[requestID] = requestedFilter.intersection(with: acceptedFilter)
+            continuation.yield(SSEEvent.message(data: data).formatted())
+            return
+        }
+
+        for (requestID, filter) in listenFilters {
+            guard let continuation = requestSSEContinuations[requestID] else { continue }
+            guard Self.notification(method, matches: filter, body: data) else { continue }
+            let id = requestJSONRPCIds[requestID] ?? .string(requestID)
+            let tagged = JSONRPCMessageKind.taggingSubscriptionNotification(
+                data,
+                subscriptionID: id
+            )
+            continuation.yield(SSEEvent.message(data: tagged).formatted())
+        }
+
+        // Modern sessions use subscriptions/listen only — never the legacy GET
+        // event store. Legacy sessions keep storing for SEP-1699 resume even
+        // while the GET stream is temporarily disconnected.
+        if isModernSession {
+            return
+        }
+
         let eventID = storeEvent(streamID: standaloneStreamID, message: data)
 
         guard let continuation = standaloneSSEContinuation else {
@@ -425,6 +662,46 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
 
         let sseEvent = SSEEvent.message(data: data, id: eventID)
         continuation.yield(sseEvent.formatted())
+    }
+
+    private static func notificationFilter(fromBody body: Data)
+        -> SubscriptionsListen.NotificationFilter?
+    {
+        guard let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+            let params = json["params"] as? [String: Any],
+            let notifications = params["notifications"] as? [String: Any]
+        else { return nil }
+        let data = try? JSONSerialization.data(withJSONObject: notifications)
+        return data.flatMap { try? JSONDecoder().decode(SubscriptionsListen.NotificationFilter.self, from: $0) }
+    }
+
+    /// Testable notification filter used by listen fan-out.
+    package static func notification(
+        _ method: String?,
+        matches filter: SubscriptionsListen.NotificationFilter,
+        body: Data
+    ) -> Bool {
+        guard let method else { return false }
+        switch method {
+        case ToolListChangedNotification.name:
+            return filter.toolsListChanged == true
+        case ResourceListChangedNotification.name:
+            return filter.resourcesListChanged == true
+        case PromptListChangedNotification.name:
+            return filter.promptsListChanged == true
+        case ResourceUpdatedNotification.name:
+            guard let uris = filter.resourceSubscriptions, !uris.isEmpty else {
+                return false
+            }
+            guard let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+                let params = json["params"] as? [String: Any],
+                let uri = params["uri"] as? String
+            else { return false }
+            return uris.contains(uri)
+        default:
+            // Unfiltered progressive/logging notifications are not opted into by default.
+            return false
+        }
     }
 
     // MARK: - Resumability
@@ -450,11 +727,24 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
         if replay.streamID == standaloneStreamID {
             standaloneSSEContinuation = sseContinuation
         } else {
-            requestSSEContinuations[replay.streamID] = sseContinuation
+            let resumedID = replay.streamID
+            sseGenerationCounter &+= 1
+            let generation = sseGenerationCounter
+            requestSSEContinuations[resumedID] = sseContinuation
+            requestSSEGenerations[resumedID] = generation
+            // Preserve JSON-RPC id type across SEP-1699 resume (stream id is the
+            // request id string form from the original POST).
+            if requestJSONRPCIds[resumedID] == nil {
+                requestJSONRPCIds[resumedID] =
+                    Int(resumedID).map { .number($0) } ?? .string(resumedID)
+            }
+            sseContinuation.onTermination = { [weak self] _ in
+                Task { await self?.handleRequestSSETerminated(resumedID, generation: generation) }
+            }
         }
 
         // Send a new priming event so the client can resume again if disconnected
-        let protocolVersion = request.header(HTTPHeaderName.protocolVersion) ?? Version.latest
+        let protocolVersion = request.header(HTTPHeaderName.protocolVersion) ?? Version.latestLegacy
         sendPrimingEvent(
             streamID: replay.streamID,
             continuation: sseContinuation,
@@ -514,17 +804,29 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
             return version
         }
         // For other requests, use the header
-        return request.header(HTTPHeaderName.protocolVersion) ?? Version.latest
+        return request.header(HTTPHeaderName.protocolVersion) ?? Version.latestLegacy
     }
 
     // MARK: - Session Helpers
 
-    private func sessionHeaders() -> [String: String] {
+    private func sessionHeaders(includeSessionID: Bool = true) -> [String: String] {
         var headers: [String: String] = [:]
-        if let sessionID {
+        if includeSessionID, let sessionID {
             headers[HTTPHeaderName.sessionID] = sessionID
         }
         return headers
+    }
+
+    private static func responsePreservingRequestID(_ response: HTTPResponse, body: Data) -> HTTPResponse {
+        guard case .error(let status, _, _, let extraHeaders) = response,
+            let request = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+            let id = request["id"],
+            var envelope = response.bodyData.flatMap({ try? JSONSerialization.jsonObject(with: $0) as? [String: Any] })
+        else { return response }
+        envelope["id"] = id
+        guard let encoded = try? JSONSerialization.data(withJSONObject: envelope) else { return response }
+        let headers = [HTTPHeaderName.contentType: ContentType.json].merging(extraHeaders) { _, new in new }
+        return .httpData(statusCode: status, encoded, headers: headers)
     }
 
     private func isValidSessionID(_ id: String) -> Bool {
@@ -538,17 +840,28 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
     ///
     /// Used to trigger client reconnection mid-call (SEP-1699). The response,
     /// when eventually sent, will be stored and replayed to the reconnected stream.
-    package func closeSSEStream(forRequestID requestID: String) {
+    package func closeSSEStream(forRequestID id: ID) {
+        let requestID = id.transportKey
         guard let continuation = requestSSEContinuations[requestID] else { return }
-        continuation.finish()
+        // Keep `requestJSONRPCIds` so a SEP-1699 resume can cancel with the
+        // original id type; clear generation so onTermination is a no-op.
         requestSSEContinuations.removeValue(forKey: requestID)
+        requestSSEGenerations.removeValue(forKey: requestID)
         httpRequestContexts.removeValue(forKey: requestID)
+        listenFilters.removeValue(forKey: requestID)
+        pendingListenFilters.removeValue(forKey: requestID)
+        requestIsModern.removeValue(forKey: requestID)
+        continuation.finish()
     }
 
     // MARK: - HTTPContextProviding
 
     public func httpRequestContext(for id: ID) -> HTTPRequest? {
-        httpRequestContexts[id.description]
+        httpRequestContexts[id.transportKey]
+    }
+
+    public func closeRequestStream(for id: ID) async {
+        closeSSEStream(forRequestID: id)
     }
 
     // MARK: - Termination
@@ -558,15 +871,23 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
     private func terminate() {
         guard !terminated else { return }
         terminated = true
+        isModernSession = false
 
         logger.info("Terminating session", metadata: ["sessionID": "\(sessionID ?? "none")"])
 
-        // Close all request SSE streams
-        for (_, continuation) in requestSSEContinuations {
+        // Close all request SSE streams (clear generation first to avoid cancel inject)
+        let continuations = Array(requestSSEContinuations.values)
+        requestSSEContinuations.removeAll()
+        requestSSEGenerations.removeAll()
+        requestJSONRPCIds.removeAll()
+        requestIsModern.removeAll()
+        progressTokenRequestIDs.removeAll()
+        listenFilters.removeAll()
+        pendingListenFilters.removeAll()
+        httpRequestContexts.removeAll()
+        for continuation in continuations {
             continuation.finish()
         }
-        requestSSEContinuations.removeAll()
-        httpRequestContexts.removeAll()
 
         // Close standalone GET stream
         standaloneSSEContinuation?.finish()
