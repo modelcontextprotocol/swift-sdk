@@ -1343,13 +1343,27 @@ import Testing
                         await tracker.append(request.url!)
                         return try await MockResponses.httpError(statusCode: 404)(request)
                     },
+                    URL(string: "https://localhost:8080/.well-known/oauth-authorization-server")!: {
+                        [tracker] request in
+                        await tracker.append(request.url!)
+                        return try await MockResponses.httpError(statusCode: 404)(request)
+                    },
+                    URL(string: "https://localhost:8080/.well-known/openid-configuration")!: {
+                        [tracker] request in
+                        await tracker.append(request.url!)
+                        return try await MockResponses.httpError(statusCode: 404)(request)
+                    },
+                    URL(string: "https://localhost:8080/register")!: { [tracker] request in
+                        await tracker.append(request.url!)
+                        return try await MockResponses.httpError(statusCode: 400)(request)
+                    },
                 ])
 
                 let context = OAuthScenarioContext(
                     testEndpoint: testEndpoint,
                     oauthConfiguration: .init(authentication: .none(clientID: "test-client")),
                     messageData: #"{"jsonrpc":"2.0","method":"ping","id":7}"#.data(using: .utf8)!,
-                    expectedErrorSubstring: "metadata"
+                    expectedErrorSubstring: "400"
                 )
                 return (context, tracker)
             }

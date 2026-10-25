@@ -131,6 +131,14 @@ public enum OAuthAuthorizationError: LocalizedError {
     ///   - actual: The `issuer` field value found in the metadata document.
     case authorizationServerIssuerMismatch(expected: String, actual: String)
 
+    /// The `iss` parameter of the authorization response does not equal the
+    /// issuer of the authorization server (RFC 9207, SEP-2468).
+    case authorizationResponseIssuerMismatch(expected: String, actual: String)
+
+    /// The authorization server advertised `iss` in authorization responses,
+    /// but the response has none (RFC 9207).
+    case authorizationResponseMissingIssuer
+
     public var errorDescription: String? {
         switch self {
         case .missingAuthorizationServer:
@@ -198,6 +206,10 @@ public enum OAuthAuthorizationError: LocalizedError {
         case .authorizationServerIssuerMismatch(let expected, let actual):
             return
                 "Authorization server issuer mismatch. Expected \(expected), got \(actual)"
+        case .authorizationResponseIssuerMismatch(let expected, let actual):
+            return "Authorization response issuer mismatch. Expected \(expected), got \(actual)"
+        case .authorizationResponseMissingIssuer:
+            return "Authorization response is missing the iss parameter the server advertised"
         }
     }
 }

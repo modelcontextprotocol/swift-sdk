@@ -23,6 +23,7 @@ protocol OAuthAuthorizationCodeFlowing: Sendable {
         authorizationURL: URL,
         redirectURI: URL,
         state: String,
+        issuer: OAuthAuthorizationCodeFlow.ExpectedIssuer?,
         delegate: (any OAuthAuthorizationDelegate)?,
         session: URLSession
     ) async throws -> String
@@ -53,6 +54,21 @@ final class OAuthNoRedirectSessionDelegate: NSObject, URLSessionTaskDelegate,
 public struct OAuthAuthorizationCodeFlow: Sendable {
 
     public init() {}
+
+    /// The authorization server that must have issued an authorization
+    /// response (RFC 9207, SEP-2468).
+    public struct ExpectedIssuer: Hashable, Sendable {
+        /// The issuer identifier from the server's metadata.
+        public var issuer: String
+        /// Whether the server advertised `authorization_response_iss_parameter_supported`,
+        /// so a response without `iss` is rejected.
+        public var isRequired: Bool
+
+        public init(issuer: String, isRequired: Bool) {
+            self.issuer = issuer
+            self.isRequired = isRequired
+        }
+    }
 
     /// Builds the authorization request URL.
     ///
@@ -114,6 +130,7 @@ public struct OAuthAuthorizationCodeFlow: Sendable {
     ///   - authorizationURL: The full authorization request URL.
     ///   - redirectURI: The expected redirect URI base for validation.
     ///   - state: The CSRF state nonce to verify in the redirect.
+    ///   - issuer: The authorization server that must have issued the response.
     ///   - delegate: Optional user-facing delegate for browser-based flows.
     ///   - session: The `URLSession` used for the no-redirect path.
     /// - Returns: The extracted authorization code.
@@ -121,6 +138,7 @@ public struct OAuthAuthorizationCodeFlow: Sendable {
         authorizationURL: URL,
         redirectURI: URL,
         state: String,
+        issuer: ExpectedIssuer? = nil,
         delegate: (any OAuthAuthorizationDelegate)?,
         session: URLSession
     ) async throws -> String {
@@ -129,7 +147,8 @@ public struct OAuthAuthorizationCodeFlow: Sendable {
             return try extractCode(
                 from: redirectURL,
                 expectedRedirectURI: redirectURI,
-                expectedState: state
+                expectedState: state,
+                expectedIssuer: issuer
             )
         }
 
@@ -168,21 +187,27 @@ public struct OAuthAuthorizationCodeFlow: Sendable {
         return try extractCode(
             from: redirectURL,
             expectedRedirectURI: redirectURI,
-            expectedState: state
+            expectedState: state,
+            expectedIssuer: issuer
         )
     }
 
     /// Extracts and validates the authorization code from the redirect URL.
     ///
+    /// An `iss` parameter must equal the expected issuer exactly, without URL
+    /// normalization; a missing `iss` is rejected when the server advertised it.
+    ///
     /// - Parameters:
     ///   - redirectURL: The redirect URL received from the authorization server.
     ///   - expectedRedirectURI: The redirect URI used in the authorization request.
     ///   - expectedState: The CSRF state nonce sent in the authorization request.
+    ///   - expectedIssuer: The authorization server that must have issued the response.
     /// - Returns: The authorization code.
     public func extractCode(
         from redirectURL: URL,
         expectedRedirectURI: URL,
-        expectedState: String
+        expectedState: String,
+        expectedIssuer: ExpectedIssuer? = nil
     ) throws -> String {
         guard
             let redirectComponents = URLComponents(url: redirectURL, resolvingAgainstBaseURL: false),
@@ -216,6 +241,20 @@ public struct OAuthAuthorizationCodeFlow: Sendable {
                 expected: expectedState,
                 actual: state
             )
+        }
+
+        if let expectedIssuer {
+            let iss = redirectComponents.queryItems?.first(where: {
+                $0.name == OAuthParameterName.issuer
+            })?.value
+            if let iss {
+                guard iss == expectedIssuer.issuer else {
+                    throw OAuthAuthorizationError.authorizationResponseIssuerMismatch(
+                        expected: expectedIssuer.issuer, actual: iss)
+                }
+            } else if expectedIssuer.isRequired {
+                throw OAuthAuthorizationError.authorizationResponseMissingIssuer
+            }
         }
 
         guard

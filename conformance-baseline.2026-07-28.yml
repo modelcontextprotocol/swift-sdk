@@ -8,30 +8,4 @@
 # failed without producing a failing check. The harness fails a run on any
 # unlisted failure and on any listed entry that now passes.
 server: []
-client:
-  - "auth/authorization-server-migration:sep-2352-reregister-on-as-change"
-  - "auth/authorization-server-migration:sep-837-application-type-present"
-  - "auth/iss-normalized:sep-2468-client-no-normalization"
-  - "auth/iss-normalized:sep-837-application-type-present"
-  - "auth/iss-not-advertised:sep-837-application-type-present"
-  - "auth/iss-supported-missing:sep-2468-client-reject-missing-iss"
-  - "auth/iss-supported-missing:sep-837-application-type-present"
-  - "auth/iss-supported:sep-837-application-type-present"
-  - "auth/iss-unexpected:sep-2468-client-compare-iss-unadvertised"
-  - "auth/iss-unexpected:sep-837-application-type-present"
-  - "auth/iss-wrong-issuer:sep-2468-client-compare-iss-supported"
-  - "auth/iss-wrong-issuer:sep-837-application-type-present"
-  - "auth/metadata-default:sep-837-application-type-present"
-  - "auth/metadata-issuer-mismatch:sep-2468-client-validate-metadata-issuer"
-  - "auth/metadata-issuer-mismatch:sep-837-application-type-present"
-  - "auth/metadata-var1:sep-837-application-type-present"
-  - "auth/metadata-var2:sep-837-application-type-present"
-  - "auth/metadata-var3:sep-837-application-type-present"
-  - "auth/offline-access-not-supported:sep-837-application-type-present"
-  - "auth/offline-access-scope:sep-837-application-type-present"
-  - "auth/scope-from-scopes-supported:sep-837-application-type-present"
-  - "auth/scope-from-www-authenticate:sep-837-application-type-present"
-  - "auth/scope-omitted-when-undefined:sep-837-application-type-present"
-  - "auth/scope-retry-limit:sep-837-application-type-present"
-  - "auth/scope-step-up:sep-837-application-type-present"
-  - "auth/token-endpoint-auth-none:sep-837-application-type-present"
+client: []

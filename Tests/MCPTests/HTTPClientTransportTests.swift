@@ -1864,7 +1864,7 @@ import Testing
                 await transport.disconnect()
             }
 
-            @Test("OAuth discovery fails when protected resource metadata is unavailable", .httpClientTransportSetup)
+            @Test("Without any metadata, OAuth falls back to the server root endpoints (2025-03-26)", .httpClientTransportSetup)
             func testOAuthDiscoveryFailsWhenMetadataUnavailable() async throws {
                 let (scenario, tracker) = await MockURLProtocol.requestHandlerStorage
                     .configureOAuthDiscoveryFailsWhenMetadataUnavailable()
@@ -1893,12 +1893,14 @@ import Testing
                     throw error
                 }
 
-                let protectedResourceMetadataRequests = await tracker.requests
+                let requests = await tracker.requests
                 let fallbackPathMetadataURL = URL(
                     string: "https://localhost:8080/.well-known/oauth-protected-resource/public/mcp")!
                 let fallbackRootMetadataURL = URL(
                     string: "https://localhost:8080/.well-known/oauth-protected-resource")!
-                #expect(protectedResourceMetadataRequests == [fallbackPathMetadataURL, fallbackRootMetadataURL])
+                #expect(Array(requests.prefix(2)) == [fallbackPathMetadataURL, fallbackRootMetadataURL])
+                // No metadata anywhere: registration goes to the server root.
+                #expect(requests.last == URL(string: "https://localhost:8080/register")!)
 
                 await transport.disconnect()
             }

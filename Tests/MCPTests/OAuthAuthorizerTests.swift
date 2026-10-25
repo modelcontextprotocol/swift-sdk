@@ -64,13 +64,23 @@ final class MockDiscoveryClient: OAuthDiscoveryFetching, @unchecked Sendable {
         )
     }
 
+    /// Thrown by the next protected resource metadata fetch, then cleared.
+    var protectedResourceMetadataError: Error?
+    /// The `trustedIssuer` of the last authorization server metadata fetch.
+    var lastTrustedIssuer: URL?
+
     func fetchProtectedResourceMetadata(candidates: [URL], fallbackIssuer: URL?, session: URLSession) async throws -> OAuthProtectedResourceMetadata {
         fetchProtectedResourceMetadataCallCount += 1
+        if let error = protectedResourceMetadataError {
+            protectedResourceMetadataError = nil
+            throw error
+        }
         return protectedResourceMetadataResult
     }
 
-    func fetchAuthorizationServerMetadata(candidates: [URL], session: URLSession) async throws -> (server: URL, metadata: OAuthAuthorizationServerMetadata) {
+    func fetchAuthorizationServerMetadata(candidates: [URL], trustedIssuer: URL?, session: URLSession) async throws -> (server: URL, metadata: OAuthAuthorizationServerMetadata) {
         fetchAuthorizationServerMetadataCallCount += 1
+        lastTrustedIssuer = trustedIssuer
         return authorizationServerMetadataResult
     }
 }
@@ -100,6 +110,8 @@ final class MockTokenClient: OAuthTokenRequesting, @unchecked Sendable {
 
 final class MockClientRegistrar: OAuthClientRegistering, @unchecked Sendable {
     var registerCallCount = 0
+    /// The authentication each registration started from.
+    var registeredFrom: [OAuthConfiguration.TokenEndpointAuthentication] = []
     var registrationResult: (
         response: OAuthClientRegistrationResponse,
         updatedAuthentication: OAuthConfiguration.TokenEndpointAuthentication
@@ -114,6 +126,7 @@ final class MockClientRegistrar: OAuthClientRegistering, @unchecked Sendable {
         updatedAuthentication: OAuthConfiguration.TokenEndpointAuthentication
     )? {
         registerCallCount += 1
+        registeredFrom.append(configuration.authentication)
         return registrationResult
     }
 }
@@ -122,6 +135,7 @@ final class MockAuthCodeFlow: OAuthAuthorizationCodeFlowing, @unchecked Sendable
     var buildURLCallCount = 0
     var performCallCount = 0
     var authorizationCode = "mock-auth-code"
+    var lastIssuer: OAuthAuthorizationCodeFlow.ExpectedIssuer?
 
     func buildURL(
         authorizationEndpoint: URL,
@@ -141,10 +155,12 @@ final class MockAuthCodeFlow: OAuthAuthorizationCodeFlowing, @unchecked Sendable
         authorizationURL: URL,
         redirectURI: URL,
         state: String,
+        issuer: OAuthAuthorizationCodeFlow.ExpectedIssuer?,
         delegate: (any OAuthAuthorizationDelegate)?,
         session: URLSession
     ) async throws -> String {
         performCallCount += 1
+        lastIssuer = issuer
         return authorizationCode
     }
 }

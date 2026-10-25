@@ -1836,6 +1836,39 @@ When a server returns `401 Unauthorized` or `403 Forbidden`, the transport autom
 Authorization is opt-in and disabled by default.
 Pass an `OAuthAuthorizer` to `HTTPClientTransport(authorizer:)` to enable it.
 
+The authorizer also:
+
+- uses authorization server metadata only when its `issuer` equals the issuer
+  the well-known URL was built from (RFC 8414 §3.3); a root issuer may differ
+  by a trailing slash only. The comparison is case-sensitive. An issuer set in
+  `endpointOverrides.authorizationServerURL` is trusted: its metadata is used
+  whatever `issuer` it names;
+- checks the `iss` parameter of the authorization response against that
+  issuer with simple string comparison, and rejects a response without `iss`
+  when the server advertises `authorization_response_iss_parameter_supported`
+  (RFC 9207, SEP-2468);
+- sends `application_type` during dynamic registration (SEP-837): `web` for
+  an `https` redirect URI on a non-loopback host, otherwise `native`. Set
+  `OAuthConfiguration(applicationType:)` to choose;
+- when a token is rejected, refreshes it first at the server that issued it,
+  and reads the resource metadata again when that fails or the refreshed
+  token is rejected too. When the resource names another authorization
+  server, registered credentials and tokens from the previous server are
+  dropped and the client registers again (SEP-2352). Pre-registered
+  credentials are kept. A failed read falls back to the metadata read before;
+  with none, the request fails and the token is kept;
+- refreshes a token only at the server that issued it. A token without a
+  recorded server is refreshed only at a configured server or token endpoint;
+- falls back to `/authorize`, `/token` and `/register` at the server origin
+  only when every metadata URL answers 404 or 410 on first discovery (2025-03-26
+  servers). A network error, a timeout, a cancelled request or another status
+  fails the request instead;
+- handles one challenge at a time: concurrent requests that get a 401 wait for
+  the first and retry with the token it obtained.
+
+`InMemoryTokenStorage` is safe to use from several tasks; custom
+`TokenStorage` implementations must be too.
+
 ### Client: Client Credentials Flow
 
 Machine-to-machine authentication using a pre-shared client secret:
