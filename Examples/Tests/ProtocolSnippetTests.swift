@@ -192,4 +192,10 @@ struct ProtocolSnippetTests {
         #expect(workload.grantType == .jwtBearer)
         #expect(workload.authentication == .none(clientID: ""))
     }
+
+    @Test func dpopConfigurationSignsProofs() throws {
+        let configuration = dpopConfiguration { $0 }
+        let dpop = try #require(configuration.dpop)
+        #expect(dpop.keyThumbprint.count == 43)
+    }
 }

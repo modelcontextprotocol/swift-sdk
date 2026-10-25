@@ -442,6 +442,10 @@ public struct OAuthConfiguration: Sendable {
     /// `aud` claim.
     public let allowsDiscoveredAuthorizationServer: Bool
 
+    /// Sender-constrained tokens (RFC 9449). `nil` uses Bearer tokens.
+    /// Tokens from ``accessTokenProvider`` are always used as Bearer tokens.
+    public var dpop: DPoP?
+
     /// Optional delegate for browser-based authorization code flows.
     public let authorizationDelegate: (any OAuthAuthorizationDelegate)?
 
@@ -473,6 +477,7 @@ public struct OAuthConfiguration: Sendable {
     ///   - accessTokenProvider: Optional closure invoked after discovery, allowing the host app
     ///     to supply an externally acquired token (e.g., from a system credential store).
     ///   - assertionProvider: The JWT source of the `.jwtBearer` grant.
+    ///   - dpop: Sender-constrained tokens with DPoP. `nil` uses Bearer tokens.
     ///   - authorizationDelegate: Optional delegate that presents the authorization URL to the
     ///     user for interactive `authorization_code` flows.
     ///   - proactiveRefreshWindowSeconds: Seconds before expiry at which a token is proactively
@@ -490,12 +495,14 @@ public struct OAuthConfiguration: Sendable {
         additionalTokenRequestParameters: [String: String] = [:],
         accessTokenProvider: AccessTokenProvider? = nil,
         assertionProvider: AssertionProvider? = nil,
+        dpop: DPoP? = nil,
         authorizationDelegate: (any OAuthAuthorizationDelegate)? = nil,
         proactiveRefreshWindowSeconds: TimeInterval = 60,
         allowsDiscoveredAuthorizationServer: Bool = false
     ) {
         self.assertionProvider = assertionProvider
         self.allowsDiscoveredAuthorizationServer = allowsDiscoveredAuthorizationServer
+        self.dpop = dpop
         self.grantType = grantType
         self.authentication = authentication
         self.retryPolicy = retryPolicy

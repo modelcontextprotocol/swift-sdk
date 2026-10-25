@@ -28,17 +28,24 @@ public protocol HTTPClientAuthorizer: AnyObject, Sendable {
     /// - Parameter endpoint: The MCP endpoint URL to validate.
     func validateEndpointSecurity(for endpoint: URL) throws
 
-    /// Returns the `Authorization` header value to attach to the next request, if a valid token is available.
+    /// Returns the headers that authorize a request, if a valid token is available.
     ///
-    /// - Parameter endpoint: The MCP endpoint being requested.
-    /// - Returns: A `"Bearer <token>"` string, or `nil` if no valid token is cached.
-    func authorizationHeader(for endpoint: URL) -> String?
+    /// ``HTTPClientTransport`` calls this for every request, after its
+    /// `requestModifier`, with the final URL and method; the returned headers
+    /// replace any of the same name.
+    ///
+    /// - Parameters:
+    ///   - url: The request URL.
+    ///   - method: The HTTP method, such as `POST` or `GET`.
+    /// - Returns: `Authorization` (`Bearer <token>` or `DPoP <token>`) and, for
+    ///   a DPoP-bound token, a `DPoP` proof; empty if no valid token is cached.
+    func authorizationHeaders(for url: URL, method: String) throws -> [String: String]
 
     /// Handles an authorization challenge received from the server and attempts to acquire a new token.
     ///
     /// Called by ``HTTPClientTransport`` when a `401` or `403` response is received.
     /// The implementation should attempt to obtain a valid access token and store it
-    /// so that a subsequent call to ``authorizationHeader(for:)`` returns the new value.
+    /// so that a subsequent call to ``authorizationHeaders(for:method:)`` returns it.
     ///
     /// - Parameters:
     ///   - statusCode: The HTTP status code (401 or 403).
@@ -96,6 +103,17 @@ public protocol HTTPClientAuthorizer: AnyObject, Sendable {
     ///   - endpoint: The MCP endpoint about to be contacted.
     ///   - session: The `URLSession` to use for token refresh requests.
     func prepareAuthorization(for endpoint: URL, session: URLSession) async throws
+
+    /// Inspects the headers of a response, before any challenge handling.
+    ///
+    /// ``HTTPClientTransport`` calls this for every response with the URL the
+    /// request was sent to. ``OAuthAuthorizer`` records a `DPoP-Nonce` here
+    /// (RFC 9449 §8). The default does nothing.
+    ///
+    /// - Parameters:
+    ///   - headers: The response headers.
+    ///   - url: The request URL.
+    func didReceiveResponse(headers: [String: String], for url: URL)
 }
 
 extension HTTPClientAuthorizer {
@@ -115,6 +133,8 @@ extension HTTPClientAuthorizer {
             statusCode: statusCode, headers: headers, endpoint: endpoint, operationKey: operationKey,
             session: session)
     }
+
+    public func didReceiveResponse(headers: [String: String], for url: URL) {}
 }
 
 // MARK: - OAuthAuthorizer
@@ -134,6 +154,9 @@ extension HTTPClientAuthorizer {
 /// 5. **Token refresh** — attempts a `refresh_token` grant before a full re-authorization.
 /// 6. **Scope step-up** — handles `403 insufficient_scope` challenges by re-requesting with
 ///    the union of existing and required scopes.
+/// 7. **DPoP** (RFC 9449) — with ``OAuthConfiguration/dpop``, signs a proof for every token
+///    and MCP request, presents bound tokens with the `DPoP` scheme, and retries
+///    `use_dpop_nonce` errors with the server's nonce.
 ///
 /// Pass an instance to `HTTPClientTransport(authorizer:)` to enable automatic authorization:
 ///
@@ -264,6 +287,8 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
     private let tokenEndpointClient: any OAuthTokenRequesting
     private let clientRegistrar: any OAuthClientRegistering
     private let authCodeFlow: any OAuthAuthorizationCodeFlowing
+    /// Signs DPoP proofs when ``OAuthConfiguration/dpop`` is set.
+    private let dpopSigner: DPoPProofSigner?
 
     /// Creates an `OAuthAuthorizer` with the given configuration and optional injectable dependencies.
     ///
@@ -327,6 +352,7 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
         self.tokenEndpointClient = tokenEndpointClient
         self.clientRegistrar = clientRegistrar
         self.authCodeFlow = authCodeFlow
+        self.dpopSigner = configuration.dpop.map(DPoPProofSigner.init)
     }
 
     // MARK: - HTTPClientAuthorizer
@@ -339,19 +365,35 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
         try urlValidator.validateHTTPSOrLoopback(endpoint, context: "MCP endpoint")
     }
 
-    public func authorizationHeader(for endpoint: URL) -> String? {
-        guard let accessToken = tokenStorage.load() else { return nil }
+    public func authorizationHeaders(for url: URL, method: String) throws -> [String: String] {
+        guard let accessToken = tokenStorage.load() else { return [:] }
         if let tokenAuthorizationServer = accessToken.authorizationServer,
             let selectedAuthorizationServer,
             !authorizationServersMatch(tokenAuthorizationServer, selectedAuthorizationServer)
         {
             tokenStorage.clear()
-            return nil
+            return [:]
         }
         if accessToken.isExpired() {
-            return nil
+            return [:]
         }
-        return "\(OAuthTokenType.bearer) \(accessToken.value)"
+        guard accessToken.isDPoPBound else {
+            return [HTTPHeaderName.authorization: "\(OAuthTokenType.bearer) \(accessToken.value)"]
+        }
+        // A DPoP-bound token is usable only with the key it is bound to.
+        guard let dpopSigner, accessToken.keyThumbprint == dpopSigner.thumbprint else {
+            tokenStorage.clear()
+            return [:]
+        }
+        return [
+            HTTPHeaderName.authorization: "\(OAuthTokenType.dpop) \(accessToken.value)",
+            HTTPHeaderName.dpop: try dpopSigner.proof(
+                method: method, url: url, accessToken: accessToken.value, server: .resourceServer),
+        ]
+    }
+
+    public func didReceiveResponse(headers: [String: String], for url: URL) {
+        dpopSigner?.recordNonce(from: headers, for: url, server: .resourceServer)
     }
 
     public func handleChallenge(
@@ -435,7 +477,18 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
         sentToken: String?,
         session: URLSession
     ) async throws -> Bool {
-        let challenge = challengeParser.parseBearer(from: headers)
+        let dpopChallenge = challengeParser.parseChallenge(scheme: OAuthTokenType.dpop, from: headers)
+        let challenge = challengeParser.parseBearer(from: headers) ?? dpopChallenge
+
+        if let dpopSigner {
+            let nonce = dpopSigner.recordNonce(from: headers, for: endpoint, server: .resourceServer)
+            // RFC 9449 §9: the token is valid; retry with the server's nonce.
+            if statusCode == 401, dpopChallenge?.error == OAuthErrorCode.useDPoPNonce, nonce != nil,
+                let token = tokenStorage.load(), token.isDPoPBound, !token.isExpired()
+            {
+                return true
+            }
+        }
 
         switch statusCode {
         case 401:
@@ -838,6 +891,7 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
     ) async throws {
         let asMetadata = try await resolveAuthorizationServerMetadata(
             metadata: metadata, session: session)
+        try checkDPoPSupport(metadata: metadata, asMetadata: asMetadata)
         try await maybeRegisterClient(asMetadata: asMetadata, session: session)
         let resource = try canonicalResource(for: endpoint)
 
@@ -912,6 +966,7 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
             parameters: &bodyParameters,
             endpoint: tokenEndpoint,
             authentication: configuration.authentication,
+            dpop: dpopSigner,
             session: session
         )
         storeTokenResponse(decoded, requestedScopes: requestedScopes)
@@ -949,6 +1004,7 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
             parameters: &bodyParameters,
             endpoint: tokenEndpoint,
             authentication: configuration.authentication,
+            dpop: dpopSigner,
             session: session
         )
         storeTokenResponse(decoded, requestedScopes: requestedScopes)
@@ -1021,9 +1077,29 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
             parameters: &bodyParameters,
             endpoint: tokenEndpoint,
             authentication: configuration.authentication,
+            dpop: dpopSigner,
             session: session
         )
         storeTokenResponse(decoded, requestedScopes: requestedScopes)
+    }
+
+    /// RFC 9449 §5.1, §5.2: the resource may require DPoP, and the
+    /// authorization server must accept ES256 proofs.
+    private func checkDPoPSupport(
+        metadata: OAuthProtectedResourceMetadata,
+        asMetadata: OAuthAuthorizationServerMetadata
+    ) throws {
+        guard dpopSigner != nil else {
+            if metadata.dpopBoundAccessTokensRequired == true {
+                throw OAuthAuthorizationError.dpopRequired
+            }
+            return
+        }
+        if let algorithms = asMetadata.dpopSigningAlgValuesSupported,
+            !algorithms.contains(DPoPProofSigner.algorithm)
+        {
+            throw OAuthAuthorizationError.dpopAlgorithmUnsupported(supported: algorithms)
+        }
     }
 
     // MARK: - Token Refresh
@@ -1067,6 +1143,7 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
                 parameters: &bodyParameters,
                 endpoint: tokenEndpoint,
                 authentication: configuration.authentication,
+                dpop: dpopSigner,
                 session: session
             )
             storeTokenResponse(decoded, requestedScopes: requestedScopes)
@@ -1156,14 +1233,19 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
         storedTokenLifetime = decoded.expiresIn.map { (decoded.accessToken, TimeInterval($0)) }
         // A stored token is new, even with the value of the one tried.
         proactivelyRenewedToken = nil
+        // A Bearer answer to a DPoP request is a downgrade (RFC 9449 §5): use it as Bearer.
+        let boundKey =
+            decoded.tokenType.caseInsensitiveCompare(OAuthTokenType.dpop) == .orderedSame
+            ? dpopSigner?.thumbprint : nil
         tokenStorage.save(OAuthAccessToken(
             value: decoded.accessToken,
-            tokenType: OAuthTokenType.bearer,
+            tokenType: boundKey == nil ? OAuthTokenType.bearer : OAuthTokenType.dpop,
             expiresAt: expiresAt,
             scopes: scopeSet,
             authorizationServer: selectedAuthorizationServer,
             refreshToken: decoded.refreshToken,
-            clientID: nonEmptyClientID()
+            clientID: nonEmptyClientID(),
+            keyThumbprint: boundKey
         ))
     }
 

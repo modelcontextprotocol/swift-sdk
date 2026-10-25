@@ -50,6 +50,22 @@ func authorizationCodeTransport(
     return transport
 }
 
+/// An interactive client with sender-constrained tokens (RFC 9449, SEP-1932).
+func dpopConfiguration(open: @escaping @Sendable (URL) async throws -> URL) -> OAuthConfiguration {
+    // snippet: auth-dpop
+    let configuration = OAuthConfiguration(
+        grantType: .authorizationCode,
+        authentication: .none(clientID: ""),
+        // A new P-256 key. Tokens are bound to it: to keep stored tokens
+        // usable after a relaunch, persist the key with them and pass the
+        // restored key to `DPoP(privateKey:)`, or use `DPoP(key:)` with a
+        // `SecureEnclave.P256.Signing.PrivateKey`.
+        dpop: .init(),
+        authorizationDelegate: BrowserAuthorization(open: open))
+    // endsnippet
+    return configuration
+}
+
 /// A client in an enterprise that manages access to MCP servers (SEP-990).
 func enterpriseConfiguration(signIn: @escaping @Sendable () async throws -> String) -> OAuthConfiguration {
     // snippet: auth-enterprise

@@ -125,8 +125,8 @@ struct HTTPClientConnectionLimitTests {
 
         func validateEndpointSecurity(for endpoint: URL) throws {}
 
-        func authorizationHeader(for endpoint: URL) -> String? {
-            lock.withLock { "Bearer \(token)" }
+        func authorizationHeaders(for url: URL, method: String) throws -> [String: String] {
+            lock.withLock { ["Authorization": "Bearer \(token)"] }
         }
 
         func handleChallenge(

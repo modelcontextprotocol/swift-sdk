@@ -48,8 +48,15 @@ enum OAuthWellKnownPath {
 
 // MARK: - OAuth Token Type
 
+/// OAuth `error` values the client acts on.
+enum OAuthErrorCode {
+    /// RFC 9449 §8, §9: retry with the server's `DPoP-Nonce`.
+    static let useDPoPNonce = "use_dpop_nonce"
+}
+
 enum OAuthTokenType {
     static let bearer = "Bearer"
+    static let dpop = "DPoP"
 }
 
 // MARK: - OAuth Code Challenge Method

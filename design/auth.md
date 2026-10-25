@@ -32,7 +32,7 @@ fallback endpoints.
 public protocol HTTPClientAuthorizer: AnyObject, Sendable {
     var maxAuthorizationAttempts: Int { get }
     func validateEndpointSecurity(for endpoint: URL) throws
-    func authorizationHeader(for endpoint: URL) -> String?
+    func authorizationHeaders(for url: URL, method: String) throws -> [String: String]
     func handleChallenge(statusCode: Int, headers: [String: String], endpoint: URL,
                          operationKey: String?, session: URLSession) async throws -> Bool
     func prepareAuthorization(for endpoint: URL, session: URLSession) async throws  // default no-op
@@ -40,9 +40,13 @@ public protocol HTTPClientAuthorizer: AnyObject, Sendable {
 ```
 
 `HTTPClientTransport(endpoint:authorizer:)` calls, for each POST and before opening the GET
-stream: `validateEndpointSecurity`, `prepareAuthorization` (errors ignored), then sets
-`Authorization` from `authorizationHeader`. On 401 or 403 it calls `handleChallenge` and retries
-while the result is `true` and fewer than `maxAuthorizationAttempts` attempts were made. Errors
+stream: `validateEndpointSecurity`, `prepareAuthorization` (errors ignored), then, after the
+`requestModifier`, sets the headers from `authorizationHeaders` for the final URL and method
+(DPoP proofs sign both). It passes the headers of every response, with the request URL, to
+`didReceiveResponse` (default: nothing). On 401 or 403 it calls `handleChallenge` and retries
+while the result is `true` and fewer than `maxAuthorizationAttempts` attempts were made; a
+`use_dpop_nonce` challenge does not count, and a second one fails the request without calling
+`handleChallenge`. Errors
 from `handleChallenge` become `MCPError.internalError("Authorization flow failed: …")`.
 
 `OAuthAuthorizer` is the built-in implementation, configured with `OAuthConfiguration`:
@@ -57,6 +61,7 @@ from `handleChallenge` become `MCPError.internalError("Authorization flow failed
 | `clientName`, `applicationType` | `"mcp-swift-sdk"`, inferred |
 | `accessTokenProvider` | none; supplies an external token after discovery |
 | `assertionProvider` | none; the JWT of the `.jwtBearer` grant |
+| `dpop` | none (Bearer); `DPoP(privateKey:)` or `DPoP(key:)` (any `DPoPSigningKey`, e.g. Secure Enclave) binds tokens to a P-256 key |
 | `authorizationDelegate` | none; presents the authorization URL |
 | `proactiveRefreshWindowSeconds` | 60 |
 
@@ -98,6 +103,11 @@ challenge that waited while another ended with an error, and finds no unexpired 
 that error instead of running the same flow again: one prompt for an authorization the user
 cancelled. A cancelled challenge is not counted.
 
+0. With DPoP, a `DPoP-Nonce` header is stored for the MCP server's origin (`didReceiveResponse`
+   stores it for the origin each request went to). A `DPoP` challenge
+   with `error="use_dpop_nonce"` while a valid DPoP token is stored retries with the nonce and
+   keeps the token. The transport retries a request once for such a challenge; a second one
+   fails the request.
 1. If the stored token has a refresh token, the challenge names no other PRM URL, the token is
    not the one the last refresh returned, and AS metadata is cached: refresh at that AS.
    Success → retry.
@@ -233,6 +243,35 @@ Comparison: the Python SDK implements leg 2 (`IdentityAssertionOAuthProvider`, c
 no PRM) and leaves leg 1 to the application; the Go SDK has both legs (`EnterpriseHandler`,
 `oauthex.ExchangeToken`) and an OIDC login helper. Neither has the workload identity grant.
 
+### DPoP (RFC 9449, SEP-1932)
+
+`DPoPProofSigner` (internal) holds the key (`any DPoPSigningKey`: `publicKey` and
+`signature(for:)`; `P256.Signing.PrivateKey` and, with CryptoKit,
+`SecureEnclave.P256.Signing.PrivateKey` conform), its JWK and RFC 7638 thumbprint, and the
+nonces, keyed by kind (authorization server or resource server) and origin, behind a lock.
+
+- Proof: compact JWS, header `typ` `dpop+jwt`, `alg` `ES256`, `jwk` (EC P-256 `x`, `y`); claims
+  `jti` (16 random bytes), `htm`, `htu` (scheme and host lowercased, no user information, query
+  or fragment),
+  `iat`, `ath` (base64url SHA-256 of the access token) on resource requests, and `nonce` when
+  one is stored. The signature is the raw `r‖s` form, as for `private_key_jwt`.
+- Token endpoint: `OAuthTokenEndpointClient.request(…, dpop:)` adds the proof to every grant.
+  A 400 `use_dpop_nonce` with a `DPoP-Nonce` header is retried once; any `DPoP-Nonce` is
+  stored. `token_type` is trimmed when decoded, so acceptance and storage see the same value;
+  `DPoP` is accepted only for a request that carried a proof. The SEP-990
+  identity provider exchange carries no proof: its result is an assertion, not an access token.
+- Storage: a `DPoP` token is stored with `tokenType` `DPoP` and `keyThumbprint`. A `Bearer`
+  answer (an AS without DPoP) is stored and used as Bearer. `authorizationHeaders` discards a
+  DPoP token whose thumbprint differs from the configured key's, or any DPoP token when DPoP
+  is off.
+- Metadata: with DPoP, AS `dpop_signing_alg_values_supported` without `ES256` throws
+  `dpopAlgorithmUnsupported`; without DPoP, PRM `dpop_bound_access_tokens_required: true`
+  throws `dpopRequired`. Both are checked before registration and the grant.
+- The parser reads any scheme (`parseChallenge(scheme:from:)`); `handleChallenge` uses the
+  `Bearer` challenge, else the `DPoP` one, for `resource_metadata`, `scope` and `error`.
+
+Comparison: the Python and Go SDKs declare the DPoP metadata fields only.
+
 ### PKCE and the authorization code grant
 
 - The AS metadata must list `S256` in `code_challenge_methods_supported`; a missing list or one
@@ -256,7 +295,7 @@ no PRM) and leaves leg 1 to the application; the Go SDK has both legs (`Enterpri
 - If the selected AS is no longer listed, the selection and AS metadata are reset and the stored
   token is cleared, unless `endpointOverrides.authorizationServerURL` configures the AS: the
   override decides the AS whatever the PRM lists.
-- `authorizationHeader` clears a stored token whose AS differs from the selected one.
+- `authorizationHeaders` clears a stored token whose AS differs from the selected one.
 - A refresh token is used only at the AS that issued it.
 - Registered credentials are bound to `registrationIssuer`. When the AS changes, authentication
   returns to the configured value and registration runs again at the new AS.
@@ -287,14 +326,19 @@ DNS rebinding is not covered. The redirect URI is validated before the flow star
 - **Always `native`.** Rejected: OpenID Connect Dynamic Client Registration limits `native`
   clients to custom-scheme or loopback redirect URIs, so an `https` redirect on a public host
   belongs to a `web` client.
-- **An actor for `OAuthAuthorizer`.** Not done: the protocol's synchronous `authorizationHeader`
+- **An actor for `OAuthAuthorizer`.** Not done: the protocol's synchronous `authorizationHeaders`
   would become `async`. A lock per property plus a gate for the async flows gives the same
   guarantees without changing the protocol.
+- **Keep `authorizationHeader(for:) -> String?` and add the proof elsewhere.** Rejected: a DPoP
+  proof signs the method and URL, and a second header needs a second return value. The new
+  requirement returns all headers; the major version allows the break.
+- **Enable DPoP from metadata alone.** Rejected: the key must be persisted with the tokens, which
+  only the application can do, so DPoP is opt-in (`dpop`).
 
 ## Open questions
 
 - A missing `authorization_endpoint` throws `tokenEndpointMissing`.
 - `TokenStorage` holds one token, so one authorizer serves one resource.
-- Deferred, not scored for conformance tiers: DPoP (SEP-1932) ([ROADMAP.md](../ROADMAP.md)).
+- DPoP: only ES256; tokens from `accessTokenProvider` are Bearer only.
 - No OpenID Connect sign-in helper produces the ID token for `enterpriseManaged` (the Go SDK has
   `PerformOIDCLogin`).

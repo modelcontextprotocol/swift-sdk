@@ -188,6 +188,10 @@ public enum HTTPResponse: Sendable {
 
 /// Standard header names used by the MCP Streamable HTTP transport.
 public enum HTTPHeaderName {
+    /// A DPoP proof (RFC 9449).
+    public static let dpop = "DPoP"
+    /// A server-provided DPoP nonce (RFC 9449 §8).
+    public static let dpopNonce = "DPoP-Nonce"
     public static let sessionID = "MCP-Session-Id"
     public static let protocolVersion = "MCP-Protocol-Version"
     public static let lastEventID = "Last-Event-ID"

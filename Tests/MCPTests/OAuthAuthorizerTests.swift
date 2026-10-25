@@ -91,6 +91,7 @@ final class MockDiscoveryClient: OAuthDiscoveryFetching, @unchecked Sendable {
 final class MockTokenClient: OAuthTokenRequesting, @unchecked Sendable {
     var requestCallCount = 0
     var capturedParameters: [String: String]?
+    var capturedDPoP: DPoPProofSigner?
     var tokenResponse = OAuthTokenResponse(
         accessToken: "mock-access-token",
         tokenType: "Bearer",
@@ -103,9 +104,11 @@ final class MockTokenClient: OAuthTokenRequesting, @unchecked Sendable {
         parameters: inout [String: String],
         endpoint: URL,
         authentication: OAuthConfiguration.TokenEndpointAuthentication,
+        dpop: DPoPProofSigner?,
         session: URLSession
     ) async throws -> OAuthTokenResponse {
         requestCallCount += 1
+        capturedDPoP = dpop
         capturedParameters = parameters
         return tokenResponse
     }

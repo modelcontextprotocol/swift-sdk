@@ -33,6 +33,7 @@ final class RecordingTokenClient: OAuthTokenRequesting, @unchecked Sendable {
         parameters: inout [String: String],
         endpoint: URL,
         authentication: OAuthConfiguration.TokenEndpointAuthentication,
+        dpop: DPoPProofSigner?,
         session: URLSession
     ) async throws -> OAuthTokenResponse {
         let grant = parameters[OAuthParameterName.grantType]
@@ -346,7 +347,7 @@ struct OAuthAuthorizerStateTests {
             for try await handled in group { #expect(handled) }
         }
         #expect(tokens.calls.count == 2)
-        #expect(authorizer.authorizationHeader(for: endpoint) == "Bearer token-2")
+        #expect(try authorizer.authorizationHeaders(for: endpoint, method: "POST")["Authorization"] == "Bearer token-2")
     }
 
     @Test("A registration that failed is tried again by the next challenge")
@@ -404,7 +405,7 @@ struct OAuthAuthorizerStateTests {
         #expect(try await first.value)
         await observer.value
         #expect(flow.performCount == 1)
-        #expect(authorizer.authorizationHeader(for: endpoint) == "Bearer token-1")
+        #expect(try authorizer.authorizationHeaders(for: endpoint, method: "POST")["Authorization"] == "Bearer token-1")
     }
 
     @Test("A 401 refreshes at the token's server before reading the resource metadata again")
@@ -418,7 +419,7 @@ struct OAuthAuthorizerStateTests {
         #expect(try await challenge(authorizer))
         #expect(tokens.calls.map(\.grantType) == ["client_credentials", "refresh_token"])
         #expect(discovery.fetchProtectedResourceMetadataCallCount == fetches)
-        #expect(authorizer.authorizationHeader(for: endpoint) == "Bearer token-2")
+        #expect(try authorizer.authorizationHeaders(for: endpoint, method: "POST")["Authorization"] == "Bearer token-2")
     }
 
     @Test("A transient failure to read the metadata keeps the token's server; nothing goes to the MCP origin")
@@ -518,7 +519,7 @@ struct OAuthAuthorizerStateTests {
         ]
         tokens.refusedGrants = ["client_credentials"]
         await #expect(throws: (any Error).self) { _ = try await challenge(authorizer, status: 403, headers: moved) }
-        #expect(authorizer.authorizationHeader(for: endpoint) == nil)
+        #expect(try authorizer.authorizationHeaders(for: endpoint, method: "POST")["Authorization"] == nil)
 
         try await authorizer.prepareAuthorization(for: endpoint, session: .shared)
         #expect(!tokens.calls.contains { $0.grantType == "refresh_token" })

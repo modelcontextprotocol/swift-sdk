@@ -47,6 +47,7 @@ lifecycle and [docs/migration.md](docs/migration.md) for upgrading.
 | JWT bearer grant | RFC 7523 | `OAuthConfiguration.GrantType.jwtBearer`, `assertionProvider` |
 | Enterprise-managed authorization | SEP-990, RFC 8693 | `OAuthConfiguration.enterpriseManaged(...)`, `OAuthTokenExchange` |
 | Workload identity | SEP-1933 | `.jwtBearer` with a public client |
+| DPoP-bound access tokens | RFC 9449, SEP-1932 | `OAuthConfiguration.dpop`, `HTTPClientAuthorizer.authorizationHeaders(for:method:)` |
 
 Details: [design/auth.md](design/auth.md).
 
@@ -55,16 +56,25 @@ Details: [design/auth.md](design/auth.md).
 - Notifications and server-to-client requests from a handler travel on the stream of the request
   that caused them (`Transport.send(_:relatedRequestID:)`).
 
-## Deferred
+## Planned
 
-Not implemented. The conformance harness exercises them only in the default leg, as extension
+Not implemented yet. The conformance harness exercises it only in the default leg, as extension
 scenarios that do not count toward a tier; they are the entries in
 [conformance/baseline.yml](conformance/baseline.yml).
 
 | Item | Reference | Baseline entries |
 |---|---|---|
 | Tasks extension `io.modelcontextprotocol/tasks` | SEP-2663 | 25 (server, `tasks-*`) |
-| DPoP-bound access tokens | SEP-1932 | 8 (client, `auth/dpop`, `auth/dpop-nonce`) |
+
+Tasks scope:
+
+- SEP-2663 only, at 2026-07-28. The experimental tasks of 2025-11-25 (SEP-1686: the `task`
+  request parameter, `tasks/result`, `tasks/list`, client-hosted tasks) are removed by SEP-2663
+  and will not be implemented; under 2025-11-25 a server creates no tasks.
+- Server: a `TaskStore` protocol with an in-memory default, tool handlers that return a task,
+  `tasks/get`, `tasks/update` (task input through MRTR `InputRequest` types) and `tasks/cancel`,
+  -32021 gating, `Mcp-Name` routing, and `notifications/tasks` on `subscriptions/listen`.
+- Client: `callTool` drives a returned task to its result, and a low-level task handle.
 
 Other known gaps are listed under "Open questions" in each design note.
 
@@ -82,6 +92,6 @@ Harness: `@modelcontextprotocol/conformance@0.2.0-alpha.11` (pinned in
 |---|---|
 | `--spec-version 2025-11-25` | 0 / 0 |
 | `--spec-version 2026-07-28` | 0 / 0 |
-| default | 25 / 8, extension scenarios only (tasks, DPoP) |
+| default | 25 / 0, extension scenarios only (tasks) |
 
 How the legs work: [conformance/README.md](conformance/README.md).
