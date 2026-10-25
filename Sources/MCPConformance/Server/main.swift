@@ -45,7 +45,7 @@ actor ServerState {
 
 // MARK: - Server Setup
 
-func createConformanceServer(state: ServerState, transport: StatefulHTTPServerTransport) async -> Server {
+func createConformanceServer(state: ServerState, transport: any Transport) async -> Server {
     let server = Server(
         name: "mcp-conformance-test-server",
         version: "1.0.0",
@@ -78,24 +78,32 @@ func createConformanceServer(state: ServerState, transport: StatefulHTTPServerTr
             Tool(name: "test_elicitation_sep1034_defaults", description: "Tests elicitation with default values (SEP-1034)", inputSchema: .object(["type": "object", "properties": [:]])),
             Tool(name: "test_elicitation_sep1330_enums", description: "Tests elicitation with enum variants (SEP-1330)", inputSchema: .object(["type": "object", "properties": [:]])),
             Tool(name: "test_client_elicitation_defaults", description: "Tests that client applies defaults for omitted elicitation fields", inputSchema: .object(["type": "object", "properties": [:]])),
-            Tool(name: "json_schema_2020_12_tool", description: "Tool with JSON Schema 2020-12 features", inputSchema: .object([
-                "$schema": .string("https://json-schema.org/draft/2020-12/schema"),
-                "type": .string("object"),
-                "$defs": .object([
-                    "address": .object([
-                        "type": .string("object"),
-                        "properties": .object([
-                            "street": .object(["type": .string("string")]),
-                            "city": .object(["type": .string("string")])
-                        ])
-                    ])
-                ]),
-                "properties": .object([
-                    "name": .object(["type": .string("string")]),
-                    "address": .object(["$ref": .string("#/$defs/address")])
-                ]),
-                "additionalProperties": .bool(false)
-            ]))
+            Tool(name: "test_missing_capability", description: "Requires the sampling client capability (SEP-2575 -32021)", inputSchema: .object(["type": "object", "properties": [:]])),
+            Tool(name: "test_logging_tool", description: "Attempts to log; dropped unless the request set a log level (SEP-2575)", inputSchema: .object(["type": "object", "properties": [:]])),
+            Tool(name: "test_streaming_elicitation", description: "Returns a plain result; the response stream must carry no requests (SEP-2575)", inputSchema: .object(["type": "object", "properties": [:]])),
+            Tool(name: "json_schema_2020_12_tool", description: "Tool with JSON Schema 2020-12 features", inputSchema: [
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "$defs": [
+                    "address": [
+                        "$anchor": "addressDef",
+                        "type": "object",
+                        "properties": ["street": ["type": "string"], "city": ["type": "string"]],
+                    ]
+                ],
+                "properties": [
+                    "name": ["type": "string"],
+                    "address": ["$ref": "#/$defs/address"],
+                    "contactMethod": ["type": "string", "enum": ["phone", "email"]],
+                    "phone": ["type": "string"],
+                    "email": ["type": "string"],
+                ],
+                "allOf": [["anyOf": [["required": ["phone"]], ["required": ["email"]]]]],
+                "if": ["properties": ["contactMethod": ["const": "phone"]], "required": ["contactMethod"]],
+                "then": ["required": ["phone"]],
+                "else": ["required": ["email"]],
+                "additionalProperties": false,
+            ]),
         ])
     }
 
@@ -151,37 +159,35 @@ func createConformanceServer(state: ServerState, transport: StatefulHTTPServerTr
         case "json_schema_2020_12_tool":
             return .init(content: [.text(text: "This is a simple text response for testing.", annotations: nil, _meta: nil)], isError: false)
         case "test_tool_with_logging":
-            // Send first log message
-            let log1 = LogMessageNotification.message(
-                .init(level: .info, data: .string("Tool execution started"))
-            )
-            try await server?.notify(log1)
-
-            // Wait 50ms
+            try await server?.log(level: .info, data: "Tool execution started")
             try await Task.sleep(for: .milliseconds(50))
-
-            // Send second log message
-            let log2 = LogMessageNotification.message(
-                .init(level: .info, data: .string("Tool processing data"))
-            )
-            try await server?.notify(log2)
-
-            // Wait another 50ms
+            try await server?.log(level: .info, data: "Tool processing data")
             try await Task.sleep(for: .milliseconds(50))
-
-            // Send third log message
-            let log3 = LogMessageNotification.message(
-                .init(level: .info, data: .string("Tool execution completed"))
-            )
-            try await server?.notify(log3)
-
+            try await server?.log(level: .info, data: "Tool execution completed")
             return .init(content: [.text(text: "Logging test completed", annotations: nil, _meta: nil)], isError: false)
+        case "test_missing_capability":
+            // SEP-2575: a request must not rely on undeclared client capabilities.
+            guard Server.currentHandlerContext?.clientCapabilities?.sampling != nil else {
+                throw MCPError.missingRequiredClientCapabilities(
+                    Client.Capabilities(sampling: .init()),
+                    message: "sampling capability required but not declared by client")
+            }
+            return .init(content: [.text(text: "Client declared the sampling capability; tool executed.", annotations: nil, _meta: nil)], isError: false)
+        case "test_logging_tool":
+            // Logged only when the request set _meta io.modelcontextprotocol/logLevel.
+            try await server?.log(level: .info, data: "test_logging_tool executed")
+            return .init(content: [.text(text: "Log attempted; the server gates on the request log level.", annotations: nil, _meta: nil)], isError: false)
+        case "test_streaming_elicitation":
+            // The response stream carries no independent requests at 2026-07-28.
+            return .init(content: [.text(text: "stream observed: result frames only, no top-level requests", annotations: nil, _meta: nil)], isError: false)
         case "test_reconnection":
             // SEP-1699: Close the SSE stream mid-call to trigger client reconnection.
             // The client should reconnect via GET with Last-Event-ID and receive the
             // response on the new stream.
-            if let requestID = Server.currentHandlerContext?.id {
-                await transport.closeSSEStream(forRequestID: requestID.description)
+            if let requestID = Server.currentHandlerContext?.id,
+                let stateful = transport as? StatefulHTTPServerTransport
+            {
+                await stateful.closeSSEStream(forRequestID: requestID.description)
             }
             // Wait briefly for the client to reconnect before sending the response.
             try await Task.sleep(for: .milliseconds(100))
@@ -505,8 +511,14 @@ struct MCPHTTPServer {
                 ProtocolVersionValidator(),
                 SessionValidator(),
             ]),
+            statelessValidationPipeline: StandardValidationPipeline(validators: [
+                OriginValidator.localhost(port: port),
+                AcceptHeaderValidator(mode: .jsonOnly),
+                ContentTypeValidator(),
+                ProtocolVersionValidator(),
+            ]),
             serverFactory: { sessionID, transport in
-                logger.debug("Creating server for session", metadata: ["sessionID": "\(sessionID)"])
+                logger.debug("Creating server", metadata: ["sessionID": "\(sessionID ?? "stateless")"])
                 return await createConformanceServer(state: state, transport: transport)
             },
             logger: logger

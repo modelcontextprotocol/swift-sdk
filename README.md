@@ -1423,11 +1423,80 @@ The Swift SDK provides multiple built-in transports:
 | --------- | ----------- | --------- | -------- |
 | [`StdioTransport`](/Sources/MCP/Base/Transports/StdioTransport.swift) | Implements [stdio transport](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports#stdio) using standard input/output streams | Apple platforms, Linux (glibc and musl) | Local subprocesses, CLI tools |
 | [`HTTPClientTransport`](/Sources/MCP/Base/Transports/HTTPClientTransport.swift) | Implements [Streamable HTTP transport](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports#streamable-http) using Foundation's URL Loading System | All platforms with Foundation (SSE streaming on Apple platforms only; Linux uses request/response) | Remote servers, web applications |
-| [`StatelessHTTPServerTransport`](/Sources/MCP/Base/Transports/HTTPServer/StatelessHTTPServerTransport.swift) | HTTP server transport with simple request-response semantics; no session management or SSE streaming, so server-to-client requests and notifications aren't delivered | All platforms with Foundation | Simple HTTP servers, serverless/edge functions |
-| [`StatefulHTTPServerTransport`](/Sources/MCP/Base/Transports/HTTPServer/StatefulHTTPServerTransport.swift) | HTTP server transport with full session management and SSE streaming for server-initiated messages | All platforms with Foundation | Full-featured HTTP servers, streaming notifications |
+| [`StatelessHTTPServerTransport`](/Sources/MCP/Base/Transports/HTTPServer/StatelessHTTPServerTransport.swift) | HTTP server transport with one exchange per request and no session; serves protocol 2026-07-28 | All platforms with Foundation | 2026-07-28 clients, serverless/edge functions |
+| [`StatefulHTTPServerTransport`](/Sources/MCP/Base/Transports/HTTPServer/StatefulHTTPServerTransport.swift) | HTTP server transport with full session management and SSE streaming for server-initiated messages; serves the `initialize` handshake (2025-11-25 and earlier) | All platforms with Foundation | Full-featured HTTP servers, streaming notifications |
 | [`InMemoryTransport`](/Sources/MCP/Base/Transports/InMemoryTransport.swift) | Custom in-memory transport for direct communication within the same process | All platforms | Testing, debugging, same-process client-server communication |
 | [`NetworkTransport`](/Sources/MCP/Base/Transports/NetworkTransport.swift) | Custom (non-standard) transport using Apple's Network framework for TCP/UDP connections, with heartbeats and automatic reconnection enabled by default; both peers should use `NetworkTransport` | Apple platforms only | Low-level networking, custom protocols |
 
+
+### Serving 2026-07-28 and Earlier Clients
+
+Protocol 2026-07-28 removes the `initialize` handshake and sessions. Each
+request carries its protocol version and client capabilities in `_meta`,
+and clients discover the server with `server/discover`, which `Server`
+answers automatically. A server serves both eras by default
+(`Server.Configuration.protocolVersions`).
+
+Over HTTP, route each request by its `MCP-Protocol-Version` header: one
+shared `Server` on a `StatelessHTTPServerTransport` handles stateless
+requests; session-based clients keep one `Server` per session.
+
+```swift
+let statelessServer = Server(name: "MyServer", version: "1.0.0", capabilities: capabilities)
+let statelessTransport = StatelessHTTPServerTransport()
+try await statelessServer.start(transport: statelessTransport)
+
+func handle(_ request: HTTPRequest) async -> HTTPResponse {
+    if request.header(HTTPHeaderName.sessionID) == nil, request.statelessProtocolVersion != nil {
+        return await statelessTransport.handleRequest(request)
+    }
+    return await sessionTransport(for: request).handleRequest(request)  // StatefulHTTPServerTransport
+}
+```
+
+For stateless requests the server:
+
+- reports the request's protocol version, client capabilities, client info
+  and log level in `Server.currentHandlerContext`;
+- adds `resultType`, `_meta["io.modelcontextprotocol/serverInfo"]` and, on
+  `tools/list`, `prompts/list`, `resources/list`, `resources/templates/list`,
+  `resources/read` and `server/discover`, the `ttlMs` and `cacheScope` cache
+  hints (`Server.Configuration.cacheHints`, or set them on the result);
+- sends log notifications only at or above the request's
+  `_meta["io.modelcontextprotocol/logLevel"]`, and none without it;
+- answers `initialize`, `ping`, `logging/setLevel`, `resources/subscribe`,
+  `resources/unsubscribe` and methods of undeclared capabilities with -32601;
+- refuses server-to-client requests (sampling, elicitation, roots).
+
+Stateless requests never send `initialize`, so an `initializeHook` does not
+see them, and `Configuration.strict` does not apply to them. A server that
+passes an `initializeHook` refuses stateless requests with -32022 (clients
+then fall back to `initialize`) unless it also passes a
+`statelessRequestHook`, which runs before each stateless request with the
+client info and capabilities from `_meta`:
+
+```swift
+try await server.start(
+    transport: transport,
+    initializeHook: { clientInfo, _ in try authorize(clientInfo) },
+    statelessRequestHook: { clientInfo, _ in try authorize(clientInfo) })
+```
+
+`StatefulHTTPServerTransport` serves handshake revisions only: a request
+whose `MCP-Protocol-Version` header or `_meta` names a stateless revision
+gets -32022 after the origin, media type and authentication validators. A
+refused `initialize` leaves no session behind. `StatelessHTTPServerTransport`
+honors a client's `notifications/cancelled` only when it carries the same
+`Authorization` header as the one request in flight with that id; clients
+cancel by closing the HTTP request.
+
+Handlers can require a client capability per request:
+
+```swift
+guard Server.currentHandlerContext?.clientCapabilities?.sampling != nil else {
+    throw MCPError.missingRequiredClientCapabilities(Client.Capabilities(sampling: .init()))
+}
+```
 
 ### Custom Transport Implementation
 

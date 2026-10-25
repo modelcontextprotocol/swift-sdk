@@ -1,12 +1,30 @@
 import Foundation
 import Logging
 
-/// A stateless HTTP server transport that returns single JSON responses.
+/// A stateless HTTP server transport: one HTTP exchange per JSON-RPC request.
 ///
-/// This transport implements a minimal subset of the MCP Streamable HTTP specification:
-/// - No session management (no `Mcp-Session-Id` header)
-/// - POST requests receive direct JSON responses (no SSE streaming)
-/// - GET and DELETE requests return 405 Method Not Allowed
+/// This transport serves requests that do not belong to a session:
+/// - Protocol 2026-07-28 and later, where every request carries its protocol
+///   version and client capabilities in `_meta` (SEP-2575).
+/// - Earlier revisions used without session management.
+///
+/// Behavior:
+/// - POST only; GET and DELETE return 405 Method Not Allowed.
+/// - No `Mcp-Session-Id` header is read or set.
+/// - The response is a single JSON body. When the handler sends notifications
+///   for the request (progress, logging) and the client accepts
+///   `text/event-stream`, the response is an SSE stream that carries those
+///   notifications and ends with the response.
+/// - On 2026-07-28 requests, JSON-RPC errors use HTTP status codes:
+///   404 for -32601; 400 for -32600, -32602 and -32020 to -32022.
+/// - Each request is given a unique internal JSON-RPC id while in flight, so
+///   concurrent clients may reuse ids.
+/// - A client cancels a request by closing its HTTP request; the adapter
+///   must then cancel the task that awaits ``handleRequest(_:)``.
+///   `notifications/cancelled` is honored only when it carries the same
+///   `Authorization` header as exactly one request in flight with that id.
+/// - At most ``maxBufferedMessages`` messages are buffered per request for a
+///   slow client; older notifications are dropped first, never the response.
 ///
 /// ## Usage
 ///
@@ -21,14 +39,9 @@ import Logging
 /// // Convert response to your framework's response type and return it
 /// ```
 ///
-/// ## When to Use
-///
-/// Use this transport when:
-/// - You don't need server-initiated messages (no GET SSE stream)
-/// - You want simple request-response semantics
-/// - Session management is handled externally or not needed
-///
-/// For full streaming and session support, use ``StatefulHTTPServerTransport`` instead.
+/// To serve both session-based and stateless clients on one endpoint, route
+/// requests whose ``HTTPRequest/statelessProtocolVersion`` is non-`nil` to
+/// this transport and the rest to a ``StatefulHTTPServerTransport``.
 public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
     public nonisolated let logger: Logger
 
@@ -46,16 +59,32 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
     private let incomingStream: AsyncThrowingStream<Data, Swift.Error>
     private let incomingContinuation: AsyncThrowingStream<Data, Swift.Error>.Continuation
 
-    // MARK: - Response waiters
+    // MARK: - In-flight requests
 
-    /// Maps request ID → continuation waiting for the server's response.
-    /// When the server calls `send()` with a response, the matching continuation is resumed.
-    private var responseWaiters: [String: CheckedContinuation<Data, any Error>] = [:]
+    /// A message the server sends for a request in flight.
+    private enum Outgoing: Sendable {
+        /// A notification or request related to the request.
+        case message(Data)
+        /// The response, with the client's id, and its error code if any.
+        case response(Data, errorCode: Int?)
+    }
 
-    /// Maps request ID → originating HTTP request, surfaced to handlers via
-    /// ``Server/currentHTTPContext``. Entries live only while a JSON-RPC request
-    /// is in flight.
-    private var httpRequestContexts: [String: HTTPRequest] = [:]
+    /// A request handed to the server and not yet answered.
+    private struct Exchange {
+        /// The JSON-RPC id the client sent.
+        let clientID: ID
+        /// The originating HTTP request, surfaced via ``Server/currentHandlerContext``.
+        let request: HTTPRequest
+        /// Messages the server sends for this request, ending with the response.
+        let outgoing: AsyncStream<Outgoing>.Continuation
+    }
+
+    /// The most messages buffered for one request while its client reads
+    /// slowly. The oldest are dropped first; the response is always last.
+    public static let maxBufferedMessages = 1024
+
+    /// In-flight requests keyed by the internal id given to the server.
+    private var exchanges: [String: Exchange] = [:]
 
     // MARK: - Init
 
@@ -63,7 +92,7 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
     ///
     /// - Parameters:
     ///   - validationPipeline: Custom validation pipeline. If `nil`, uses sensible defaults:
-    ///     origin validation (localhost), Accept header (JSON only), Content-Type,
+    ///     origin validation (localhost), Accept header (JSON required), Content-Type,
     ///     and protocol version validation.
     ///   - logger: Optional logger. If `nil`, a no-op logger is used.
     public init(
@@ -97,15 +126,23 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
     }
 
     public func disconnect() async {
-        await terminate()
+        terminate()
     }
 
-    /// Routes outgoing server messages to the appropriate waiting HTTP handler.
+    /// Routes outgoing server messages to the HTTP exchange they belong to.
     ///
-    /// - Responses are matched by JSON-RPC ID and delivered to the waiting `handleRequest` call.
-    /// - Notifications and server-initiated requests are logged and dropped
-    ///   (no streaming channel available in stateless mode).
+    /// Responses are matched by JSON-RPC ID. Other messages are dropped:
+    /// there is no stream outside a request.
     public func send(_ data: Data) async throws {
+        try await send(data, relatedRequestID: nil)
+    }
+
+    /// Routes outgoing server messages to the HTTP exchange they belong to.
+    ///
+    /// Notifications and requests related to an in-flight request are
+    /// delivered on that request's response stream; unrelated ones are
+    /// dropped.
+    public func send(_ data: Data, relatedRequestID: ID?) async throws {
         guard !terminated else {
             throw MCPError.connectionClosed
         }
@@ -117,26 +154,25 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
 
         switch kind {
         case .response(let id):
-            guard let continuation = responseWaiters.removeValue(forKey: id) else {
+            guard let exchange = exchanges.removeValue(forKey: id) else {
+                logger.debug("No waiter for response", metadata: ["requestID": "\(id)"])
+                return
+            }
+            let rewritten = JSONRPCMessageFields.replacingIDReadingErrorCode(in: data, with: exchange.clientID)
+            exchange.outgoing.yield(
+                .response(rewritten?.data ?? data, errorCode: rewritten?.errorCode))
+            exchange.outgoing.finish()
+
+        case .notification(let method), .request(_, let method):
+            guard let related = relatedRequestID?.description, let exchange = exchanges[related]
+            else {
                 logger.debug(
-                    "No waiter for response, may have timed out",
-                    metadata: ["requestID": "\(id)"]
+                    "Message without an in-flight request dropped in stateless mode",
+                    metadata: ["method": "\(method)"]
                 )
                 return
             }
-            continuation.resume(returning: data)
-
-        case .notification(let method):
-            logger.debug(
-                "Server-initiated notification dropped in stateless mode (no GET SSE stream)",
-                metadata: ["method": "\(method)"]
-            )
-
-        case .request(_, let method):
-            logger.debug(
-                "Server-initiated request dropped in stateless mode (no GET SSE stream)",
-                metadata: ["method": "\(method)"]
-            )
+            exchange.outgoing.yield(.message(data))
         }
     }
 
@@ -165,6 +201,17 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
         case "POST":
             return await handlePost(request)
         default:
+            // Validators that answer a request themselves, such as
+            // ProtectedResourceMetadataValidator for the resource metadata
+            // document, run for every method. Anything else is 405.
+            let context = HTTPValidationContext(
+                httpMethod: request.method.uppercased(), sessionID: nil,
+                supportedProtocolVersions: Set(Version.stateless + Version.handshake))
+            if let response = validationPipeline.validate(request, context: context),
+                (200..<300).contains(response.statusCode)
+            {
+                return response
+            }
             return .error(
                 statusCode: 405,
                 .invalidRequest("Method Not Allowed"),
@@ -176,96 +223,315 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
     // MARK: - POST Handler
 
     private func handlePost(_ request: HTTPRequest) async -> HTTPResponse {
-        // Parse body first to determine message type
         guard let body = request.body, !body.isEmpty else {
-            return .error(
-                statusCode: 400,
-                .parseError("Empty request body")
-            )
+            return .error(statusCode: 400, .parseError("Empty request body"))
         }
 
         guard let messageKind = JSONRPCMessageKind(data: body) else {
-            return .error(
-                statusCode: 400,
-                .parseError("Invalid JSON-RPC message")
-            )
+            return .error(statusCode: 400, .parseError("Invalid JSON-RPC message"))
         }
 
-        // Build validation context
+        // One probe for the id and the `_meta` version.
+        let fields = JSONRPCMessageFields.requestFields(in: body)
+        var requestID: ID?
+        if case .request = messageKind {
+            requestID = fields.id
+        }
+
         let context = HTTPValidationContext(
             httpMethod: "POST",
             sessionID: nil,
             isInitializationRequest: messageKind.isInitializeRequest,
-            supportedProtocolVersions: Version.supported
+            supportedProtocolVersions: Set(Version.stateless + Version.handshake)
         )
 
-        // Run validation pipeline
         if let errorResponse = validationPipeline.validate(request, context: context) {
-            return errorResponse
+            return errorResponse.withRequestID(requestID)
         }
 
-        // Handle by message type
         switch messageKind {
+        case .notification(let method) where method == CancelledNotification.name:
+            if let cancellation = cancellation(body, request: request) {
+                incomingContinuation.yield(cancellation)
+            } else {
+                logger.debug("notifications/cancelled matches no request in flight; ignored")
+            }
+            return .accepted()
+
         case .notification, .response:
-            // Yield to server and return 202 Accepted
             incomingContinuation.yield(body)
             return .accepted()
 
-        case .request(let id, _):
-            return await handleJSONRPCRequest(body, requestID: id, request: request)
+        case .request:
+            guard let requestID else {
+                return .error(statusCode: 400, .invalidRequest("Invalid JSON-RPC id"))
+            }
+            if let mismatch = Self.versionHeaderError(request, metaVersion: fields.metaProtocolVersion) {
+                return .error(statusCode: 400, mismatch, id: requestID)
+            }
+            return await handleJSONRPCRequest(
+                body,
+                clientID: requestID,
+                isStateless: request.statelessProtocolVersion != nil,
+                request: request
+            )
         }
+    }
+
+    /// Checks the `MCP-Protocol-Version` header against `params._meta` (SEP-2575).
+    private static func versionHeaderError(_ request: HTTPRequest, metaVersion: String?) -> MCPError? {
+        if let headerVersion = request.statelessProtocolVersion {
+            guard let metaVersion else {
+                return .invalidParams("Missing _meta field \"\(MetaKey.protocolVersion)\"")
+            }
+            guard metaVersion == headerVersion else {
+                return .headerMismatch(
+                    "\(HTTPHeaderName.protocolVersion) header \(headerVersion) does not match _meta version \(metaVersion)"
+                )
+            }
+        } else if let metaVersion, !Version.handshake.contains(metaVersion) {
+            let header = request.header(HTTPHeaderName.protocolVersion) ?? "missing"
+            return .headerMismatch(
+                "\(HTTPHeaderName.protocolVersion) header (\(header)) does not match _meta version \(metaVersion)"
+            )
+        }
+        return nil
     }
 
     private func handleJSONRPCRequest(
         _ body: Data,
-        requestID: String,
+        clientID: ID,
+        isStateless: Bool,
         request: HTTPRequest
     ) async -> HTTPResponse {
-        httpRequestContexts[requestID] = request
-        // Yield the incoming message to the server
-        incomingContinuation.yield(body)
-
-        // Wait for the server to process and send a response
-        let responseData: Data
-        do {
-            responseData = try await withCheckedThrowingContinuation { continuation in
-                responseWaiters[requestID] = continuation
-            }
-        } catch {
-            httpRequestContexts.removeValue(forKey: requestID)
-            return .error(
-                statusCode: 500,
-                .internalError("Error processing request: \(error.localizedDescription)")
-            )
+        let internalID = "mcp-http-\(UUID().uuidString)"
+        guard let rewritten = JSONRPCMessageFields.replacingID(in: body, with: .string(internalID))
+        else {
+            return .error(statusCode: 400, .parseError("Invalid JSON-RPC message"), id: clientID)
         }
 
-        httpRequestContexts.removeValue(forKey: requestID)
-        return .data(responseData, headers: [HTTPHeaderName.contentType: ContentType.json])
+        let (outgoing, continuation) = AsyncStream<Outgoing>.makeStream(
+            bufferingPolicy: .bufferingNewest(Self.maxBufferedMessages))
+        exchanges[internalID] = Exchange(clientID: clientID, request: request, outgoing: continuation)
+        incomingContinuation.yield(rewritten)
+
+        let acceptsSSE = (request.header(HTTPHeaderName.accept) ?? "").contains(ContentType.sse)
+        let logger = self.logger
+        // The adapter cancels this task when the client goes away before the
+        // response is decided: cancel the request, as for a closed SSE stream.
+        return await withTaskCancellationHandler {
+            await respond(
+                to: outgoing, internalID: internalID, clientID: clientID,
+                isStateless: isStateless, acceptsSSE: acceptsSSE, logger: logger)
+        } onCancel: {
+            Task { await self.abandon(internalID) }
+        }
+    }
+
+    /// Waits for the server's messages for one request and turns them into
+    /// the HTTP response: JSON, or an SSE stream once a notification arrives.
+    private func respond(
+        to outgoing: AsyncStream<Outgoing>, internalID: String, clientID: ID,
+        isStateless: Bool, acceptsSSE: Bool, logger: Logger
+    ) async -> HTTPResponse {
+        await withCheckedContinuation { (decision: CheckedContinuation<HTTPResponse, Never>) in
+            Task {
+                var stream: AsyncThrowingStream<Data, Swift.Error>.Continuation?
+                for await message in outgoing {
+                    switch message {
+                    case .response(let data, let errorCode):
+                        if let stream {
+                            stream.yield(SSEEvent.message(data: data).formatted())
+                            stream.finish()
+                        } else {
+                            decision.resume(
+                                returning: Self.jsonResponse(data, errorCode: errorCode, isStateless: isStateless))
+                        }
+                        return
+                    case .message(let data):
+                        guard acceptsSSE else {
+                            logger.debug("Notification dropped: client does not accept SSE")
+                            continue
+                        }
+                        if stream == nil {
+                            let (sse, sseContinuation) = AsyncThrowingStream<Data, Swift.Error>
+                                .makeStream(bufferingPolicy: .bufferingNewest(Self.maxBufferedMessages))
+                            // The client went away: cancel the request.
+                            sseContinuation.onTermination = { termination in
+                                if case .cancelled = termination {
+                                    Task { await self.abandon(internalID) }
+                                }
+                            }
+                            stream = sseContinuation
+                            decision.resume(
+                                returning: .stream(
+                                    sse,
+                                    headers: [
+                                        HTTPHeaderName.contentType: ContentType.sse,
+                                        HTTPHeaderName.cacheControl: "no-cache, no-transform",
+                                        HTTPHeaderName.connection: "keep-alive",
+                                    ]))
+                        }
+                        stream?.yield(SSEEvent.message(data: data).formatted())
+                    }
+                }
+                // The transport terminated or the request was abandoned
+                // before the server answered.
+                if let stream {
+                    stream.finish(throwing: MCPError.connectionClosed)
+                } else {
+                    decision.resume(
+                        returning: .error(statusCode: 503, .connectionClosed, id: clientID))
+                }
+            }
+        }
+    }
+
+    /// Forgets a request whose client went away and cancels it in the server.
+    private func abandon(_ internalID: String) {
+        guard let exchange = exchanges.removeValue(forKey: internalID) else { return }
+        exchange.outgoing.finish()
+        let cancelled = CancelledNotification.message(
+            .init(requestId: .string(internalID), reason: "Client disconnected"))
+        if let data = try? JSONEncoder().encode(cancelled) {
+            incomingContinuation.yield(data)
+        }
+    }
+
+    /// A client's `notifications/cancelled`, rewritten to the internal id of
+    /// the request it cancels. The request ids of different clients overlap,
+    /// so it must match exactly one request in flight with that id and the
+    /// same `Authorization` header; without one there is no way to tell
+    /// clients apart, and the notification is not honored.
+    private func cancellation(_ body: Data, request: HTTPRequest) -> Data? {
+        guard let authorization = request.header(HTTPHeaderName.authorization),
+            let requestID = JSONRPCMessageKind.cancelledRequestID(in: body)
+        else { return nil }
+        let matches = exchanges.filter {
+            $0.value.clientID.description == requestID
+                && $0.value.request.header(HTTPHeaderName.authorization) == authorization
+        }
+        guard matches.count == 1, let internalID = matches.first?.key else { return nil }
+        let cancelled = CancelledNotification.message(
+            .init(requestId: .string(internalID), reason: "Cancelled by the client"))
+        return try? JSONEncoder().encode(cancelled)
+    }
+
+    /// A JSON response; errors on 2026-07-28 requests get their HTTP status.
+    private static func jsonResponse(_ data: Data, errorCode: Int?, isStateless: Bool) -> HTTPResponse {
+        var status = 200
+        if let code = errorCode {
+            if isStateless {
+                status = JSONRPCErrorStatus.statusCode(for: code)
+            } else if code == MCPError.unsupportedProtocolVersion(supported: []).code {
+                status = 400
+            }
+        }
+        return .data(
+            data, statusCode: status, headers: [HTTPHeaderName.contentType: ContentType.json])
     }
 
     // MARK: - HTTPContextProviding
 
     public func httpRequestContext(for id: ID) -> HTTPRequest? {
-        httpRequestContexts[id.description]
+        exchanges[id.description]?.request
     }
 
     // MARK: - Termination
 
-    private func terminate() async {
+    private func terminate() {
         guard !terminated else { return }
         terminated = true
 
         logger.debug("Stateless HTTP server transport terminated")
 
-        // Cancel all waiting continuations
-        for (id, continuation) in responseWaiters {
-            continuation.resume(throwing: MCPError.connectionClosed)
-            logger.debug("Cancelled waiter for request", metadata: ["requestID": "\(id)"])
+        for exchange in exchanges.values {
+            exchange.outgoing.finish()
         }
-        responseWaiters.removeAll()
-        httpRequestContexts.removeAll()
+        exchanges.removeAll()
 
-        // Close incoming stream
         incomingContinuation.finish()
+    }
+}
+
+/// Reads and rewrites members of a single JSON-RPC message.
+enum JSONRPCMessageFields {
+    /// Decodes each member independently, so one malformed member does not
+    /// hide the others.
+    private struct Probe: Decodable {
+        let id: ID?
+        let protocolVersion: String?
+        let errorCode: Int?
+
+        private enum Keys: String, CodingKey {
+            case id, params, error, _meta, code
+            case protocolVersion = "io.modelcontextprotocol/protocolVersion"
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: Keys.self)
+            id = try? container.decodeIfPresent(ID.self, forKey: .id)
+            let meta = try? container.nestedContainer(keyedBy: Keys.self, forKey: .params)
+                .nestedContainer(keyedBy: Keys.self, forKey: ._meta)
+            protocolVersion = try? meta?.decodeIfPresent(String.self, forKey: .protocolVersion)
+            errorCode = try? container.nestedContainer(keyedBy: Keys.self, forKey: .error)
+                .decodeIfPresent(Int.self, forKey: .code)
+        }
+    }
+
+    private static func probe(_ data: Data) -> Probe? {
+        try? JSONDecoder().decode(Probe.self, from: data)
+    }
+
+    /// The `id` of a message, if it is a string or an integer.
+    static func id(in data: Data) -> ID? {
+        guard let id = probe(data)?.id, id != .string("") else { return nil }
+        return id
+    }
+
+    /// The `id` and the `params._meta` protocol version of a message, from
+    /// one decode.
+    static func requestFields(in data: Data) -> (id: ID?, metaProtocolVersion: String?) {
+        let probe = probe(data)
+        let id = probe?.id == .string("") ? nil : probe?.id
+        return (id, probe?.protocolVersion)
+    }
+
+    /// The message with its `id` replaced, and its `error.code` if it is an
+    /// error response, from one parse.
+    static func replacingIDReadingErrorCode(in data: Data, with id: ID) -> (data: Data, errorCode: Int?)? {
+        guard var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        let errorCode = (json["error"] as? [String: Any])?["code"] as? Int
+        switch id {
+        case .string(let string): json["id"] = string
+        case .number(let number): json["id"] = number
+        }
+        guard let rewritten = try? JSONSerialization.data(withJSONObject: json, options: [.withoutEscapingSlashes])
+        else { return nil }
+        return (rewritten, errorCode)
+    }
+
+    /// The message with its `id` replaced.
+    static func replacingID(in data: Data, with id: ID) -> Data? {
+        guard var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        switch id {
+        case .string(let string): json["id"] = string
+        case .number(let number): json["id"] = number
+        }
+        return try? JSONSerialization.data(withJSONObject: json, options: [.withoutEscapingSlashes])
+    }
+
+    /// `params._meta["io.modelcontextprotocol/protocolVersion"]`, if it is a string.
+    static func metaProtocolVersion(in data: Data) -> String? {
+        probe(data)?.protocolVersion
+    }
+
+    /// `error.code` of a response, if it is an error response.
+    static func errorCode(in data: Data) -> Int? {
+        probe(data)?.errorCode
     }
 }

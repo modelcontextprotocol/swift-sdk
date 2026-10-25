@@ -42,6 +42,9 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
     // MARK: - State
 
     private var sessionID: String?
+    /// The JSON-RPC id of the `initialize` request that created the session,
+    /// until it is answered.
+    private var initializeRequestID: String?
     private var terminated = false
     private var started = false
 
@@ -170,6 +173,15 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
         switch kind {
         case .response(let id):
             routeResponse(data, requestID: id)
+            if id == initializeRequestID {
+                initializeRequestID = nil
+                // A refused `initialize` (for example by the server's
+                // initialize hook) leaves no session behind.
+                if JSONRPCMessageFields.errorCode(in: data) != nil {
+                    logger.info("Initialization failed; session dropped", metadata: ["sessionID": "\(sessionID ?? "none")"])
+                    sessionID = nil
+                }
+            }
         case .notification, .request:
             if let related = relatedRequestID?.description, openRequestIDs.contains(related) {
                 routeToRequestStream(data, requestID: related)
@@ -235,6 +247,33 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
                 statusCode: 400,
                 .parseError("Invalid JSON-RPC message"),
                 sessionID: sessionID
+            )
+        }
+
+        // Requests at 2026-07-28 and later carry no session; this transport
+        // serves handshake revisions only, whether the stateless version is
+        // in the header or only in `_meta`. They pass the validators that do
+        // not depend on a session (origin, media types, authentication), then
+        // get -32022, whose data lets the client fall back to `initialize`.
+        if case .request(let id, _) = messageKind, !messageKind.isInitializeRequest,
+            let version = request.statelessProtocolVersion
+                ?? JSONRPCMessageFields.metaProtocolVersion(in: body).flatMap({
+                    Version.handshake.contains($0) ? nil : $0
+                })
+        {
+            let sessionless = HTTPValidationContext(
+                httpMethod: "POST", sessionID: nil, isInitializationRequest: true,
+                supportedProtocolVersions: Version.supported)
+            if let errorResponse = validationPipeline.validate(request, context: sessionless) {
+                return errorResponse
+            }
+            // Echo the session ID only to a client that already holds it.
+            let knownSession = request.header(HTTPHeaderName.sessionID) == sessionID ? sessionID : nil
+            return .error(
+                statusCode: 400,
+                .unsupportedProtocolVersion(supported: Version.handshake, requested: version),
+                id: JSONRPCMessageFields.id(in: body) ?? .string(id),
+                sessionID: knownSession
             )
         }
 
@@ -312,6 +351,7 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
         }
 
         // For the initialize request, use SSE streaming like any other request
+        initializeRequestID = requestID
         return handleJSONRPCRequest(body, requestID: requestID, request: request)
     }
 
