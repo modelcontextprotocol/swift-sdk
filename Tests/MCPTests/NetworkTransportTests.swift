@@ -624,15 +624,19 @@ import Testing
             // Simulate failure during heartbeat
             mockConnection.simulateFailure(error: NWError.posix(POSIXErrorCode.ECONNRESET))
 
-            // Wait for potential recovery
-            try await Task.sleep(for: .milliseconds(500))
-
-            // Verify connection state
-            if case .failed = mockConnection.state {
-                // expected
-            } else {
-                Issue.record("Expected state to be failed")
+            // The transport should react to the failure by cancelling the
+            // connection before it tries to reconnect
+            let deadline = ContinuousClock.now + .seconds(3)
+            while mockConnection.state != .cancelled && ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(50))
             }
+            #expect(mockConnection.state == .cancelled)
+
+            // Once the connection is lost, the transport should stop sending heartbeats.
+            // A failed heartbeat retries after 2 seconds, so wait longer than that.
+            let heartbeatsSent = mockConnection.getSentData().count
+            try await Task.sleep(for: .seconds(2.5))
+            #expect(mockConnection.getSentData().count == heartbeatsSent)
 
             await transport.disconnect()
         }
