@@ -545,6 +545,82 @@ func runJSONSchemaRefNoDerefScenario(_ args: [String]) async throws {
     await client.disconnect()
 }
 
+// MARK: - Request Header Scenarios (SEP-2243)
+
+/// Stub arguments for the required properties of a tool input schema.
+private func stubArguments(for tool: Tool) -> [String: Value] {
+    let schema = tool.inputSchema.objectValue
+    let properties = schema?["properties"]?.objectValue ?? [:]
+    var arguments: [String: Value] = [:]
+    for name in schema?["required"]?.arrayValue?.compactMap(\.stringValue) ?? [] {
+        switch properties[name]?.objectValue?["type"]?.stringValue {
+        case "integer", "number": arguments[name] = 0
+        case "boolean": arguments[name] = false
+        case "object": arguments[name] = [:]
+        case "array": arguments[name] = []
+        default: arguments[name] = "stub"
+        }
+    }
+    return arguments
+}
+
+/// Exercises every request that carries `Mcp-Method` and `Mcp-Name`.
+func runHTTPStandardHeadersScenario(_ args: [String]) async throws {
+    guard let serverURLString = args.last, let serverURL = URL(string: serverURLString) else {
+        throw ConformanceError.invalidArguments("Valid server URL is required")
+    }
+    let client = makeConformanceClient()
+    try await client.connect(transport: HTTPClientTransport(endpoint: serverURL))
+    for tool in try await client.listTools().tools {
+        _ = try await client.callTool(name: tool.name, arguments: stubArguments(for: tool))
+    }
+    for resource in try await client.listResources().resources {
+        _ = try await client.readResource(uri: resource.uri)
+    }
+    for prompt in try await client.listPrompts().prompts {
+        _ = try await client.getPrompt(name: prompt.name)
+    }
+    await client.disconnect()
+}
+
+/// Calls the tools named in `context.toolCalls` with their arguments.
+func runHTTPCustomHeadersScenario(_ args: [String]) async throws {
+    guard let serverURLString = args.last, let serverURL = URL(string: serverURLString) else {
+        throw ConformanceError.invalidArguments("Valid server URL is required")
+    }
+    struct Context: Decodable {
+        struct ToolCall: Decodable {
+            let name: String
+            let arguments: [String: Value]?
+        }
+        let toolCalls: [ToolCall]
+    }
+    let raw = ProcessInfo.processInfo.environment["MCP_CONFORMANCE_CONTEXT"] ?? "{}"
+    let context = try JSONDecoder().decode(Context.self, from: Data(raw.utf8))
+
+    let client = makeConformanceClient()
+    try await client.connect(transport: HTTPClientTransport(endpoint: serverURL))
+    _ = try await client.listTools()
+    for call in context.toolCalls {
+        _ = try await client.callTool(name: call.name, arguments: call.arguments)
+    }
+    await client.disconnect()
+}
+
+/// Calls every listed tool; the client must have dropped tools with invalid
+/// `x-mcp-header` annotations.
+func runHTTPInvalidToolHeadersScenario(_ args: [String]) async throws {
+    guard let serverURLString = args.last, let serverURL = URL(string: serverURLString) else {
+        throw ConformanceError.invalidArguments("Valid server URL is required")
+    }
+    let client = makeConformanceClient()
+    try await client.connect(transport: HTTPClientTransport(endpoint: serverURL))
+    for tool in try await client.listTools().tools {
+        _ = try await client.callTool(name: tool.name, arguments: stubArguments(for: tool))
+    }
+    await client.disconnect()
+}
+
 // MARK: - SSE Scenarios
 
 /// Handler for SSE-related scenarios (retry, reconnection, etc.)
@@ -742,6 +818,9 @@ nonisolated(unsafe) let scenarioHandlers: [String: ScenarioHandler] = [
     "json-schema-2020-12-preservation": runJSONSchemaPreservationScenario,
     "json-schema-ref-no-deref": runJSONSchemaRefNoDerefScenario,
     "request-metadata": runRequestMetadataScenario,
+    "http-standard-headers": runHTTPStandardHeadersScenario,
+    "http-custom-headers": runHTTPCustomHeadersScenario,
+    "http-invalid-tool-headers": runHTTPInvalidToolHeadersScenario,
 ]
 
 // MARK: - Error Types

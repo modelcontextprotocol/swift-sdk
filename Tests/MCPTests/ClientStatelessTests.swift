@@ -128,6 +128,46 @@ struct ClientStatelessTests {
     }
 }
 
+/// Lists different tools on each call: `a` first, then `b`.
+private actor ToolListing {
+    private var calls = 0
+    func next() -> String {
+        calls += 1
+        return calls == 1 ? "a" : "b"
+    }
+}
+
+@Suite("Client tool header cache")
+struct ClientToolHeaderCacheTests {
+    private func server(_ listing: ToolListing) async -> Server {
+        let server = Server(
+            name: "headers", version: "1", capabilities: .init(tools: .init()),
+            configuration: .init(protocolVersions: Version.stateless + Version.handshake))
+        await server.withMethodHandler(ListTools.self) { _ in
+            let name = await listing.next()
+            return .init(tools: [
+                Tool(
+                    name: name, description: nil,
+                    inputSchema: ["type": "object", "properties": ["r": ["type": "string", "x-mcp-header": "R"]]])
+            ])
+        }
+        return server
+    }
+
+    @Test("A first page replaces earlier tools, and disconnect clears them")
+    func replacesAndClears() async throws {
+        let server = await server(ToolListing())
+        let (client, _) = try await connectClient(server, mode: .automatic)
+        _ = try await client.listTools()
+        #expect(await client.toolHeaderParameters.keys.sorted() == ["a"])
+        _ = try await client.listTools()
+        #expect(await client.toolHeaderParameters.keys.sorted() == ["b"])
+        await client.disconnect()
+        #expect(await client.toolHeaderParameters.isEmpty)
+        await server.stop()
+    }
+}
+
 @Suite("Client Discovery Negotiation Tests")
 struct ClientDiscoveryNegotiationTests {
     /// Waits until the client has sent `count` messages and returns the last one.
@@ -266,5 +306,115 @@ struct ClientDiscoveryNegotiationTests {
             #expect(await transport.protocolVersion == "2026-07-28")
             await transport.disconnect()
         }
+
+        @Test("Stateless requests carry Mcp-Method, Mcp-Name and Mcp-Param headers", .httpClientTransportSetup)
+        func testRequestHeaders() async throws {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [MockURLProtocol.self]
+            let transport = HTTPClientTransport(
+                endpoint: endpoint, configuration: configuration, streaming: false)
+            let recorder = HeaderRecorder()
+
+            await MockURLProtocol.requestHandlerStorage.setHandler { [endpoint] request in
+                let message = try JSONDecoder().decode(Value.self, from: bodyData(of: request)).objectValue ?? [:]
+                let method = message["method"]?.stringValue ?? ""
+                await recorder.record(method, headers: request.allHTTPHeaderFields ?? [:])
+                let result: Value
+                switch method {
+                case "server/discover":
+                    result = [
+                        "supportedVersions": ["2026-07-28"], "capabilities": ["tools": [:]],
+                        "serverInfo": ["name": "mock", "version": "1"],
+                    ]
+                case "tools/list":
+                    result = [
+                        "tools": [
+                            [
+                                "name": "route", "inputSchema": [
+                                    "type": "object",
+                                    "properties": [
+                                        "region": ["type": "string", "x-mcp-header": "Region"],
+                                        "count": ["type": "integer", "x-mcp-header": "Count"],
+                                        "note": ["type": "string"],
+                                    ],
+                                ],
+                            ],
+                            [
+                                "name": "broken", "inputSchema": [
+                                    "type": "object",
+                                    "properties": ["data": ["type": "object", "x-mcp-header": "Data"]],
+                                ],
+                            ],
+                        ]
+                    ]
+                default:
+                    result = ["content": []]
+                }
+                let body: Value = ["jsonrpc": "2.0", "id": message["id"] ?? .null, "result": result]
+                let response = HTTPURLResponse(
+                    url: endpoint, statusCode: 200, httpVersion: "HTTP/1.1",
+                    headerFields: ["Content-Type": "application/json"])!
+                return (response, try JSONEncoder().encode(body))
+            }
+
+            let client = Client(name: "probe", version: "1.0", configuration: .init(protocolMode: .automatic))
+            try await client.connect(transport: transport)
+            #expect(try await client.listTools().tools.map(\.name) == ["route"])
+            _ = try await client.callTool(name: "route", arguments: ["region": "Zürich", "count": 3, "note": "n"])
+            await client.disconnect()
+
+            let discover = try #require(await recorder.headers["server/discover"])
+            #expect(discover["Mcp-Method"] == "server/discover")
+            let list = try #require(await recorder.headers["tools/list"])
+            #expect(list["Mcp-Method"] == "tools/list")
+            #expect(list["Mcp-Name"] == nil)
+            let call = try #require(await recorder.headers["tools/call"])
+            #expect(call["Mcp-Method"] == "tools/call")
+            #expect(call["Mcp-Name"] == "route")
+            #expect(call["Mcp-Param-Region"] == "=?base64?WsO8cmljaA==?=")
+            #expect(call["Mcp-Param-Count"] == "3")
+            #expect(call.keys.filter { $0.hasPrefix("Mcp-Param-") }.count == 2)
+        }
+
+        @Test("Handshake requests carry no SEP-2243 headers", .httpClientTransportSetup)
+        func testNoHeadersOnHandshake() async throws {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [MockURLProtocol.self]
+            let transport = HTTPClientTransport(
+                endpoint: endpoint, configuration: configuration, streaming: false)
+            try await transport.connect()
+            await MockURLProtocol.requestHandlerStorage.setHandler { [endpoint] request in
+                #expect(request.value(forHTTPHeaderField: "Mcp-Method") == nil)
+                #expect(request.value(forHTTPHeaderField: "Mcp-Name") == nil)
+                let response = HTTPURLResponse(
+                    url: endpoint, statusCode: 202, httpVersion: "HTTP/1.1", headerFields: [:])!
+                return (response, Data())
+            }
+            try await transport.send(
+                Data(#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}}"#.utf8))
+            await transport.disconnect()
+        }
+    }
+
+    private actor HeaderRecorder {
+        var headers: [String: [String: String]] = [:]
+        func record(_ method: String, headers: [String: String]) {
+            self.headers[method] = headers
+        }
+    }
+
+    private func bodyData(of request: URLRequest) -> Data {
+        if let body = request.httpBody { return body }
+        guard let stream = request.httpBodyStream else { return Data() }
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while stream.hasBytesAvailable {
+            let count = stream.read(&buffer, maxLength: buffer.count)
+            guard count > 0 else { break }
+            data.append(buffer, count: count)
+        }
+        return data
     }
 #endif

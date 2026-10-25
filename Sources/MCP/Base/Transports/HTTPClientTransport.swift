@@ -312,9 +312,15 @@ public actor HTTPClientTransport: Transport {
     /// runs until its response arrives, ``disconnect()`` is called, or the
     /// client sends `notifications/cancelled` for it.
     public func send(_ data: Data) async throws {
+        try await send(data, additionalHeaders: [:])
+    }
+
+    /// Sends data through an HTTP POST request with extra headers, such as
+    /// the `Mcp-Param-*` headers of a `tools/call` (SEP-2243).
+    public func send(_ data: Data, additionalHeaders: [String: String]) async throws {
         let message = OutgoingMessage(data)
         if let id = message.requestID {
-            let task = Task { try await self.post(message) }
+            let task = Task { try await self.post(message, additionalHeaders: additionalHeaders) }
             inFlightPosts[id] = task
             defer { inFlightPosts[id] = nil }
             try await withTaskCancellationHandler {
@@ -329,7 +335,7 @@ public actor HTTPClientTransport: Transport {
         if let cancelled = message.cancelledRequestID {
             inFlightPosts[cancelled]?.cancel()
         }
-        try await post(message)
+        try await post(message, additionalHeaders: additionalHeaders)
     }
 
     /// Aborts the POST that carries request `id`, closing its response stream.
@@ -340,7 +346,7 @@ public actor HTTPClientTransport: Transport {
         inFlightPosts[id.description]?.cancel()
     }
 
-    private func post(_ message: OutgoingMessage) async throws {
+    private func post(_ message: OutgoingMessage, additionalHeaders: [String: String]) async throws {
         guard isConnected else {
             throw MCPError.internalError("Transport not connected")
         }
@@ -360,9 +366,12 @@ public actor HTTPClientTransport: Transport {
         }
 
         var attempts = 0
-        let operationKey = message.method
+        let operationKey = message.operationKey
         // A stateless request names its version in `_meta`; the header must match.
         let version = message.protocolVersion ?? protocolVersion
+        let standardHeaders =
+            version.map { Version.profile(for: $0).usesStandardHeaders } == true
+            ? Self.standardHeaders(for: message) : [:]
 
         while true {
             var request = URLRequest(url: endpoint)
@@ -376,6 +385,12 @@ public actor HTTPClientTransport: Transport {
 
             if let version {
                 request.addValue(version, forHTTPHeaderField: HTTPHeaderName.protocolVersion)
+            }
+            for (name, value) in standardHeaders {
+                request.setValue(value, forHTTPHeaderField: name)
+            }
+            for (name, value) in additionalHeaders {
+                request.setValue(value, forHTTPHeaderField: name)
             }
 
             if let sessionID = sessionID, !isStateless {
@@ -594,6 +609,16 @@ public actor HTTPClientTransport: Transport {
         for (key, value) in response.allHeaderFields {
             guard let key = key as? String, let value = value as? String else { continue }
             headers[key] = value
+        }
+        return headers
+    }
+
+    /// `Mcp-Method` and, where the method has one, `Mcp-Name` (SEP-2243).
+    private static func standardHeaders(for message: OutgoingMessage) -> [String: String] {
+        guard let method = message.method else { return [:] }
+        var headers = [MCPRequestHeaders.method: method]
+        if let name = message.nameValue {
+            headers[MCPRequestHeaders.name] = MCPRequestHeaders.encode(name)
         }
         return headers
     }
@@ -1010,19 +1035,30 @@ struct OutgoingMessage: Sendable {
     /// A request's ID, rendered like ``JSONRPCMessageKind`` IDs; `nil` for
     /// notifications, responses and batches.
     let requestID: String?
-    /// The trimmed method name; the operation key for authorization.
+    /// The method name, as sent.
     let method: String?
+    /// The `Mcp-Name` value: `params.name` or `params.uri` by method.
+    let nameValue: String?
     /// `params._meta["io.modelcontextprotocol/protocolVersion"]`.
     let protocolVersion: String?
     /// The `requestId` of a `notifications/cancelled` message.
     let cancelledRequestID: String?
 
+    /// The trimmed method name; the operation key for authorization.
+    var operationKey: String? {
+        let trimmed = method?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed?.isEmpty == false ? trimmed : nil
+    }
+
     init(_ data: Data) {
         self.data = data
         let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        let method = (json?["method"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let method = json?["method"] as? String
         let params = json?["params"] as? [String: Any]
-        self.method = method?.isEmpty == false ? method : nil
+        self.method = method
+        self.nameValue = method.flatMap {
+            MCPRequestHeaders.nameValue(method: $0, name: params?["name"] as? String, uri: params?["uri"] as? String)
+        }
         self.requestID = json.flatMap { json in
             json["method"] is String ? JSONRPCMessageKind.extractID(from: json) : nil
         }

@@ -8,13 +8,6 @@
 # failed without producing a failing check. The harness fails a run on any
 # unlisted failure and on any listed entry that now passes.
 server:
-  - "http-custom-header-server-validation:sep-2243-server-decode-base64"
-  - "http-custom-header-server-validation:sep-2243-server-no-xmcp-tool"
-  - "http-custom-header-server-validation:sep-2243-server-reject-invalid-param-chars"
-  - "http-custom-header-server-validation:sep-2243-server-reject-param-mismatch"
-  - "http-custom-header-server-validation:sep-2243-server-validate-param-match"
-  - "http-header-validation:sep-2243-server-reject-error-code"
-  - "http-header-validation:sep-2243-server-reject-invalid-headers"
   - "input-required-result-basic-elicitation:sep-2322-elicitation-incomplete"
   - "input-required-result-basic-list-roots:sep-2322-list-roots-incomplete"
   - "input-required-result-basic-sampling:sep-2322-sampling-incomplete"
@@ -60,13 +53,6 @@ client:
   - "auth/scope-retry-limit:sep-837-application-type-present"
   - "auth/scope-step-up:sep-837-application-type-present"
   - "auth/token-endpoint-auth-none:sep-837-application-type-present"
-  - "http-custom-headers:sep-2243-client-base64-unsafe"
-  - "http-custom-headers:sep-2243-client-encode-values"
-  - "http-custom-headers:sep-2243-client-mirrors-designated-params"
-  - "http-custom-headers:sep-2243-client-omit-null"
-  - "http-custom-headers:sep-2243-client-supports-custom-headers"
-  - "http-invalid-tool-headers:sep-2243-client-reject-invalid-tool"
-  - "http-invalid-tool-headers:sep-2243-invalid-tool-tools-list-gate"
   - "sep-2322-client-request-state:sep-2322-client-jsonrpc-id-different"
   - "sep-2322-client-request-state:sep-2322-client-no-state-omitted"
   - "sep-2322-client-request-state:sep-2322-client-parallel-isolation"

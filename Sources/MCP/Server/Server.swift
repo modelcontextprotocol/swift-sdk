@@ -244,6 +244,14 @@ public actor Server {
     /// whether `notifications/cancelled` arrived for them meanwhile.
     private var startingRequests: [ID: Bool] = [:]
 
+    /// `x-mcp-header` parameters by tool name (SEP-2243). Filled on the
+    /// first `tools/call` that needs them; cleared when a
+    /// `ToolListChangedNotification` is sent or the `tools/list` handler is
+    /// replaced.
+    private var toolHeaderCache: [String: ToolHeaders]?
+    private var toolHeaderLoad: Task<[String: ToolHeaders]?, Never>?
+    private var toolHeaderGeneration = 0
+
     /// Pending requests sent to the client, awaiting responses
     private var pendingRequests: [ID: AnyPendingRequest] = [:]
 
@@ -487,6 +495,7 @@ public actor Server {
             let result = try await handler(request.params)
             return Response(id: request.id, result: result)
         }
+        if M.name == ListTools.name { invalidateToolHeaders() }
         return self
     }
 
@@ -521,6 +530,7 @@ public actor Server {
             throw MCPError.internalError("Server connection not initialized")
         }
 
+        if N.name == ToolListChangedNotification.name { invalidateToolHeaders() }
         let notificationData = try encoder.encode(notification)
         try await connection.send(
             notificationData, relatedRequestID: Server.currentHandlerContext?.id)
@@ -991,6 +1001,12 @@ public actor Server {
                 logLevel: info.logLevel,
                 isStateless: true)
         }
+        // Checked in the handler task, after the stateless hook, so it can be
+        // cancelled and an unauthorized client cannot trigger it.
+        let headerCheck: HTTPRequest? =
+            handlerContext.isStateless && request.method == CallTool.name
+                && handlerContext.profile?.usesStandardHeaders == true
+            ? httpContext : nil
         let annotate: @Sendable (Response<AnyMethod>) -> Response<AnyMethod> = {
             [serverInfo, configuration] response in
             guard handlerContext.isStateless, case .success(let value) = response.result else {
@@ -1027,8 +1043,18 @@ public actor Server {
                         }
                     }
 
+                    if let http = headerCheck,
+                        let mismatch = await self.parameterHeaderError(request, http: http, context: handlerContext)
+                    {
+                        return AnyMethod.response(id: request.id, error: mismatch)
+                    }
+
                     // Handle request and get response
-                    return annotate(try await handler(request))
+                    var response = try await handler(request)
+                    if handlerContext.isStateless, request.method == ListTools.name {
+                        response = await self.droppingInvalidHeaderTools(response)
+                    }
+                    return annotate(response)
                 } catch is CancellationError {
                     // Request was cancelled, don't send a response per MCP spec
                     await logger?.debug(
@@ -1081,6 +1107,126 @@ public actor Server {
 
             return response
         }
+    }
+
+    // MARK: - Custom headers (SEP-2243)
+
+    /// Checks the `Mcp-Param-*` headers of a `tools/call` against its
+    /// arguments, using the input schemas of the `tools/list` handler.
+    ///
+    /// Fails closed: a call that carries `Mcp-Param-*` headers is refused
+    /// with -32020 when the tool's schema cannot be found, and a call to a
+    /// tool hidden for an invalid annotation is always refused.
+    private func parameterHeaderError(
+        _ request: Request<AnyMethod>, http: HTTPRequest, context: HandlerContext
+    ) async -> MCPError? {
+        let params = request.params.objectValue
+        let arguments = params?["arguments"]
+        let prefix = MCPRequestHeaders.parameterPrefix.lowercased()
+        let hasHeaders = http.headers.keys.contains { $0.lowercased().hasPrefix(prefix) }
+        // Nothing to compare: skip the schema lookup.
+        if arguments?.objectValue?.isEmpty ?? true, !hasHeaders { return nil }
+        guard methodHandlers[ListTools.name] != nil else { return nil }
+        let name = params?["name"]?.stringValue ?? ""
+
+        switch await toolHeaders(context: context, request: request)?[name] {
+        case .valid(let parameters)?:
+            return MCPRequestHeaders.validate(parameters, arguments: arguments, header: http.header)
+                .map { MCPError.headerMismatch($0) }
+        case .invalid?:
+            return .headerMismatch("The tool has an invalid \(MCPRequestHeaders.schemaKeyword) annotation")
+        case nil:
+            return hasHeaders ? .headerMismatch("No input schema to check the Mcp-Param headers against") : nil
+        }
+    }
+
+    /// The `x-mcp-header` parameters of a listed tool.
+    enum ToolHeaders: Sendable {
+        case valid([MCPRequestHeaders.Parameter])
+        /// Hidden from `tools/list` for an invalid annotation.
+        case invalid
+    }
+
+    /// The parameters of every tool the `tools/list` handler lists, from one
+    /// pass through its pages. Concurrent calls share the pass; the result
+    /// is kept until the tool list changes. `nil` when the pass fails.
+    private func toolHeaders(context: HandlerContext, request: Request<AnyMethod>) async
+        -> [String: ToolHeaders]?
+    {
+        if let cached = toolHeaderCache { return cached }
+        if let pending = toolHeaderLoad { return await pending.value }
+        guard let handler = methodHandlers[ListTools.name] else { return nil }
+        let generation = toolHeaderGeneration
+        let load = Task { () -> [String: ToolHeaders]? in
+            var headers: [String: ToolHeaders] = [:]
+            var cursor: String?
+            for _ in 0..<Self.maxToolListPages {
+                var params: [String: Value] = [:]
+                if let cursor { params["cursor"] = .string(cursor) }
+                let list = Request<AnyMethod>(
+                    id: request.id, method: ListTools.name, params: .object(params), _meta: request._meta)
+                let response = try? await Server.$currentHandlerContext.withValue(context) {
+                    try await handler(list)
+                }
+                guard case .success(let result)? = response?.result else { return nil }
+                for tool in result.objectValue?["tools"]?.arrayValue ?? [] {
+                    guard let name = tool.objectValue?["name"]?.stringValue else { continue }
+                    let parameters = try? MCPRequestHeaders.parameters(in: tool.objectValue?["inputSchema"] ?? .null)
+                    headers[name] = parameters.map(ToolHeaders.valid) ?? .invalid
+                }
+                guard let next = result.objectValue?["nextCursor"]?.stringValue else { return headers }
+                cursor = next
+            }
+            return nil
+        }
+        toolHeaderLoad = load
+        let headers = await load.value
+        if toolHeaderGeneration == generation {
+            toolHeaderLoad = nil
+            toolHeaderCache = headers
+        }
+        if headers == nil {
+            await logger?.warning(
+                "Cannot read the tools/list input schemas; calls with Mcp-Param headers are refused")
+        }
+        return headers
+    }
+
+    /// Forgets the cached tool schemas.
+    private func invalidateToolHeaders() {
+        toolHeaderGeneration &+= 1
+        toolHeaderCache = nil
+        toolHeaderLoad = nil
+    }
+
+    private static let maxToolListPages = 100
+
+    /// Removes tools with invalid `x-mcp-header` annotations from a
+    /// `tools/list` result: clients must ignore them (SEP-2243).
+    private func droppingInvalidHeaderTools(_ response: Response<AnyMethod>) async
+        -> Response<AnyMethod>
+    {
+        guard case .success(let value) = response.result,
+            var object = value.objectValue,
+            let tools = object["tools"]?.arrayValue
+        else { return response }
+        var valid: [Value] = []
+        for tool in tools {
+            do {
+                _ = try MCPRequestHeaders.parameters(in: tool.objectValue?["inputSchema"] ?? .null)
+                valid.append(tool)
+            } catch {
+                await logger?.warning(
+                    "Tool not listed: invalid x-mcp-header annotation",
+                    metadata: [
+                        "tool": "\(MCPRequestHeaders.sanitized(tool.objectValue?["name"]?.stringValue ?? "?"))",
+                        "error": "\(error)",
+                    ])
+            }
+        }
+        guard valid.count != tools.count else { return response }
+        object["tools"] = .array(valid)
+        return Response(id: response.id, result: .object(object))
     }
 
     private func handleMessage(_ message: Message<AnyNotification>) async throws {

@@ -81,6 +81,14 @@ func createConformanceServer(state: ServerState, transport: any Transport) async
             Tool(name: "test_missing_capability", description: "Requires the sampling client capability (SEP-2575 -32021)", inputSchema: .object(["type": "object", "properties": [:]])),
             Tool(name: "test_logging_tool", description: "Attempts to log; dropped unless the request set a log level (SEP-2575)", inputSchema: .object(["type": "object", "properties": [:]])),
             Tool(name: "test_streaming_elicitation", description: "Returns a plain result; the response stream must carry no requests (SEP-2575)", inputSchema: .object(["type": "object", "properties": [:]])),
+            Tool(name: "test_x_mcp_header", description: "Mirrors region into the Mcp-Param-Region header (SEP-2243)", inputSchema: .object([
+                "type": "object",
+                "properties": [
+                    "region": ["type": "string", "x-mcp-header": "Region"],
+                    "level": ["type": "integer"],
+                ],
+                "required": ["region"],
+            ])),
             Tool(name: "json_schema_2020_12_tool", description: "Tool with JSON Schema 2020-12 features", inputSchema: [
                 "$schema": "https://json-schema.org/draft/2020-12/schema",
                 "type": "object",
@@ -111,6 +119,9 @@ func createConformanceServer(state: ServerState, transport: any Transport) async
         switch params.name {
         case "test_simple_text":
             return .init(content: [.text(text: "This is a simple text response for testing.", annotations: nil, _meta: nil)], isError: false)
+        case "test_x_mcp_header":
+            let region = params.arguments?["region"]?.stringValue ?? ""
+            return .init(content: [.text(text: "Region: \(region)", annotations: nil, _meta: nil)], isError: false)
         case "test_image_content":
             return .init(content: [.image(data: testImageBase64, mimeType: "image/png", annotations: nil, _meta: nil)], isError: false)
         case "test_audio_content":
