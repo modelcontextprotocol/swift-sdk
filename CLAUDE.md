@@ -221,6 +221,17 @@ The SDK stays dual-era: a request carrying `io.modelcontextprotocol/protocolVers
 - Client: `send(_:)` loops through `resolveInputRequests` with the registered
   sampling/elicitation/roots handlers (`Configuration.multiRoundTrip`).
 
+## Interop
+
+`scripts/run-interop.sh [--update-results]` runs the Swift, Go and Python SDKs' clients and
+servers against each other (profiles basic, advanced, connect, session), in both eras, over
+HTTP and stdio, and writes `.build/interop/report.md` (`--update-results` copies it to
+`interop/RESULTS.md`). The other SDKs are pinned releases: `interop/go-client/go.mod` and
+`interop/python-client/requirements.in` (hashed lock `requirements.txt`, example servers
+checked against `examples.sha256`); no local checkouts. The three drivers in
+`interop/{swift-client,go-client,python-client}` take the same flags and checks; keep them in
+step. Findings: `interop/README.md`.
+
 ## Conformance fixtures
 
 `conformance/everything-{client,server}` build `mcp-everything-client` and

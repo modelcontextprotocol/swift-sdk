@@ -66,7 +66,10 @@ let package = Package(
             targets: ["MCPConformanceServer"]),
         .executable(
             name: "mcp-everything-client",
-            targets: ["MCPConformanceClient"])
+            targets: ["MCPConformanceClient"]),
+        .executable(
+            name: "mcp-interop-client",
+            targets: ["MCPInteropClient"])
     ],
     dependencies: [
         .package(url: "https://github.com/swiftlang/swift-docc-plugin", branch: "main"),
@@ -121,6 +124,15 @@ let package = Package(
                 .product(name: "Logging", package: "swift-log"),
             ],
             path: "conformance/everything-client"
+        ),
+        .executableTarget(
+            name: "MCPInteropClient",
+            dependencies: [
+                "MCP",
+                .product(name: "Logging", package: "swift-log"),
+                .product(name: "SystemPackage", package: "swift-system"),
+            ],
+            path: "interop/swift-client"
         ),
     ] + examples
 )

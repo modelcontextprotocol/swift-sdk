@@ -163,3 +163,23 @@ The output of a leg is in `.build/conformance/<leg>/`: the harness logs
 
 `scripts/tests/run-conformance-test.sh` checks the exit status of the runner
 and the scorer with a fake harness; it needs Node.js and no network.
+
+## Interop with the Go and Python SDKs
+
+`scripts/run-interop.sh` runs real clients and servers of the three SDKs
+against each other: a check battery written once for each SDK
+(`interop/swift-client`, `interop/go-client`, `interop/python-client`)
+against the conformance everything-server of each SDK, in both eras, over
+Streamable HTTP and stdio, plus the SDKs' example clients and servers. The Go
+and Python SDKs are pinned releases (`interop/go-client/go.mod`,
+`interop/python-client/requirements.txt`); the script needs Go, `uv` and
+network access on the first run.
+
+```console
+$ scripts/run-interop.sh                   # report in .build/interop/report.md
+$ scripts/run-interop.sh --update-results  # also writes interop/RESULTS.md
+```
+
+The checks, the servers and the findings are in
+[`interop/README.md`](../interop/README.md).
+
