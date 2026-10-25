@@ -16,12 +16,23 @@ import Crypto
 /// (machine-to-machine) and RFC 7523 `jwt-bearer` grant types via the ``grantType`` property.
 public struct OAuthConfiguration: Sendable {
     /// The OAuth 2.1 grant type to use for token acquisition.
-    public enum GrantType: Sendable {
+    ///
+    /// New grant types can appear in a minor release, so a `switch` needs a `default`.
+    public struct GrantType: Hashable, Sendable, CustomStringConvertible {
+        /// The `grant_type` value of the token request.
+        public let rawValue: String
+
+        init(rawValue: String) {
+            self.rawValue = rawValue
+        }
+
+        public var description: String { rawValue }
+
         /// OAuth 2.1 authorization_code flow with PKCE.
-        case authorizationCode
+        public static let authorizationCode = GrantType(rawValue: OAuthGrantTypeValue.authorizationCode)
 
         /// OAuth 2.1 client_credentials flow.
-        case clientCredentials
+        public static let clientCredentials = GrantType(rawValue: OAuthGrantTypeValue.clientCredentials)
 
         /// RFC 7523 JWT bearer grant (`urn:ietf:params:oauth:grant-type:jwt-bearer`).
         ///
@@ -29,42 +40,76 @@ public struct OAuthConfiguration: Sendable {
         /// returns: an identity assertion (ID-JAG) for enterprise-managed authorization
         /// (SEP-990), or a workload identity token (SEP-1933). No client registration
         /// happens.
-        case jwtBearer
+        public static let jwtBearer = GrantType(rawValue: OAuthGrantTypeValue.jwtBearer)
     }
 
     /// How the client authenticates to the OAuth token endpoint.
-    public enum TokenEndpointAuthentication: Sendable, Equatable {
-        /// `client_secret_basic` authentication using the Authorization header.
-        case clientSecretBasic(clientID: String, clientSecret: String)
-
-        /// `client_secret_post` authentication using form parameters.
-        case clientSecretPost(clientID: String, clientSecret: String)
-
-        /// Public client authentication (`token_endpoint_auth_method=none`).
-        case none(clientID: String)
-
-        /// `private_key_jwt` authentication.
     ///
-    /// The built-in ``OAuthConfiguration/makePrivateKeyJWTAssertion(clientID:tokenEndpoint:privateKeyPEM:signingAlgorithm:audience:issuedAt:expiresIn:)``
-    /// helper generates ES256 (P-256 ECDSA) assertions only. To use other algorithms
-    /// (e.g., RS256, ES384), provide a custom ``OAuthConfiguration/JWTAssertionFactory`` closure.
-        case privateKeyJWT(clientID: String, assertionFactory: JWTAssertionFactory)
-
-        var clientID: String {
-            switch self {
-            case .clientSecretBasic(let clientID, _), .clientSecretPost(let clientID, _),
-                .none(let clientID), .privateKeyJWT(let clientID, _):
-                return clientID
-            }
+    /// Create one with a static member, such as
+    /// ``clientSecretBasic(clientID:clientSecret:)``. New methods can appear in a minor
+    /// release.
+    public struct TokenEndpointAuthentication: Sendable, Equatable {
+        enum Method: Sendable {
+            case clientSecretBasic(clientSecret: String)
+            case clientSecretPost(clientSecret: String)
+            case none
+            case privateKeyJWT(JWTAssertionFactory)
         }
 
-        /// The token endpoint auth method name per RFC 7591.
-        var methodName: String {
-            switch self {
+        /// The client ID.
+        public let clientID: String
+
+        let method: Method
+
+        init(clientID: String, method: Method) {
+            self.clientID = clientID
+            self.method = method
+        }
+
+        /// `client_secret_basic` authentication using the Authorization header.
+        public static func clientSecretBasic(clientID: String, clientSecret: String) -> Self {
+            Self(clientID: clientID, method: .clientSecretBasic(clientSecret: clientSecret))
+        }
+
+        /// `client_secret_post` authentication using form parameters.
+        public static func clientSecretPost(clientID: String, clientSecret: String) -> Self {
+            Self(clientID: clientID, method: .clientSecretPost(clientSecret: clientSecret))
+        }
+
+        /// Public client authentication (`token_endpoint_auth_method=none`). An empty client
+        /// ID asks for dynamic client registration.
+        public static func none(clientID: String) -> Self {
+            Self(clientID: clientID, method: .none)
+        }
+
+        /// `private_key_jwt` authentication.
+        ///
+        /// The built-in ``OAuthConfiguration/makePrivateKeyJWTAssertion(clientID:tokenEndpoint:privateKeyPEM:signingAlgorithm:audience:issuedAt:expiresIn:)``
+        /// helper generates ES256 (P-256 ECDSA) assertions only. To use other algorithms
+        /// (e.g., RS256, ES384), provide a custom ``OAuthConfiguration/JWTAssertionFactory`` closure.
+        public static func privateKeyJWT(clientID: String, assertionFactory: @escaping JWTAssertionFactory) -> Self {
+            Self(clientID: clientID, method: .privateKeyJWT(assertionFactory))
+        }
+
+        /// The `token_endpoint_auth_method` (RFC 7591), for example `client_secret_basic`.
+        public var methodName: String {
+            switch method {
             case .clientSecretBasic: return OAuthTokenEndpointAuthMethod.clientSecretBasic
             case .clientSecretPost: return OAuthTokenEndpointAuthMethod.clientSecretPost
             case .none: return OAuthTokenEndpointAuthMethod.none
             case .privateKeyJWT: return OAuthTokenEndpointAuthMethod.privateKeyJWT
+            }
+        }
+
+        /// The same method for another client ID, and another secret when one is given.
+        func registered(clientID: String, clientSecret: String?) -> Self {
+            switch method {
+            case .clientSecretBasic(let current):
+                return .clientSecretBasic(clientID: clientID, clientSecret: clientSecret ?? current)
+            case .clientSecretPost(let current):
+                return .clientSecretPost(clientID: clientID, clientSecret: clientSecret ?? current)
+            case .none, .privateKeyJWT:
+                return Self(clientID: clientID, method: method)
             }
         }
 
@@ -73,28 +118,42 @@ public struct OAuthConfiguration: Sendable {
             bodyParameters: inout [String: String],
             tokenEndpoint: URL
         ) async throws {
-            switch self {
-            case .clientSecretBasic(let clientID, let clientSecret):
+            switch method {
+            case .clientSecretBasic(let clientSecret):
                 // RFC 6749 §2.3.1: percent-encode client_id and client_secret with
                 // application/x-www-form-urlencoded before concatenation.
                 let encodedID = clientID.rfc6749PercentEncoded()
                 let encodedSecret = clientSecret.rfc6749PercentEncoded()
                 let basic = Data("\(encodedID):\(encodedSecret)".utf8).base64EncodedString()
                 request.setValue("Basic \(basic)", forHTTPHeaderField: HTTPHeaderName.authorization)
-            case .clientSecretPost(let clientID, let clientSecret):
+            case .clientSecretPost(let clientSecret):
                 bodyParameters[OAuthParameterName.clientID] = clientID
                 bodyParameters[OAuthParameterName.clientSecret] = clientSecret
-            case .none(let clientID):
+            case .none:
                 // An empty ID asks for registration; it is not sent.
                 if !clientID.isEmpty {
                     bodyParameters[OAuthParameterName.clientID] = clientID
                 }
-            case .privateKeyJWT(let clientID, let assertionFactory):
+            case .privateKeyJWT(let assertionFactory):
                 bodyParameters[OAuthParameterName.clientID] = clientID
                 bodyParameters[OAuthParameterName.clientAssertionType] =
                     OAuthClientAssertionType.jwtBearer
                 bodyParameters[OAuthParameterName.clientAssertion] =
                     try await assertionFactory(tokenEndpoint, clientID)
+            }
+        }
+
+        /// Whether both use the same method, client ID and secret. Two `private_key_jwt`
+        /// values with the same client ID are equal: closures cannot be compared.
+        public static func == (lhs: Self, rhs: Self) -> Bool {
+            guard lhs.clientID == rhs.clientID else { return false }
+            switch (lhs.method, rhs.method) {
+            case (.clientSecretBasic(let l), .clientSecretBasic(let r)), (.clientSecretPost(let l), .clientSecretPost(let r)):
+                return l == r
+            case (.none, .none), (.privateKeyJWT, .privateKeyJWT):
+                return true
+            default:
+                return false
             }
         }
     }
@@ -104,11 +163,25 @@ public struct OAuthConfiguration: Sendable {
         async throws -> String
 
     /// Supported signing algorithms for SDK-generated `private_key_jwt` assertions.
-    public enum PrivateKeyJWTSigningAlgorithm: String, Sendable {
-        case ES256
+    ///
+    /// New algorithms can appear in a minor release.
+    public struct PrivateKeyJWTSigningAlgorithm: Hashable, Sendable, CustomStringConvertible {
+        /// The JWS `alg` value.
+        public let rawValue: String
+
+        init(rawValue: String) {
+            self.rawValue = rawValue
+        }
+
+        public var description: String { rawValue }
+
+        /// ECDSA with P-256 and SHA-256.
+        public static let ES256 = PrivateKeyJWTSigningAlgorithm(rawValue: "ES256")
     }
 
     /// Errors thrown while creating SDK-generated `private_key_jwt` assertions.
+    ///
+    /// Frozen: no case is added in 1.x (the two ways the helper can fail).
     public enum PrivateKeyJWTAssertionError: LocalizedError, Sendable {
         case invalidLifetime(TimeInterval)
         /// Not thrown: signing uses swift-crypto on every platform.
@@ -186,12 +259,11 @@ public struct OAuthConfiguration: Sendable {
 
         let signingInput = "\(header.base64URLEncodedString()).\(payload.base64URLEncodedString())"
 
-        switch signingAlgorithm {
-        case .ES256:
-            let privateKey = try P256.Signing.PrivateKey(pemRepresentation: privateKeyPEM)
-            let signature = try privateKey.signature(for: Data(signingInput.utf8)).rawRepresentation
-            return "\(signingInput).\(signature.base64URLEncodedString())"
-        }
+        // ES256 is the only algorithm: the initializer is internal.
+        precondition(signingAlgorithm == .ES256, "Unsupported signing algorithm \(signingAlgorithm)")
+        let privateKey = try P256.Signing.PrivateKey(pemRepresentation: privateKeyPEM)
+        let signature = try privateKey.signature(for: Data(signingInput.utf8)).rawRepresentation
+        return "\(signingInput).\(signature.base64URLEncodedString())"
     }
 
     /// Returns a loopback redirect URI with a random ephemeral port.
@@ -399,6 +471,8 @@ public struct OAuthConfiguration: Sendable {
 
     /// The OpenID Connect `application_type` sent during dynamic client
     /// registration (SEP-837).
+    ///
+    /// Frozen: no case is added in 1.x (OpenID Connect Dynamic Registration defines `native` and `web`).
     public enum ApplicationType: String, Hashable, Sendable {
         /// An app on the user's device: loopback or custom-scheme redirects.
         case native
@@ -516,23 +590,6 @@ public struct OAuthConfiguration: Sendable {
         self.accessTokenProvider = accessTokenProvider
         self.authorizationDelegate = authorizationDelegate
         self.proactiveRefreshWindowSeconds = proactiveRefreshWindowSeconds
-    }
-}
-
-extension OAuthConfiguration.TokenEndpointAuthentication {
-    public static func == (lhs: Self, rhs: Self) -> Bool {
-        switch (lhs, rhs) {
-        case (.clientSecretBasic(let li, let ls), .clientSecretBasic(let ri, let rs)):
-            return li == ri && ls == rs
-        case (.clientSecretPost(let li, let ls), .clientSecretPost(let ri, let rs)):
-            return li == ri && ls == rs
-        case (.none(let li), .none(let ri)):
-            return li == ri
-        case (.privateKeyJWT(let li, _), .privateKeyJWT(let ri, _)):
-            return li == ri
-        default:
-            return false
-        }
     }
 }
 

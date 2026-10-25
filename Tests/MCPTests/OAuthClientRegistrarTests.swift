@@ -73,16 +73,12 @@ import Testing
         func testRegisterThrowsWithoutClientIDOrEndpoint(grantType: OAuthConfiguration.GrantType) async throws {
             let config = OAuthConfiguration(grantType: grantType, authentication: .none(clientID: ""))
             let (session, _) = makeIsolatedSession()
-            let error = await #expect(throws: OAuthAuthorizationError.self) {
+            await #expect(throws: OAuthAuthorizationError.registrationInformationRequired) {
                 try await registrar.register(
                     configuration: config,
                     asMetadata: makeASMetadata(registrationEndpoint: nil),
                     session: session
                 )
-            }
-            guard case .registrationInformationRequired = error else {
-                Issue.record("Expected registrationInformationRequired, got \(String(describing: error))")
-                return
             }
         }
 
@@ -191,12 +187,7 @@ import Testing
                     session: session
                 )
             }
-            guard case .tokenRequestFailed(let statusCode, let oauthError) = error else {
-                Issue.record("Expected tokenRequestFailed, got \(String(describing: error))")
-                return
-            }
-            #expect(statusCode == 503)
-            #expect(oauthError == nil)
+            #expect(error == .tokenRequestFailed(statusCode: 503, oauthError: nil))
         }
 
         // MARK: - updatedAuthentication helper

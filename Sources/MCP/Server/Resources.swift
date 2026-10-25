@@ -219,6 +219,8 @@ public struct Resource: Hashable, Codable, Sendable {
     // A resource annotation.
     public struct Annotations: Hashable, Codable, Sendable {
         /// The intended audience for this resource.
+        ///
+        /// Frozen: no case is added in 1.x (every revision has `user` and `assistant` only).
         public enum Audience: String, Hashable, Codable, Sendable {
             /// Content intended for end users.
             case user = "user"

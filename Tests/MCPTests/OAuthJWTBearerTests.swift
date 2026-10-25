@@ -228,9 +228,8 @@ struct OAuthJWTBearerGrantTests {
                 _ = try await authorizer.handleChallenge(
                     statusCode: 401, headers: headers401, endpoint: endpoint, session: session)
                 Issue.record("The grant should fail")
-            } catch OAuthAuthorizationError.tokenRequestFailed(let status, let error) {
-                #expect(status == 400)
-                #expect(error == "invalid_grant")
+            } catch let error as OAuthAuthorizationError {
+                #expect(error == .tokenRequestFailed(statusCode: 400, oauthError: "invalid_grant"))
             }
             let sent = await requests.values
             #expect(sent.count == 1)
@@ -304,9 +303,12 @@ struct OAuthJWTBearerGrantTests {
                 _ = try await OAuthTokenExchange.exchange(
                     request, tokenEndpoint: idpToken, authentication: .none(clientID: "c"), session: session)
                 Issue.record("The exchange should fail")
-            } catch OAuthAuthorizationError.issuedTokenTypeMismatch(let expected, let actual) {
-                #expect(expected == OAuthTokenExchange.TokenType.idJAG)
-                #expect(actual == OAuthTokenExchange.TokenType.accessToken)
+            } catch let error as OAuthAuthorizationError {
+                #expect(
+                    error
+                        == .issuedTokenTypeMismatch(
+                            expected: OAuthTokenExchange.TokenType.idJAG,
+                            actual: OAuthTokenExchange.TokenType.accessToken))
             }
         }
 
@@ -320,9 +322,8 @@ struct OAuthJWTBearerGrantTests {
                 _ = try await OAuthTokenExchange.exchange(
                     request, tokenEndpoint: idpToken, authentication: .none(clientID: "c"), session: session)
                 Issue.record("The exchange should fail")
-            } catch OAuthAuthorizationError.tokenRequestFailed(let status, let error) {
-                #expect(status == 400)
-                #expect(error == "invalid_target")
+            } catch let error as OAuthAuthorizationError {
+                #expect(error == .tokenRequestFailed(statusCode: 400, oauthError: "invalid_target"))
             }
         }
 

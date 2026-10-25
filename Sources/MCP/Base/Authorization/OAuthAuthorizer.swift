@@ -992,6 +992,9 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
                 asMetadata: asMetadata,
                 session: session
             )
+        default:
+            // Every grant type the SDK defines is handled above.
+            preconditionFailure("Unhandled grant type \(configuration.grantType)")
         }
     }
 
@@ -1224,7 +1227,7 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
             refreshedTokenValue = decoded.accessToken
             return true
         } catch let error as OAuthAuthorizationError {
-            if case .tokenRequestFailed(let statusCode, _) = error,
+            if error.code == .tokenRequestFailed, let statusCode = error.statusCode,
                 (400..<500).contains(statusCode)
             {
                 return false
@@ -1262,7 +1265,7 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
         }
 
         guard !clientRegistrationAttempted else { return }
-        guard case .none = configuration.authentication else { return }
+        guard case .none = configuration.authentication.method else { return }
         // The assertion identifies the client: nothing to register.
         guard configuration.grantType != .jwtBearer else { return }
 

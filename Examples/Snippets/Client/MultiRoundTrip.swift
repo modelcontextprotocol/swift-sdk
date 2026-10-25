@@ -57,6 +57,7 @@ func deployManually(transport: any Transport) async throws -> CallTool.Result {
             case .elicitation(let params): responses[key] = .elicitation(await askUser(params))
             case .sampling(let params): responses[key] = .sampling(try await runModel(params))
             case .listRoots: responses[key] = .roots(.init(roots: []))
+            case .unknown(let method, _): throw MCPError.methodNotFound(method)
             }
         }
         if responses.isEmpty {

@@ -6,6 +6,8 @@ import Foundation
 /// optional logger names, and arbitrary JSON-serializable data.
 ///
 /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/server/utilities/logging/
+///
+/// Frozen: no case is added in 1.x (the eight RFC 5424 severities).
 public enum LogLevel: String, Hashable, Codable, Sendable, CaseIterable {
     /// Detailed debugging information
     case debug

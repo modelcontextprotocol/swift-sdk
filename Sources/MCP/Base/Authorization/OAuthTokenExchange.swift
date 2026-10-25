@@ -206,6 +206,8 @@ extension OAuthConfiguration {
     /// (ID-JAGs) for enterprise-managed authorization (SEP-990).
     public struct EnterpriseIdentityProvider: Sendable {
         /// Where to send the token exchange.
+        ///
+        /// Frozen: no case is added in 1.x (a token endpoint, or an issuer to discover it from).
         public enum Endpoint: Sendable, Hashable {
             /// The token endpoint of the identity provider.
             case tokenEndpoint(URL)

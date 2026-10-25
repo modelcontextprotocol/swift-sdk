@@ -13,6 +13,8 @@ import class Foundation.JSONEncoder
 ///
 /// The client fulfills it as it would fulfill the same request sent by the
 /// server, and returns the outcome as an ``InputResponse`` under the same key.
+///
+/// No other case is added in 1.x: a kind from a later revision is ``unknown(method:params:)``.
 public enum InputRequest: Hashable, Sendable {
     /// `elicitation/create`: ask the user for input.
     case elicitation(CreateElicitation.Parameters)
@@ -20,6 +22,10 @@ public enum InputRequest: Hashable, Sendable {
     case sampling(CreateSamplingMessage.Parameters)
     /// `roots/list`: ask for the client's roots.
     case listRoots
+    /// A request the SDK does not know, from a later revision: its method and
+    /// `params`. The client fulfills it with the handler registered for the
+    /// method, if any.
+    case unknown(method: String, params: Value)
 
     /// The method of the request.
     public var method: String {
@@ -27,6 +33,7 @@ public enum InputRequest: Hashable, Sendable {
         case .elicitation: return CreateElicitation.name
         case .sampling: return CreateSamplingMessage.name
         case .listRoots: return ListRoots.name
+        case .unknown(let method, _): return method
         }
     }
 
@@ -42,10 +49,15 @@ public enum InputRequest: Hashable, Sendable {
         switch self {
         case .elicitation(let params):
             guard let elicitation = capabilities.elicitation else { return false }
-            if case .url = params { return elicitation.url != nil }
-            return true
+            switch params {
+            case .url: return elicitation.url != nil
+            case .form: return true
+            case .unknown: return false
+            }
         case .sampling: return capabilities.sampling != nil
         case .listRoots: return capabilities.roots != nil
+        // The SDK does not know which capability it needs.
+        case .unknown: return true
         }
     }
 
@@ -62,6 +74,7 @@ public enum InputRequest: Hashable, Sendable {
             capabilities.elicitation = elicitation
         case .sampling: capabilities.sampling = capabilities.sampling ?? .init()
         case .listRoots: capabilities.roots = capabilities.roots ?? .init()
+        case .unknown: break
         }
     }
 
@@ -71,6 +84,7 @@ public enum InputRequest: Hashable, Sendable {
         case .elicitation(let params): return try Value(params)
         case .sampling(let params): return try Value(params)
         case .listRoots: return [:]
+        case .unknown(_, let params): return params
         }
     }
 }
@@ -91,8 +105,7 @@ extension InputRequest: Codable {
         case ListRoots.name:
             self = .listRoots
         default:
-            throw DecodingError.dataCorruptedError(
-                forKey: .method, in: container, debugDescription: "Unsupported input request method \(method)")
+            self = .unknown(method: method, params: try container.decodeIfPresent(Value.self, forKey: .params) ?? [:])
         }
     }
 
@@ -103,6 +116,7 @@ extension InputRequest: Codable {
         case .elicitation(let params): try container.encode(params, forKey: .params)
         case .sampling(let params): try container.encode(params, forKey: .params)
         case .listRoots: try container.encode(Empty(), forKey: .params)
+        case .unknown(_, let params): try container.encode(params, forKey: .params)
         }
     }
 }
@@ -111,11 +125,15 @@ extension InputRequest: Codable {
 ///
 /// On the wire it is the plain result of the request. Decoding tells the
 /// kinds apart by shape: `roots` for roots, `action` for elicitation,
-/// otherwise sampling.
+/// `content` or `model` for sampling, otherwise ``unknown(_:)``.
+///
+/// No other case is added in 1.x: a kind from a later revision is ``unknown(_:)``.
 public enum InputResponse: Hashable, Sendable {
     case elicitation(CreateElicitation.Result)
     case sampling(CreateSamplingMessage.Result)
     case roots(ListRoots.Result)
+    /// The result of a request the SDK does not know, as received.
+    case unknown(Value)
 
     /// The elicitation result, if this is one.
     public var elicitation: CreateElicitation.Result? {
@@ -141,7 +159,7 @@ public enum InputResponse: Hashable, Sendable {
         case CreateElicitation.name: self = .elicitation(try CreateElicitation.Result(decoding: result))
         case CreateSamplingMessage.name: self = .sampling(try CreateSamplingMessage.Result(decoding: result))
         case ListRoots.name: self = .roots(try ListRoots.Result(decoding: result))
-        default: throw MCPError.invalidParams("Unsupported input request method \(method)")
+        default: self = .unknown(result)
         }
     }
 }
@@ -153,8 +171,10 @@ extension InputResponse: Codable {
             self = .roots(try ListRoots.Result(decoding: Value.object(object)))
         } else if object["action"] != nil {
             self = .elicitation(try CreateElicitation.Result(decoding: Value.object(object)))
-        } else {
+        } else if object["content"] != nil || object["model"] != nil {
             self = .sampling(try CreateSamplingMessage.Result(decoding: Value.object(object)))
+        } else {
+            self = .unknown(.object(object))
         }
     }
 
@@ -163,6 +183,7 @@ extension InputResponse: Codable {
         case .elicitation(let result): try result.encode(to: encoder)
         case .sampling(let result): try result.encode(to: encoder)
         case .roots(let result): try result.encode(to: encoder)
+        case .unknown(let value): try value.encode(to: encoder)
         }
     }
 }

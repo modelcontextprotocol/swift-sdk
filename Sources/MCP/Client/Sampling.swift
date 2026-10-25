@@ -9,6 +9,8 @@ public enum Sampling {
     /// A message in the conversation history.
     public struct Message: Hashable, Sendable {
         /// The message role
+        ///
+        /// Frozen: no case is added in 1.x (every revision has `user` and `assistant` only).
         public enum Role: String, Hashable, Codable, Sendable {
             /// A user message
             case user
@@ -51,6 +53,8 @@ public enum Sampling {
         }
 
         /// Content types for sampling messages
+        ///
+        /// Frozen: no case is added in 1.x (content is one block or an array of blocks).
         public enum Content: Hashable, Sendable {
             /// Single content block
             case single(ContentBlock)
@@ -58,6 +62,8 @@ public enum Sampling {
             case multiple([ContentBlock])
 
             /// Individual content blocks in messages
+            ///
+            /// No other case is added in 1.x: a kind from a later revision is ``unknown(type:_:)``.
             public enum ContentBlock: Hashable, Sendable {
                 /// Text content
                 case text(String)
@@ -69,6 +75,9 @@ public enum Sampling {
                 case toolUse(Sampling.ToolUseContent)
                 /// Tool result content
                 case toolResult(Sampling.ToolResultContent)
+                /// A block of a type the SDK does not know, from a later revision: its
+                /// `type` and the whole block as received. It is encoded as received.
+                case unknown(type: String, Value)
             }
 
             /// Returns true if this is a single content block
@@ -139,6 +148,8 @@ public enum Sampling {
     }
 
     /// Context inclusion options for sampling requests
+    ///
+    /// Frozen: no case is added in 1.x (soft-deprecated at 2025-11-25, so it can only shrink).
     public enum ContextInclusion: String, Hashable, Codable, Sendable {
         /// No additional context
         case none
@@ -202,6 +213,8 @@ public enum Sampling {
         public var _meta: Metadata?
 
         /// Individual content blocks in tool results
+        ///
+        /// No other case is added in 1.x: a kind from a later revision is ``unknown(type:_:)``.
         public enum ContentBlock: Hashable, Sendable {
             /// Text content
             case text(String)
@@ -213,6 +226,9 @@ public enum Sampling {
             case resource(resource: Resource.Content, annotations: Resource.Annotations?, _meta: Metadata?)
             /// Resource link
             case resourceLink(uri: String, name: String, title: String?, description: String?, mimeType: String?, annotations: Resource.Annotations?)
+            /// A block of a type the SDK does not know, from a later revision: its
+            /// `type` and the whole block as received. It is encoded as received.
+            case unknown(type: String, Value)
         }
 
         public init(
@@ -295,13 +311,15 @@ extension Sampling.Message.Content.ContentBlock: Codable {
                 isError: isError,
                 _meta: _meta))
         default:
-            throw DecodingError.dataCorruptedError(
-                forKey: .type, in: container,
-                debugDescription: "Unknown sampling message content block type")
+            self = .unknown(type: type, try UnknownBlock.decode(from: decoder))
         }
     }
 
     public func encode(to encoder: Encoder) throws {
+        if case .unknown(let type, let block) = self {
+            try UnknownBlock.encode(block, kind: type, to: encoder)
+            return
+        }
         var container = encoder.container(keyedBy: CodingKeys.self)
 
         switch self {
@@ -329,6 +347,8 @@ extension Sampling.Message.Content.ContentBlock: Codable {
             try container.encodeIfPresent(toolResult.structuredContent, forKey: .structuredContent)
             try container.encodeIfPresent(toolResult.isError, forKey: .isError)
             try container.encodeIfPresent(toolResult._meta, forKey: ._meta)
+        case .unknown:
+            return
         }
     }
 }
@@ -416,13 +436,15 @@ extension Sampling.ToolResultContent.ContentBlock: Codable {
                 uri: uri, name: name, title: title, description: description,
                 mimeType: mimeType, annotations: annotations)
         default:
-            throw DecodingError.dataCorruptedError(
-                forKey: .type, in: container,
-                debugDescription: "Unknown tool result content block type")
+            self = .unknown(type: type, try UnknownBlock.decode(from: decoder))
         }
     }
 
     public func encode(to encoder: Encoder) throws {
+        if case .unknown(let type, let block) = self {
+            try UnknownBlock.encode(block, kind: type, to: encoder)
+            return
+        }
         var container = encoder.container(keyedBy: CodingKeys.self)
 
         switch self {
@@ -450,6 +472,8 @@ extension Sampling.ToolResultContent.ContentBlock: Codable {
             try container.encodeIfPresent(description, forKey: .description)
             try container.encodeIfPresent(mimeType, forKey: .mimeType)
             try container.encodeIfPresent(annotations, forKey: .annotations)
+        case .unknown:
+            return
         }
     }
 }
@@ -463,14 +487,25 @@ public enum CreateSamplingMessage: Method {
 
     /// Tool choice configuration for sampling
     public struct ToolChoice: Hashable, Codable, Sendable {
-        /// Tool choice mode
-        public enum Mode: String, Hashable, Codable, Sendable {
+        /// Tool choice mode.
+        ///
+        /// New modes can appear in a later revision, so a `switch` needs a `default`. A mode
+        /// the SDK does not know decodes as itself.
+        public struct Mode: RawRepresentable, Hashable, Codable, Sendable, CustomStringConvertible {
+            public let rawValue: String
+
+            public init(rawValue: String) {
+                self.rawValue = rawValue
+            }
+
+            public var description: String { rawValue }
+
             /// Automatically decide whether to use tools
-            case auto
+            public static let auto = Mode(rawValue: "auto")
             /// Require using at least one tool
-            case required
+            public static let required = Mode(rawValue: "required")
             /// Do not use any tools
-            case none
+            public static let none = Mode(rawValue: "none")
         }
 
         /// The tool choice mode. If omitted, defaults to `.auto`.

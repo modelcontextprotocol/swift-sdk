@@ -134,6 +134,8 @@ public actor Client {
     }
 
     /// How the client opens a connection.
+    ///
+    /// Frozen: no case is added in 1.x (a new protocol era is a major release).
     public enum ProtocolMode: Hashable, Codable, Sendable {
         /// Use the `initialize` handshake (2025-11-25 and earlier).
         case handshake

@@ -51,6 +51,8 @@ public struct ProgressNotification: Notification {
 ///
 /// Progress tokens can be either strings or integers.
 /// Progress tokens MUST be unique across all active requests.
+///
+/// Frozen: no case is added in 1.x (a progress token is a string or an integer).
 public enum ProgressToken: Hashable, Codable, Sendable {
     case string(String)
     case integer(Int)

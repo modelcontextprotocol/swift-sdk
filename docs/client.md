@@ -211,6 +211,9 @@ for item in content {
         print("embedded resource: \(resource.uri)")
     case .resourceLink(let uri, let name, _, _, _, _):
         print("link to \(name): \(uri)")
+    case .unknown(let type, _):
+        // A block from a later revision of the protocol.
+        print("unknown content: \(type)")
     }
 }
 if isError == true {
@@ -418,6 +421,9 @@ await client.withElicitationHandler { params in
             return .init(action: .decline)
         }
         return .init(action: .accept)
+    case .unknown:
+        // A mode from a later revision.
+        return .init(action: .decline)
     }
 }
 try await client.connect(transport: transport)
@@ -517,6 +523,7 @@ while result.resultType == .inputRequired {
         case .elicitation(let params): responses[key] = .elicitation(await askUser(params))
         case .sampling(let params): responses[key] = .sampling(try await runModel(params))
         case .listRoots: responses[key] = .roots(.init(roots: []))
+        case .unknown(let method, _): throw MCPError.methodNotFound(method)
         }
     }
     if responses.isEmpty {

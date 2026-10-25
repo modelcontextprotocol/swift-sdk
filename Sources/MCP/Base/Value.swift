@@ -3,6 +3,8 @@ import class Foundation.JSONDecoder
 import class Foundation.JSONEncoder
 
 /// A codable value.
+///
+/// Frozen: no case is added in 1.x (the cases are the JSON data model, plus `data`).
 public enum Value: Hashable, Sendable {
     case null
     case bool(Bool)

@@ -206,9 +206,11 @@ import Testing
                     session: session
                 )
                 Issue.record("Expected an issuer mismatch")
-            } catch OAuthAuthorizationError.authorizationServerIssuerMismatch(let expected, let actual) {
-                #expect(expected == "https://auth.example.com")
-                #expect(actual == "https://other.example.com")
+            } catch let error as OAuthAuthorizationError {
+                #expect(
+                    error
+                        == .authorizationServerIssuerMismatch(
+                            expected: "https://auth.example.com", actual: "https://other.example.com"))
             }
         }
 
@@ -230,8 +232,7 @@ import Testing
                     session: session
                 )
             } throws: { error in
-                guard case .privateIPAddressBlocked = error as? OAuthAuthorizationError else { return false }
-                return true
+                (error as? OAuthAuthorizationError)?.code == .privateIPAddressBlocked
             }
         }
 
@@ -250,9 +251,8 @@ import Testing
                     session: session
                 )
             } throws: { error in
-                guard case .insecureAuthorizationServerEndpoint(_, let url) = error as? OAuthAuthorizationError
-                else { return false }
-                return url == "http://localhost.:8091"
+                let error = error as? OAuthAuthorizationError
+                return error?.code == .insecureAuthorizationServerEndpoint && error?.url == "http://localhost.:8091"
             }
         }
 
@@ -268,10 +268,7 @@ import Testing
                     session: session
                 )
             } throws: { error in
-                guard case .authorizationServerMetadataDiscoveryFailed = error as? OAuthAuthorizationError else {
-                    return false
-                }
-                return true
+                (error as? OAuthAuthorizationError)?.code == .authorizationServerMetadataDiscoveryFailed
             }
         }
 

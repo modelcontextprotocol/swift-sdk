@@ -36,6 +36,9 @@ func callEchoTool(_ client: Client) async throws -> String {
             print("embedded resource: \(resource.uri)")
         case .resourceLink(let uri, let name, _, _, _, _):
             print("link to \(name): \(uri)")
+        case .unknown(let type, _):
+            // A block from a later revision of the protocol.
+            print("unknown content: \(type)")
         }
     }
     if isError == true {

@@ -117,9 +117,10 @@ struct MultiRoundTripWireTests {
         #expect(value.objectValue?["roots"] == ["method": "roots/list", "params": [:]])
         #expect(try [String: InputRequest](decoding: value) == requests)
 
-        #expect(throws: DecodingError.self) {
+        // A method the SDK does not know as an input request is kept.
+        #expect(
             try InputRequest(decoding: ["method": "tools/call", "params": [:]])
-        }
+                == .unknown(method: "tools/call", params: [:]))
     }
 
     @Test("Input responses decode by shape")

@@ -761,6 +761,8 @@ public actor Server {
             return .sampling(try await ask(CreateSamplingMessage.request(params)))
         case .listRoots:
             return .roots(try await ask(ListRoots.request()))
+        case .unknown(let method, let params):
+            return .unknown(try await ask(Request<AnyMethod>(method: method, params: params)))
         }
     }
 
@@ -776,7 +778,7 @@ public actor Server {
                 Task { await self.withdraw(request.id) }
             }
         } catch let error as MCPError {
-            throw MCPError.internalError("The client failed \(M.name): \(error.localizedDescription)")
+            throw MCPError.internalError("The client failed \(request.method): \(error.localizedDescription)")
         }
     }
 

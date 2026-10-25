@@ -303,10 +303,7 @@ struct DPoPAuthorizerTests {
             _ = try await authorizer.handleChallenge(
                 statusCode: 401, headers: headers401, endpoint: endpoint, session: .shared)
         }
-        guard case .dpopRequired = error else {
-            Issue.record("Expected dpopRequired, got \(String(describing: error))")
-            return
-        }
+        #expect(error?.code == .dpopRequired)
         #expect(tokenClient.requestCallCount == 1)
         #expect(storage.load() == nil)
     }
@@ -698,11 +695,7 @@ struct DPoPAuthorizerTests {
             _ = try await authorizer.handleChallenge(
                 statusCode: 401, headers: headers401, endpoint: endpoint, session: .shared)
         }
-        guard case .dpopAlgorithmUnsupported(let supported) = error else {
-            Issue.record("Expected dpopAlgorithmUnsupported, got \(String(describing: error))")
-            return
-        }
-        #expect(supported == ["RS256"])
+        #expect(error == .dpopAlgorithmUnsupported(supported: ["RS256"]))
     }
 }
 
@@ -784,10 +777,7 @@ struct DPoPAuthorizerTests {
                     parameters: &parameters, endpoint: tokenEndpoint, authentication: .none(clientID: "c"),
                     dpop: signer, session: session)
             }
-            guard case .tokenRequestFailed(400, "use_dpop_nonce") = error else {
-                Issue.record("Expected tokenRequestFailed, got \(String(describing: error))")
-                return
-            }
+            #expect(error == .tokenRequestFailed(statusCode: 400, oauthError: "use_dpop_nonce"))
             #expect(await requests.values.count == 2)
         }
 

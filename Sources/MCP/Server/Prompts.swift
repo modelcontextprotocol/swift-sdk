@@ -89,6 +89,8 @@ public struct Prompt: Hashable, Codable, Sendable {
     /// A message in a prompt
     public struct Message: Hashable, Codable, Sendable {
         /// The message role
+        ///
+        /// Frozen: no case is added in 1.x (every revision has `user` and `assistant` only).
         public enum Role: String, Hashable, Codable, Sendable {
             /// A user message
             case user
@@ -127,6 +129,8 @@ public struct Prompt: Hashable, Codable, Sendable {
         }
 
         /// Content types for messages
+        ///
+        /// No other case is added in 1.x: a kind from a later revision is ``unknown(type:_:)``.
         public enum Content: Hashable, Sendable {
             /// Text content
             case text(text: String)
@@ -138,6 +142,9 @@ public struct Prompt: Hashable, Codable, Sendable {
             case resource(resource: Resource.Content, annotations: Resource.Annotations? = nil, _meta: Metadata? = nil)
             /// Resource link
             case resourceLink(uri: String, name: String, title: String? = nil, description: String? = nil, mimeType: String? = nil, annotations: Resource.Annotations? = nil)
+            /// A block of a type the SDK does not know, from a later revision: its
+            /// `type` and the whole block as received. It is encoded as received.
+            case unknown(type: String, Value)
         }
     }
 
@@ -182,6 +189,10 @@ extension Prompt.Message.Content: Codable {
     }
 
     public func encode(to encoder: Encoder) throws {
+        if case .unknown(let type, let block) = self {
+            try UnknownBlock.encode(block, kind: type, to: encoder)
+            return
+        }
         var container = encoder.container(keyedBy: CodingKeys.self)
 
         switch self {
@@ -209,6 +220,8 @@ extension Prompt.Message.Content: Codable {
             try container.encodeIfPresent(description, forKey: .description)
             try container.encodeIfPresent(mimeType, forKey: .mimeType)
             try container.encodeIfPresent(annotations, forKey: .annotations)
+        case .unknown:
+            return
         }
     }
 
@@ -242,10 +255,7 @@ extension Prompt.Message.Content: Codable {
             let annotations = try container.decodeIfPresent(Resource.Annotations.self, forKey: .annotations)
             self = .resourceLink(uri: uri, name: name, title: title, description: description, mimeType: mimeType, annotations: annotations)
         default:
-            throw DecodingError.dataCorruptedError(
-                forKey: .type,
-                in: container,
-                debugDescription: "Unknown content type")
+            self = .unknown(type: type, try UnknownBlock.decode(from: decoder))
         }
     }
 }

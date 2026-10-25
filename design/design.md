@@ -495,7 +495,9 @@ Each change and the reason for it. [docs/migration.md](../docs/migration.md) has
 | `Client.Configuration` gains `protocolMode`, `logLevel`, `multiRoundTrip` | 2026-07-28 client. All defaulted. |
 | List-changed and resource-updated notifications are not sent on a connection without `initialize` | At 2026-07-28 they go only to listen streams. |
 | The stateful HTTP transport answers 2026-07-28 requests with 400 -32022 | Lets `.automatic` clients fall back. |
-| OAuth: authorization server metadata whose `issuer` differs from the candidate is rejected; new `OAuthAuthorizationError` cases; DCR sends `application_type` | RFC 8414 §3.3, RFC 9207, SEP-2468, SEP-837 ([auth.md](auth.md)). |
+| OAuth: authorization server metadata whose `issuer` differs from the candidate is rejected; new `OAuthAuthorizationError` codes; DCR sends `application_type` | RFC 8414 §3.3, RFC 9207, SEP-2468, SEP-837 ([auth.md](auth.md)). |
+| `OAuthAuthorizationError`, `GrantType`, `TokenEndpointAuthentication`, `PrivateKeyJWTSigningAlgorithm`, `BearerTokenValidationResult`, `Elicitation.Mode`, `ToolChoice.Mode` become structs | Their sets grew during 0.x or have registries; as structs, 1.x minors can add values. Static members keep construction and catch patterns compiling. The policy is in `VERSIONING.md` (Enums and open types). |
+| Content blocks, `InputRequest`, `InputResponse`, `CreateElicitation.Parameters` gain `.unknown`; `MCPError.Code` | A peer on a later revision sent a block or request the SDK could not decode, and the whole result failed. Users match these with associated values, so they stay enums, frozen apart from the catch-all. |
 
 Layout changes that do not affect the API: fixtures moved from `Sources/MCPConformance` to
 `conformance/everything-*`, and baselines from `conformance-baseline*.yml` to

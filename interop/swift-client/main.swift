@@ -176,6 +176,7 @@ struct Battery: Sendable {
             case .audio: "audio"
             case .resource: "resource"
             case .resourceLink: "resource_link"
+            case .unknown(let type, _): type
             }
         }
     }
