@@ -46,8 +46,9 @@ stream: `validateEndpointSecurity`, `prepareAuthorization` (errors ignored), the
 `didReceiveResponse` (default: nothing). On 401 or 403 it calls `handleChallenge` and retries
 while the result is `true` and fewer than `maxAuthorizationAttempts` attempts were made; a
 `use_dpop_nonce` challenge does not count, and a second one fails the request without calling
-`handleChallenge`. Errors
-from `handleChallenge` become `MCPError.internalError("Authorization flow failed: …")`.
+`handleChallenge`. An error from `handleChallenge` fails the request as
+`MCPError.transportError(error)`, and a 401 or 403 that is not retried as
+`transportError(HTTPStatusError)`.
 
 `OAuthAuthorizer` is the built-in implementation, configured with `OAuthConfiguration`:
 

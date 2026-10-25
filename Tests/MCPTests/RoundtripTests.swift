@@ -57,17 +57,17 @@ struct RoundtripTests {
         }
         await server.withMethodHandler(CallTool.self) { request in
             guard request.name == "add" else {
-                return CallTool.Result(content: [.text(text: "Invalid tool name", annotations: nil, _meta: nil)], isError: true)
+                return CallTool.Result(content: [.text(text: "Invalid tool name")], isError: true)
             }
 
             guard let a = request.arguments?["a"]?.intValue,
                 let b = request.arguments?["b"]?.intValue
             else {
                 return CallTool.Result(
-                    content: [.text(text: "Did not receive valid arguments", annotations: nil, _meta: nil)], isError: true)
+                    content: [.text(text: "Did not receive valid arguments")], isError: true)
             }
 
-            return CallTool.Result(content: [.text(text: "\(a + b)", annotations: nil, _meta: nil)])
+            return CallTool.Result(content: [.text(text: "\(a + b)")])
         }
 
         // Add resource handlers to server
@@ -103,11 +103,11 @@ struct RoundtripTests {
         let initTask = Task {
             let result = try await client.connect(transport: clientTransport)
 
-            #expect(result.serverInfo.name == "TestServer")
-            #expect(result.serverInfo.version == "1.0.0")
+            #expect(result.serverInfo?.name == "TestServer")
+            #expect(result.serverInfo?.version == "1.0.0")
             #expect(result.capabilities.prompts != nil)
             #expect(result.capabilities.tools != nil)
-            #expect(result.protocolVersion == Version.latest)
+            #expect(result.protocolVersion == Version.latestHandshake)
         }
         try await withThrowingTaskGroup(of: Void.self) { group in
             group.addTask {
@@ -143,7 +143,7 @@ struct RoundtripTests {
         }
 
         let listToolsTask = Task {
-            let (tools, _) = try await client.listTools()
+            let tools = try await client.listTools().tools
             #expect(tools.count == 1)
             #expect(tools[0].name == "add")
         }
@@ -151,7 +151,7 @@ struct RoundtripTests {
         let callToolTask = Task {
             let result = try await client.callTool(name: "add", arguments: ["a": 1, "b": 2])
             #expect(result.isError == nil)
-            #expect(result.content == [.text(text: "3", annotations: nil, _meta: nil)])
+            #expect(result.content == [.text(text: "3")])
         }
 
         try await withThrowingTaskGroup(of: Void.self) { group in
@@ -183,7 +183,7 @@ struct RoundtripTests {
 
         // Test reading a resource
         let readResourceTask = Task {
-            let result = try await client.readResource(uri: "test://example.txt")
+            let result = try await client.readResource(uri: "test://example.txt").contents
             #expect(result.count == 1)
             #expect(result[0] == .text("Hello, World!", uri: "test://example.txt"))
         }

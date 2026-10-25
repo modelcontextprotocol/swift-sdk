@@ -22,8 +22,8 @@ struct ProtocolSnippetTests {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
         try await server.start(transport: serverTransport)
         try await client.connect(transport: clientTransport)
-        let (content, _) = try await client.callTool(name: "whoami")
-        #expect(content == [.text(text: "example-client at 2026-07-28, stateless: true", annotations: nil, _meta: nil)])
+        let content = try await client.callTool(name: "whoami").content
+        #expect(content == [.text(text: "example-client at 2026-07-28, stateless: true")])
         await client.disconnect()
         await server.stop()
     }
@@ -119,7 +119,7 @@ struct ProtocolSnippetTests {
         let client = Client(name: "example-client", version: "1.0.0")
         try await server.start(transport: serverTransport)
         let result = try await client.connect(transport: clientTransport)
-        #expect(result.serverInfo.name == "example")
+        #expect(result.serverInfo?.name == "example")
         try await pingServer(client)
         await client.disconnect()
         await server.stop()

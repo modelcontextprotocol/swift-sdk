@@ -116,11 +116,11 @@ public struct Tool: Hashable, Codable, Sendable {
     /// No other case is added in 1.x: a kind from a later revision is ``unknown(type:_:)``.
     public enum Content: Hashable, Codable, Sendable {
         /// Text content
-        case text(text: String, annotations: Resource.Annotations?, _meta: Metadata?)
+        case text(text: String, annotations: Resource.Annotations? = nil, _meta: Metadata? = nil)
         /// Image content
-        case image(data: String, mimeType: String, annotations: Resource.Annotations?, _meta: Metadata?)
+        case image(data: String, mimeType: String, annotations: Resource.Annotations? = nil, _meta: Metadata? = nil)
         /// Audio content
-        case audio(data: String, mimeType: String, annotations: Resource.Annotations?, _meta: Metadata?)
+        case audio(data: String, mimeType: String, annotations: Resource.Annotations? = nil, _meta: Metadata? = nil)
         /// Embedded resource content (EmbeddedResource from spec)
         case resource(resource: Resource.Content, annotations: Resource.Annotations? = nil, _meta: Metadata? = nil)
         /// Resource link
@@ -132,42 +132,6 @@ public struct Tool: Hashable, Codable, Sendable {
         /// A block of a type the SDK does not know, from a later revision: its
         /// `type` and the whole block as received. It is encoded as received.
         case unknown(type: String, Value)
-
-        /// Deprecated compatibility factory for older call sites that used `.text("...")` and `.text("...", metadata: ...)`.
-        @available(*, deprecated, message: "Use .text(text:annotations:_meta:) instead.")
-        public static func text(_ text: String, metadata: Metadata? = nil) -> Self {
-            .text(text: text, annotations: nil, _meta: metadata)
-        }
-
-        /// Deprecated compatibility factory for older call sites that used `.text(text: ..., metadata: ...)`.
-        @available(*, deprecated, message: "Use .text(text:annotations:_meta:) instead.")
-        public static func text(text: String, metadata: Metadata? = nil) -> Self {
-            .text(text: text, annotations: nil, _meta: metadata)
-        }
-
-        /// Deprecated compatibility factory for older call sites that used `.image(..., metadata: ...)`.
-        @available(*, deprecated, message: "Use .image(data:mimeType:annotations:_meta:) instead.")
-        public static func image(_ data: String, _ mimeType: String, metadata: Metadata? = nil) -> Self {
-            .image(data: data, mimeType: mimeType, annotations: nil, _meta: metadata)
-        }
-
-        /// Deprecated compatibility factory for older call sites that used `.image(data:mimeType:metadata:)`.
-        @available(*, deprecated, message: "Use .image(data:mimeType:annotations:_meta:) instead.")
-        public static func image(data: String, mimeType: String, metadata: Metadata? = nil) -> Self {
-            .image(data: data, mimeType: mimeType, annotations: nil, _meta: metadata)
-        }
-
-        /// Deprecated compatibility factory for older call sites that used `.audio(..., metadata: ...)`.
-        @available(*, deprecated, message: "Use .audio(data:mimeType:annotations:_meta:) instead.")
-        public static func audio(_ data: String, _ mimeType: String, metadata: Metadata? = nil) -> Self {
-            .audio(data: data, mimeType: mimeType, annotations: nil, _meta: metadata)
-        }
-
-        /// Deprecated compatibility factory for older call sites that used `.audio(data:mimeType:metadata:)`.
-        @available(*, deprecated, message: "Use .audio(data:mimeType:annotations:_meta:) instead.")
-        public static func audio(data: String, mimeType: String, metadata: Metadata? = nil) -> Self {
-            .audio(data: data, mimeType: mimeType, annotations: nil, _meta: metadata)
-        }
 
         private enum CodingKeys: String, CodingKey {
             case type

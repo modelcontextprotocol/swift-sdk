@@ -26,7 +26,7 @@ func cancelSlowCall(protocolMode: Client.ProtocolMode = .handshake) async throws
     try await client.connect(transport: clientTransport)
 
     // snippet: cancellation-client
-    let call: RequestContext<CallTool.Result> = try await client.callTool(name: "slow")
+    let call = try await client.startToolCall(name: "slow")
     // endsnippet
     for await _ in started { break }
     var clientResult = "completed"
@@ -81,7 +81,7 @@ func reportProgress() async throws -> [String] {
         let params = message.params
         report.yield("\(params.message ?? "") \(Int(params.progress))/\(Int(params.total ?? 0))")
     }
-    let (_, _) = try await client.callTool(
+    _ = try await client.callTool(
         name: "build", meta: Metadata(progressToken: .unique()))
     // endsnippet
     report.finish()

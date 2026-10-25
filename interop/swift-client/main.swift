@@ -158,7 +158,7 @@ struct Battery: Sendable {
     }
 
     func callTool(_ name: String, _ arguments: [String: Value]? = nil, meta: Metadata? = nil)
-        async throws -> (content: [Tool.Content], isError: Bool?)
+        async throws -> CallTool.Result
     {
         try await client.callTool(name: name, arguments: arguments, meta: meta)
     }
@@ -297,12 +297,12 @@ struct Battery: Sendable {
             return uris.sorted().joined(separator: ",")
         }
         await check("resource-static-text") {
-            let contents = try await client.readResource(uri: "test://static-text")
+            let contents = try await client.readResource(uri: "test://static-text").contents
             try require(contents.first?.text?.isEmpty == false, "no text")
             return contents[0].text!
         }
         await check("resource-static-binary") {
-            let contents = try await client.readResource(uri: "test://static-binary")
+            let contents = try await client.readResource(uri: "test://static-binary").contents
             try require(contents.first?.blob?.isEmpty == false, "no blob")
             return "\(contents[0].mimeType ?? "?"), \(contents[0].blob!.count) b64"
         }
@@ -312,7 +312,7 @@ struct Battery: Sendable {
             return templates.joined(separator: ",")
         }
         await check("resource-template-read") {
-            let contents = try await client.readResource(uri: "test://template/42/data")
+            let contents = try await client.readResource(uri: "test://template/42/data").contents
             try require(contents.first?.text?.contains("42") == true, "text \(contents.first?.text ?? "nil")")
             return contents[0].text!
         }
@@ -441,7 +441,7 @@ struct Battery: Sendable {
         }
 
         await check("cancel-then-continue") {
-            let context: RequestContext<CallTool.Result> = try await client.callTool(
+            let context = try await client.startToolCall(
                 name: "test_tool_with_progress", arguments: nil,
                 meta: Metadata(progressToken: .string("interop-cancel")))
             try await Task.sleep(nanoseconds: 20_000_000)

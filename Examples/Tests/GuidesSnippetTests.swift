@@ -87,7 +87,7 @@ struct GuidesSnippetTests {
     func handlerEra(mode: Client.ProtocolMode, expected: String) async throws {
         let server = await eraServer()
         let client = try await connectInMemory(to: server, mode: mode)
-        let (content, _) = try await client.callTool(name: "era")
+        let content = try await client.callTool(name: "era").content
         #expect(firstText(content) == expected)
         await client.disconnect()
         await server.stop()
@@ -99,7 +99,7 @@ struct GuidesSnippetTests {
     func serverRequestsAllowed(mode: Client.ProtocolMode, expected: String) async throws {
         let server = Server(name: "s", version: "1", capabilities: .init(tools: .init()))
         await server.withMethodHandler(CallTool.self) { _ in
-            .init(content: [.text(text: "\(canSendServerRequests())", annotations: nil, _meta: nil)])
+            .init(content: [.text(text: "\(canSendServerRequests())")])
         }
         let client = try await connectInMemory(to: server, mode: mode)
         #expect(firstText(try await client.callTool(name: "x").content) == expected)
@@ -292,12 +292,25 @@ struct GuidesSnippetTests {
         let server = await makeCalculatorServer()
         let client = try await connectInMemory(to: server)
 
-        let (content, isError) = try await client.callTool(name: "add", arguments: ["a": 2, "b": 3])
-        #expect(isError == nil)
-        #expect(content == [.text(text: "5", annotations: nil, _meta: nil)])
+        let result = try await client.callTool(name: "add", arguments: ["a": 2, "b": 3])
+        #expect(result.isError == nil)
+        #expect(result.content == [.text(text: "5")])
 
         await client.disconnect()
         await server.stop()
+    }
+    // endsnippet
+
+    // snippet: testing-context-test
+    @Test("A handler that reads its context")
+    func contextHandler() async throws {
+        let context = Server.HandlerContext(
+            id: 1, httpContext: nil, protocolVersion: Version.v2026_07_28,
+            clientInfo: .init(name: "tester", version: "1"), isStateless: true)
+        let result = try await Server.$currentHandlerContext.withValue(context) {
+            try await whoAmI(.init(name: "whoami"))
+        }
+        #expect(result.content == [.text(text: "tester")])
     }
     // endsnippet
 
@@ -325,8 +338,8 @@ struct GuidesSnippetTests {
         let client = try await connectInMemory(to: server, mode: mode)
         #expect(await client.isStateless == (mode == .automatic))
 
-        let (content, _) = try await client.callTool(name: "add", arguments: ["a": 1, "b": 1])
-        #expect(content == [.text(text: "2", annotations: nil, _meta: nil)])
+        let content = try await client.callTool(name: "add", arguments: ["a": 1, "b": 1]).content
+        #expect(content == [.text(text: "2")])
 
         await client.disconnect()
         await server.stop()
@@ -549,17 +562,6 @@ struct GuidesSnippetTests {
 
     // MARK: rough_edges.md
 
-    @Test("Both callTool overloads")
-    func callToolOverloads() async throws {
-        let server = await makeCalculatorServer()
-        let client = try await connectInMemory(to: server)
-        let (isError, result) = try await callBothWays(client, tool: "add")
-        #expect(isError == true)  // no arguments: the tool reports an error
-        #expect(result.isError == true)
-        await client.disconnect()
-        await server.stop()
-    }
-
     @Test("Cache hints are filled at 2026-07-28 only", arguments: [
         (Client.ProtocolMode.handshake, false), (Client.ProtocolMode.automatic, true),
     ])
@@ -567,7 +569,7 @@ struct GuidesSnippetTests {
         let server = await makeCalculatorServer()
         await server.withMethodHandler(ListTools.self) { _ in .init(tools: []) }
         let client = try await connectInMemory(to: server, mode: mode)
-        let result = try await listToolsWithCacheHints(client)
+        let result = try await client.listTools()
         #expect((result.ttlMs == 0) == filled)
         #expect((result.cacheScope == .private) == filled)
         #expect((result._meta?.serverInfo?.name == "calculator") == filled)
@@ -577,7 +579,6 @@ struct GuidesSnippetTests {
 
     @Test("Rough edges in errors and the stateless transport")
     func roughErrors() async throws {
-        #expect(textContent("x") == .text(text: "x", annotations: nil, _meta: nil))
 
         // -32603 keeps the message of a peer that sends no `data.detail`.
         let decodedInternal = try JSONDecoder().decode(

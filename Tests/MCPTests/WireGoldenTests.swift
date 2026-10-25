@@ -115,7 +115,7 @@ struct DataURLStringTests {
             return .init(contents: [.text("x", uri: params.uri)])
         }
         await server.withMethodHandler(CallTool.self) { _ in
-            .init(content: [.text("data:,hello")])
+            .init(content: [.text(text: "data:,hello")])
         }
         let wire = WireExchange(server: server)
         try await wire.start()
@@ -158,7 +158,7 @@ struct DataURLStringTests {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
         let server = Server(name: "s", version: "1", capabilities: .init(tools: .init()))
         await server.withMethodHandler(CallTool.self) { _ in
-            .init(content: [.text("data:,hello")], structuredContent: .string("data:,hi"))
+            .init(content: [.text(text: "data:,hello")], structuredContent: .string("data:,hi"))
         }
         try await server.start(transport: serverTransport)
         let client = Client(name: "c", version: "1")

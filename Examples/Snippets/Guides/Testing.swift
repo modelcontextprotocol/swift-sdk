@@ -12,11 +12,11 @@ import MCP
     }
     guard let a = params.arguments?["a"]?.intValue, let b = params.arguments?["b"]?.intValue else {
         return CallTool.Result(
-            content: [.text(text: "a and b must be integers", annotations: nil, _meta: nil)],
+            content: [.text(text: "a and b must be integers")],
             isError: true)
     }
     return CallTool.Result(
-        content: [.text(text: "\(a + b)", annotations: nil, _meta: nil)],
+        content: [.text(text: "\(a + b)")],
         structuredContent: ["sum": .int(a + b)])
 }
 
@@ -24,6 +24,14 @@ func makeCalculatorServer() async -> Server {
     let server = Server(name: "calculator", version: "1.0.0", capabilities: .init(tools: .init()))
     await server.withMethodHandler(CallTool.self, handler: addNumbers)
     return server
+}
+// endsnippet
+
+// snippet: testing-context-handler
+/// A handler that reads the request's context.
+@Sendable func whoAmI(_ params: CallTool.Parameters) async throws -> CallTool.Result {
+    let client = Server.currentHandlerContext?.clientInfo?.name ?? "unknown"
+    return CallTool.Result(content: [.text(text: client)])
 }
 // endsnippet
 

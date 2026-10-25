@@ -82,7 +82,7 @@ actor WireLog: Transport {
 /// Lists prompts and reports a protocol error by its code.
 func listPromptsReportingErrors(_ client: Client) async -> String {
     do {
-        let (prompts, _) = try await client.listPrompts()
+        let prompts = try await client.listPrompts().prompts
         return "\(prompts.count) prompts"
     } catch let error as MCPError {
         // `code` and `data` are the JSON-RPC `code` and `data` members.
@@ -99,7 +99,7 @@ func listPromptsReportingErrors(_ client: Client) async -> String {
 func callTool(
     _ name: String, on client: Client, timeout limit: Duration
 ) async throws -> CallTool.Result {
-    let request: RequestContext<CallTool.Result> = try await client.callTool(name: name)
+    let request = try await client.startToolCall(name: name)
     let timer = Task {
         try await Task.sleep(for: limit)
         try await client.cancelRequest(request.requestID, reason: "Timed out after \(limit)")
@@ -119,7 +119,7 @@ func registerConfirmTool(on server: Server) async {
             return .inputRequired(["confirm": .elicitation(message: "Delete the file?")])
         }
         let text = answer.action == .accept ? "Deleted" : "Kept"
-        return CallTool.Result(content: [.text(text: text, annotations: nil, _meta: nil)])
+        return CallTool.Result(content: [.text(text: text)])
     }
 }
 // endsnippet

@@ -24,6 +24,12 @@ the enums that became open structs, and `HTTPClientAuthorizer`.
 | `BearerTokenValidationResult`, `Elicitation.Mode`, `ToolChoice.Mode` | Structs, not enums | Add a `default` to `switch` statements |
 | Content blocks, `InputRequest`, `InputResponse`, `CreateElicitation.Parameters` | New case `.unknown` for kinds from a later revision | Add it, or a `default`, to `switch` statements |
 | `HTTPClientAuthorizer` | `authorizationHeader(for:)` became `authorizationHeaders(for:method:)` | Update custom authorizers |
+| `Client` convenience methods | Return the result type, not a tuple; `startToolCall` replaces the `RequestContext` overload of `callTool`; `initialize()` is removed | Read the result's properties |
+| `Client.connect(transport:)` | Returns `Client.ConnectionInfo`, whose `serverInfo` is optional | Unwrap `serverInfo` |
+| `Version.latest` | Renamed `Version.latestHandshake`; the old name is deprecated | Rename |
+| `Tool.Content` | `annotations` and `_meta` default to `nil`; the deprecated short forms are removed | Use `.text(text:)`, `.image(data:mimeType:)`, `.audio(data:mimeType:)` |
+| `HTTPClientTransport` errors | HTTP statuses and OAuth failures are `transportError` with `HTTPStatusError` or `OAuthAuthorizationError`, not `internalError` with a message | Match the typed errors |
+| `Server.start(transport:)` | Keeps handlers registered before it; answers `logging/setLevel` and filters `log` when the server declares `logging` | Remove workarounds |
 | `OAuthWWWAuthenticateParsing` | New requirement `parseChallenge(scheme:from:)`, with a default | Nothing |
 | `Server` | Serves 2026-07-28 requests by default | Nothing, or opt out |
 | `Client` | Connects at 2026-07-28 by default, with a fallback to `initialize` | Nothing, or opt out |
@@ -277,6 +283,115 @@ failing it:
 A block or request is encoded as it was received. An exhaustive `switch` needs
 the new case or a `default`; these enums gain no other case in 1.x.
 
+### Client convenience methods
+
+`listTools`, `listPrompts`, `listResources`, `listResourceTemplates`,
+`callTool`, `getPrompt` and `readResource` return the request's result
+(`ListTools.Result`, `CallTool.Result`, and so on) instead of a tuple or an
+array. The results have the tuples' labels as properties (`tools`,
+`nextCursor`, `content`, `isError`, `description`, `messages`), so
+`try await client.listTools().tools` compiles unchanged; destructuring does
+not. The results also carry what the tuples dropped: `structuredContent`,
+`_meta`, `ttlMs` and `cacheScope`. `readResource` returns
+`ReadResource.Result`; its `contents` is the former array.
+
+Before:
+
+```swift
+let (content, isError) = try await client.callTool(name: "echo", arguments: ["text": "hi"])
+let (tools, nextCursor) = try await client.listTools()
+```
+
+After:
+
+```swift
+/// The convenience methods return the request's result.
+func callAndList(_ client: Client) async throws -> (text: [String], nextCursor: String?) {
+    let result = try await client.callTool(name: "echo", arguments: ["text": "hi"])
+    let text = result.content.compactMap { block -> String? in
+        if case .text(let text, _, _) = block { return text }
+        return nil
+    }
+    let page = try await client.listTools()
+    return (text, page.nextCursor)
+}
+```
+
+The synchronous `callTool` overload that returned a
+`RequestContext<CallTool.Result>` is now `startToolCall(name:arguments:meta:)`,
+so a call no longer needs a type annotation to pick it. The deprecated
+`Client.initialize()` is removed: `connect(transport:)` initializes.
+
+### `Client.connect(transport:)`
+
+`connect(transport:)` returns a `Client.ConnectionInfo` instead of an
+`Initialize.Result`: `protocolVersion`, `capabilities`, `serverInfo`,
+`instructions` and `isStateless`. At 2026-07-28 the previous release built an
+`Initialize.Result` from the `server/discover` result, with an empty name and
+version when the server sent no `io.modelcontextprotocol/serverInfo`; now
+`serverInfo` is `nil` then, on the result and on `Client.serverInfo`.
+
+```swift
+/// `connect` returns a `Client.ConnectionInfo`; `serverInfo` is optional.
+func describeServer(_ client: Client, transport: any Transport) async throws -> String {
+    let connection = try await client.connect(transport: transport)
+    let name = connection.serverInfo?.name ?? "unnamed server"
+    return "\(name) at \(connection.protocolVersion)"
+}
+```
+
+`setLoggingLevel(_:)` on a 2026-07-28 connection sets the new `Client.logLevel`,
+which every request carries in `_meta`, instead of changing
+`configuration.logLevel`.
+
+### `Tool.Content`
+
+The `text`, `image` and `audio` cases have default values for `annotations`
+and `_meta`, so `.text(text: "Hello")` is the case itself. The deprecated
+helpers that took `metadata:` or unlabeled values (`.text(_:)`,
+`.text(text:metadata:)`, `.image(_:_:metadata:)`,
+`.image(data:mimeType:metadata:)`, `.audio(_:_:metadata:)`,
+`.audio(data:mimeType:metadata:)`) are removed: write `.text(text: "Hello")`,
+and `_meta:` where you passed `metadata:`.
+
+```swift
+/// `annotations` and `_meta` default to `nil`.
+let greeting: [Tool.Content] = [
+    .text(text: "Hello"),
+    .image(data: "iVBORw0KGgo=", mimeType: "image/png"),
+]
+```
+
+### HTTP client errors
+
+`HTTPClientTransport` throws `MCPError.transportError(_:)` with a typed error
+where it threw `MCPError.internalError` with a message:
+
+| Failure | Before | After |
+|---|---|---|
+| HTTP status without a JSON-RPC answer | `internalError("Bad request")`, `("Session expired")`, `("Too many requests")`, ... | `transportError(HTTPStatusError)`: `statusCode`, `headers`, `isSessionExpired` |
+| 401 or 403 without an authorizer, or after the retries | `internalError("Authentication required")`, `("Access forbidden")` | `transportError(HTTPStatusError)` with 401 or 403 |
+| OAuth | `internalError("Authorization flow failed: …")` | `transportError(OAuthAuthorizationError)`, or the error of a custom `HTTPClientAuthorizer` |
+
+The descriptions are the same as before, so logs read the same. The error's
+`code` is -32001 instead of -32603; it is never sent on the wire.
+
+```swift
+/// HTTP and OAuth failures are typed errors inside `transportError`.
+func describeFailure(_ error: any Error) -> String {
+    switch error {
+    case MCPError.transportError(let status as HTTPStatusError) where status.isSessionExpired:
+        return "The session expired; connect again"
+    case MCPError.transportError(let status as HTTPStatusError):
+        return "HTTP \(status.statusCode), retry after \(status.value(forHeader: "Retry-After") ?? "?")"
+    case MCPError.transportError(let oauth as OAuthAuthorizationError):
+        return "Authorization failed: \(oauth.code)"
+    default:
+        return error.localizedDescription
+    }
+}
+```
+
 ### `HTTPClientAuthorizer`
 
 `authorizationHeader(for endpoint: URL) -> String?` is replaced by
@@ -286,7 +401,7 @@ the URL). Return `["Authorization": value]` where the old method returned
 `value`, and `[:]` for `nil`. The transport now sets these headers after the
 `requestModifier`, for the final URL and method; they replace an
 `Authorization` header the modifier set. A thrown error fails the request with
-`internalError("Authorization flow failed: …")`.
+`transportError(_:)` carrying that error.
 
 `OAuthAccessToken` has a new stored property, `keyThumbprint`, with a
 defaulted initializer parameter; tokens saved by the previous release decode
@@ -349,7 +464,7 @@ func makeHandshakeClient() -> Client {
 ```
 
 `Version.supported` now contains 2026-07-28. Code that used it as the list of
-`initialize` revisions reads `Version.handshake`. `Version.latest` is still
+`initialize` revisions reads `Version.handshake`. `Version.latestHandshake` is still
 2025-11-25. `HTTPValidationContext` defaults `supportedProtocolVersions` to
 `Version.handshake`, the revisions that sessions serve; a custom stateless
 pipeline passes `Version.stateless + Version.handshake`.
@@ -440,6 +555,17 @@ or a shorter `discoveryTimeout`.
 (default 1000) and `eventStoreByteCapacity` bytes (default 16 MiB) per session
 for `Last-Event-ID` replay. The previous release kept every event until the
 session ended.
+
+### Server default handlers
+
+- `start(transport:)` keeps a handler you registered for `initialize`, `ping`,
+  `server/discover` or `subscriptions/listen` before it. The previous release
+  replaced it with the built-in one.
+- A server with the `logging` capability answers `logging/setLevel` itself on
+  handshake connections and `log(level:logger:data:)` drops messages below the
+  level. The previous release had no such handler (clients got -32601) and sent
+  every message. A `SetLoggingLevel` handler of yours still replaces it.
+- `Server.HandlerContext` has a public initializer, for tests.
 
 ### HTTP client transport
 

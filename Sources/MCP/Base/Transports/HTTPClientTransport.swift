@@ -188,7 +188,7 @@ public actor HTTPClientTransport: Transport {
         configuration: URLSessionConfiguration = HTTPClientTransport.defaultConfiguration,
         streaming: Bool = true,
         sseInitializationTimeout: TimeInterval = 10,
-        protocolVersion: String = Version.latest,
+        protocolVersion: String = Version.latestHandshake,
         authorizer: (any HTTPClientAuthorizer)? = nil,
         requestModifier: @escaping (URLRequest) -> URLRequest = { $0 },
         logger: Logger? = nil
@@ -215,7 +215,7 @@ public actor HTTPClientTransport: Transport {
         session: URLSession,
         streaming: Bool = false,
         sseInitializationTimeout: TimeInterval = 10,
-        protocolVersion: String = Version.latest,
+        protocolVersion: String = Version.latestHandshake,
         authorizer: (any HTTPClientAuthorizer)? = nil,
         requestModifier: @escaping (URLRequest) -> URLRequest = { $0 },
         logger: Logger? = nil
@@ -472,9 +472,7 @@ public actor HTTPClientTransport: Transport {
             do {
                 try authorizer.validateEndpointSecurity(for: endpoint)
             } catch {
-                throw MCPError.internalError(
-                    "Authorization flow failed: \(error.localizedDescription)"
-                )
+                throw MCPError.transportError(error)
             }
         }
 
@@ -550,8 +548,7 @@ public actor HTTPClientTransport: Transport {
                         )
                     }
                 } catch {
-                    throw MCPError.internalError(
-                        "Authorization flow failed: \(error.localizedDescription)")
+                    throw MCPError.transportError(error)
                 }
 
                 // RFC 9449 §9: the authorizer says whether the retry only
@@ -598,7 +595,7 @@ public actor HTTPClientTransport: Transport {
                 return
             }
         }
-        try processHTTPResponse(httpResponse, contentType: contentType)
+        try processHTTPResponse(httpResponse)
         guard case 200..<300 = httpResponse.statusCode else { return }
 
         if contentType.contains(ContentType.sse) {
@@ -632,13 +629,10 @@ public actor HTTPClientTransport: Transport {
         }
     }
 
-    private func processHTTPResponse(_ response: HTTPURLResponse, contentType: String) throws {
+    private func processHTTPResponse(_ response: HTTPURLResponse) throws {
         switch response.statusCode {
         case 200..<300:
             return
-
-        case 400:
-            throw MCPError.internalError(StatusMessage.badRequest)
 
         case 401:
             throw HTTPAuthenticationChallengeError(
@@ -652,34 +646,26 @@ public actor HTTPClientTransport: Transport {
                 headers: responseHeaders(from: response)
             )
 
-        case 404:
-            if sessionID != nil {
-                logger.warning("Session has expired")
-                sessionID = nil
-                throw MCPError.internalError("Session expired")
-            }
-            throw MCPError.internalError(StatusMessage.notFound)
+        case 404 where sessionID != nil:
+            logger.warning("Session has expired")
+            sessionID = nil
+            throw statusError(response, isSessionExpired: true)
 
-        case 405:
-            if streaming {
-                self.streamingTask?.cancel()
-                throw MCPError.internalError(StatusMessage.streamingUnsupported)
-            }
-            throw MCPError.internalError(StatusMessage.methodNotAllowed)
-
-        case 408:
-            throw MCPError.internalError("Request timeout")
-
-        case 429:
-            throw MCPError.internalError("Too many requests")
-
-        case 500..<600:
-            throw MCPError.internalError("Server error: \(response.statusCode)")
+        case 405 where streaming:
+            self.streamingTask?.cancel()
+            throw statusError(response)
 
         default:
-            throw MCPError.internalError(
-                "Unexpected HTTP response: \(response.statusCode) (\(contentType))")
+            throw statusError(response)
         }
+    }
+
+    /// The ``HTTPStatusError`` of `response`, as the transport throws it.
+    private func statusError(_ response: HTTPURLResponse, isSessionExpired: Bool = false) -> MCPError {
+        .transportError(
+            HTTPStatusError(
+                statusCode: response.statusCode, headers: responseHeaders(from: response),
+                isSessionExpired: isSessionExpired))
     }
 
     /// Sets the authorizer's headers for the final URL and method of `request`.
@@ -690,7 +676,7 @@ public actor HTTPClientTransport: Transport {
             headers = try authorizer.authorizationHeaders(
                 for: request.url ?? endpoint, method: request.httpMethod ?? "POST")
         } catch {
-            throw MCPError.internalError("Authorization flow failed: \(error.localizedDescription)")
+            throw MCPError.transportError(error)
         }
         for (name, value) in headers {
             request.setValue(value, forHTTPHeaderField: name)
@@ -705,14 +691,7 @@ public actor HTTPClientTransport: Transport {
     }
 
     private func mapAuthenticationChallengeError(_ error: HTTPAuthenticationChallengeError) -> MCPError {
-        switch error.statusCode {
-        case 401:
-            return MCPError.internalError("Authentication required")
-        case 403:
-            return MCPError.internalError("Access forbidden")
-        default:
-            return MCPError.internalError("HTTP authorization error: \(error.statusCode)")
-        }
+        .transportError(HTTPStatusError(statusCode: error.statusCode, headers: error.headers))
     }
 
     private func responseHeaders(from response: HTTPURLResponse) -> [String: String] {
@@ -773,17 +752,10 @@ public actor HTTPClientTransport: Transport {
     /// answer for the request: how a server that serves only the handshake
     /// refuses a request without a session.
     package static func isSessionlessRefusal(_ error: Swift.Error) -> Bool {
-        guard case .internalError(let detail?) = error as? MCPError else { return false }
-        return [StatusMessage.badRequest, StatusMessage.notFound, StatusMessage.methodNotAllowed,
-            StatusMessage.streamingUnsupported].contains(detail)
-    }
-
-    /// Error details for HTTP status replies.
-    enum StatusMessage {
-        static let badRequest = "Bad request"
-        static let notFound = "Endpoint not found"
-        static let methodNotAllowed = "Method not allowed"
-        static let streamingUnsupported = "Server does not support streaming"
+        guard case .transportError(let underlying) = error as? MCPError,
+            let status = underlying as? HTTPStatusError, !status.isSessionExpired
+        else { return false }
+        return [400, 404, 405].contains(status.statusCode)
     }
 
     /// Receives data in an async sequence
@@ -890,9 +862,7 @@ public actor HTTPClientTransport: Transport {
             do {
                 try authorizer.validateEndpointSecurity(for: endpoint)
             } catch {
-                throw MCPError.internalError(
-                    "Authorization flow failed: \(error.localizedDescription)"
-                )
+                throw MCPError.transportError(error)
             }
         }
 
@@ -915,7 +885,7 @@ public actor HTTPClientTransport: Transport {
             if httpResponse.statusCode == 400, lastEventID != nil {
                 lastEventID = nil
             }
-            throw MCPError.internalError("HTTP error: \(httpResponse.statusCode)")
+            throw statusError(httpResponse)
         }
 
         if let newSessionID = httpResponse.value(forHTTPHeaderField: HTTPHeaderName.sessionID) {
@@ -994,7 +964,7 @@ public actor HTTPClientTransport: Transport {
                     session: session
                 )
             } catch {
-                throw MCPError.internalError("Authorization flow failed: \(error.localizedDescription)")
+                throw MCPError.transportError(error)
             }
             // RFC 9449 §9: a DPoP nonce retry is allowed once per GET, as for a POST.
             if handled.isDPoPNonceRetry {

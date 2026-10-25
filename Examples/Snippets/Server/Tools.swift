@@ -33,12 +33,12 @@ func registerToolCall(on server: Server) async {
             guard let city = params.arguments?["city"]?.stringValue else {
                 // A tool failure: the model sees it and can retry.
                 return CallTool.Result(
-                    content: [.text(text: "Missing argument: city", annotations: nil, _meta: nil)],
+                    content: [.text(text: "Missing argument: city")],
                     isError: true)
             }
             let units = params.arguments?["units"]?.stringValue ?? "metric"
             return CallTool.Result(content: [
-                .text(text: "18 degrees (\(units)), clear, in \(city)", annotations: nil, _meta: nil)
+                .text(text: "18 degrees (\(units)), clear, in \(city)")
             ])
         case "get_forecast":
             return try forecastResult(for: params.arguments?["city"]?.stringValue ?? "Paris")
@@ -53,8 +53,8 @@ func registerToolCall(on server: Server) async {
 // snippet: tools-content
 func chartResult(png: Data) -> CallTool.Result {
     CallTool.Result(content: [
-        .text(text: "Temperature over 24 hours", annotations: nil, _meta: nil),
-        .image(data: png.base64EncodedString(), mimeType: "image/png", annotations: nil, _meta: nil),
+        .text(text: "Temperature over 24 hours"),
+        .image(data: png.base64EncodedString(), mimeType: "image/png"),
         .resource(
             resource: .text("time,celsius\n00:00,12\n", uri: "weather://paris/today.csv", mimeType: "text/csv")),
         .resourceLink(
@@ -94,7 +94,7 @@ func forecastResult(for city: String) throws -> CallTool.Result {
     // Also send the JSON as text, for clients that ignore structuredContent.
     let json = String(decoding: try JSONEncoder().encode(forecast), as: UTF8.self)
     return try CallTool.Result(
-        content: [.text(text: json, annotations: nil, _meta: nil)],
+        content: [.text(text: json)],
         structuredContent: forecast)
 }
 // endsnippet

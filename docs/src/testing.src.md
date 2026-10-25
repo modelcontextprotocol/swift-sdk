@@ -38,9 +38,16 @@ can be registered and also called directly:
 
 %include Examples/Tests/GuidesSnippetTests.swift testing-handler-test
 
-`Server.currentHandlerContext` is `nil` in a direct call, and
-`Server.HandlerContext` has no public initializer. Test handlers that read the
-context, or that return input-required results, through a connection.
+`Server.currentHandlerContext` is `nil` in a direct call. A handler that reads
+it gets one from `Server.HandlerContext(id:httpContext:...)` and
+`$currentHandlerContext.withValue`:
+
+%include Examples/Snippets/Guides/Testing.swift testing-context-handler
+
+%include Examples/Tests/GuidesSnippetTests.swift testing-context-test
+
+Test handlers that return input-required results through a connection: the
+server runs the rounds.
 
 ## Testing both eras
 

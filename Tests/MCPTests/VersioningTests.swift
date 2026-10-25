@@ -6,9 +6,9 @@ import Testing
 struct VersioningTests {
     @Test("Client requests latest supported version")
     func testClientRequestsLatestSupportedVersion() {
-        let clientVersion = Version.latest
+        let clientVersion = Version.latestHandshake
         let negotiatedVersion = Version.negotiate(clientRequestedVersion: clientVersion)
-        #expect(negotiatedVersion == Version.latest)
+        #expect(negotiatedVersion == Version.latestHandshake)
     }
 
     @Test("Client requests older supported version")
@@ -22,21 +22,21 @@ struct VersioningTests {
     func testClientRequestsUnsupportedVersion() {
         let clientVersion = "2023-01-01"  // An unsupported version
         let negotiatedVersion = Version.negotiate(clientRequestedVersion: clientVersion)
-        #expect(negotiatedVersion == Version.latest)
+        #expect(negotiatedVersion == Version.latestHandshake)
     }
 
     @Test("Client requests empty version string")
     func testClientRequestsEmptyVersionString() {
         let clientVersion = ""
         let negotiatedVersion = Version.negotiate(clientRequestedVersion: clientVersion)
-        #expect(negotiatedVersion == Version.latest)
+        #expect(negotiatedVersion == Version.latestHandshake)
     }
 
     @Test("Client requests garbage version string")
     func testClientRequestsGarbageVersionString() {
         let clientVersion = "not-a-version"
         let negotiatedVersion = Version.negotiate(clientRequestedVersion: clientVersion)
-        #expect(negotiatedVersion == Version.latest)
+        #expect(negotiatedVersion == Version.latestHandshake)
     }
 
     @Test("Server's supported versions correctly defined")
@@ -51,7 +51,7 @@ struct VersioningTests {
 
     @Test("Server's latest version is correct")
     func testServerLatestVersion() {
-        #expect(Version.latest == "2025-11-25")
+        #expect(Version.latestHandshake == "2025-11-25")
     }
 
     @Test("Client requests new 2025-11-25 version")
@@ -68,7 +68,7 @@ struct ProtocolProfileTests {
     func testRevisionLists() {
         #expect(Set(Version.handshake).isDisjoint(with: Version.stateless))
         #expect(Version.handshake == Version.handshake.sorted(by: >))
-        #expect(Version.handshake.first == Version.latest)
+        #expect(Version.handshake.first == Version.latestHandshake)
         #expect(Version.supported == Set(Version.handshake + Version.stateless))
     }
 

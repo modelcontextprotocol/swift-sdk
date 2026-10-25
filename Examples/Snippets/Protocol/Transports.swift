@@ -220,7 +220,7 @@ func registerDetachedWork(on server: Server) async {
         let userAgent = await Task.detached {
             context?.httpContext?.header("User-Agent") ?? "unknown"
         }.value
-        return .init(content: [.text(text: userAgent, annotations: nil, _meta: nil)])
+        return .init(content: [.text(text: userAgent)])
     }
     // endsnippet
 }

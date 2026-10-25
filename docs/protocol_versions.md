@@ -42,7 +42,7 @@ func versionLists() -> (handshake: [String], stateless: [String], supported: Set
         Version.handshake,  // ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
         Version.stateless,  // ["2026-07-28"]
         Version.supported,  // both lists
-        Version.latest  // "2025-11-25": what `initialize` requests
+        Version.latestHandshake  // "2025-11-25": what `initialize` requests
     )
 }
 ```
@@ -52,13 +52,13 @@ func versionLists() -> (handshake: [String], stateless: [String], supported: Set
 | `Version.handshake` | Revisions served through `initialize`, newest first. |
 | `Version.stateless` | Revisions served per request, newest first. |
 | `Version.supported` | Every revision the SDK implements: `Version.handshake` and `Version.stateless`. |
-| `Version.latest` | 2025-11-25. The client requests it in `initialize`, and `HTTPClientTransport` sends it in the `MCP-Protocol-Version` header until a version is negotiated. |
+| `Version.latestHandshake` | 2025-11-25. The client requests it in `initialize`, and `HTTPClientTransport` sends it in the `MCP-Protocol-Version` header until a version is negotiated. |
 | `Version.v2024_11_05` ... `Version.v2026_07_28` | One constant per revision. |
 
-`Version.latest` is a handshake revision because it is the version that
-`initialize` requests. It is not the newest revision the SDK implements;
+`Version.latestHandshake` is not the newest revision the SDK implements;
 that is `Version.stateless[0]`. Code that needs the served revisions in order
-reads `Version.stateless + Version.handshake`.
+reads `Version.stateless + Version.handshake`. `Version.latest`, its former
+name, is deprecated.
 
 ## Protocol profiles
 
@@ -169,7 +169,7 @@ func registerEraTool(on server: Server) async {
         let context = Server.currentHandlerContext
         let era = context?.isStateless == true ? "stateless" : "handshake"
         let text = "\(context?.protocolVersion ?? "unknown") (\(era))"
-        return CallTool.Result(content: [.text(text: text, annotations: nil, _meta: nil)])
+        return CallTool.Result(content: [.text(text: text)])
     }
 }
 ```
@@ -214,7 +214,7 @@ let pinnedMode = Client.Configuration(protocolMode: .stateless(Version.v2026_07_
 | Mode | First request | Fallback |
 |---|---|---|
 | `.automatic` (default) | `server/discover` at `Version.stateless[0]` (2026-07-28) | `initialize` |
-| `.handshake` | `initialize` at `Version.latest` | none |
+| `.handshake` | `initialize` at `Version.latestHandshake` | none |
 | `.stateless(version)` | `server/discover` at `version` | none; `connect` throws |
 
 ### Negotiation and fallback
@@ -261,23 +261,24 @@ func connectAutomatically(over transport: any Transport) async throws -> (Client
 ```
 
 After `connect`, `negotiatedProtocolVersion`, `serverInfo`,
-`serverCapabilities` and `isStateless` describe the connection. On a stateless
-connection, `connect` returns an `Initialize.Result` built from the
-`server/discover` result; its `serverInfo` comes from the result's `_meta` and
-has an empty name and version when the server sent none.
+`serverCapabilities` and `isStateless` describe the connection, and `connect`
+returns the same in a `Client.ConnectionInfo`. On a stateless connection,
+`serverInfo` comes from the `_meta` of the `server/discover` result and is
+`nil` when the server sent none.
 
 ### Stateless connections
 
 On a stateless connection the client:
 
 - adds the `_meta` envelope to every request; keys already in the request's
-  `_meta` win. `logLevel` comes from `Configuration.logLevel`;
+  `_meta` win. `logLevel` comes from `Client.logLevel`, which starts as
+  `Configuration.logLevel`;
 - sends no `Mcp-Session-Id` and opens no GET stream over HTTP
   (`HTTPClientTransport.useStatelessProtocol(_:)`), and adds the `Mcp-Method`,
   `Mcp-Name` and `Mcp-Param-*` headers;
 - sends `server/discover` for `ping()`;
-- stores the level of `setLoggingLevel(_:)` in `Configuration.logLevel`
-  instead of sending `logging/setLevel`;
+- stores the level of `setLoggingLevel(_:)` in `Client.logLevel` instead of
+  sending `logging/setLevel`;
 - does nothing in `notifyRootsChanged()`;
 - answers input-required results with its sampling, elicitation and roots
   handlers, and retries the request;
@@ -291,7 +292,7 @@ On a stateless connection the client:
 | `initialize`, `notifications/initialized` | yes | removed: -32601 |
 | `server/discover` | -32601 | yes |
 | `ping` | yes | removed: -32601; `Client.ping()` sends `server/discover` |
-| `logging/setLevel` | yes, when the server registers a handler | removed: -32601; the level is in `_meta` |
+| `logging/setLevel` | yes, with the `logging` capability | removed: -32601; the level is in `_meta` |
 | `resources/subscribe`, `resources/unsubscribe` | yes, when the server registers handlers | removed: -32601; use `subscriptions/listen` |
 | `subscriptions/listen` | -32601 | yes; the server handles it |
 | Unsolicited list-changed and resource-updated notifications | yes | only on listen streams |

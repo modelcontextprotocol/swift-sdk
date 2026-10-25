@@ -132,12 +132,12 @@ func registerToolCall(on server: Server) async {
             guard let city = params.arguments?["city"]?.stringValue else {
                 // A tool failure: the model sees it and can retry.
                 return CallTool.Result(
-                    content: [.text(text: "Missing argument: city", annotations: nil, _meta: nil)],
+                    content: [.text(text: "Missing argument: city")],
                     isError: true)
             }
             let units = params.arguments?["units"]?.stringValue ?? "metric"
             return CallTool.Result(content: [
-                .text(text: "18 degrees (\(units)), clear, in \(city)", annotations: nil, _meta: nil)
+                .text(text: "18 degrees (\(units)), clear, in \(city)")
             ])
         case "get_forecast":
             return try forecastResult(for: params.arguments?["city"]?.stringValue ?? "Paris")
@@ -164,8 +164,8 @@ func registerToolCall(on server: Server) async {
 ```swift
 func chartResult(png: Data) -> CallTool.Result {
     CallTool.Result(content: [
-        .text(text: "Temperature over 24 hours", annotations: nil, _meta: nil),
-        .image(data: png.base64EncodedString(), mimeType: "image/png", annotations: nil, _meta: nil),
+        .text(text: "Temperature over 24 hours"),
+        .image(data: png.base64EncodedString(), mimeType: "image/png"),
         .resource(
             resource: .text("time,celsius\n00:00,12\n", uri: "weather://paris/today.csv", mimeType: "text/csv")),
         .resourceLink(
@@ -211,7 +211,7 @@ func forecastResult(for city: String) throws -> CallTool.Result {
     // Also send the JSON as text, for clients that ignore structuredContent.
     let json = String(decoding: try JSONEncoder().encode(forecast), as: UTF8.self)
     return try CallTool.Result(
-        content: [.text(text: json, annotations: nil, _meta: nil)],
+        content: [.text(text: json)],
         structuredContent: forecast)
 }
 ```
@@ -515,12 +515,12 @@ func registerDeployTool(on server: Server) async {
         // Round 2: the client sent the answer under the key of the request.
         if let answer = params.inputResponses?["confirm"]?.elicitation {
             guard answer.action == .accept, answer.content?["confirm"]?.boolValue == true else {
-                return CallTool.Result(content: [.text(text: "Cancelled", annotations: nil, _meta: nil)])
+                return CallTool.Result(content: [.text(text: "Cancelled")])
             }
             // requestState is the plaintext this handler returned in round 1.
             let build = params.requestState ?? "unknown"
             return CallTool.Result(content: [
-                .text(text: "Deployed \(build) to \(environment)", annotations: nil, _meta: nil)
+                .text(text: "Deployed \(build) to \(environment)")
             ])
         }
 
@@ -563,7 +563,7 @@ func summarizeWorkspace(_ params: CallTool.Parameters) -> CallTool.Result {
         ])
     }
     let text = "\(roots.count) roots. Model: \(summary.model)"
-    return CallTool.Result(content: [.text(text: text, annotations: nil, _meta: nil)])
+    return CallTool.Result(content: [.text(text: text)])
 }
 ```
 
@@ -591,7 +591,7 @@ func confirmation(_ message: String) -> CallTool.Result {
     guard Server.currentHandlerContext?.clientCapabilities?.elicitation != nil else {
         // Returning the input request anyway fails with -32021 at 2026-07-28.
         return CallTool.Result(
-            content: [.text(text: "This tool needs a client with elicitation", annotations: nil, _meta: nil)],
+            content: [.text(text: "This tool needs a client with elicitation")],
             isError: true)
     }
     return .inputRequired(["confirm": .elicitation(message: message)])
@@ -814,36 +814,27 @@ The eras choose the level differently:
 | | 2025-11-25 and earlier | 2026-07-28 |
 | --- | --- | --- |
 | How the client sets the level | `logging/setLevel` request, once | `_meta["io.modelcontextprotocol/logLevel"]` on each request |
-| Who stores it | Your `SetLoggingLevel` handler. Without one, the client gets -32601. | The SDK, per request |
-| Who filters | You: `log` sends every message | `log` called from the handler drops messages below the level, and all messages when the request set none |
-| `logging/setLevel` | Served by your handler | -32601 |
+| Who stores it | The SDK, per connection, when the server declares `logging` | The SDK, per request |
+| Who filters | `log` drops messages below the level; before the client sets one, it sends every message | `log` called from the handler drops messages below the level, and all messages when the request set none |
+| `logging/setLevel` | Served by the SDK, or by your `SetLoggingLevel` handler; without the `logging` capability, -32601 | -32601 |
 
 ```swift
-/// The level a handshake client chose with logging/setLevel.
-actor LogThreshold {
-    private(set) var level: LogLevel = .info
-    func set(_ level: LogLevel) { self.level = level }
-}
-
-func registerLogging(on server: Server, threshold: LogThreshold) async {
-    // 2025-11-25 and earlier. The SDK neither stores nor applies this level.
-    await server.withMethodHandler(SetLoggingLevel.self) { params in
-        await threshold.set(params.level)
-        return Empty()
+/// A server that logs. With the `logging` capability, `log` applies the
+/// level the client chose, in either era.
+func makeLoggingServer() async -> Server {
+    let server = Server(
+        name: "deployer", version: "1.0.0",
+        capabilities: .init(logging: .init(), tools: .init()))
+    await server.withMethodHandler(CallTool.self) { _ in
+        try await server.log(level: .info, logger: "deploy", data: ["message": "starting"])
+        try await server.log(level: .error, logger: "deploy", data: ["message": "failed"])
+        return .init(content: [])
     }
-}
-
-/// Sends a log message at the level each era asks for.
-func log(_ level: LogLevel, _ message: String, server: Server, threshold: LogThreshold) async throws {
-    // A stateless request carries its own level, and server.log applies it.
-    if Server.currentHandlerContext?.isStateless != true {
-        guard level >= (await threshold.level) else { return }
-    }
-    try await server.log(level: level, logger: "deploy", data: ["message": .string(message)])
+    return server
 }
 ```
 
-Outside a handler there is no request, so `log` does not filter. The messages are `notifications/message` notifications; called from a handler, they go on the stream of the request being handled.
+Outside a handler there is no request: `log` applies the connection's `logging/setLevel` level, if any. The messages are `notifications/message` notifications; called from a handler, they go on the stream of the request being handled.
 
 ## Handler context
 
@@ -997,7 +988,7 @@ The server answers with the requested version if it is a handshake revision in `
 
 ### Built-in handlers and registration
 
-`start` registers method handlers for `initialize`, `ping`, `server/discover` and `subscriptions/listen`, and adds a notification handler for `notifications/cancelled`. It replaces your handlers for these four methods if you registered them before `start`; a registration after `start` replaces the built-in one. Replace a built-in handler only on purpose, as in [protocol_versions.md](protocol_versions.md#stateless-only).
+`start` registers method handlers for `initialize`, `ping`, `server/discover`, `subscriptions/listen` and, with the `logging` capability, `logging/setLevel`, and adds a notification handler for `notifications/cancelled`. A handler of yours for one of these methods is kept, whether you registered it before or after `start`. Replace a built-in handler only on purpose, as in [protocol_versions.md](protocol_versions.md#stateless-only); a `SetLoggingLevel` handler of yours means `log` no longer knows the level.
 
 - `withMethodHandler(_:handler:)` keeps one handler per method. A second registration for the same method replaces the first.
 - `onNotification(_:handler:)` adds a handler; several handlers for one notification all run. Errors they throw are logged.

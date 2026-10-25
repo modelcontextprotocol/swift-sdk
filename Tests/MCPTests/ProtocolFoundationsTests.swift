@@ -274,7 +274,7 @@ struct EnvelopeMetaTests {
         #expect((try json(request)["params"] as? [String: Any])?["uri"] as? String == uri)
 
         let response = try AnyResponse(
-            CallTool.response(id: 1, result: .init(content: [.text("data:,hello")])))
+            CallTool.response(id: 1, result: .init(content: [.text(text: "data:,hello")])))
         let content = (try json(response)["result"] as? [String: Any])?["content"] as? [[String: Any]]
         #expect(content?.first?["text"] as? String == "data:,hello")
     }

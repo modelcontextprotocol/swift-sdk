@@ -50,7 +50,7 @@ func listenForChanges(_ client: Client) async throws -> SubscriptionFilter {
 func watchNotes(_ client: Client) async throws -> Set<String> {
     // snippet: subscribe-resource
     await client.onNotification(ResourceUpdatedNotification.self) { message in
-        guard let contents = try? await client.readResource(uri: message.params.uri) else { return }
+        guard let contents = try? await client.readResource(uri: message.params.uri).contents else { return }
         print("\(message.params.uri) now has \(contents.count) parts")
     }
     // resources/subscribe at 2025-11-25; a listen stream per URI at 2026-07-28.
@@ -89,7 +89,7 @@ actor LogInbox {
 func cancelLongCall(_ client: Client, timeout: Duration = .seconds(5)) async throws -> Bool {
     // snippet: cancel
     var cancelled = false
-    let context: RequestContext<CallTool.Result> = try await client.callTool(
+    let context = try await client.startToolCall(
         name: "slow", arguments: ["seconds": 30])
 
     // Give up after `timeout`, for example. A Stop button works the same way.
@@ -117,9 +117,9 @@ func callWithProgress(_ client: Client, into updates: ProgressInbox) async throw
         guard params.progressToken == token else { return }
         await updates.add(params.progress, of: params.total)
     }
-    let (content, _) = try await client.callTool(
+    let content = try await client.callTool(
         name: "index", arguments: ["path": "/src"],
-        meta: Metadata(progressToken: token))
+        meta: Metadata(progressToken: token)).content
     // endsnippet
     return content
 }

@@ -15,13 +15,13 @@ import MCP
 
 /// Connects with the default configuration: `server/discover` at 2026-07-28,
 /// with a fallback to `initialize`.
-func connectWithDefaults(transport: any Transport) async throws -> (Client, Initialize.Result) {
+func connectWithDefaults(transport: any Transport) async throws -> (Client, Client.ConnectionInfo) {
     // snippet: connect
     let client = Client(name: "my-client", version: "1.0.0")
     let result = try await client.connect(transport: transport)
-    print("Connected to \(result.serverInfo.name) at \(result.protocolVersion)")
+    print("Connected to \(result.serverInfo?.name ?? "a server") at \(result.protocolVersion)")
     if result.capabilities.tools != nil {
-        let (tools, _) = try await client.listTools()
+        let tools = try await client.listTools().tools
         print("Tools: \(tools.map(\.name))")
     }
     // endsnippet

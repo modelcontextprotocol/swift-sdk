@@ -22,7 +22,7 @@ struct ClientTests {
                 let response = Initialize.response(
                     id: request.id,
                     result: .init(
-                        protocolVersion: Version.latest,
+                        protocolVersion: Version.latestHandshake,
                         capabilities: .init(),
                         serverInfo: .init(name: "TestServer", version: "1.0"),
                         instructions: nil
@@ -34,7 +34,7 @@ struct ClientTests {
 
         let result = try await client.connect(transport: transport)
         #expect(await transport.isConnected == true)
-        #expect(result.protocolVersion == Version.latest)
+        #expect(result.protocolVersion == Version.latestHandshake)
         await client.disconnect()
         #expect(await transport.isConnected == false)
         initTask.cancel()
@@ -59,7 +59,7 @@ struct ClientTests {
             let response = Initialize.response(
                 id: request.id,
                 result: .init(
-                    protocolVersion: Version.latest,
+                    protocolVersion: Version.latestHandshake,
                     capabilities: .init(),
                     serverInfo: .init(name: "TestServer", version: "1.0"),
                     instructions: nil
@@ -70,9 +70,9 @@ struct ClientTests {
 
             // Now complete the connect call which will automatically initialize
             let result = try await client.connect(transport: transport)
-            #expect(result.protocolVersion == Version.latest)
-            #expect(result.serverInfo.name == "TestServer")
-            #expect(result.serverInfo.version == "1.0")
+            #expect(result.protocolVersion == Version.latestHandshake)
+            #expect(result.serverInfo?.name == "TestServer")
+            #expect(result.serverInfo?.version == "1.0")
 
             // Small delay to ensure message loop is started
             try await Task.sleep(for: .milliseconds(10))
@@ -132,7 +132,7 @@ struct ClientTests {
                 let response = Initialize.response(
                     id: request.id,
                     result: .init(
-                        protocolVersion: Version.latest,
+                        protocolVersion: Version.latestHandshake,
                         capabilities: .init(),
                         serverInfo: .init(name: "TestServer", version: "1.0"),
                         instructions: nil
@@ -182,7 +182,7 @@ struct ClientTests {
                 let response = Initialize.response(
                     id: request.id,
                     result: .init(
-                        protocolVersion: Version.latest,
+                        protocolVersion: Version.latestHandshake,
                         capabilities: .init(),
                         serverInfo: .init(name: "TestServer", version: "1.0"),
                         instructions: nil
@@ -238,7 +238,7 @@ struct ClientTests {
                 let response = Initialize.response(
                     id: request.id,
                     result: .init(
-                        protocolVersion: Version.latest,
+                        protocolVersion: Version.latestHandshake,
                         capabilities: .init(),
                         serverInfo: .init(name: "TestServer", version: "1.0"),
                         instructions: nil
@@ -329,7 +329,7 @@ struct ClientTests {
                 let response = Initialize.response(
                     id: request.id,
                     result: .init(
-                        protocolVersion: Version.latest,
+                        protocolVersion: Version.latestHandshake,
                         capabilities: .init(),
                         serverInfo: .init(name: "TestServer", version: "1.0"),
                         instructions: nil
@@ -409,7 +409,7 @@ struct ClientTests {
                 let response = Initialize.response(
                     id: request.id,
                     result: .init(
-                        protocolVersion: Version.latest,
+                        protocolVersion: Version.latestHandshake,
                         capabilities: .init(),
                         serverInfo: .init(name: "TestServer", version: "1.0"),
                         instructions: nil
@@ -489,7 +489,7 @@ struct ClientTests {
                 let response = Initialize.response(
                     id: request.id,
                     result: .init(
-                        protocolVersion: Version.latest,
+                        protocolVersion: Version.latestHandshake,
                         capabilities: .init(),
                         serverInfo: .init(name: "TestServer", version: "1.0"),
                         instructions: nil
@@ -529,7 +529,7 @@ struct ClientTests {
                 let response = Initialize.response(
                     id: request.id,
                     result: .init(
-                        protocolVersion: Version.latest,
+                        protocolVersion: Version.latestHandshake,
                         capabilities: .init(),
                         serverInfo: .init(name: "TestServer", version: "1.0"),
                         instructions: nil
@@ -589,7 +589,7 @@ struct ClientTests {
                 let response = Initialize.response(
                     id: request.id,
                     result: .init(
-                        protocolVersion: Version.latest,
+                        protocolVersion: Version.latestHandshake,
                         capabilities: .init(),
                         serverInfo: .init(name: "TestServer", version: "1.0"),
                         instructions: nil
@@ -664,7 +664,7 @@ struct ClientTests {
                 let response = Initialize.response(
                     id: request.id,
                     result: .init(
-                        protocolVersion: Version.latest,
+                        protocolVersion: Version.latestHandshake,
                         capabilities: .init(),
                         serverInfo: .init(name: "TestServer", version: "1.0"),
                         instructions: nil
@@ -725,7 +725,7 @@ struct ClientTests {
                 let response = Initialize.response(
                     id: request.id,
                     result: .init(
-                        protocolVersion: Version.latest,
+                        protocolVersion: Version.latestHandshake,
                         capabilities: .init(),
                         serverInfo: .init(name: "TestServer", version: "1.0"),
                         instructions: nil

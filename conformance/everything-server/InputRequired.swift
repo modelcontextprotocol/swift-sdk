@@ -21,7 +21,7 @@ let inputRequiredPrompt = Prompt(
     name: "test_input_required_result_prompt", description: "Asks for context before it is returned (SEP-2322)")
 
 private func text(_ value: String) -> CallTool.Result {
-    .init(content: [.text(text: value, annotations: nil, _meta: nil)], isError: false)
+    .init(content: [.text(text: value)], isError: false)
 }
 
 private func ask(_ message: String, field: String, type: String = "string") -> InputRequest {

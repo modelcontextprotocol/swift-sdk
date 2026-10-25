@@ -17,7 +17,7 @@ func makeLifecycleServer(configuration: Server.Configuration = .default) async -
         let version = context?.protocolVersion ?? "unknown"
         let caller = context?.clientInfo?.name ?? "anonymous"
         let stateless = context?.isStateless ?? false
-        return .init(content: [.text(text: "\(caller) at \(version), stateless: \(stateless)", annotations: nil, _meta: nil)])
+        return .init(content: [.text(text: "\(caller) at \(version), stateless: \(stateless)")])
     }
     // endsnippet
     return server

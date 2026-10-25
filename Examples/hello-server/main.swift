@@ -34,7 +34,7 @@ await server.withMethodHandler(CallTool.self) { params in
         throw MCPError.invalidParams("Unknown tool: \(params.name)")
     }
     let name = params.arguments?["name"]?.stringValue ?? "world"
-    return CallTool.Result(content: [.text(text: "Hello, \(name)!", annotations: nil, _meta: nil)])
+    return CallTool.Result(content: [.text(text: "Hello, \(name)!")])
 }
 
 try await server.start(transport: StdioTransport())

@@ -9,7 +9,7 @@ func versionLists() -> (handshake: [String], stateless: [String], supported: Set
         Version.handshake,  // ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
         Version.stateless,  // ["2026-07-28"]
         Version.supported,  // both lists
-        Version.latest  // "2025-11-25": what `initialize` requests
+        Version.latestHandshake  // "2025-11-25": what `initialize` requests
     )
 }
 // endsnippet
@@ -42,7 +42,7 @@ func registerEraTool(on server: Server) async {
         let context = Server.currentHandlerContext
         let era = context?.isStateless == true ? "stateless" : "handshake"
         let text = "\(context?.protocolVersion ?? "unknown") (\(era))"
-        return CallTool.Result(content: [.text(text: text, annotations: nil, _meta: nil)])
+        return CallTool.Result(content: [.text(text: text)])
     }
 }
 // endsnippet

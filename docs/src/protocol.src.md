@@ -17,11 +17,11 @@ Current defaults:
 
 - `Client.Configuration.protocolMode` defaults to `.automatic`: `server/discover` at 2026-07-28, with a fallback to `initialize`.
 - `Server.Configuration.protocolVersions` defaults to `Version.stateless + Version.handshake`, so a server serves both eras.
-- `Version.supported` lists both eras. `Version.latest`, the version `initialize` requests, is 2025-11-25.
+- `Version.supported` lists both eras. `Version.latestHandshake`, the version `initialize` requests, is 2025-11-25.
 
 ### The initialize handshake
 
-With `.handshake`, or after an `.automatic` fallback, the client sends `initialize` with `Version.latest`, then `notifications/initialized`. The server negotiates: it answers with the requested version when it serves it, and otherwise with its newest handshake revision.
+With `.handshake`, or after an `.automatic` fallback, the client sends `initialize` with `Version.latestHandshake`, then `notifications/initialized`. The server negotiates: it answers with the requested version when it serves it, and otherwise with its newest handshake revision.
 
 %include Examples/Snippets/Protocol/Lifecycle.swift lifecycle-handshake
 
@@ -46,7 +46,7 @@ At 2026-07-28 there is no handshake. A client may send `server/discover` to lear
 | Mode | Behavior |
 |---|---|
 | `.automatic` (default) | `server/discover` at `Version.stateless[0]`. On -32022 it retries once with the first version in `data.supported` that is in `Version.stateless`. Falls back to `initialize` (see below). |
-| `.handshake` | `initialize` with `Version.latest`. |
+| `.handshake` | `initialize` with `Version.latestHandshake`. |
 | `.stateless(v)` | `server/discover` at `v`. No retry and no fallback: when the server does not serve `v`, the -32022 error is thrown. |
 
 `.automatic` falls back to `initialize` when:
@@ -201,14 +201,13 @@ When a POST's SSE stream ends before the response to its request, a handshake co
 
 HTTP errors map as follows. At 2026-07-28 a server answers protocol errors with a 4xx status and a JSON-RPC error body; the transport delivers that body, so the caller sees the `MCPError` (-32601, -32602, -32020, -32021, -32022), not an HTTP error. Only an `error` whose ID is the request's ID is delivered. A `result`, an error with another ID (such as a placeholder), a batch, or the reply to a notification gives the status error below. A 404 drops the session ID in both cases.
 
-| Status | Without a JSON-RPC error for the request |
+Without a JSON-RPC error for the request, the transport throws `MCPError.transportError(_:)` with an `HTTPStatusError`: its `statusCode`, the response `headers` (`value(forHeader:)` reads one, such as `Retry-After`), and `isSessionExpired`.
+
+| Status | Also |
 |---|---|
-| 400 | `MCPError.internalError("Bad request")` |
-| 401, 403 | handled by the authorizer if one is set; else `internalError("Authentication required")` / `("Access forbidden")` |
-| 404 | with a session: the session is dropped and `internalError("Session expired")`; else `("Endpoint not found")` |
-| 405 | `internalError("Server does not support streaming")` when `streaming` is `true`, which also stops the GET stream; else `("Method not allowed")` |
-| 408, 429 | `internalError("Request timeout")`, `("Too many requests")` |
-| 5xx | `internalError("Server error: <status>")` |
+| 401, 403 | Handled by the authorizer, if one is set; the error when it is not, or when retries run out |
+| 404 | With a session: the session is dropped and `isSessionExpired` is `true` |
+| 405 | With `streaming: true`, the GET stream also stops |
 
 To add headers to every request (an API key, a user agent), pass `requestModifier`. For OAuth, pass an `authorizer` (see [Authorization](#authorization)).
 
@@ -471,7 +470,7 @@ Issuer checks and authorization server changes:
 - A refresh token is sent only to the server that issued it. A token without a recorded server is refreshed only at a configured `authorizationServerURL` or `tokenEndpoint`.
 - For 2025-03-26 servers that publish no metadata at all, the authorizer falls back to `/authorize`, `/token` and `/register` at the server origin, with S256. It does so only on first discovery, and only when every metadata URL answers 404 or 410; a network error, a cancelled request or another status fails the request instead.
 
-Errors reach the caller as `MCPError.internalError("Authorization flow failed: …")` wrapping an `OAuthAuthorizationError`, or as `internalError("Authentication required")` (401) and `("Access forbidden")` (403) when retries run out.
+Errors reach the caller as `MCPError.transportError(_:)` with the `OAuthAuthorizationError` (or the error a custom authorizer threw), or with an `HTTPStatusError` of 401 or 403 when retries run out.
 
 #### Enterprise-managed authorization
 
@@ -618,7 +617,7 @@ On the client, `cancelRequest(_:reason:)` fails the pending request with `Cancel
 
 On the server, `notifications/cancelled` cancels the handler's task. Over `StatelessHTTPServerTransport`, the transport does the same when the client closes an SSE reply: it injects `notifications/cancelled` for the request's internal id. A `notifications/cancelled` POSTed to that transport is honored when its `Authorization` header matches the request's ([Stateless HTTP server](#stateless-http-server)); the request's HTTP response then ends with 202 Accepted, or with the end of its SSE stream, and carries no JSON-RPC response. A handler stops when it reaches a cancellation point (`Task.sleep`, `Task.checkCancellation()`, a cancellable `await`). If it throws `CancellationError`, the server sends nothing; any other error is sent as a response.
 
-To cancel, keep the request id. The convenience methods return results, so use the `callTool` overload that returns a `RequestContext`, or `send(_:)`:
+To cancel, keep the request id: `startToolCall(name:arguments:meta:)` and `send(_:)` return a `RequestContext` that has it.
 
 %include Examples/Snippets/Protocol/Utilities.swift cancellation-server
 
