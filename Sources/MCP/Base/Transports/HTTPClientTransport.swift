@@ -343,6 +343,19 @@ public actor HTTPClientTransport: Transport {
         try await post(message, additionalHeaders: additionalHeaders)
     }
 
+    /// Whether POST responses are read as streams. On Linux the transport
+    /// reads whole bodies, so a `subscriptions/listen` response never
+    /// arrives before the stream ends.
+    #if os(Linux)
+        package static let streamsResponses = false
+    #else
+        package static let streamsResponses = true
+    #endif
+
+    /// The idle timeout of `subscriptions/listen` POSTs. A server may send
+    /// nothing for a long time on such a stream.
+    static let listenIdleTimeout: TimeInterval = 3600
+
     /// Aborts the POST that carries request `id`, closing its response stream.
     ///
     /// At protocol 2026-07-28 this is how a request is cancelled: the server
@@ -387,6 +400,9 @@ public actor HTTPClientTransport: Transport {
             )
             request.addValue(ContentType.json, forHTTPHeaderField: HTTPHeaderName.contentType)
             request.httpBody = message.data
+            if message.method == SubscriptionsListen.name {
+                request.timeoutInterval = Self.listenIdleTimeout
+            }
 
             if let version {
                 request.addValue(version, forHTTPHeaderField: HTTPHeaderName.protocolVersion)

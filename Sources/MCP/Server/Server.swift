@@ -47,20 +47,33 @@ public actor Server {
         /// Cache hint for cacheable methods missing from ``cacheHints``.
         public var defaultCacheHint: CacheHint
 
+        /// The most `subscriptions/listen` streams open at once. Further
+        /// streams are refused with -32600.
+        public var maxSubscriptionStreams: Int
+
+        /// The most resource URIs one `subscriptions/listen` stream may name.
+        /// A stream that names more is refused with -32602.
+        public var maxResourceSubscriptions: Int
+
         public init(
             strict: Bool = false,
             protocolVersions: [String] = Version.stateless + Version.handshake,
             cacheHints: [String: CacheHint] = [:],
-            defaultCacheHint: CacheHint = .uncached
+            defaultCacheHint: CacheHint = .uncached,
+            maxSubscriptionStreams: Int = 1000,
+            maxResourceSubscriptions: Int = 256
         ) {
             self.strict = strict
             self.protocolVersions = protocolVersions
             self.cacheHints = cacheHints
             self.defaultCacheHint = defaultCacheHint
+            self.maxSubscriptionStreams = maxSubscriptionStreams
+            self.maxResourceSubscriptions = maxResourceSubscriptions
         }
 
         private enum CodingKeys: String, CodingKey {
             case strict, protocolVersions, cacheHints, defaultCacheHint
+            case maxSubscriptionStreams, maxResourceSubscriptions
         }
 
         /// Decodes a configuration; keys added after `strict` take their
@@ -74,6 +87,12 @@ public actor Server {
             cacheHints = try container.decodeIfPresent([String: CacheHint].self, forKey: .cacheHints) ?? [:]
             defaultCacheHint =
                 try container.decodeIfPresent(CacheHint.self, forKey: .defaultCacheHint) ?? defaults.defaultCacheHint
+            maxSubscriptionStreams =
+                try container.decodeIfPresent(Int.self, forKey: .maxSubscriptionStreams)
+                ?? defaults.maxSubscriptionStreams
+            maxResourceSubscriptions =
+                try container.decodeIfPresent(Int.self, forKey: .maxResourceSubscriptions)
+                ?? defaults.maxResourceSubscriptions
         }
     }
 
@@ -263,8 +282,9 @@ public actor Server {
     private var clientCapabilities: Client.Capabilities?
     /// The protocol version
     private var protocolVersion: String?
-    /// The list of subscriptions
-    private var subscriptions: [String: Set<ID>] = [:]
+    /// Open `subscriptions/listen` streams.
+    private var listeners: [Int: Listener] = [:]
+    private var nextListenerToken = 0
     /// The task for the message handling loop
     private var task: Task<Void, Never>?
     /// Whether ``start(transport:initializeHook:statelessRequestHook:)`` got an initialize hook.
@@ -391,6 +411,7 @@ public actor Server {
 
     /// Stop the server
     public func stop() async {
+        closeSubscriptions()
         task?.cancel()
         task = nil
 
@@ -525,15 +546,179 @@ public actor Server {
     ///
     /// Called from a method handler, the notification is delivered on the
     /// stream of the request being handled when the transport has one.
+    ///
+    /// List-changed and resource-updated notifications are also delivered to
+    /// the matching `subscriptions/listen` streams. At 2026-07-28 they are
+    /// sent only there: without an `initialize` session they are not sent on
+    /// the connection. Every caller's matching stream receives them; use
+    /// ``notify(_:to:)`` to reach only some callers.
     public func notify<N: Notification>(_ notification: Message<N>) async throws {
+        try await notify(notification, matching: nil)
+    }
+
+    /// Sends a list-changed or resource-updated notification only to the
+    /// `subscriptions/listen` streams whose caller `recipients` accepts, for
+    /// example by the principal in `context.httpContext`.
+    ///
+    /// On an `initialize` session the notification is also sent on the
+    /// connection, as ``notify(_:)`` does: that session has one client.
+    public func notify<N: Notification>(
+        _ notification: Message<N>, to recipients: @escaping @Sendable (HandlerContext) -> Bool
+    ) async throws {
+        try await notify(notification, matching: recipients)
+    }
+
+    private func notify<N: Notification>(
+        _ notification: Message<N>, matching recipients: ((HandlerContext) -> Bool)?
+    ) async throws {
         guard let connection = connection else {
             throw MCPError.internalError("Server connection not initialized")
         }
 
         if N.name == ToolListChangedNotification.name { invalidateToolHeaders() }
         let notificationData = try encoder.encode(notification)
+        if let event = SubscriptionEvent(notification) {
+            publish(event, to: recipients)
+            guard isInitialized else { return }
+        }
         try await connection.send(
             notificationData, relatedRequestID: Server.currentHandlerContext?.id)
+    }
+
+    // MARK: - Subscriptions (2026-07-28)
+
+    private struct Listener {
+        let filter: SubscriptionFilter
+        /// `filter.resourceSubscriptions`, for lookups.
+        let resources: Set<String>
+        /// The caller, for ``notify(_:to:)``.
+        let context: HandlerContext
+        let events: AsyncStream<SubscriptionEvent>.Continuation
+    }
+
+    /// The longest resource URI a `subscriptions/listen` stream may name.
+    static let maxSubscriptionURILength = 4096
+
+    /// Narrows or refuses `subscriptions/listen` filters.
+    private var subscriptionAuthorizer:
+        (@Sendable (SubscriptionFilter, HandlerContext) async throws -> SubscriptionFilter)?
+
+    /// Sets a check that runs for each `subscriptions/listen` stream
+    /// (2026-07-28) with the requested filter and the caller's context,
+    /// before the server acknowledges it. Return the filter to serve, for
+    /// example without the resource URIs the caller may not read, or throw
+    /// an `MCPError` to refuse the stream.
+    ///
+    /// Without one, any caller can listen to every list change and to any
+    /// resource URI, and ``notify(_:)`` reaches every caller's matching
+    /// stream.
+    @discardableResult
+    public func withSubscriptionAuthorizer(
+        _ authorize: @escaping @Sendable (SubscriptionFilter, HandlerContext) async throws -> SubscriptionFilter
+    ) -> Self {
+        subscriptionAuthorizer = authorize
+        return self
+    }
+
+    /// The most events buffered for a listen stream; older ones are dropped.
+    /// Events are level triggers ("refetch"), so dropping duplicates is safe.
+    private static let listenerBufferSize = 256
+
+    private func publish(_ event: SubscriptionEvent, to recipients: ((HandlerContext) -> Bool)?) {
+        for listener in listeners.values where event.matches(listener.filter, resources: listener.resources) {
+            if let recipients, !recipients(listener.context) { continue }
+            listener.events.yield(event)
+        }
+    }
+
+    /// The number of open `subscriptions/listen` streams.
+    var openSubscriptionCount: Int { listeners.count }
+
+    /// Ends every open `subscriptions/listen` stream with its result.
+    public func closeSubscriptions() {
+        for listener in listeners.values {
+            listener.events.finish()
+        }
+    }
+
+    /// The part of a filter this server honors: kinds whose capability it declares.
+    private func honored(_ requested: SubscriptionFilter) -> SubscriptionFilter {
+        SubscriptionFilter(
+            toolsListChanged: requested.toolsListChanged == true && capabilities.tools?.listChanged == true
+                ? true : nil,
+            promptsListChanged: requested.promptsListChanged == true
+                && capabilities.prompts?.listChanged == true ? true : nil,
+            resourcesListChanged: requested.resourcesListChanged == true
+                && capabilities.resources?.listChanged == true ? true : nil,
+            resourceSubscriptions: capabilities.resources?.subscribe == true
+                && requested.resourceSubscriptions?.isEmpty == false
+                ? requested.resourceSubscriptions : nil)
+    }
+
+    /// The requested filter with duplicate URIs removed; throws -32602 for
+    /// too many or too long URIs.
+    private func checked(_ requested: SubscriptionFilter) throws -> SubscriptionFilter {
+        guard let uris = requested.resourceSubscriptions else { return requested }
+        var seen: Set<String> = []
+        let unique = uris.filter { seen.insert($0).inserted }
+        guard unique.count <= configuration.maxResourceSubscriptions else {
+            throw MCPError.invalidParams(
+                "A listen stream may name at most \(configuration.maxResourceSubscriptions) resources")
+        }
+        guard unique.allSatisfy({ $0.utf8.count <= Self.maxSubscriptionURILength }) else {
+            throw MCPError.invalidParams(
+                "Resource URIs may have at most \(Self.maxSubscriptionURILength) bytes")
+        }
+        var filter = requested
+        filter.resourceSubscriptions = unique
+        return filter
+    }
+
+    /// Serves one `subscriptions/listen` stream: acknowledges, then forwards
+    /// matching events until the client goes away or the server closes it.
+    private func serveListen(_ params: SubscriptionsListen.Parameters) async throws
+        -> SubscriptionsListen.Result
+    {
+        guard let connection, let context = Server.currentHandlerContext else {
+            throw MCPError.internalError("Server connection not initialized")
+        }
+        func checkCapacity() throws {
+            guard listeners.count < configuration.maxSubscriptionStreams else {
+                throw MCPError.invalidRequest("Too many open \(SubscriptionsListen.name) streams")
+            }
+        }
+        try checkCapacity()
+        var requested = try checked(params.notifications)
+        if let authorize = subscriptionAuthorizer {
+            requested = try checked(try await authorize(requested, context))
+            try checkCapacity()
+        }
+        let filter = honored(requested)
+        var meta = Metadata()
+        meta.subscriptionID = context.id
+
+        let (events, continuation) = AsyncStream<SubscriptionEvent>.makeStream(
+            bufferingPolicy: .bufferingNewest(Self.listenerBufferSize))
+        let token = nextListenerToken
+        nextListenerToken += 1
+        // Register before the acknowledgement so no event is lost; the
+        // acknowledgement is still first because only this task writes.
+        listeners[token] = Listener(
+            filter: filter, resources: Set(filter.resourceSubscriptions ?? []), context: context,
+            events: continuation)
+        defer { listeners[token] = nil }
+
+        let ack = Message<SubscriptionsAcknowledgedNotification>(
+            method: SubscriptionsAcknowledgedNotification.name,
+            params: .init(notifications: filter), _meta: meta)
+        try await connection.send(encoder.encode(ack), relatedRequestID: context.id)
+
+        for await event in events {
+            try await connection.send(
+                encoder.encode(event.message(subscriptionID: context.id)), relatedRequestID: context.id)
+        }
+        try Task.checkCancellation()
+        return SubscriptionsListen.Result(_meta: meta)
     }
 
     /// Send a request to the client and return a Task for the response
@@ -1352,6 +1537,11 @@ public actor Server {
 
         // Ping
         withMethodHandler(Ping.self) { _ in return Empty() }
+
+        // Notification streams (2026-07-28 and later)
+        withMethodHandler(SubscriptionsListen.self) { params in
+            try await self.serveListen(params)
+        }
 
         // Discovery (2026-07-28 and later)
         withMethodHandler(ServerDiscover.self) { _ in

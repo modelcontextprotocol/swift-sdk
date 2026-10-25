@@ -22,7 +22,7 @@ enum StatelessRequests {
     ]
 
     /// Methods that exist only at 2026-07-28 and later.
-    static let statelessOnlyMethods: Set<String> = [ServerDiscover.name, "subscriptions/listen"]
+    static let statelessOnlyMethods: Set<String> = [ServerDiscover.name, SubscriptionsListen.name]
 
     /// Methods whose results carry SEP-2549 cache hints.
     static let cacheableMethods: Set<String> = [
