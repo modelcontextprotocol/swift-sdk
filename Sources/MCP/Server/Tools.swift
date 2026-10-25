@@ -387,16 +387,33 @@ public enum CallTool: Method {
         /// Arguments to use for the tool call.
         public let arguments: [String: Value]?
 
-        public init(name: String, arguments: [String: Value]? = nil, meta: Metadata? = nil) {
+        /// The client's responses to the server's input requests, keyed as
+        /// the requests were (2026-07-28, SEP-2322).
+        public var inputResponses: [String: InputResponse]?
+
+        /// The `requestState` of the previous round, echoed unchanged.
+        public var requestState: String?
+
+        public init(
+            name: String,
+            arguments: [String: Value]? = nil,
+            meta: Metadata? = nil,
+            inputResponses: [String: InputResponse]? = nil,
+            requestState: String? = nil
+        ) {
             self._meta = meta
             self.name = name
             self.arguments = arguments
+            self.inputResponses = inputResponses
+            self.requestState = requestState
         }
 
         private enum CodingKeys: String, CodingKey {
             case _meta
             case name
             case arguments
+            case inputResponses
+            case requestState
         }
 
         public init(from decoder: Decoder) throws {
@@ -404,6 +421,8 @@ public enum CallTool: Method {
             _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
             name = try container.decode(String.self, forKey: .name)
             arguments = try container.decodeIfPresent([String: Value].self, forKey: .arguments)
+            inputResponses = try MRTR.decodeInputResponses(container, forKey: .inputResponses)
+            requestState = try container.decodeIfPresent(String.self, forKey: .requestState)
         }
 
         public func encode(to encoder: Encoder) throws {
@@ -411,15 +430,29 @@ public enum CallTool: Method {
             try container.encodeIfPresent(_meta, forKey: ._meta)
             try container.encode(name, forKey: .name)
             try container.encodeIfPresent(arguments, forKey: .arguments)
+            try container.encodeIfPresent(inputResponses, forKey: .inputResponses)
+            try container.encodeIfPresent(requestState, forKey: .requestState)
         }
     }
 
+    /// The result of a tool call: its content, or, at 2026-07-28, a request
+    /// for more input (see `inputRequired(_:requestState:_meta:)`).
     public struct Result: Hashable, Codable, Sendable {
         public let content: [Tool.Content]
         public let structuredContent: Value?
         public let isError: Bool?
         /// Optional metadata about this result
         public var _meta: Metadata?
+
+        /// Requests the client must fulfill before the call can finish,
+        /// keyed by names the server chooses (SEP-2322).
+        public var inputRequests: [String: InputRequest]?
+
+        /// Opaque state the client echoes on the next round. The server
+        /// SDK seals it before it leaves the server.
+        public var requestState: String?
+
+        private var declaredResultType: ResultType?
 
         public init(
             content: [Tool.Content] = [],
@@ -448,12 +481,43 @@ public enum CallTool: Method {
             )
         }
 
+        /// A result that asks the client for input and a retry (SEP-2322).
+        ///
+        /// Give at least one of `requests` and `requestState`. For clients
+        /// before 2026-07-28 the server sends the requests itself and calls
+        /// the handler again with the responses.
+        public static func inputRequired(
+            _ requests: [String: InputRequest]? = nil,
+            requestState: String? = nil,
+            _meta: Metadata? = nil
+        ) -> Result {
+            var result = Result(_meta: _meta)
+            result.inputRequests = requests
+            result.requestState = requestState
+            result.declaredResultType = .inputRequired
+            return result
+        }
+
+        /// ``ResultType/inputRequired`` when the server asks for input.
+        public var resultType: ResultType {
+            MRTR.resultType(
+                declared: declaredResultType, inputRequests: inputRequests, requestState: requestState)
+        }
+
         private enum CodingKeys: String, CodingKey, CaseIterable {
             case content, structuredContent, isError, _meta
+            case resultType, inputRequests, requestState
         }
 
         public func encode(to encoder: Encoder) throws {
             var container = encoder.container(keyedBy: CodingKeys.self)
+            if resultType == .inputRequired {
+                try container.encode(resultType, forKey: .resultType)
+                try container.encodeIfPresent(inputRequests, forKey: .inputRequests)
+                try container.encodeIfPresent(requestState, forKey: .requestState)
+                try container.encodeIfPresent(_meta, forKey: ._meta)
+                return
+            }
             try container.encode(content, forKey: .content)
             try container.encodeIfPresent(structuredContent, forKey: .structuredContent)
             try container.encodeIfPresent(isError, forKey: .isError)
@@ -462,13 +526,39 @@ public enum CallTool: Method {
 
         public init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
+            declaredResultType = MRTR.declared(
+                try container.decodeIfPresent(ResultType.self, forKey: .resultType))
+            _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
+            if declaredResultType == .inputRequired {
+                inputRequests = try container.decodeIfPresent(
+                    [String: InputRequest].self, forKey: .inputRequests)
+                requestState = try container.decodeIfPresent(String.self, forKey: .requestState)
+                content = []
+                structuredContent = nil
+                isError = nil
+                return
+            }
             content = try container.decode([Tool.Content].self, forKey: .content)
             structuredContent = try container.decodeIfPresent(
                 Value.self, forKey: .structuredContent)
             isError = try container.decodeIfPresent(Bool.self, forKey: .isError)
-            _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
         }
     }
+}
+
+extension CallTool.Parameters: InputRespondingParameters {
+    var stateBinding: (target: String, arguments: Value) { (name, .object(arguments ?? [:])) }
+
+    func retrying(inputResponses: [String: InputResponse]?, requestState: String?) -> Self {
+        var copy = self
+        copy.inputResponses = inputResponses
+        copy.requestState = requestState
+        return copy
+    }
+}
+
+extension CallTool.Result: InputRequiringResult {
+    var hasContent: Bool { !content.isEmpty || structuredContent != nil || isError != nil }
 }
 
 /// When the list of available tools changes, servers that declared the listChanged capability SHOULD send a notification:

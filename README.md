@@ -1080,6 +1080,10 @@ await server.withMethodHandler(Complete.self) { params in
 
 ### Sampling
 
+> At protocol 2026-07-28, `requestSampling`, `requestElicitation` and
+> `listRoots` throw: return [input requests](#input-requests) instead, which
+> also work with earlier clients.
+
 Servers can request LLM completions from clients through sampling. This enables agentic behaviors where servers can ask for AI assistance while maintaining human oversight.
 
 Sampling is a *client* capability: the server doesn't declare anything,
@@ -1507,7 +1511,8 @@ For stateless requests the server:
   `_meta["io.modelcontextprotocol/logLevel"]`, and none without it;
 - answers `initialize`, `ping`, `logging/setLevel`, `resources/subscribe`,
   `resources/unsubscribe` and methods of undeclared capabilities with -32601;
-- refuses server-to-client requests (sampling, elicitation, roots).
+- refuses server-to-client requests (sampling, elicitation, roots); handlers
+  return input requests instead (see [Input Requests](#input-requests)).
 
 Stateless requests never send `initialize`, so an `initializeHook` does not
 see them, and `Configuration.strict` does not apply to them. A server that
@@ -1667,6 +1672,101 @@ await subscription.cancel()
 
 Over HTTP, cancelling a request at 2026-07-28 closes its response stream;
 `Client.cancelRequest(_:reason:)` does this for HTTP connections.
+
+#### Input Requests
+
+At 2026-07-28 a server cannot send requests to the client (SEP-2322). A
+`tools/call`, `prompts/get` or `resources/read` handler that needs input
+returns an input-required result instead. The client fulfills the requests
+and sends the same request again, with the responses under the same keys and
+the `requestState` echoed:
+
+```swift
+await server.withMethodHandler(CallTool.self) { params in
+    guard let answer = params.inputResponses?["confirm"]?.elicitation else {
+        return .inputRequired(
+            ["confirm": .elicitation(message: "Deploy to production?")],
+            requestState: "deploy:step-1")
+    }
+    // params.requestState == "deploy:step-1"
+    return .init(content: [.text(text: "Deploy: \(answer.action.rawValue)", annotations: nil, _meta: nil)])
+}
+```
+
+- An input request is `.elicitation(_:)`, `.sampling(_:)` or `.listRoots`; a
+  response is read with `.elicitation`, `.sampling` or `.roots`.
+- The same handler serves earlier clients: for them the server sends the
+  requests itself (`elicitation/create`, `sampling/createMessage`,
+  `roots/list`) and calls the handler again with the responses, up to 10
+  rounds. A result with only `requestState` is retried after 50 ms, doubling
+  up to 250 ms, as a 2026-07-28 client does. When the client cancels the
+  call, the server withdraws the outstanding requests with
+  `notifications/cancelled` and calls the handler no more. A client error
+  to one of these requests fails the call with -32603.
+- A result with content and input requests fails with -32603. Input requests
+  for capabilities the client did not declare fail with -32021 in both eras,
+  whatever `strict` says, so check
+  `Server.currentHandlerContext?.clientCapabilities` first.
+
+The client holds `requestState` between rounds, so what comes back is client
+input. `Server` seals the state with AES-256-GCM before it leaves and verifies
+each echo before the handler runs: handlers read and write plaintext. A
+token is bound to the request (method, name or URI, arguments), a time window
+(10 minutes per round), the server name and, optionally, a principal. Any
+failure is answered with -32602 "Invalid or expired requestState".
+
+A token can be echoed again until it expires, to repeat a round or to go
+back to an earlier one. To accept each token once, pass `consume`, a closure
+that records the token's id until its expiry and returns whether it was new;
+back it with a store that every instance shares. A client that retries a
+round after a lost response must then start the request again.
+
+The default key exists only in the server process. When a retry can reach
+another instance or must survive a restart, share keys of 32 random bytes or
+more:
+
+```swift
+let server = Server(
+    name: "MyServer", version: "1.0.0", capabilities: capabilities,
+    requestStateProtection: try RequestStateProtection(
+        keys: [currentKey, previousKey],  // the first seals; all verify
+        // The authenticated user, such as the subject of the bearer token your
+        // validator accepted; never a header the client sets itself.
+        principal: { context in context.httpContext.flatMap(authenticatedUser) }))
+```
+
+To rotate a key, deploy `[old, new]` everywhere, then `[new, old]`, then
+`[new]` after one time-to-live. Pass `RequestStateProtection(codec:)` to use
+your own `RequestStateCodec` (for example one backed by a key service), or
+`requestStateProtection: nil` to send state as written when it cannot affect
+authorization, resource access or business logic.
+
+On the client, `Client` runs the rounds: it calls the registered
+elicitation, sampling and roots handlers, retries with a new request id,
+and returns the final result. It gives up after
+`Configuration.multiRoundTrip.maxRounds` (10) rounds, and refuses a result
+with more than `maxInputRequests` (16) input requests before any handler
+runs. `cancelRequest(_:)` and `disconnect()` stop the rounds and cancel the
+handlers that are running. To run the rounds
+yourself, for example to resume them in another process, disable it and use
+`send(_:)`:
+
+```swift
+let client = Client(
+    name: "MyApp", version: "1.0.0",
+    configuration: .init(protocolMode: .automatic, multiRoundTrip: .init(isEnabled: false)))
+// ...
+var params = CallTool.Parameters(name: "deploy")
+var result = try await client.send(CallTool.request(params)).value
+while result.resultType == .inputRequired {
+    params.inputResponses = try await answer(result.inputRequests ?? [:])
+    params.requestState = result.requestState
+    result = try await client.send(CallTool.request(params)).value
+}
+```
+
+With the rounds disabled, `callTool(name:arguments:meta:)`, `getPrompt` and
+`readResource` throw for an input-required result.
 
 ### Custom Transport Implementation
 

@@ -39,20 +39,25 @@ public actor Client {
         /// have no timeout.
         public var discoveryTimeout: Duration?
 
+        /// How the client answers input-required results (SEP-2322).
+        public var multiRoundTrip: MultiRoundTrip
+
         public init(
             strict: Bool = false,
             protocolMode: ProtocolMode = .handshake,
             logLevel: LogLevel? = nil,
-            discoveryTimeout: Duration? = .seconds(10)
+            discoveryTimeout: Duration? = .seconds(10),
+            multiRoundTrip: MultiRoundTrip = .init()
         ) {
             self.strict = strict
             self.protocolMode = protocolMode
             self.logLevel = logLevel
             self.discoveryTimeout = discoveryTimeout
+            self.multiRoundTrip = multiRoundTrip
         }
 
         private enum CodingKeys: String, CodingKey {
-            case strict, protocolMode, logLevel, discoveryTimeout
+            case strict, protocolMode, logLevel, discoveryTimeout, multiRoundTrip
         }
 
         /// Decodes a configuration; keys added after `strict` are optional.
@@ -64,6 +69,7 @@ public actor Client {
             discoveryTimeout =
                 container.contains(.discoveryTimeout)
                 ? try container.decodeIfPresent(Duration.self, forKey: .discoveryTimeout) : .seconds(10)
+            multiRoundTrip = try container.decodeIfPresent(MultiRoundTrip.self, forKey: .multiRoundTrip) ?? .init()
         }
 
         public func encode(to encoder: Encoder) throws {
@@ -72,6 +78,46 @@ public actor Client {
             try container.encode(protocolMode, forKey: .protocolMode)
             try container.encodeIfPresent(logLevel, forKey: .logLevel)
             try container.encode(discoveryTimeout, forKey: .discoveryTimeout)
+            try container.encode(multiRoundTrip, forKey: .multiRoundTrip)
+        }
+
+        /// How the client answers input-required results (SEP-2322).
+        ///
+        /// When enabled, ``Client/send(_:)`` fulfills the input requests of a
+        /// `tools/call`, `prompts/get` or `resources/read` result with the
+        /// registered sampling, elicitation and roots handlers, and retries
+        /// the request with the responses and the echoed `requestState`
+        /// until the result is complete.
+        public struct MultiRoundTrip: Hashable, Codable, Sendable {
+            /// Whether the client retries by itself. When `false`, ``Client/send(_:)``
+            /// returns input-required results, and the convenience methods
+            /// `callTool`, `getPrompt` and `readResource` throw for them.
+            public var isEnabled: Bool
+            /// The most retries before the request fails.
+            public var maxRounds: Int
+            /// The most input requests one result may carry. A result with
+            /// more fails the request before any handler runs.
+            public var maxInputRequests: Int
+
+            public init(isEnabled: Bool = true, maxRounds: Int = 10, maxInputRequests: Int = 16) {
+                self.isEnabled = isEnabled
+                self.maxRounds = maxRounds
+                self.maxInputRequests = maxInputRequests
+            }
+
+            private enum CodingKeys: String, CodingKey {
+                case isEnabled, maxRounds, maxInputRequests
+            }
+
+            /// Decodes the options; missing keys take their defaults.
+            public init(from decoder: Decoder) throws {
+                let container = try decoder.container(keyedBy: CodingKeys.self)
+                let defaults = MultiRoundTrip()
+                isEnabled = try container.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? defaults.isEnabled
+                maxRounds = try container.decodeIfPresent(Int.self, forKey: .maxRounds) ?? defaults.maxRounds
+                maxInputRequests =
+                    try container.decodeIfPresent(Int.self, forKey: .maxInputRequests) ?? defaults.maxInputRequests
+            }
         }
     }
 
@@ -268,6 +314,12 @@ public actor Client {
     private var unservedResources: Set<String> = []
     /// `subscribeToResource` calls waiting for a stream that names their URI.
     private(set) var resourceWaiters: [(id: UUID, uri: String, continuation: CheckedContinuation<Void, Swift.Error>)] = []
+    /// Multi round-trip exchanges in progress: first request id to the id of the current round.
+    private var roundTrips: [ID: ID] = [:]
+    /// Exchanges cancelled between rounds.
+    private var cancelledRoundTrips: Set<ID> = []
+    /// Cancels the task that runs an exchange's rounds, by first request id.
+    private var roundTripCancellers: [ID: @Sendable () -> Void] = [:]
     /// Waiters for `subscriptions/listen` acknowledgements, by request id.
     private var listenAcknowledgements:
         [ID: AsyncStream<Result<SubscriptionFilter, Swift.Error>>.Continuation] = [:]
@@ -450,6 +502,10 @@ public actor Client {
         self.task = nil
         self.connection = nil
         self.pendingRequests = [:]  // Use empty dictionary literal
+        for cancel in roundTripCancellers.values { cancel() }
+        roundTripCancellers = [:]
+        roundTrips = [:]
+        cancelledRoundTrips = []
         self.toolHeaderParameters = [:]
 
         // A subscribeToResource call made while the stream was closing.
@@ -557,7 +613,98 @@ public actor Client {
     /// - Throws: MCPError if the client is not connected
     /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/cancellation
     public func send<M: Method>(_ request: Request<M>) throws -> RequestContext<M.Result> {
-        try send(request, markingSendFailures: false)
+        let first = try dispatch(request)
+        let options = configuration.multiRoundTrip
+        guard MRTR.carriers.contains(M.name), options.isEnabled else {
+            return RequestContext(requestID: request.id, requestTask: first)
+        }
+        // Registered before the first response can arrive, so a
+        // cancelRequest always finds the exchange.
+        roundTrips[request.id] = request.id
+        let task = Task<M.Result, Error> {
+            defer { self.endRoundTrips(request.id) }
+            return try await self.resolveInputRequests(request, first: first.value, options: options)
+        }
+        roundTripCancellers[request.id] = { task.cancel() }
+        return RequestContext(requestID: request.id, requestTask: task)
+    }
+
+    /// Fulfills input requests and retries until the result is complete (SEP-2322).
+    private func resolveInputRequests<M: Method>(
+        _ request: Request<M>, first: M.Result, options: Configuration.MultiRoundTrip
+    ) async throws -> M.Result {
+        var result = first
+        var params = request.params
+        var rounds = 0
+        var stateOnlyDelay = MRTR.stateOnlyInitialDelay
+        while let asking = result as? any InputRequiringResult, asking.isInputRequired,
+            let current = params as? any InputRespondingParameters
+        {
+            try Task.checkCancellation()
+            if cancelledRoundTrips.contains(request.id) { throw CancellationError() }
+            rounds += 1
+            guard rounds <= options.maxRounds else {
+                throw MCPError.internalError(
+                    "\(M.name): the server asked for input more than \(options.maxRounds) times")
+            }
+            var responses: [String: InputResponse]?
+            if let requests = asking.inputRequests, requests.count > options.maxInputRequests {
+                throw MCPError.internalError(
+                    "\(M.name): the server asked for \(requests.count) inputs at once, more than \(options.maxInputRequests)")
+            }
+            if let requests = asking.inputRequests, !requests.isEmpty {
+                stateOnlyDelay = MRTR.stateOnlyInitialDelay
+                responses = try await fulfillInputRequests(requests)
+            } else {
+                // Only state, or neither: the server is not done yet.
+                try await Task.sleep(for: stateOnlyDelay)
+                stateOnlyDelay = min(stateOnlyDelay * 2, MRTR.stateOnlyMaximumDelay)
+            }
+            try Task.checkCancellation()
+            if cancelledRoundTrips.contains(request.id) { throw CancellationError() }
+            params = current.retrying(inputResponses: responses, requestState: asking.requestState) as! M.Parameters
+            let retry = Request<M>(method: M.name, params: params, _meta: request._meta)
+            roundTrips[request.id] = retry.id
+            result = try await dispatch(retry).value
+        }
+        return result
+    }
+
+    private func endRoundTrips(_ id: ID) {
+        roundTrips[id] = nil
+        cancelledRoundTrips.remove(id)
+        roundTripCancellers[id] = nil
+    }
+
+    /// Runs the registered handlers for input requests, concurrently.
+    private func fulfillInputRequests(_ requests: [String: InputRequest]) async throws
+        -> [String: InputResponse]
+    {
+        var calls: [(String, InputRequest, RequestHandlerBox, AnyRequest)] = []
+        for (key, request) in requests {
+            guard let handler = methodHandlers[request.method] else {
+                throw MCPError.methodNotFound("No handler registered for \(request.method)")
+            }
+            calls.append((key, request, handler, Request(method: request.method, params: try request.params())))
+        }
+        return try await withThrowingTaskGroup(of: (String, InputResponse).self) { group in
+            for (key, request, handler, anyRequest) in calls {
+                group.addTask {
+                    let response = try await handler(anyRequest)
+                    switch response.result {
+                    case .success(let value):
+                        return (key, try InputResponse(method: request.method, result: value))
+                    case .failure(let error):
+                        throw error
+                    }
+                }
+            }
+            var responses: [String: InputResponse] = [:]
+            for try await (key, response) in group {
+                responses[key] = response
+            }
+            return responses
+        }
     }
 
     /// A transport error raised while sending a request, as opposed to the
@@ -566,11 +713,11 @@ public actor Client {
         let error: Swift.Error
     }
 
-    /// Sends a request. With `markingSendFailures`, transport errors are
-    /// wrapped in ``SendFailure``.
-    private func send<M: Method>(
-        _ request: Request<M>, markingSendFailures: Bool
-    ) throws -> RequestContext<M.Result> {
+    /// Sends one request and returns the task for its result. With
+    /// `markingSendFailures`, transport errors are wrapped in ``SendFailure``.
+    private func dispatch<M: Method>(
+        _ request: Request<M>, markingSendFailures: Bool = false
+    ) throws -> Task<M.Result, Error> {
         guard let connection = connection else {
             throw MCPError.internalError("Client connection not initialized")
         }
@@ -622,7 +769,7 @@ public actor Client {
             return value
         }
 
-        return RequestContext(requestID: request.id, requestTask: requestTask)
+        return requestTask
     }
 
     // MARK: - Subscriptions (2026-07-28)
@@ -935,10 +1082,24 @@ public actor Client {
     /// - Throws: MCPError if the notification cannot be sent
     /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/cancellation
     public func cancelRequest(_ requestID: ID, reason: String? = nil) async throws {
+        // A request in a multi round-trip exchange: stop its rounds, which
+        // cancels running input handlers, and cancel its current round.
+        var requestID = requestID
+        var inRoundTrip = false
+        if let current = roundTrips[requestID] {
+            cancelledRoundTrips.insert(requestID)
+            roundTripCancellers[requestID]?()
+            requestID = current
+            inRoundTrip = true
+        }
+
         // Remove the pending request and resume with cancellation error
         // This ensures any response that arrives after cancellation is ignored
         if let pendingRequest = removePendingRequest(id: requestID) {
             pendingRequest.resume(throwing: CancellationError())
+        } else if inRoundTrip {
+            // Between rounds: the server has nothing in flight to cancel.
+            return
         }
 
         // At 2026-07-28 over HTTP, closing the response stream cancels the request.
@@ -1223,7 +1384,8 @@ public actor Client {
             // `initialize` fallback must not be handled as a discovery error.
             let result: ServerDiscover.Result
             do {
-                let context = try send(request, markingSendFailures: true)
+                let context = RequestContext(
+                    requestID: request.id, requestTask: try dispatch(request, markingSendFailures: true))
                 result = try await discoverResult(
                     context, timeout: fallback ? configuration.discoveryTimeout : nil)
             } catch MCPError.unsupportedProtocolVersion(let supported, let requested) {
@@ -1326,7 +1488,7 @@ public actor Client {
     {
         try validateServerCapability(\.prompts, "Prompts")
         let request = GetPrompt.request(.init(name: name, arguments: arguments))
-        let result = try await send(request).value
+        let result = try Self.complete(try await send(request).value, GetPrompt.name)
         return (description: result.description, messages: result.messages)
     }
 
@@ -1349,7 +1511,7 @@ public actor Client {
     public func readResource(uri: String) async throws -> [Resource.Content] {
         try validateServerCapability(\.resources, "Resources")
         let request = ReadResource.request(.init(uri: uri))
-        let result = try await send(request).value
+        let result = try Self.complete(try await send(request).value, ReadResource.name)
         return result.contents
     }
 
@@ -1516,8 +1678,15 @@ public actor Client {
     ) async throws -> (content: [Tool.Content], isError: Bool?) {
         try validateServerCapability(\.tools, "Tools")
         let request = CallTool.request(.init(name: name, arguments: arguments, meta: meta))
-        let result = try await send(request).value
+        let result = try Self.complete(try await send(request).value, CallTool.name)
         return (content: result.content, isError: result.isError)
+    }
+
+    /// Rejects an input-required result, returned when multi round-trip is disabled.
+    private static func complete<R: InputRequiringResult>(_ result: R, _ method: String) throws -> R {
+        guard result.isInputRequired else { return result }
+        throw MCPError.invalidRequest(
+            "\(method) requires input; enable Configuration.multiRoundTrip or use send(_:)")
     }
 
     /// Call a tool on the server.

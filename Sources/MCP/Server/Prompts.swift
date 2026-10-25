@@ -342,17 +342,63 @@ public enum GetPrompt: Method {
         public let name: String
         public let arguments: [String: String]?
 
-        public init(name: String, arguments: [String: String]? = nil) {
+        /// The client's responses to the server's input requests, keyed as
+        /// the requests were (2026-07-28, SEP-2322).
+        public var inputResponses: [String: InputResponse]?
+
+        /// The `requestState` of the previous round, echoed unchanged.
+        public var requestState: String?
+
+        public init(
+            name: String,
+            arguments: [String: String]? = nil,
+            inputResponses: [String: InputResponse]? = nil,
+            requestState: String? = nil
+        ) {
             self.name = name
             self.arguments = arguments
+            self.inputResponses = inputResponses
+            self.requestState = requestState
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case name, arguments, inputResponses, requestState
+        }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            name = try container.decode(String.self, forKey: .name)
+            arguments = try container.decodeIfPresent([String: String].self, forKey: .arguments)
+            inputResponses = try MRTR.decodeInputResponses(container, forKey: .inputResponses)
+            requestState = try container.decodeIfPresent(String.self, forKey: .requestState)
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(name, forKey: .name)
+            try container.encodeIfPresent(arguments, forKey: .arguments)
+            try container.encodeIfPresent(inputResponses, forKey: .inputResponses)
+            try container.encodeIfPresent(requestState, forKey: .requestState)
         }
     }
 
+    /// The prompt, or, at 2026-07-28, a request for more input (see
+    /// `inputRequired(_:requestState:_meta:)`).
     public struct Result: Hashable, Codable, Sendable {
         public let description: String?
         public let messages: [Prompt.Message]
         /// Optional metadata about this result
         public var _meta: Metadata?
+
+        /// Requests the client must fulfill before the prompt can be
+        /// returned, keyed by names the server chooses (SEP-2322).
+        public var inputRequests: [String: InputRequest]?
+
+        /// Opaque state the client echoes on the next round. The server
+        /// SDK seals it before it leaves the server.
+        public var requestState: String?
+
+        private var declaredResultType: ResultType?
 
         public init(
             description: String? = nil,
@@ -364,12 +410,43 @@ public enum GetPrompt: Method {
             self._meta = _meta
         }
 
+        /// A result that asks the client for input and a retry (SEP-2322).
+        ///
+        /// Give at least one of `requests` and `requestState`. For clients
+        /// before 2026-07-28 the server sends the requests itself and calls
+        /// the handler again with the responses.
+        public static func inputRequired(
+            _ requests: [String: InputRequest]? = nil,
+            requestState: String? = nil,
+            _meta: Metadata? = nil
+        ) -> Result {
+            var result = Result(messages: [], _meta: _meta)
+            result.inputRequests = requests
+            result.requestState = requestState
+            result.declaredResultType = .inputRequired
+            return result
+        }
+
+        /// ``ResultType/inputRequired`` when the server asks for input.
+        public var resultType: ResultType {
+            MRTR.resultType(
+                declared: declaredResultType, inputRequests: inputRequests, requestState: requestState)
+        }
+
         private enum CodingKeys: String, CodingKey, CaseIterable {
             case description, messages, _meta
+            case resultType, inputRequests, requestState
         }
 
         public func encode(to encoder: Encoder) throws {
             var container = encoder.container(keyedBy: CodingKeys.self)
+            if resultType == .inputRequired {
+                try container.encode(resultType, forKey: .resultType)
+                try container.encodeIfPresent(inputRequests, forKey: .inputRequests)
+                try container.encodeIfPresent(requestState, forKey: .requestState)
+                try container.encodeIfPresent(_meta, forKey: ._meta)
+                return
+            }
             try container.encodeIfPresent(description, forKey: .description)
             try container.encode(messages, forKey: .messages)
             try container.encodeIfPresent(_meta, forKey: ._meta)
@@ -377,11 +454,38 @@ public enum GetPrompt: Method {
 
         public init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
+            declaredResultType = MRTR.declared(
+                try container.decodeIfPresent(ResultType.self, forKey: .resultType))
+            _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
+            if declaredResultType == .inputRequired {
+                inputRequests = try container.decodeIfPresent(
+                    [String: InputRequest].self, forKey: .inputRequests)
+                requestState = try container.decodeIfPresent(String.self, forKey: .requestState)
+                description = nil
+                messages = []
+                return
+            }
             description = try container.decodeIfPresent(String.self, forKey: .description)
             messages = try container.decode([Prompt.Message].self, forKey: .messages)
-            _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
         }
     }
+}
+
+extension GetPrompt.Parameters: InputRespondingParameters {
+    var stateBinding: (target: String, arguments: Value) {
+        (name, .object((arguments ?? [:]).mapValues(Value.string)))
+    }
+
+    func retrying(inputResponses: [String: InputResponse]?, requestState: String?) -> Self {
+        var copy = self
+        copy.inputResponses = inputResponses
+        copy.requestState = requestState
+        return copy
+    }
+}
+
+extension GetPrompt.Result: InputRequiringResult {
+    var hasContent: Bool { !messages.isEmpty || description != nil }
 }
 
 /// When the list of available prompts changes, servers that declared the listChanged capability SHOULD send a notification.
