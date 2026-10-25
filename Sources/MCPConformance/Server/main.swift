@@ -402,7 +402,7 @@ func createConformanceServer(state: ServerState, transport: StatefulHTTPServerTr
                 let id = String(params.uri.dropFirst("test://template/".count))
                 return .init(contents: [.text("Template resource with id: \(id)", uri: params.uri)])
             }
-            throw MCPError.invalidParams("Resource not found: \(params.uri)")
+            throw MCPError.resourceNotFound(uri: params.uri)
         }
     }
 

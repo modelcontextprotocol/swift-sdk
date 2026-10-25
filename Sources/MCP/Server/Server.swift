@@ -116,19 +116,28 @@ public actor Server {
         public var resources: Resources?
         /// Tools capabilities
         public var tools: Tools?
+        /// Experimental features supported by the server
+        public var experimental: [String: Value]?
+        /// Protocol extensions supported by the server, keyed by extension
+        /// identifier, with extension-defined settings (SEP-2133).
+        public var extensions: [String: Value]?
 
         public init(
             completions: Completions? = nil,
             logging: Logging? = nil,
             prompts: Prompts? = nil,
             resources: Resources? = nil,
-            tools: Tools? = nil
+            tools: Tools? = nil,
+            experimental: [String: Value]? = nil,
+            extensions: [String: Value]? = nil
         ) {
             self.completions = completions
             self.logging = logging
             self.prompts = prompts
             self.resources = resources
             self.tools = tools
+            self.experimental = experimental
+            self.extensions = extensions
         }
     }
 

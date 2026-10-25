@@ -38,9 +38,10 @@ struct AnyMethod: Method, Sendable {
 
 extension Method where Parameters == Empty {
     public static func request(
-        id: ID = .random
+        id: ID = .random,
+        _meta: Metadata? = nil
     ) -> Request<Self> {
-        Request(id: id, method: name, params: Empty())
+        Request(id: id, method: name, params: Empty(), _meta: _meta)
     }
 }
 
@@ -54,9 +55,10 @@ extension Method {
     /// Create a request with the given parameters.
     public static func request(
         id: ID = .random,
-        _ parameters: Self.Parameters
+        _ parameters: Self.Parameters,
+        _meta: Metadata? = nil
     ) -> Request<Self> {
-        Request(id: id, method: name, params: parameters)
+        Request(id: id, method: name, params: parameters, _meta: _meta)
     }
 
     /// Create a response with the given result.
@@ -86,15 +88,22 @@ public struct Request<M: Method>: Hashable, Identifiable, Codable, Sendable {
     public let method: String
     /// The request parameters.
     public let params: M.Parameters
+    /// Request-level metadata, sent as `params._meta`.
+    ///
+    /// Merged with any `_meta` the parameters encode themselves; on a key
+    /// conflict the parameters win. Decoding fills it from `params._meta`.
+    public var _meta: Metadata?
 
     init(
         id: ID = .random,
         method: String,
-        params: M.Parameters
+        params: M.Parameters,
+        _meta: Metadata? = nil
     ) {
         self.id = id
         self.method = method
         self.params = params
+        self._meta = _meta
     }
 
     private enum CodingKeys: String, CodingKey, CaseIterable {
@@ -106,8 +115,40 @@ public struct Request<M: Method>: Hashable, Identifiable, Codable, Sendable {
         try container.encode(jsonrpc, forKey: .jsonrpc)
         try container.encode(id, forKey: .id)
         try container.encode(method, forKey: .method)
-        try container.encode(params, forKey: .params)
+        if let meta = _meta, !meta.fields.isEmpty {
+            try container.encode(try mergingMeta(meta, into: params), forKey: .params)
+        } else {
+            try container.encode(params, forKey: .params)
+        }
     }
+}
+
+/// Decodes only `_meta` from a parameters object.
+private struct MetaProbe: Decodable {
+    let _meta: Metadata?
+}
+
+/// Encodes `params` as a JSON object with `meta` merged into its `_meta`;
+/// keys already present in the encoded `_meta` win.
+private func mergingMeta<P: Codable>(_ meta: Metadata, into params: P) throws -> Value {
+    var object: [String: Value]
+    // Through `Value`, but strings stay strings: a `data:` URL argument is
+    // sent as given.
+    switch try Value.preservingStrings(params) {
+    case .object(let fields): object = fields
+    case .null: object = [:]
+    default:
+        throw EncodingError.invalidValue(
+            params,
+            EncodingError.Context(
+                codingPath: [], debugDescription: "Parameters with _meta must encode as an object"))
+    }
+    var merged = meta.fields
+    if case .object(let own) = object["_meta"] {
+        merged.merge(own) { _, own in own }
+    }
+    object["_meta"] = .object(merged)
+    return .object(object)
 }
 
 extension Request {
@@ -120,6 +161,7 @@ extension Request {
         }
         id = try container.decode(ID.self, forKey: .id)
         method = try container.decode(String.self, forKey: .method)
+        _meta = (try? container.decodeIfPresent(MetaProbe.self, forKey: .params))??._meta
 
         if M.Parameters.self is NotRequired.Type {
             // For NotRequired parameters, use decodeIfPresent or init()
@@ -326,10 +368,16 @@ public struct Message<N: Notification>: Hashable, Codable, Sendable {
     public let method: String
     /// The notification parameters.
     public let params: N.Parameters
+    /// Notification-level metadata, sent as `params._meta`.
+    ///
+    /// Merged with any `_meta` the parameters encode themselves; on a key
+    /// conflict the parameters win. Decoding fills it from `params._meta`.
+    public var _meta: Metadata?
 
-    public init(method: String, params: N.Parameters) {
+    public init(method: String, params: N.Parameters, _meta: Metadata? = nil) {
         self.method = method
         self.params = params
+        self._meta = _meta
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -340,7 +388,9 @@ public struct Message<N: Notification>: Hashable, Codable, Sendable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(jsonrpc, forKey: .jsonrpc)
         try container.encode(method, forKey: .method)
-        if N.Parameters.self != Empty.self {
+        if let meta = _meta, !meta.fields.isEmpty {
+            try container.encode(try mergingMeta(meta, into: params), forKey: .params)
+        } else if N.Parameters.self != Empty.self {
             try container.encode(params, forKey: .params)
         }
     }
@@ -353,6 +403,7 @@ public struct Message<N: Notification>: Hashable, Codable, Sendable {
                 forKey: .jsonrpc, in: container, debugDescription: "Invalid JSON-RPC version")
         }
         method = try container.decode(String.self, forKey: .method)
+        _meta = (try? container.decodeIfPresent(MetaProbe.self, forKey: .params))??._meta
 
         if N.Parameters.self is NotRequired.Type {
             // For NotRequired parameters, use decodeIfPresent or init()
