@@ -28,7 +28,7 @@ is 100% for clients and servers at 2025-11-25 and 2026-07-28; see
 
 ## Requirements
 
-- Swift 6.0 or later (Xcode 16 or later).
+- Swift 6.1 or later (Xcode 16.3 or later).
 - macOS 13, iOS 16, Mac Catalyst 16, watchOS 9, tvOS 16, visionOS 1, or Linux
   with glibc or musl.
 

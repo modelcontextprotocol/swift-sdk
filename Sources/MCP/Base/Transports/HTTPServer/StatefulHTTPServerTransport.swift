@@ -31,6 +31,7 @@ import Logging
 /// For SSE responses, the `.stream` case provides an `AsyncThrowingStream<Data, Error>`
 /// to pipe to the client.
 public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
+    /// The logger of the transport; a no-op logger unless one was passed to `init`.
     public nonisolated let logger: Logger
 
     // MARK: - Dependencies
@@ -161,6 +162,10 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
 
     // MARK: - Transport Conformance
 
+    /// Marks the transport started; it opens no socket, since the framework
+    /// adapter delivers requests through ``handleRequest(_:)``.
+    ///
+    /// - Throws: ``MCPError/internalError(_:)`` when already started.
     public func connect() async throws {
         guard !started else {
             throw MCPError.internalError("Transport already started")
@@ -169,6 +174,8 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
         logger.debug("Stateful HTTP server transport started")
     }
 
+    /// Terminates the session: closes every SSE stream and the incoming
+    /// stream, and drops stored events; later requests get 404.
     public func disconnect() async {
         terminate()
     }
@@ -217,6 +224,7 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
         }
     }
 
+    /// The JSON-RPC messages that clients POST to the session.
     public func receive() -> AsyncThrowingStream<Data, Swift.Error> {
         incomingStream
     }
@@ -757,6 +765,8 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
 
     // MARK: - HTTPContextProviding
 
+    /// The HTTP request that carried the JSON-RPC request `id`, until its
+    /// response is routed, its stream closes or the session terminates.
     public func httpRequestContext(for id: ID) -> HTTPRequest? {
         httpRequestContexts[id.description]
     }

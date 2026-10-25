@@ -54,6 +54,7 @@ public actor Client {
         /// request is refused with -32603.
         public var maxConcurrentServerRequests: Int
 
+        /// Creates a client configuration.
         public init(
             strict: Bool = false,
             protocolMode: ProtocolMode = .automatic,
@@ -116,6 +117,7 @@ public actor Client {
             /// more fails the request before any handler runs.
             public var maxInputRequests: Int
 
+            /// Creates multi round-trip options.
             public init(isEnabled: Bool = true, maxRounds: Int = 10, maxInputRequests: Int = 16) {
                 self.isEnabled = isEnabled
                 self.maxRounds = maxRounds
@@ -174,6 +176,7 @@ public actor Client {
         /// Optional set of sized icons for display in a user interface
         public var icons: [Icon]?
 
+        /// Creates client implementation information.
         public init(
             name: String,
             version: String,
@@ -198,6 +201,7 @@ public actor Client {
             /// Whether the list of roots has changed
             public var listChanged: Bool?
 
+            /// Creates a roots capability.
             public init(listChanged: Bool? = nil) {
                 self.listChanged = listChanged
             }
@@ -207,11 +211,13 @@ public actor Client {
         public struct Sampling: Hashable, Sendable {
             /// Tools sub-capability for sampling
             public struct Tools: Hashable, Codable, Sendable {
+                /// Creates a sampling tools sub-capability.
                 public init() {}
             }
 
             /// Context sub-capability for sampling
             public struct Context: Hashable, Codable, Sendable {
+                /// Creates a sampling context sub-capability.
                 public init() {}
             }
 
@@ -220,6 +226,7 @@ public actor Client {
             /// Whether context is supported in sampling
             public var context: Context?
 
+            /// Creates a sampling capability.
             public init(tools: Tools? = nil, context: Context? = nil) {
                 self.tools = tools
                 self.context = context
@@ -230,11 +237,13 @@ public actor Client {
         public struct Elicitation: Hashable, Sendable {
             /// Form-based elicitation sub-capability
             public struct Form: Hashable, Codable, Sendable {
+                /// Creates a form elicitation sub-capability.
                 public init() {}
             }
 
             /// URL-based elicitation sub-capability
             public struct URL: Hashable, Codable, Sendable {
+                /// Creates a URL elicitation sub-capability.
                 public init() {}
             }
 
@@ -243,6 +252,9 @@ public actor Client {
             /// Whether URL-based elicitation is supported
             public var url: URL?
 
+            /// Creates an elicitation capability.
+            ///
+            /// By default only form-based elicitation is declared.
             public init(form: Form? = Form(), url: URL? = nil) {
                 self.form = form
                 self.url = url
@@ -262,6 +274,7 @@ public actor Client {
         /// extension-defined settings (SEP-2133).
         public var extensions: [String: Value]?
 
+        /// Creates client capabilities.
         public init(
             sampling: Sampling? = nil,
             elicitation: Elicitation? = nil,
@@ -435,6 +448,8 @@ public actor Client {
         return decoder
     }()
 
+    /// Creates a client with its implementation information, capabilities
+    /// and configuration.
     public init(
         name: String,
         version: String,
@@ -468,6 +483,7 @@ public actor Client {
         /// Whether the connection is at 2026-07-28, without a handshake.
         public let isStateless: Bool
 
+        /// Creates connection information.
         public init(
             protocolVersion: String,
             capabilities: Server.Capabilities,

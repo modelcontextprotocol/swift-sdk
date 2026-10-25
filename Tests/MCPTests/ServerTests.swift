@@ -318,6 +318,31 @@ struct ServerTests {
 
 @Suite("Server default handlers")
 struct ServerDefaultHandlerTests {
+    @Test("a stopped server and client are released")
+    func released() async throws {
+        weak var weakServer: Server?
+        weak var weakClient: Client?
+        do {
+            let server = Server(name: "s", version: "1", capabilities: .init(logging: .init(), tools: .init()))
+            await server.withMethodHandler(ListTools.self) { _ in .init(tools: []) }
+            let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+            try await server.start(transport: serverTransport)
+            let client = Client(name: "c", version: "1", configuration: .handshake)
+            try await client.connect(transport: clientTransport)
+            _ = try await client.listTools()
+            await client.disconnect()
+            await server.stop()
+            weakServer = server
+            weakClient = client
+        }
+        // The receive loops end shortly after the transports close.
+        for _ in 0..<500 where weakServer != nil || weakClient != nil {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(weakServer == nil)
+        #expect(weakClient == nil)
+    }
+
     @Test("start keeps a handler registered before it")
     func startKeepsHandlers() async throws {
         let server = Server(name: "s", version: "1", capabilities: .init(tools: .init()))

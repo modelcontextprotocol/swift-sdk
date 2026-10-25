@@ -38,7 +38,7 @@ the enums that became open structs, and `HTTPClientAuthorizer`.
 | `.none(clientID:)` | A plain client ID is pre-registered: no dynamic registration | Pass `""` to register |
 | HTTP transports | New error bodies, status codes and streaming | See below |
 | `HTTPClientTransport` | Default per-host connection limit 64; POST streams resume per stream; SSE on Linux | Raise `httpMaximumConnectionsPerHost` in custom configurations |
-| Package | Depends on swift-crypto, no longer on eventsource | Resolve packages again |
+| Package | Requires Swift 6.1 tools; depends on swift-crypto, no longer on eventsource | Use Xcode 16.3 or later; resolve packages again |
 
 ## Breaking changes
 
@@ -470,6 +470,9 @@ session ended.
   level. The previous release had no such handler (clients got -32601) and sent
   every message. A `SetLoggingLevel` handler of yours still replaces it.
 - `Server.HandlerContext` has a public initializer, for tests.
+- A stopped server is released. In the previous release the built-in handlers
+  kept every started `Server` alive, so a server per session leaked one per
+  session.
 
 ### HTTP client transport
 
@@ -538,8 +541,10 @@ session ended.
 
 ### Package
 
-The `MCP` target depends on swift-crypto (`3.0.0..<5.0.0`), in both manifests.
-It seals `requestState` with AES-GCM, computes PKCE challenges and signs
+The package requires Swift 6.1 tools (Xcode 16.3 or later):
+`Package@swift-6.0.swift` is removed.
+
+The `MCP` target depends on swift-crypto (`3.0.0..<5.0.0`). It seals `requestState` with AES-GCM, computes PKCE challenges and signs
 `private_key_jwt` assertions. It no longer depends on eventsource:
 `HTTPClientTransport` parses server-sent events itself. Code that imported
 `EventSource` through the SDK declares the dependency itself.

@@ -22,6 +22,7 @@ public struct Prompt: Hashable, Codable, Sendable {
     /// Optional metadata about this prompt
     public var _meta: Metadata?
 
+    /// Creates a prompt.
     public init(
         name: String,
         title: String? = nil,
@@ -73,6 +74,7 @@ public struct Prompt: Hashable, Codable, Sendable {
         /// Whether the argument is required
         public let required: Bool?
 
+        /// Creates a prompt argument.
         public init(
             name: String,
             title: String? = nil,
@@ -155,6 +157,7 @@ public struct Prompt: Hashable, Codable, Sendable {
         /// A human-readable prompt title
         public let title: String?
 
+        /// Creates a reference to the prompt named `name`.
         public init(name: String, title: String? = nil) {
             self.name = name
             self.title = title
@@ -283,27 +286,36 @@ extension Prompt.Message.Content: ExpressibleByStringInterpolation {
 public enum ListPrompts: Method {
     public static let name: String = "prompts/list"
 
+    /// The parameters of `prompts/list`.
     public struct Parameters: NotRequired, Hashable, Codable, Sendable {
+        /// The cursor from the `nextCursor` of a previous result, or `nil` for the first page.
         public let cursor: String?
 
+        /// Creates the parameters of a request for the first page.
         public init() {
             self.cursor = nil
         }
 
+        /// Creates the parameters of a request for the page at `cursor`.
         public init(cursor: String) {
             self.cursor = cursor
         }
     }
 
+    /// The result of `prompts/list`.
     public struct Result: Hashable, Codable, Sendable, CacheableResult {
+        /// The prompts on this page.
         public let prompts: [Prompt]
+        /// The cursor of the next page, or `nil` on the last page.
         public let nextCursor: String?
+        /// Optional metadata about this result
         public var _meta: Metadata?
         /// How long the result may be reused, in milliseconds (SEP-2549).
         public var ttlMs: Int?
         /// Who may reuse the result (SEP-2549).
         public var cacheScope: CacheScope?
 
+        /// Creates the result of a `prompts/list` request.
         public init(
             prompts: [Prompt],
             nextCursor: String? = nil,
@@ -348,8 +360,11 @@ public enum ListPrompts: Method {
 public enum GetPrompt: Method {
     public static let name: String = "prompts/get"
 
+    /// The parameters of `prompts/get`.
     public struct Parameters: Hashable, Codable, Sendable {
+        /// The name of the prompt.
         public let name: String
+        /// The values of the prompt's arguments, keyed by argument name.
         public let arguments: [String: String]?
 
         /// The client's responses to the server's input requests, keyed as
@@ -359,6 +374,7 @@ public enum GetPrompt: Method {
         /// The `requestState` of the previous round, echoed unchanged.
         public var requestState: String?
 
+        /// Creates the parameters of a `prompts/get` request.
         public init(
             name: String,
             arguments: [String: String]? = nil,
@@ -395,7 +411,9 @@ public enum GetPrompt: Method {
     /// The prompt, or, at 2026-07-28, a request for more input (see
     /// `inputRequired(_:requestState:_meta:)`).
     public struct Result: Hashable, Codable, Sendable {
+        /// A description of the prompt.
         public let description: String?
+        /// The messages of the prompt, empty when the result asks for input.
         public let messages: [Prompt.Message]
         /// Optional metadata about this result
         public var _meta: Metadata?
@@ -410,6 +428,7 @@ public enum GetPrompt: Method {
 
         private var declaredResultType: ResultType?
 
+        /// Creates a result with the prompt's messages.
         public init(
             description: String? = nil,
             messages: [Prompt.Message],

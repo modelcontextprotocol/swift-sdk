@@ -6,10 +6,15 @@ import Foundation
 ///
 /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/
 public enum Version {
+    /// Protocol revision 2024-11-05.
     public static let v2024_11_05 = "2024-11-05"
+    /// Protocol revision 2025-03-26.
     public static let v2025_03_26 = "2025-03-26"
+    /// Protocol revision 2025-06-18.
     public static let v2025_06_18 = "2025-06-18"
+    /// Protocol revision 2025-11-25.
     public static let v2025_11_25 = "2025-11-25"
+    /// Protocol revision 2026-07-28, served without the `initialize` handshake.
     public static let v2026_07_28 = "2026-07-28"
 
     /// Revisions that open a connection with the `initialize` handshake,

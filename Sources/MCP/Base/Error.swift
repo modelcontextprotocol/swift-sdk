@@ -17,6 +17,7 @@ public struct URLElicitationInfo: Codable, Hashable, Sendable {
     /// Message describing the elicitation
     public var message: String
 
+    /// Creates the information for a required URL elicitation.
     public init(mode: String = "url", elicitationId: String, url: String, message: String) {
         self.mode = mode
         self.elicitationId = elicitationId

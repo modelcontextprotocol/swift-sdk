@@ -24,6 +24,7 @@ public protocol OAuthWWWAuthenticateParsing {
 }
 
 extension OAuthWWWAuthenticateParsing {
+    /// Parses the challenge with ``DefaultOAuthWWWAuthenticateParser``.
     public func parseChallenge(scheme: String, from headers: [String: String])
         -> OAuthBearerChallenge?
     {
@@ -40,15 +41,19 @@ extension OAuthWWWAuthenticateParsing {
 /// - Quoted-string parameter values with backslash escaping
 /// - Case-insensitive scheme and parameter key matching
 public struct DefaultOAuthWWWAuthenticateParser: OAuthWWWAuthenticateParsing {
+    /// Creates the default challenge parser.
     public init() {}
     private let tokenCharacters = CharacterSet(
         charactersIn: "!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
     )
 
+    /// Parses the `Bearer` challenge.
     public func parseBearer(from headers: [String: String]) -> OAuthBearerChallenge? {
         parseChallenge(scheme: OAuthTokenType.bearer, from: headers)
     }
 
+    /// Parses the challenge of `scheme` from the `WWW-Authenticate` header,
+    /// looked up case-insensitively.
     public func parseChallenge(scheme: String, from headers: [String: String])
         -> OAuthBearerChallenge?
     {

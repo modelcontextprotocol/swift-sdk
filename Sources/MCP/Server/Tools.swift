@@ -69,6 +69,7 @@ public struct Tool: Hashable, Codable, Sendable {
                 && openWorldHint == nil
         }
 
+        /// Creates tool annotations.
         public init(
             title: String? = nil,
             readOnlyHint: Bool? = nil,
@@ -284,27 +285,36 @@ public struct Tool: Hashable, Codable, Sendable {
 public enum ListTools: Method {
     public static let name = "tools/list"
 
+    /// The parameters of `tools/list`.
     public struct Parameters: NotRequired, Hashable, Codable, Sendable {
+        /// The cursor from the `nextCursor` of a previous result, or `nil` for the first page.
         public let cursor: String?
 
+        /// Creates the parameters of a request for the first page.
         public init() {
             self.cursor = nil
         }
 
+        /// Creates the parameters of a request for the page at `cursor`.
         public init(cursor: String) {
             self.cursor = cursor
         }
     }
 
+    /// The result of `tools/list`.
     public struct Result: Hashable, Codable, Sendable, CacheableResult {
+        /// The tools on this page.
         public let tools: [Tool]
+        /// The cursor of the next page, or `nil` on the last page.
         public let nextCursor: String?
+        /// Optional metadata about this result
         public var _meta: Metadata?
         /// How long the result may be reused, in milliseconds (SEP-2549).
         public var ttlMs: Int?
         /// Who may reuse the result (SEP-2549).
         public var cacheScope: CacheScope?
 
+        /// Creates the result of a `tools/list` request.
         public init(
             tools: [Tool],
             nextCursor: String? = nil,
@@ -348,6 +358,7 @@ public enum ListTools: Method {
 public enum CallTool: Method {
     public static let name = "tools/call"
 
+    /// The parameters of `tools/call`.
     public struct Parameters: Hashable, Codable, Sendable {
         /// Optional request metadata including progress token.
         ///
@@ -368,6 +379,7 @@ public enum CallTool: Method {
         /// The `requestState` of the previous round, echoed unchanged.
         public var requestState: String?
 
+        /// Creates the parameters of a `tools/call` request.
         public init(
             name: String,
             arguments: [String: Value]? = nil,
@@ -412,8 +424,13 @@ public enum CallTool: Method {
     /// The result of a tool call: its content, or, at 2026-07-28, a request
     /// for more input (see `inputRequired(_:requestState:_meta:)`).
     public struct Result: Hashable, Codable, Sendable {
+        /// The unstructured content of the result.
         public let content: [Tool.Content]
+        /// The structured content of the result, conforming to the tool's `outputSchema` when it has one.
         public let structuredContent: Value?
+        /// Whether the tool reported an error, described in `content`.
+        ///
+        /// An error the tool reports is a result, not a JSON-RPC error. `nil` means `false`.
         public let isError: Bool?
         /// Optional metadata about this result
         public var _meta: Metadata?
@@ -428,6 +445,7 @@ public enum CallTool: Method {
 
         private var declaredResultType: ResultType?
 
+        /// Creates the result of a `tools/call` request.
         public init(
             content: [Tool.Content] = [],
             structuredContent: Value? = nil,
@@ -440,6 +458,9 @@ public enum CallTool: Method {
             self._meta = _meta
         }
 
+        /// Creates a result whose structured content is `structuredContent` encoded as JSON.
+        ///
+        /// - Throws: An error when `structuredContent` cannot be encoded.
         public init<Output: Codable>(
             content: [Tool.Content] = [],
             structuredContent: Output,

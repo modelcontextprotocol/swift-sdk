@@ -75,12 +75,15 @@ public struct AcceptHeaderValidator: HTTPRequestValidator {
         case jsonOnly
     }
 
+    /// The content types POST requests must accept.
     public let mode: Mode
 
+    /// Creates a validator for the given response mode.
     public init(mode: Mode) {
         self.mode = mode
     }
 
+    /// Returns 406 when the `Accept` header lacks a required content type.
     public func validate(_ request: HTTPRequest, context: HTTPValidationContext) -> HTTPResponse? {
         let accept = request.header(HTTPHeaderName.accept) ?? ""
         let acceptTypes = accept.split(separator: ",").map {
@@ -136,8 +139,10 @@ public struct AcceptHeaderValidator: HTTPRequestValidator {
 
 /// Validates that POST requests have `Content-Type: application/json`.
 public struct ContentTypeValidator: HTTPRequestValidator {
+    /// Creates a content type validator.
     public init() {}
 
+    /// Returns 415 when a POST request's media type is not `application/json`.
     public func validate(_ request: HTTPRequest, context: HTTPValidationContext) -> HTTPResponse? {
         guard context.httpMethod == "POST" else { return nil }
 
@@ -168,8 +173,12 @@ public struct ContentTypeValidator: HTTPRequestValidator {
 /// - If the header is present but unsupported, the server returns 400 Bad Request
 /// - Initialization requests are exempt (protocol version comes from the request body)
 public struct ProtocolVersionValidator: HTTPRequestValidator {
+    /// Creates a protocol version validator.
     public init() {}
 
+    /// Returns 400 with ``MCPError/unsupportedProtocolVersion(supported:requested:)``
+    /// when the header names a version outside
+    /// ``HTTPValidationContext/supportedProtocolVersions``.
     public func validate(_ request: HTTPRequest, context: HTTPValidationContext) -> HTTPResponse? {
         // Skip for initialization requests (version is in the body, not the header)
         guard !context.isInitializationRequest else { return nil }
@@ -203,8 +212,11 @@ public struct ProtocolVersionValidator: HTTPRequestValidator {
 /// - Non-initialization requests must include the session ID header
 /// - The session ID must match the active session
 public struct SessionValidator: HTTPRequestValidator {
+    /// Creates a session validator.
     public init() {}
 
+    /// Returns 400 when no session exists or the header is missing, and 404
+    /// when the session ID does not match.
     public func validate(_ request: HTTPRequest, context: HTTPValidationContext) -> HTTPResponse? {
         // Skip validation for initialization requests
         guard !context.isInitializationRequest else { return nil }
@@ -251,10 +263,13 @@ public struct SessionValidator: HTTPRequestValidator {
 /// Use `.disabled` to skip validation (e.g., cloud deployments).
 /// Use `init(allowedHosts:allowedOrigins:)` for custom configurations.
 public struct OriginValidator: HTTPRequestValidator {
+    /// The allowed `Host` values; a trailing `:*` matches any numeric port.
     public let allowedHosts: [String]
+    /// The allowed `Origin` values; a trailing `:*` matches any numeric port.
     public let allowedOrigins: [String]
     private let enabled: Bool
 
+    /// Creates a validator that allows the given hosts and origins.
     public init(allowedHosts: [String], allowedOrigins: [String]) {
         self.allowedHosts = allowedHosts
         self.allowedOrigins = allowedOrigins
@@ -291,6 +306,9 @@ public struct OriginValidator: HTTPRequestValidator {
         OriginValidator(disabled: ())
     }
 
+    /// Returns 421 for a disallowed `Host` and 403 for a disallowed `Origin`.
+    ///
+    /// A request without either header passes that check.
     public func validate(_ request: HTTPRequest, context: HTTPValidationContext) -> HTTPResponse? {
         guard enabled else { return nil }
 
@@ -371,10 +389,14 @@ public struct OriginValidator: HTTPRequestValidator {
 public struct ProtectedResourceMetadataValidator: HTTPRequestValidator {
     private let encodedMetadata: Data
 
+    /// Creates a validator that serves the given metadata.
     public init(metadata: OAuthProtectedResourceServerMetadata) {
         self.encodedMetadata = (try? JSONEncoder().encode(metadata)) ?? Data()
     }
 
+    /// Returns the metadata as JSON for a GET of
+    /// `/.well-known/oauth-protected-resource` or a path below it, and `nil`
+    /// for any other request.
     public func validate(_ request: HTTPRequest, context: HTTPValidationContext) -> HTTPResponse? {
         guard context.httpMethod == "GET",
             let path = request.path,
@@ -495,7 +517,10 @@ public struct BearerTokenValidator: HTTPRequestValidator {
         _ context: HTTPValidationContext
     ) -> Bool
 
+    /// The RFC 9728 Protected Resource Metadata URL, sent as `resource_metadata`
+    /// in `WWW-Authenticate` challenges.
     public let resourceMetadataURL: URL
+    /// The canonical URI of this resource server, matched against token audiences.
     public let resourceIdentifier: URL
     private let tokenValidator: TokenValidator
     private let challengeScopeProvider: ChallengeScopeProvider?
@@ -531,6 +556,11 @@ public struct BearerTokenValidator: HTTPRequestValidator {
         self.metadataDiscovery = metadataDiscovery
     }
 
+    /// Checks the Bearer token of a request that requires authentication.
+    ///
+    /// Returns 401 with a `WWW-Authenticate` challenge for a missing, invalid,
+    /// expired or wrong-audience token, 403 for insufficient scope, and 400 for
+    /// a malformed `Authorization` header.
     public func validate(_ request: HTTPRequest, context: HTTPValidationContext) -> HTTPResponse? {
         guard requiresAuthentication(request, context) else { return nil }
 
@@ -745,6 +775,7 @@ public struct StandardValidationPipeline: HTTPRequestValidationPipeline {
         self.validators = validators
     }
 
+    /// Returns the first error response of the validators, in order, or `nil`.
     public func validate(_ request: HTTPRequest, context: HTTPValidationContext) -> HTTPResponse? {
         for validator in validators {
             if let errorResponse = validator.validate(request, context: context) {

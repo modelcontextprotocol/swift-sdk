@@ -56,6 +56,37 @@ jobs:
       - name: DocC and weave check
         run: scripts/ci/run-jobs.sh docs
 
+  # The public API against the newest 1.x release tag (VERSIONING.md).
+  api-breakage:
+    name: API breakage
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - name: Compare with the newest release
+        run: scripts/ci/run-jobs.sh api-breakage
+
+  # libFuzzer on the parsers and the HTTP server transports. Linux only: the
+  # Xcode toolchain has no libFuzzer.
+  fuzz:
+    name: Fuzz
+    runs-on: ubuntu-latest
+    container: swift:6.1-noble
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Run each target for a minute
+        run: scripts/ci/run-jobs.sh fuzz
+      - name: Upload crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fuzz-artifacts
+          path: .build/fuzz/artifacts/
+          if-no-files-found: ignore
+
   # Every conformance leg and tier score, baseline-enforced, on macOS and on Linux
   # (RHEL UBI 9 and Ubuntu 24.04). The baselines are shared.
   conformance:

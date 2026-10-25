@@ -304,18 +304,22 @@ extension Value: ExpressibleByDictionaryLiteral {
 // MARK: - ExpressibleByStringInterpolation
 
 extension Value: ExpressibleByStringInterpolation {
+    /// Builds the string of a ``Value/string(_:)`` from an interpolated literal.
     public struct StringInterpolation: StringInterpolationProtocol {
         var stringValue: String
 
+        /// Creates an empty interpolation, reserving capacity for the literal.
         public init(literalCapacity: Int, interpolationCount: Int) {
             self.stringValue = ""
             self.stringValue.reserveCapacity(literalCapacity + interpolationCount)
         }
 
+        /// Appends a literal segment.
         public mutating func appendLiteral(_ literal: String) {
             self.stringValue.append(literal)
         }
 
+        /// Appends the `description` of an interpolated value.
         public mutating func appendInterpolation<T: CustomStringConvertible>(_ value: T) {
             self.stringValue.append(value.description)
         }

@@ -11,6 +11,8 @@
 # same scripts with the same arguments.
 build-test                     gate      build-test
 docs                           gate      docs
+api-breakage                   gate      api-breakage
+fuzz                           gate      fuzz
 conformance-scripts            gate      conformance-scripts
 conformance-2025-11-25-client  gate      conformance --spec-version 2025-11-25 --mode client
 conformance-2025-11-25-server  gate      conformance --spec-version 2025-11-25 --mode server

@@ -3,15 +3,21 @@ import class Foundation.JSONEncoder
 
 private let jsonrpc = "2.0"
 
+/// A parameters type whose `params` member may be absent on the wire.
+///
+/// A message that omits `params` decodes with the value of ``init()``.
 public protocol NotRequired {
     init()
 }
 
+/// Parameters or a result with no members.
 public struct Empty: NotRequired, Hashable, Codable, Sendable {
+    /// Creates an empty value.
     public init() {}
 }
 
 extension Value: NotRequired {
+    /// Creates ``Value/null``.
     public init() {
         self = .null
     }
@@ -41,6 +47,7 @@ struct AnyMethod: Method, Sendable {
 }
 
 extension Method where Parameters == Empty {
+    /// Create a request for a method that takes no parameters.
     public static func request(
         id: ID = .random,
         _meta: Metadata? = nil
@@ -50,6 +57,7 @@ extension Method where Parameters == Empty {
 }
 
 extension Method where Result == Empty {
+    /// Create an empty success response for a method that returns no result.
     public static func response(id: ID) -> Response<Self> {
         Response(id: id, result: Empty())
     }
@@ -294,6 +302,7 @@ public struct Response<M: Method>: Hashable, Identifiable, Codable, Sendable {
     /// The response result.
     public let result: Swift.Result<M.Result, MCPError>
 
+    /// Creates a response with a result or an error.
     public init(
         id: ID,
         result: Swift.Result<M.Result, MCPError>
@@ -302,6 +311,7 @@ public struct Response<M: Method>: Hashable, Identifiable, Codable, Sendable {
         self.result = result
     }
 
+    /// Creates a success response.
     public init(
         id: ID,
         result: M.Result
@@ -309,6 +319,7 @@ public struct Response<M: Method>: Hashable, Identifiable, Codable, Sendable {
         self.init(id: id, result: .success(result))
     }
 
+    /// Creates an error response.
     public init(
         id: ID,
         error: MCPError
@@ -418,6 +429,7 @@ public struct Message<N: Notification>: Hashable, Codable, Sendable {
     /// an integer beyond `Int` or a decimal beyond `Double` loses precision.
     public var _meta: Metadata?
 
+    /// Creates a notification message.
     public init(method: String, params: N.Parameters, _meta: Metadata? = nil) {
         self.method = method
         self.params = params

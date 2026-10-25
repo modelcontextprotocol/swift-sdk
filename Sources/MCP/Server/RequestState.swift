@@ -11,6 +11,7 @@ public struct InvalidRequestState: Error, Hashable, Sendable {
     /// A reason for the server log. It is never sent to the client.
     public let reason: String
 
+    /// Creates an error with a reason for the server log.
     public init(_ reason: String) {
         self.reason = reason
     }
@@ -92,6 +93,7 @@ public struct AESGCMRequestStateCodec: RequestStateCodec {
         return try! AESGCMRequestStateCodec(keys: [secret])
     }
 
+    /// Encrypts `payload` under the first key and returns a `v1.` token.
     public func seal(_ payload: Data) throws -> String {
         guard let key = ring[sealingKeyID] else { throw InvalidRequestState("no sealing key") }
         let box = try AES.GCM.seal(
@@ -99,6 +101,10 @@ public struct AESGCMRequestStateCodec: RequestStateCodec {
         return Self.prefix + (sealingKeyID + box.nonce + box.ciphertext + box.tag).base64URLEncodedString()
     }
 
+    /// Decrypts a token sealed under any key of the codec.
+    ///
+    /// - Throws: ``InvalidRequestState`` for a malformed token, an unknown key or
+    ///   a failed authentication.
     public func unseal(_ token: String) throws -> Data {
         guard token.hasPrefix(Self.prefix),
             let raw = Data(base64URLEncoded: String(token.dropFirst(Self.prefix.count))),
@@ -158,6 +164,9 @@ public struct RequestStateProtection: Sendable {
     /// replays until expiry.
     public var consume: (@Sendable (_ tokenID: String, _ expiry: Date) async throws -> Bool)?
 
+    /// Creates protection with a custom codec.
+    ///
+    /// State stays valid for 10 minutes by default.
     public init(
         codec: any RequestStateCodec,
         timeToLive: Duration = .seconds(600),

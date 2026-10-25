@@ -34,10 +34,12 @@ public enum LogLevel: String, Hashable, Codable, Sendable, CaseIterable {
 public enum SetLoggingLevel: Method {
     public static let name = "logging/setLevel"
 
+    /// The parameters of `logging/setLevel`.
     public struct Parameters: Hashable, Codable, Sendable {
         /// The minimum log level to set
         public let level: LogLevel
 
+        /// Creates the parameters of a `logging/setLevel` request.
         public init(level: LogLevel) {
             self.level = level
         }
@@ -53,6 +55,7 @@ public enum SetLoggingLevel: Method {
 public struct LogMessageNotification: Notification {
     public static let name = "notifications/message"
 
+    /// The parameters of `notifications/message`.
     public struct Parameters: Hashable, Codable, Sendable {
         /// The severity level of the log message
         public let level: LogLevel
@@ -61,6 +64,7 @@ public struct LogMessageNotification: Notification {
         /// Arbitrary JSON-serializable data for the log message
         public let data: Value
 
+        /// Creates the parameters of a `notifications/message` notification.
         public init(
             level: LogLevel,
             logger: String? = nil,

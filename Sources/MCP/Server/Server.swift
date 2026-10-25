@@ -55,6 +55,7 @@ public actor Server {
         /// A stream that names more is refused with -32602.
         public var maxResourceSubscriptions: Int
 
+        /// Creates a server configuration.
         public init(
             strict: Bool = false,
             protocolVersions: [String] = Version.stateless + Version.handshake,
@@ -111,6 +112,7 @@ public actor Server {
         /// Optional set of sized icons for display in a user interface
         public let icons: [Icon]?
 
+        /// Creates the server implementation information.
         public init(
             name: String,
             version: String,
@@ -137,6 +139,7 @@ public actor Server {
             /// Whether the list of resources has changed
             public var listChanged: Bool?
 
+            /// Creates the `resources` capability.
             public init(
                 subscribe: Bool? = nil,
                 listChanged: Bool? = nil
@@ -151,6 +154,7 @@ public actor Server {
             /// Whether the server notifies clients when tools change
             public var listChanged: Bool?
 
+            /// Creates the `tools` capability.
             public init(listChanged: Bool? = nil) {
                 self.listChanged = listChanged
             }
@@ -161,6 +165,7 @@ public actor Server {
             /// Whether the server notifies clients when prompts change
             public var listChanged: Bool?
 
+            /// Creates the `prompts` capability.
             public init(listChanged: Bool? = nil) {
                 self.listChanged = listChanged
             }
@@ -168,11 +173,13 @@ public actor Server {
 
         /// Logging capabilities
         public struct Logging: Hashable, Codable, Sendable {
+            /// Creates the `logging` capability, which has no settings.
             public init() {}
         }
 
         /// Completions capabilities
         public struct Completions: Hashable, Codable, Sendable {
+            /// Creates the `completions` capability, which has no settings.
             public init() {}
         }
 
@@ -192,6 +199,7 @@ public actor Server {
         /// identifier, with extension-defined settings (SEP-2133).
         public var extensions: [String: Value]?
 
+        /// Creates server capabilities.
         public init(
             completions: Completions? = nil,
             logging: Logging? = nil,
@@ -525,6 +533,10 @@ public actor Server {
         connection = nil
     }
 
+    /// Waits until the message handling loop ends.
+    ///
+    /// The loop ends when the transport stops delivering messages or on
+    /// ``stop()``. Returns at once when the server was not started.
     public func waitUntilCompleted() async {
         await task?.value
     }
@@ -1899,8 +1911,12 @@ public actor Server {
     private func registerDefaultHandlers(
         initializeHook: (@Sendable (Client.Info, Client.Capabilities) async throws -> Void)?
     ) {
+        // The handlers are stored on the server: capturing it strongly would
+        // keep every started server alive.
+
         // Initialize
-        registerDefault(Initialize.self) { params in
+        registerDefault(Initialize.self) { [weak self] params in
+            guard let self else { throw MCPError.internalError("Server is gone") }
             // Behind a sessionless transport every client sends its own
             // `initialize`; the server keeps no per-client state.
             let sessionless = await self.isSessionless
@@ -1947,20 +1963,23 @@ public actor Server {
 
         // Log level (handshake connections; 2026-07-28 sets it per request)
         if capabilities.logging != nil {
-            registerDefault(SetLoggingLevel.self) { params in
+            registerDefault(SetLoggingLevel.self) { [weak self] params in
+                guard let self else { throw MCPError.internalError("Server is gone") }
                 await self.setClientLogLevel(params.level)
                 return Empty()
             }
         }
 
         // Notification streams (2026-07-28 and later)
-        registerDefault(SubscriptionsListen.self) { params in
-            try await self.serveListen(params)
+        registerDefault(SubscriptionsListen.self) { [weak self] params in
+            guard let self else { throw MCPError.internalError("Server is gone") }
+            return try await self.serveListen(params)
         }
 
         // Discovery (2026-07-28 and later)
-        registerDefault(ServerDiscover.self) { _ in
-            ServerDiscover.Result(
+        registerDefault(ServerDiscover.self) { [weak self] _ in
+            guard let self else { throw MCPError.internalError("Server is gone") }
+            return ServerDiscover.Result(
                 supportedVersions: await self.configuration.protocolVersions,
                 capabilities: await self.capabilities,
                 instructions: self.instructions
@@ -2000,7 +2019,8 @@ public actor Server {
     }
 
     private func registerCancellationHandler() {
-        onNotification(CancelledNotification.self) { message in
+        onNotification(CancelledNotification.self) { [weak self] message in
+            guard let self else { return }
 
             let requestId = message.params.requestId
             let reason = message.params.reason

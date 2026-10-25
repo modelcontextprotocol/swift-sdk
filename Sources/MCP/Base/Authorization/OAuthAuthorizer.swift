@@ -124,6 +124,7 @@ public protocol HTTPClientAuthorizer: AnyObject, Sendable {
 }
 
 extension HTTPClientAuthorizer {
+    /// Does nothing.
     public func prepareAuthorization(for endpoint: URL, session: URLSession) async throws {}
 
     /// Calls ``handleChallenge(statusCode:headers:endpoint:operationKey:session:)``,
@@ -146,6 +147,7 @@ extension HTTPClientAuthorizer {
                 && HTTPChallengeResult.isDPoPNonceChallenge(statusCode: statusCode, headers: headers))
     }
 
+    /// Does nothing.
     public func didReceiveResponse(headers: [String: String], for url: URL) {}
 }
 
@@ -369,14 +371,22 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
 
     // MARK: - HTTPClientAuthorizer
 
+    /// The `maxAuthorizationAttempts` of the configuration's ``OAuthConfiguration/retryPolicy``.
     public var maxAuthorizationAttempts: Int {
         configuration.retryPolicy.maxAuthorizationAttempts
     }
 
+    /// Requires the MCP endpoint to use HTTPS, or HTTP on a loopback host, without a fragment.
     public func validateEndpointSecurity(for endpoint: URL) throws {
         try urlValidator.validateHTTPSOrLoopback(endpoint, context: "MCP endpoint")
     }
 
+    /// Returns the `Authorization` header for the stored access token, with a
+    /// `DPoP` proof when the token is DPoP-bound.
+    ///
+    /// Returns no headers when the token has expired. A token from another
+    /// authorization server than the selected one, or bound to another DPoP
+    /// key, is cleared.
     public func authorizationHeaders(for url: URL, method: String) throws -> [String: String] {
         guard let accessToken = tokenStorage.load() else { return [:] }
         if let tokenAuthorizationServer = accessToken.authorizationServer,
@@ -420,10 +430,18 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
         tokenStorage.clear()
     }
 
+    /// Records the `DPoP-Nonce` of a resource server response (RFC 9449 §8)
+    /// when ``OAuthConfiguration/dpop`` is set.
     public func didReceiveResponse(headers: [String: String], for url: URL) {
         dpopSigner?.recordNonce(from: headers, for: url, server: .resourceServer)
     }
 
+    /// Answers a `401` by refreshing or acquiring an access token, and a `403`
+    /// `insufficient_scope` by requesting the union of the granted and required
+    /// scopes; returns `false` for any other challenge.
+    ///
+    /// Step-up attempts per resource, operation and scope set are limited by
+    /// ``OAuthConfiguration/RetryPolicy/maxScopeUpgradeAttempts``.
     public func handleChallenge(
         statusCode: Int,
         headers: [String: String],
@@ -733,6 +751,11 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
         }
     }
 
+    /// Renews the access token when it expires within
+    /// ``OAuthConfiguration/proactiveRefreshWindowSeconds``: with its refresh
+    /// token, or with a new `client_credentials` or `jwt-bearer` grant.
+    ///
+    /// Failures are ignored; the `401` path recovers.
     public func prepareAuthorization(for endpoint: URL, session: URLSession) async throws {
         guard configuration.proactiveRefreshWindowSeconds > 0 else { return }
         guard let token = tokenStorage.load(), isDueForRenewal(token) else { return }

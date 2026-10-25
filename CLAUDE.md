@@ -24,13 +24,15 @@ swift test --filter ClientTests/testX   # run one test method
 swift build --product mcp-everything-client
 swift build --product mcp-everything-server
 
-# DocC build
+# DocC build; every public declaration needs a doc comment
 swift package generate-documentation --target MCP --warnings-as-errors
+swift scripts/doc-coverage.swift
+
+# libFuzzer targets in fuzz/ (Linux only)
+scripts/ci-linux.sh fuzz 60
 ```
 
-`Package.swift` requires Swift 6.1 tools; `Package@swift-6.0.swift` is a lighter-weight manifest
-(no conformance executables, no swift-nio dependency) for consumers pinned to Swift 6.0 tools.
-Keep the two manifests' target/dependency lists in sync when adding to the `MCP` library target.
+`Package.swift` requires Swift 6.1 tools, the minimum for 1.x; there is no second manifest.
 
 ## Architecture
 

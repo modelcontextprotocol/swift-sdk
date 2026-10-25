@@ -15,10 +15,15 @@ import Foundation
 public enum OAuthTokenExchange {
     /// Token type identifiers (RFC 8693 section 3, SEP-990).
     public enum TokenType {
+        /// An OAuth 2.0 access token.
         public static let accessToken = "urn:ietf:params:oauth:token-type:access_token"
+        /// An OAuth 2.0 refresh token.
         public static let refreshToken = "urn:ietf:params:oauth:token-type:refresh_token"
+        /// An OpenID Connect ID token.
         public static let idToken = "urn:ietf:params:oauth:token-type:id_token"
+        /// A JWT (RFC 7519 section 9).
         public static let jwt = "urn:ietf:params:oauth:token-type:jwt"
+        /// A base64url-encoded SAML 2.0 assertion.
         public static let saml2 = "urn:ietf:params:oauth:token-type:saml2"
         /// An Identity Assertion JWT Authorization Grant (SEP-990).
         public static let idJAG = "urn:ietf:params:oauth:token-type:id-jag"
@@ -40,6 +45,7 @@ public enum OAuthTokenExchange {
         /// The scopes to request.
         public var scopes: Set<String>?
 
+        /// Creates a token exchange request.
         public init(
             subjectToken: String,
             subjectTokenType: String,
@@ -223,6 +229,7 @@ extension OAuthConfiguration {
         /// Accepts loopback `http` endpoints (local tests).
         package var allowsLoopbackHTTP = false
 
+        /// Creates an identity provider description.
         public init(endpoint: Endpoint, authentication: TokenEndpointAuthentication) {
             self.endpoint = endpoint
             self.authentication = authentication
