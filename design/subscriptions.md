@@ -132,8 +132,7 @@ One background stream carries everything the client listens for by itself: the l
 have at least one handler and that the server declares with `listChanged`, and the URIs passed to
 `subscribeToResource(uri:)`. `refreshNotificationStream()` runs after `connect`, when
 `onNotification` registers a list-changed handler, and on subscribe and unsubscribe. It does
-nothing on handshake connections, or over `HTTPClientTransport` on Linux, which reads whole
-bodies.
+nothing on handshake connections.
 
 - If the wanted filter equals the current one (open or opening), nothing happens. Otherwise the
   generation counter increments and a background task opens a new stream with `listen`.

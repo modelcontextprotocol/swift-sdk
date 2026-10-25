@@ -1,10 +1,6 @@
 import Foundation
 import Logging
 
-#if !os(Linux)
-    import EventSource
-#endif
-
 #if canImport(FoundationNetworking)
     import FoundationNetworking
 #endif
@@ -23,13 +19,14 @@ import Logging
 /// - Session management using the `MCP-Session-Id` header
 /// - Protocol version negotiation via `MCP-Protocol-Version` header
 /// - Automatic reconnection for dropped SSE streams with resumability support
-/// - Platform-specific optimizations for different operating systems
 ///
 /// The transport supports two modes:
 /// - Regular HTTP (`streaming=false`): Simple request/response pattern
 /// - Streaming HTTP with SSE (`streaming=true`): Enables server-to-client push messages
 ///
-/// - Important: Server-Sent Events (SSE) functionality is not supported on Linux platforms.
+/// It behaves the same on Apple platforms and Linux. Response bodies are read
+/// as they arrive: with `URLSession.bytes(for:)` on Apple platforms, and with a
+/// data delegate on swift-corelibs-foundation, which has no `bytes(for:)`.
 ///
 /// ## Example Usage
 ///
@@ -66,6 +63,8 @@ public actor HTTPClientTransport: Transport {
 
     private let streaming: Bool
     private var streamingTask: Task<Void, Never>?
+    /// Streams response bodies on swift-corelibs-foundation.
+    private let streamingSession: StreamingSession
 
     /// Logger instance for transport-related events
     public nonisolated let logger: Logger
@@ -222,6 +221,7 @@ public actor HTTPClientTransport: Transport {
     ) {
         self.endpoint = endpoint
         self.session = session
+        self.streamingSession = StreamingSession(configuration: session.configuration)
         self.streaming = streaming
         self.sseInitializationTimeout = sseInitializationTimeout
         self.protocolVersion = protocolVersion
@@ -303,6 +303,7 @@ public actor HTTPClientTransport: Transport {
         cancelledBeforeSend.removeAll()
 
         session.invalidateAndCancel()
+        streamingSession.invalidate()
         messageContinuation.finish()
 
         initialSessionIDSignalTask?.cancel()
@@ -376,15 +377,6 @@ public actor HTTPClientTransport: Transport {
         }
         try await post(message, additionalHeaders: additionalHeaders)
     }
-
-    /// Whether POST responses are read as streams. On Linux the transport
-    /// reads whole bodies, so a `subscriptions/listen` response never
-    /// arrives before the stream ends.
-    #if os(Linux)
-        package static let streamsResponses = false
-    #else
-        package static let streamsResponses = true
-    #endif
 
     /// The idle timeout of `subscriptions/listen` POSTs. A server may send
     /// nothing for a long time on such a stream.
@@ -524,15 +516,9 @@ public actor HTTPClientTransport: Transport {
             try applyAuthorization(to: &request)
 
             do {
-                #if os(Linux)
-                    let (responseData, response) = try await session.data(for: request)
-                    noteResponse(response, to: request)
-                    try await processResponse(response: response, data: responseData, request: message)
-                #else
-                    let (responseStream, response) = try await session.bytes(for: request)
-                    noteResponse(response, to: request)
-                    try await processResponse(response: response, stream: responseStream, request: message)
-                #endif
+                let (body, response) = try await session.responseBody(for: request, streaming: streamingSession)
+                noteResponse(response, to: request)
+                try await processResponse(response: response, body: body, request: message)
                 return
             } catch let authError as HTTPAuthenticationChallengeError {
                 guard let authorizer else {
@@ -576,110 +562,62 @@ public actor HTTPClientTransport: Transport {
         }
     }
 
-    #if os(Linux)
-        private func processResponse(
-            response: URLResponse, data: Data, request message: OutgoingMessage
-        ) async throws {
-            guard let httpResponse = response as? HTTPURLResponse else {
-                throw MCPError.internalError("Invalid HTTP response")
+    private func processResponse(
+        response: URLResponse, body: ResponseBody, request message: OutgoingMessage
+    ) async throws {
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw MCPError.internalError("Invalid HTTP response")
+        }
+
+        let contentType = httpResponse.value(forHTTPHeaderField: HTTPHeaderName.contentType) ?? ""
+
+        if let newSessionID = httpResponse.value(forHTTPHeaderField: HTTPHeaderName.sessionID) {
+            let wasSessionIDNil = (self.sessionID == nil)
+            self.sessionID = newSessionID
+            if wasSessionIDNil {
+                triggerInitialSessionIDSignal()
             }
+            logger.debug("Session ID received", metadata: ["sessionID": "\(newSessionID)"])
+        }
 
-            let contentType = httpResponse.value(forHTTPHeaderField: HTTPHeaderName.contentType) ?? ""
-
-            if let newSessionID = httpResponse.value(forHTTPHeaderField: HTTPHeaderName.sessionID) {
-                let wasSessionIDNil = (self.sessionID == nil)
-                self.sessionID = newSessionID
-                if wasSessionIDNil {
-                    triggerInitialSessionIDSignal()
-                }
-                logger.debug("Session ID received", metadata: ["sessionID": "\(newSessionID)"])
-            }
-
-            if Self.mayCarryPeerError(httpResponse.statusCode),
-                deliverErrorResponse(data, contentType: contentType, status: httpResponse.statusCode, request: message)
-            {
+        if Self.mayCarryPeerError(httpResponse.statusCode), contentType.contains(ContentType.json) {
+            let errorBody = try await body.collect(limit: (1 << 20) + 1)
+            if deliverErrorResponse(errorBody, contentType: contentType, status: httpResponse.statusCode, request: message) {
                 return
             }
-            try processHTTPResponse(httpResponse, contentType: contentType)
-            guard case 200..<300 = httpResponse.statusCode else { return }
-
-            if contentType.contains(ContentType.sse) {
-                logger.warning("SSE responses aren't fully supported on Linux")
-                messageContinuation.yield(data)
-            } else if contentType.contains(ContentType.json) {
-                logger.trace("Received JSON response", metadata: ["size": "\(data.count)"])
-                messageContinuation.yield(data)
-            } else if httpResponse.statusCode != 202 || message.requestID != nil {
-                // 202 Accepted has no body: how a server accepts a notification or a response.
-                // A request is owed JSON or SSE.
-                logger.warning("Unexpected content type: \(contentType)")
-            }
         }
-    #else
-        private func processResponse(
-            response: URLResponse, stream: URLSession.AsyncBytes, request message: OutgoingMessage
-        ) async throws {
-            guard let httpResponse = response as? HTTPURLResponse else {
-                throw MCPError.internalError("Invalid HTTP response")
-            }
+        try processHTTPResponse(httpResponse, contentType: contentType)
+        guard case 200..<300 = httpResponse.statusCode else { return }
 
-            let contentType = httpResponse.value(forHTTPHeaderField: HTTPHeaderName.contentType) ?? ""
-
-            if let newSessionID = httpResponse.value(forHTTPHeaderField: HTTPHeaderName.sessionID) {
-                let wasSessionIDNil = (self.sessionID == nil)
-                self.sessionID = newSessionID
-                if wasSessionIDNil {
-                    triggerInitialSessionIDSignal()
-                }
-                logger.debug("Session ID received", metadata: ["sessionID": "\(newSessionID)"])
+        if contentType.contains(ContentType.sse) {
+            logger.trace("Received SSE response, processing in streaming task")
+            // The response this stream owes, if the POST carried a request.
+            let awaited = message.requestID
+            var lastEventID: String?
+            var retry: Int?
+            var responded = false
+            do {
+                try await processSSE(
+                    body, until: awaited,
+                    onEventID: { lastEventID = $0 }, onRetry: { retry = Self.clampedRetryInterval($0) },
+                    onResponse: { if $0 == awaited { responded = true } })
+            } catch where awaited != nil && lastEventID != nil && !Task.isCancelled {
+                logger.debug("POST SSE stream failed before its response", metadata: ["error": "\(error)"])
             }
-
-            if Self.mayCarryPeerError(httpResponse.statusCode), contentType.contains(ContentType.json) {
-                var body = Data()
-                for try await byte in stream {
-                    body.append(byte)
-                    if body.count > 1 << 20 { break }
-                }
-                if deliverErrorResponse(body, contentType: contentType, status: httpResponse.statusCode, request: message) {
-                    return
-                }
+            if let awaited, !responded, !Task.isCancelled {
+                try await resumeResponseStream(
+                    after: lastEventID, retry: retry, awaiting: awaited, request: message)
             }
-            try processHTTPResponse(httpResponse, contentType: contentType)
-            guard case 200..<300 = httpResponse.statusCode else { return }
-
-            if contentType.contains(ContentType.sse) {
-                logger.trace("Received SSE response, processing in streaming task")
-                // The response this stream owes, if the POST carried a request.
-                let awaited = message.requestID
-                var lastEventID: String?
-                var retry: Int?
-                var responded = false
-                do {
-                    try await processSSE(
-                        stream, until: awaited,
-                        onEventID: { lastEventID = $0 }, onRetry: { retry = Self.clampedRetryInterval($0) },
-                        onResponse: { if $0 == awaited { responded = true } })
-                } catch where awaited != nil && lastEventID != nil && !Task.isCancelled {
-                    logger.debug("POST SSE stream failed before its response", metadata: ["error": "\(error)"])
-                }
-                if let awaited, !responded, !Task.isCancelled {
-                    try await resumeResponseStream(
-                        after: lastEventID, retry: retry, awaiting: awaited, request: message)
-                }
-            } else if contentType.contains(ContentType.json) {
-                var buffer = Data()
-                for try await byte in stream {
-                    buffer.append(byte)
-                }
-                logger.trace("Received JSON response", metadata: ["size": "\(buffer.count)"])
-                messageContinuation.yield(buffer)
-            } else if httpResponse.statusCode != 202 || message.requestID != nil {
-                // 202 Accepted has no body: how a server accepts a notification or a response.
-                // A request is owed JSON or SSE.
-                logger.warning("Unexpected content type: \(contentType)")
-            }
+        } else if contentType.contains(ContentType.json) {
+            let buffer = try await body.collect()
+            logger.trace("Received JSON response", metadata: ["size": "\(buffer.count)"])
+            messageContinuation.yield(buffer)
+        } else if httpResponse.statusCode != 202 || message.requestID != nil {
+            // 202 Accepted has no body: how a server accepts a notification or a response.
+            // A request is owed JSON or SSE.
+            logger.warning("Unexpected content type: \(contentType)")
         }
-    #endif
+    }
 
     private func processHTTPResponse(_ response: HTTPURLResponse, contentType: String) throws {
         switch response.statusCode {
@@ -858,349 +796,339 @@ public actor HTTPClientTransport: Transport {
     // MARK: - SSE
 
     private func startListeningForServerEvents() async {
-        #if os(Linux)
-            if streaming {
-                logger.warning(
-                    "SSE streaming was requested but is not fully supported on Linux. SSE connection will not be attempted."
-                )
+        guard isConnected else { return }
+
+        if self.sessionID == nil, let signalTask = self.initialSessionIDSignalTask {
+            logger.debug("⏳ Waiting for session ID to be set (timeout: \(self.sseInitializationTimeout)s)...")
+
+            let startTime = Date()
+            let timeout = self.sseInitializationTimeout
+            // The signal task waits on a continuation that only a session
+            // ID (or disconnect) resumes, so the timeout resumes it too.
+            let timer = Task { [weak self] in
+                try await Task.sleep(for: .seconds(timeout))
+                await self?.sessionIDWaitTimedOut(after: timeout)
             }
-        #else
-            guard isConnected else { return }
+            await signalTask.value
+            timer.cancel()
 
-            if self.sessionID == nil, let signalTask = self.initialSessionIDSignalTask {
-                logger.debug("⏳ Waiting for session ID to be set (timeout: \(self.sseInitializationTimeout)s)...")
-
-                let startTime = Date()
-                let timeout = self.sseInitializationTimeout
-                // The signal task waits on a continuation that only a session
-                // ID (or disconnect) resumes, so the timeout resumes it too.
-                let timer = Task { [weak self] in
-                    try await Task.sleep(for: .seconds(timeout))
-                    await self?.sessionIDWaitTimedOut(after: timeout)
-                }
-                await signalTask.value
-                timer.cancel()
-
-                if self.sessionID != nil {
-                    let elapsed = Date().timeIntervalSince(startTime)
-                    logger.debug("✓ Session ID received after \(Int(elapsed * 1000))ms, proceeding with SSE connection")
-                }
-            } else {
-                logger.debug("✓ Session ID already available, proceeding with SSE connection immediately")
+            if self.sessionID != nil {
+                let elapsed = Date().timeIntervalSince(startTime)
+                logger.debug("✓ Session ID received after \(Int(elapsed * 1000))ms, proceeding with SSE connection")
             }
+        } else {
+            logger.debug("✓ Session ID already available, proceeding with SSE connection immediately")
+        }
 
-            var isFirstAttempt = true
-            var attemptCount = 0
-            // Failed connections and streams that close without an event in a
-            // row; each one after the first doubles the wait.
-            var consecutiveFailures = 0
+        var isFirstAttempt = true
+        var attemptCount = 0
+        // Failed connections and streams that close without an event in a
+        // row; each one after the first doubles the wait.
+        var consecutiveFailures = 0
 
-            logger.debug("🔄 Starting SSE retry loop", metadata: [
-                "isConnected": "\(isConnected)",
-                "isCancelled": "\(Task.isCancelled)"
+        logger.debug("🔄 Starting SSE retry loop", metadata: [
+            "isConnected": "\(isConnected)",
+            "isCancelled": "\(Task.isCancelled)"
+        ])
+
+        while isConnected && !Task.isCancelled {
+            attemptCount += 1
+            logger.debug("🔄 SSE retry loop iteration", metadata: [
+                "attempt": "\(attemptCount)",
+                "isFirstAttempt": "\(isFirstAttempt)"
             ])
 
-            while isConnected && !Task.isCancelled {
-                attemptCount += 1
-                logger.debug("🔄 SSE retry loop iteration", metadata: [
-                    "attempt": "\(attemptCount)",
-                    "isFirstAttempt": "\(isFirstAttempt)"
-                ])
-
-                do {
-                    if !isFirstAttempt {
-                        let delayMs = Self.reconnectDelay(
-                            retryInterval: self.retryInterval, consecutiveFailures: consecutiveFailures)
-                        logger.debug("⏳ Waiting before SSE reconnection", metadata: ["retryMs": "\(delayMs)"])
-                        try await Task.sleep(for: .milliseconds(delayMs))
-                        logger.debug("✓ Wait complete, reconnecting now")
-                    }
-                    isFirstAttempt = false
-
-                    logger.debug("📡 Calling connectToEventStream (attempt #\(attemptCount))")
-
-                    let receivedEvents = try await self.connectToEventStream()
-                    consecutiveFailures = receivedEvents ? 0 : consecutiveFailures + 1
-
-                    logger.info("🔌 SSE stream closed gracefully, will reconnect", metadata: [
-                        "attempt": "\(attemptCount)",
-                        "willRetryAfter": "\(self.retryInterval)ms"
-                    ])
-                } catch {
-                    consecutiveFailures += 1
-                    if !Task.isCancelled {
-                        logger.error("❌ SSE connection error (attempt #\(attemptCount)): \(error)")
-                    } else {
-                        logger.debug("⏹️ SSE task cancelled")
-                    }
+            do {
+                if !isFirstAttempt {
+                    let delayMs = Self.reconnectDelay(
+                        retryInterval: self.retryInterval, consecutiveFailures: consecutiveFailures)
+                    logger.debug("⏳ Waiting before SSE reconnection", metadata: ["retryMs": "\(delayMs)"])
+                    try await Task.sleep(for: .milliseconds(delayMs))
+                    logger.debug("✓ Wait complete, reconnecting now")
                 }
+                isFirstAttempt = false
 
-                logger.debug("🔄 End of retry loop iteration", metadata: [
-                    "isConnected": "\(isConnected)",
-                    "isCancelled": "\(Task.isCancelled)",
-                    "willContinue": "\(isConnected && !Task.isCancelled)"
+                logger.debug("📡 Calling connectToEventStream (attempt #\(attemptCount))")
+
+                let receivedEvents = try await self.connectToEventStream()
+                consecutiveFailures = receivedEvents ? 0 : consecutiveFailures + 1
+
+                logger.info("🔌 SSE stream closed gracefully, will reconnect", metadata: [
+                    "attempt": "\(attemptCount)",
+                    "willRetryAfter": "\(self.retryInterval)ms"
                 ])
+            } catch {
+                consecutiveFailures += 1
+                if !Task.isCancelled {
+                    logger.error("❌ SSE connection error (attempt #\(attemptCount)): \(error)")
+                } else {
+                    logger.debug("⏹️ SSE task cancelled")
+                }
             }
 
-            logger.debug("⏹️ SSE retry loop exited", metadata: [
+            logger.debug("🔄 End of retry loop iteration", metadata: [
                 "isConnected": "\(isConnected)",
                 "isCancelled": "\(Task.isCancelled)",
-                "totalAttempts": "\(attemptCount)"
+                "willContinue": "\(isConnected && !Task.isCancelled)"
             ])
-        #endif
+        }
+
+        logger.debug("⏹️ SSE retry loop exited", metadata: [
+            "isConnected": "\(isConnected)",
+            "isCancelled": "\(Task.isCancelled)",
+            "totalAttempts": "\(attemptCount)"
+        ])
     }
 
-    #if !os(Linux)
-        /// Opens the standalone GET stream and reads it until it ends.
-        /// Returns whether any event arrived.
-        private func connectToEventStream() async throws -> Bool {
-            guard isConnected else {
-                logger.debug("⚠️ Skipping connectToEventStream - transport not connected")
-                return false
-            }
+    /// Opens the standalone GET stream and reads it until it ends.
+    /// Returns whether any event arrived.
+    private func connectToEventStream() async throws -> Bool {
+        guard isConnected else {
+            logger.debug("⚠️ Skipping connectToEventStream - transport not connected")
+            return false
+        }
 
-            if let authorizer {
-                do {
-                    try authorizer.validateEndpointSecurity(for: endpoint)
-                } catch {
-                    throw MCPError.internalError(
-                        "Authorization flow failed: \(error.localizedDescription)"
-                    )
-                }
+        if let authorizer {
+            do {
+                try authorizer.validateEndpointSecurity(for: endpoint)
+            } catch {
+                throw MCPError.internalError(
+                    "Authorization flow failed: \(error.localizedDescription)"
+                )
             }
+        }
 
-            if let lastEventID = lastEventID {
-                logger.info("→ Resuming SSE stream with Last-Event-ID", metadata: ["lastEventID": "\(lastEventID)"])
-            } else {
-                logger.info("→ Connecting to SSE stream (no last event ID to resume from)")
+        if let lastEventID = lastEventID {
+            logger.info("→ Resuming SSE stream with Last-Event-ID", metadata: ["lastEventID": "\(lastEventID)"])
+        } else {
+            logger.info("→ Connecting to SSE stream (no last event ID to resume from)")
+        }
+
+        let (stream, httpResponse) = try await openEventStream(
+            lastEventID: lastEventID, protocolVersion: protocolVersion)
+
+        guard httpResponse.statusCode == 200 else {
+            stream.cancel()
+            if httpResponse.statusCode == 405 {
+                self.streamingTask?.cancel()
             }
+            // The server no longer has the event to resume from: the next
+            // connection opens a fresh stream instead of repeating the ID.
+            if httpResponse.statusCode == 400, lastEventID != nil {
+                lastEventID = nil
+            }
+            throw MCPError.internalError("HTTP error: \(httpResponse.statusCode)")
+        }
+
+        if let newSessionID = httpResponse.value(forHTTPHeaderField: HTTPHeaderName.sessionID) {
+            let wasSessionIDNil = (self.sessionID == nil)
+            self.sessionID = newSessionID
+            if wasSessionIDNil {
+                triggerInitialSessionIDSignal()
+            }
+            logger.debug("Session ID received", metadata: ["sessionID": "\(newSessionID)"])
+        }
+
+        return try await self.processSSE(
+            stream, onEventID: { self.lastEventID = $0 },
+            onRetry: { self.retryInterval = Self.clampedRetryInterval($0) })
+    }
+
+    /// Sends a GET for an SSE stream, resuming after `lastEventID` when
+    /// given. A 401 or 403 goes to the authorizer, as for a POST, and the
+    /// GET is retried while it handles the challenge.
+    private func openEventStream(
+        lastEventID: String?, protocolVersion: String?
+    ) async throws -> (ResponseBody, HTTPURLResponse) {
+        if let authorizer {
+            try? await authorizer.prepareAuthorization(for: endpoint, session: session)
+        }
+        var attempts = 0
+        while true {
+            var request = URLRequest(url: endpoint)
+            request.httpMethod = "GET"
+            request.addValue(ContentType.sse, forHTTPHeaderField: HTTPHeaderName.accept)
+            request.addValue("no-cache", forHTTPHeaderField: HTTPHeaderName.cacheControl)
+            if let protocolVersion {
+                request.addValue(protocolVersion, forHTTPHeaderField: HTTPHeaderName.protocolVersion)
+            }
+            if let sessionID {
+                request.addValue(sessionID, forHTTPHeaderField: HTTPHeaderName.sessionID)
+            }
+            if let lastEventID {
+                request.addValue(lastEventID, forHTTPHeaderField: HTTPHeaderName.lastEventID)
+            }
+            request = requestModifier(request)
+            try applyAuthorization(to: &request)
+
+            let (stream, response) = try await session.responseBody(for: request, streaming: streamingSession)
+            noteResponse(response, to: request)
+            guard let httpResponse = response as? HTTPURLResponse else {
+                stream.cancel()
+                throw MCPError.internalError("Invalid HTTP response")
+            }
+            guard let authorizer, httpResponse.statusCode == 401 || httpResponse.statusCode == 403 else {
+                return (stream, httpResponse)
+            }
+            stream.cancel()
+            let handled: Bool
+            do {
+                handled = try await authorizer.handleChallenge(
+                    statusCode: httpResponse.statusCode,
+                    headers: responseHeaders(from: httpResponse),
+                    endpoint: endpoint,
+                    operationKey: nil,
+                    sentAuthorization: request.value(forHTTPHeaderField: HTTPHeaderName.authorization),
+                    session: session
+                )
+            } catch {
+                throw MCPError.internalError("Authorization flow failed: \(error.localizedDescription)")
+            }
+            attempts += 1
+            guard handled, attempts < authorizer.maxAuthorizationAttempts else {
+                throw mapAuthenticationChallengeError(
+                    HTTPAuthenticationChallengeError(
+                        statusCode: httpResponse.statusCode, headers: responseHeaders(from: httpResponse)))
+            }
+        }
+    }
+
+    /// The most GET resumptions of one POST stream before its request fails.
+    static let maxStreamResumptions = 10
+
+    /// Resumes a POST stream that ended before its response (2025-11-25
+    /// resumability, SEP-1699): a GET with the stream's own last event ID,
+    /// repeated while the server closes the stream again. Without an event
+    /// ID, or when the server refuses the GET, the request fails with an
+    /// error instead of waiting forever. Revisions without sessions
+    /// (2026-07-28) have no resumability: the request fails at once.
+    private func resumeResponseStream(
+        after eventID: String?, retry: Int?, awaiting id: String, request message: OutgoingMessage
+    ) async throws {
+        let requestData = message.data
+        let version = message.protocolVersion ?? protocolVersion
+        guard !isStateless, version.map({ Version.profile(for: $0).usesSessions }) ?? true else {
+            deliverStreamLoss(for: requestData, reason: "The server closed the response stream without a response")
+            return
+        }
+        var lastEventID = eventID
+        var retry = retry
+        var attempts = 0
+        while let resumeFrom = lastEventID, attempts < Self.maxStreamResumptions {
+            guard isConnected, !Task.isCancelled else { return }
+            attempts += 1
+            try await Task.sleep(for: .milliseconds(retry ?? retryInterval))
+            logger.debug(
+                "Resuming a response stream", metadata: ["lastEventID": "\(resumeFrom)", "attempt": "\(attempts)"])
 
             let (stream, httpResponse) = try await openEventStream(
-                lastEventID: lastEventID, protocolVersion: protocolVersion)
-
+                lastEventID: resumeFrom, protocolVersion: version)
             guard httpResponse.statusCode == 200 else {
-                stream.task.cancel()
-                if httpResponse.statusCode == 405 {
-                    self.streamingTask?.cancel()
-                }
-                // The server no longer has the event to resume from: the next
-                // connection opens a fresh stream instead of repeating the ID.
-                if httpResponse.statusCode == 400, lastEventID != nil {
-                    lastEventID = nil
-                }
-                throw MCPError.internalError("HTTP error: \(httpResponse.statusCode)")
+                stream.cancel()
+                logger.warning(
+                    "The server refused to resume a response stream",
+                    metadata: ["status": "\(httpResponse.statusCode)"])
+                break
             }
-
-            if let newSessionID = httpResponse.value(forHTTPHeaderField: HTTPHeaderName.sessionID) {
-                let wasSessionIDNil = (self.sessionID == nil)
-                self.sessionID = newSessionID
-                if wasSessionIDNil {
-                    triggerInitialSessionIDSignal()
-                }
-                logger.debug("Session ID received", metadata: ["sessionID": "\(newSessionID)"])
+            var responded = false
+            do {
+                try await processSSE(
+                    stream, until: id,
+                    onEventID: { lastEventID = $0 }, onRetry: { retry = Self.clampedRetryInterval($0) },
+                    onResponse: { if $0 == id { responded = true } })
+            } catch {
+                if Task.isCancelled { return }
+                logger.debug("Resumed response stream failed", metadata: ["error": "\(error)"])
             }
-
-            return try await self.processSSE(
-                stream, onEventID: { self.lastEventID = $0 },
-                onRetry: { self.retryInterval = Self.clampedRetryInterval($0) })
+            if responded { return }
         }
+        // A cancelled read can end the last attempt's stream without an
+        // error: a cancelled request or a closed transport is no loss.
+        guard isConnected, !Task.isCancelled else { return }
+        deliverStreamLoss(
+            for: requestData,
+            reason: eventID != nil
+                ? "The response stream could not be resumed"
+                : "The server closed the response stream without a response or an event ID to resume from")
+    }
 
-        /// Sends a GET for an SSE stream, resuming after `lastEventID` when
-        /// given. A 401 or 403 goes to the authorizer, as for a POST, and the
-        /// GET is retried while it handles the challenge.
-        private func openEventStream(
-            lastEventID: String?, protocolVersion: String?
-        ) async throws -> (URLSession.AsyncBytes, HTTPURLResponse) {
-            if let authorizer {
-                try? await authorizer.prepareAuthorization(for: endpoint, session: session)
+    /// Fails the request of a response stream that cannot be resumed.
+    private func deliverStreamLoss(for requestData: Data, reason: String) {
+        guard let request = try? JSONSerialization.jsonObject(with: requestData) as? [String: Any],
+            let id = request["id"]
+        else { return }
+        let error: [String: Any] = [
+            "jsonrpc": "2.0", "id": id,
+            "error": ["code": MCPError.internalError(nil).code, "message": reason],
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: error) else { return }
+        logger.warning("\(reason)")
+        messageContinuation.yield(data)
+    }
+
+    /// Reads SSE events and yields their messages. `onEventID` and
+    /// `onRetry` see each event's `id` and `retry`, `onResponse` the ID of
+    /// each response. With `until`, reading stops once that response is
+    /// delivered. Messages are only parsed for their ID when `until` or
+    /// `onResponse` needs it. Returns whether any event arrived.
+    @discardableResult
+    private func processSSE(
+        _ stream: ResponseBody,
+        until responseID: String? = nil,
+        onEventID: (String) -> Void = { _ in },
+        onRetry: (Int) -> Void = { _ in },
+        onResponse: ((String) -> Void)? = nil
+    ) async throws -> Bool {
+        logger.debug("📥 Starting SSE event processing")
+        var eventCount = 0
+        var hadDataEvent = false
+
+        for try await event in stream.serverSentEvents {
+            eventCount += 1
+
+            if Task.isCancelled {
+                logger.debug("⏹️ SSE processing cancelled", metadata: ["eventsProcessed": "\(eventCount)"])
+                break
             }
-            var attempts = 0
-            while true {
-                var request = URLRequest(url: endpoint)
-                request.httpMethod = "GET"
-                request.addValue(ContentType.sse, forHTTPHeaderField: HTTPHeaderName.accept)
-                request.addValue("no-cache", forHTTPHeaderField: HTTPHeaderName.cacheControl)
-                if let protocolVersion {
-                    request.addValue(protocolVersion, forHTTPHeaderField: HTTPHeaderName.protocolVersion)
-                }
-                if let sessionID {
-                    request.addValue(sessionID, forHTTPHeaderField: HTTPHeaderName.sessionID)
-                }
-                if let lastEventID {
-                    request.addValue(lastEventID, forHTTPHeaderField: HTTPHeaderName.lastEventID)
-                }
-                request = requestModifier(request)
-                try applyAuthorization(to: &request)
 
-                let (stream, response) = try await session.bytes(for: request)
-                noteResponse(response, to: request)
-                guard let httpResponse = response as? HTTPURLResponse else {
-                    stream.task.cancel()
-                    throw MCPError.internalError("Invalid HTTP response")
-                }
-                guard let authorizer, httpResponse.statusCode == 401 || httpResponse.statusCode == 403 else {
-                    return (stream, httpResponse)
-                }
-                stream.task.cancel()
-                let handled: Bool
-                do {
-                    handled = try await authorizer.handleChallenge(
-                        statusCode: httpResponse.statusCode,
-                        headers: responseHeaders(from: httpResponse),
-                        endpoint: endpoint,
-                        operationKey: nil,
-                        sentAuthorization: request.value(forHTTPHeaderField: HTTPHeaderName.authorization),
-                        session: session
-                    )
-                } catch {
-                    throw MCPError.internalError("Authorization flow failed: \(error.localizedDescription)")
-                }
-                attempts += 1
-                guard handled, attempts < authorizer.maxAuthorizationAttempts else {
-                    throw mapAuthenticationChallengeError(
-                        HTTPAuthenticationChallengeError(
-                            statusCode: httpResponse.statusCode, headers: responseHeaders(from: httpResponse)))
-                }
+            logger.trace(
+                "SSE event received",
+                metadata: [
+                    "type": "\(event.event ?? "message")",
+                    "id": "\(event.id ?? "none")",
+                ]
+            )
+
+            if let eventID = event.id, !eventID.isEmpty {
+                onEventID(eventID)
+                logger.debug("Stored event ID for resumability", metadata: ["eventID": "\(eventID)"])
             }
-        }
 
-        /// The most GET resumptions of one POST stream before its request fails.
-        static let maxStreamResumptions = 10
-
-        /// Resumes a POST stream that ended before its response (2025-11-25
-        /// resumability, SEP-1699): a GET with the stream's own last event ID,
-        /// repeated while the server closes the stream again. Without an event
-        /// ID, or when the server refuses the GET, the request fails with an
-        /// error instead of waiting forever. Revisions without sessions
-        /// (2026-07-28) have no resumability: the request fails at once.
-        private func resumeResponseStream(
-            after eventID: String?, retry: Int?, awaiting id: String, request message: OutgoingMessage
-        ) async throws {
-            let requestData = message.data
-            let version = message.protocolVersion ?? protocolVersion
-            guard !isStateless, version.map({ Version.profile(for: $0).usesSessions }) ?? true else {
-                deliverStreamLoss(for: requestData, reason: "The server closed the response stream without a response")
-                return
+            if let retry = event.retry {
+                onRetry(retry)
+                logger.debug("SSE retry interval updated", metadata: ["retryMs": "\(retry)"])
             }
-            var lastEventID = eventID
-            var retry = retry
-            var attempts = 0
-            while let resumeFrom = lastEventID, attempts < Self.maxStreamResumptions {
-                guard isConnected, !Task.isCancelled else { return }
-                attempts += 1
-                try await Task.sleep(for: .milliseconds(retry ?? retryInterval))
-                logger.debug(
-                    "Resuming a response stream", metadata: ["lastEventID": "\(resumeFrom)", "attempt": "\(attempts)"])
 
-                let (stream, httpResponse) = try await openEventStream(
-                    lastEventID: resumeFrom, protocolVersion: version)
-                guard httpResponse.statusCode == 200 else {
-                    stream.task.cancel()
-                    logger.warning(
-                        "The server refused to resume a response stream",
-                        metadata: ["status": "\(httpResponse.statusCode)"])
+            if !event.data.isEmpty, let data = event.data.data(using: .utf8) {
+                hadDataEvent = true
+                var delivered: String?
+                if responseID != nil || onResponse != nil,
+                    case .response(let id) = JSONRPCMessageKind(data: data)
+                {
+                    onResponse?(id)
+                    delivered = id
+                }
+                messageContinuation.yield(data)
+                if let responseID, delivered == responseID {
+                    stream.cancel()
                     break
                 }
-                var responded = false
-                do {
-                    try await processSSE(
-                        stream, until: id,
-                        onEventID: { lastEventID = $0 }, onRetry: { retry = Self.clampedRetryInterval($0) },
-                        onResponse: { if $0 == id { responded = true } })
-                } catch {
-                    if Task.isCancelled { return }
-                    logger.debug("Resumed response stream failed", metadata: ["error": "\(error)"])
-                }
-                if responded { return }
             }
-            // A cancelled read can end the last attempt's stream without an
-            // error: a cancelled request or a closed transport is no loss.
-            guard isConnected, !Task.isCancelled else { return }
-            deliverStreamLoss(
-                for: requestData,
-                reason: eventID != nil
-                    ? "The response stream could not be resumed"
-                    : "The server closed the response stream without a response or an event ID to resume from")
         }
 
-        /// Fails the request of a response stream that cannot be resumed.
-        private func deliverStreamLoss(for requestData: Data, reason: String) {
-            guard let request = try? JSONSerialization.jsonObject(with: requestData) as? [String: Any],
-                let id = request["id"]
-            else { return }
-            let error: [String: Any] = [
-                "jsonrpc": "2.0", "id": id,
-                "error": ["code": MCPError.internalError(nil).code, "message": reason],
-            ]
-            guard let data = try? JSONSerialization.data(withJSONObject: error) else { return }
-            logger.warning("\(reason)")
-            messageContinuation.yield(data)
-        }
-
-        /// Reads SSE events and yields their messages. `onEventID` and
-        /// `onRetry` see each event's `id` and `retry`, `onResponse` the ID of
-        /// each response. With `until`, reading stops once that response is
-        /// delivered. Messages are only parsed for their ID when `until` or
-        /// `onResponse` needs it. Returns whether any event arrived.
-        @discardableResult
-        private func processSSE(
-            _ stream: URLSession.AsyncBytes,
-            until responseID: String? = nil,
-            onEventID: (String) -> Void = { _ in },
-            onRetry: (Int) -> Void = { _ in },
-            onResponse: ((String) -> Void)? = nil
-        ) async throws -> Bool {
-            logger.debug("📥 Starting SSE event processing")
-            var eventCount = 0
-            var hadDataEvent = false
-
-            for try await event in stream.events {
-                eventCount += 1
-
-                if Task.isCancelled {
-                    logger.debug("⏹️ SSE processing cancelled", metadata: ["eventsProcessed": "\(eventCount)"])
-                    break
-                }
-
-                logger.trace(
-                    "SSE event received",
-                    metadata: [
-                        "type": "\(event.event ?? "message")",
-                        "id": "\(event.id ?? "none")",
-                    ]
-                )
-
-                if let eventID = event.id, !eventID.isEmpty {
-                    onEventID(eventID)
-                    logger.debug("Stored event ID for resumability", metadata: ["eventID": "\(eventID)"])
-                }
-
-                if let retry = event.retry {
-                    onRetry(retry)
-                    logger.debug("SSE retry interval updated", metadata: ["retryMs": "\(retry)"])
-                }
-
-                if !event.data.isEmpty, let data = event.data.data(using: .utf8) {
-                    hadDataEvent = true
-                    var delivered: String?
-                    if responseID != nil || onResponse != nil,
-                        case .response(let id) = JSONRPCMessageKind(data: data)
-                    {
-                        onResponse?(id)
-                        delivered = id
-                    }
-                    messageContinuation.yield(data)
-                    if let responseID, delivered == responseID {
-                        stream.task.cancel()
-                        break
-                    }
-                }
-            }
-
-            logger.debug("✓ SSE event stream completed", metadata: ["eventsProcessed": "\(eventCount)", "hadData": "\(hadDataEvent)"])
-            return eventCount > 0
-        }
-    #endif
+        logger.debug("✓ SSE event stream completed", metadata: ["eventsProcessed": "\(eventCount)", "hadData": "\(hadDataEvent)"])
+        return eventCount > 0
+    }
 }
 
 /// The parts of an outgoing JSON-RPC message the transport reads, parsed

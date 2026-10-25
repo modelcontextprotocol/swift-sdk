@@ -256,7 +256,7 @@ struct OutgoingMessageTests {
     }
 }
 
-#if swift(>=6.1) && !os(Linux)
+#if swift(>=6.1)
     @Suite("HTTP error bodies")
     struct HTTPErrorBodyTests {
         let endpoint = URL(string: "http://127.0.0.1:9/mcp")!

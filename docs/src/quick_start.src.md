@@ -29,8 +29,7 @@ targets: [
 ]
 ```
 
-The library depends on swift-system, swift-log, swift-crypto and, on Apple
-platforms, eventsource.
+The library depends on swift-system, swift-log and swift-crypto.
 
 ## A stdio server
 

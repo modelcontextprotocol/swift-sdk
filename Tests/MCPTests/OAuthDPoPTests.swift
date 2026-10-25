@@ -706,7 +706,7 @@ struct DPoPAuthorizerTests {
     }
 }
 
-#if swift(>=6.1) && !os(Linux)
+#if swift(>=6.1)
 
     private func json(_ url: URL, _ status: Int, _ object: [String: Any], headers: [String: String] = [:])
         throws -> (HTTPURLResponse, Data)

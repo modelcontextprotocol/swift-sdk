@@ -83,7 +83,7 @@ extension URLSession {
                 delegate: OAuthRedirectGuard(policy: policy, validator: validator),
                 delegateQueue: nil)
             defer { guarded.finishTasksAndInvalidate() }
-            return try await guarded.data(for: request)
+            return try await guarded.data(for: request.addingAdditionalHeaders(of: configuration))
         #else
             let guardDelegate = OAuthRedirectGuard(policy: policy, validator: validator)
             return try await data(for: request, delegate: guardDelegate)

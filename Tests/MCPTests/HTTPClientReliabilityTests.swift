@@ -85,7 +85,7 @@ struct HTTPClientConnectionLimitTests {
     }
 }
 
-#if swift(>=6.1) && !os(Linux)
+#if swift(>=6.1)
 
     private actor RecordedRequests {
         private(set) var all: [URLRequest] = []
@@ -431,7 +431,7 @@ struct HTTPClientConnectionLimitTests {
 
 #endif
 
-#if swift(>=6.1) && !os(Linux)
+#if swift(>=6.1)
     @Suite("HTTP client listen requests")
     struct HTTPClientListenTimeoutTests {
         @Test("A subscriptions/listen POST has a long idle timeout; other POSTs keep the default")

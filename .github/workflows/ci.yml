@@ -30,7 +30,10 @@ jobs:
             swift-version: Xcode default
           - os: ubuntu-latest
             container: swift:6.1-rhel-ubi9
-            swift-version: "6.1"
+            swift-version: "6.1 (RHEL UBI 9)"
+          - os: ubuntu-latest
+            container: swift:6.1-noble
+            swift-version: "6.1 (Ubuntu 24.04)"
 
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.container }}
@@ -53,14 +56,43 @@ jobs:
       - name: DocC and weave check
         run: scripts/ci/run-jobs.sh docs
 
-  # Every conformance leg and tier score, baseline-enforced. On Linux only the jobs
-  # marked `gate` in scripts/ci/jobs; the rest run in linux-advisory.
-  #
-  # Linux runs in the RHEL UBI 9 image: on Ubuntu 24.04 (libcurl 8.5) the
-  # Linux client hangs in a 2026-07-28 scenario (design/linux.md).
+  # Every conformance leg and tier score, baseline-enforced, on macOS and on Linux
+  # (RHEL UBI 9 and Ubuntu 24.04). The baselines are shared.
   conformance:
-    name: Conformance (${{ matrix.os }})
+    name: Conformance (${{ matrix.os }}${{ matrix.container && format(', {0}', matrix.container) || '' }})
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+          - os: ubuntu-latest
+            container: swift:6.1-rhel-ubi9
+          - os: ubuntu-latest
+            container: swift:6.1-noble
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        if: runner.os == 'macOS'
+        with:
+          node-version: "22"
+      - name: Run conformance
+        run: scripts/ci/run-jobs.sh --strict --timeout 20 'conformance-.*' 'tier-.*'
+      - name: Upload conformance results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: conformance-${{ matrix.os }}-${{ strategy.job-index }}
+          path: .build/conformance/
+          if-no-files-found: ignore
+
+  # The matrix must match interop/RESULTS.md on macOS and on Linux. On Linux,
+  # scripts/ci/lib.sh installs Go and uv with scripts/ci/deps-linux.sh.
+  interop:
+    name: Interop (${{ matrix.os }})
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -72,66 +104,23 @@ jobs:
     container: ${{ matrix.container }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        if: runner.os == 'macOS'
-        with:
-          node-version: "22"
-      - name: Run conformance
-        run: scripts/ci/run-jobs.sh --gate --timeout 20 'conformance-.*' 'tier-.*'
-      - name: Upload conformance results
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: conformance-${{ matrix.os }}
-          path: .build/conformance/
-          if-no-files-found: ignore
-
-  # Gated on macOS: the matrix must match interop/RESULTS.md.
-  interop:
-    name: Interop (macos-latest)
-    runs-on: macos-latest
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        if: runner.os == 'macOS'
         with:
           go-version: "1.25"
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        if: runner.os == 'macOS'
       - name: Run interop
-        run: scripts/ci/run-jobs.sh interop
+        run: scripts/ci/run-jobs.sh --strict interop
       - name: Upload interop report
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: interop-macos
+          name: interop-${{ matrix.os }}
           path: |
             .build/interop/report.md
             .build/interop/results/
             .build/interop/logs/
-          if-no-files-found: ignore
-
-  # The jobs the Linux HTTP client fails today (design/linux.md). They run so the
-  # gap stays visible, but do not fail the workflow; a job moves to `gate` in
-  # scripts/ci/jobs once it passes.
-  linux-advisory:
-    name: Linux advisory (not required)
-    runs-on: ubuntu-latest
-    container: swift:6.1-rhel-ubi9
-    timeout-minutes: 90
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: Run advisory jobs
-        run: scripts/ci/run-jobs.sh --advisory --strict --timeout 30
-      - name: Upload results
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: linux-advisory
-          path: |
-            .build/conformance/
-            .build/interop/report.md
-            .build/interop/results/
           if-no-files-found: ignore
 
   static-linux-sdk-build:

@@ -153,7 +153,7 @@ A transport moves JSON-RPC messages between a client and a server. In the SDK a 
 | Transport | Side | Eras | Notes |
 |---|---|---|---|
 | `StdioTransport` | both | both | Newline-delimited JSON over two file descriptors. Apple platforms and Linux (glibc, musl). |
-| `HTTPClientTransport` | client | both | Streamable HTTP. SSE on Apple platforms only. |
+| `HTTPClientTransport` | client | both | Streamable HTTP, with SSE. |
 | `StatefulHTTPServerTransport` | server | handshake | One instance per `Mcp-Session-Id`. |
 | `StatelessHTTPServerTransport` | server | 2026-07-28 (and sessionless handshake use) | One instance for all requests. |
 | `InMemoryTransport` | both | both | Same process; tests and embedding. |
@@ -193,7 +193,7 @@ What the transport sends depends on the era of each message:
 
 The client switches the transport when the connection opens: `Client` calls `updateNegotiatedProtocolVersion(_:)` after `initialize` and `useStatelessProtocol(_:)` after `server/discover`.
 
-On handshake connections with `streaming: true`, the transport waits up to `sseInitializationTimeout` (10 s) for a session ID, then opens the GET stream for server-initiated messages. When the stream ends it reconnects after the server's SSE `retry:` interval (3000 ms by default) and sends `Last-Event-ID` with the last event ID it saw. A 405 on GET stops the stream. SSE is not available on Linux: there the transport reads whole response bodies.
+On handshake connections with `streaming: true`, the transport waits up to `sseInitializationTimeout` (10 s) for a session ID, then opens the GET stream for server-initiated messages. When the stream ends it reconnects after the server's SSE `retry:` interval (3000 ms by default) and sends `Last-Event-ID` with the last event ID it saw. A 405 on GET stops the stream.
 
 When a POST's SSE stream ends before the response to its request, a handshake connection resumes that stream: after the stream's `retry:` interval the transport sends a GET with `Last-Event-ID` set to the stream's own last event ID, and reads the replay until the response arrives. It repeats this while the server closes the stream again, up to 10 times. When the stream had no event ID, the server refuses the GET (the Go SDK's server keeps no events and answers 400), or the attempts run out, the request fails with -32603 ("The server closed the response stream without a response or an event ID to resume from", or "The response stream could not be resumed") instead of waiting. At 2026-07-28 there is no resumption: the request fails at once ("The server closed the response stream without a response").
 

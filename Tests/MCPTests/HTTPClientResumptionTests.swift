@@ -11,7 +11,7 @@ import Testing
 // A POST stream that ends before its response is resumed with a GET carrying
 // that stream's last event ID (2025-11-25 resumability, SEP-1699).
 
-#if swift(>=6.1) && !os(Linux)
+#if swift(>=6.1)
 
     private actor Requests {
         private(set) var all: [URLRequest] = []
