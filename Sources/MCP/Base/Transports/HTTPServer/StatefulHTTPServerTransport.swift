@@ -195,9 +195,20 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
         }
     }
 
+    func handleValidatedInitializationRequest(_ request: HTTPRequest) -> HTTPResponse {
+        if terminated {
+            return .error(
+                statusCode: 404,
+                .invalidRequest("Not Found: Session has been terminated"),
+                sessionID: sessionID
+            )
+        }
+        return handlePost(request, skipValidation: true)
+    }
+
     // MARK: - POST Handler
 
-    private func handlePost(_ request: HTTPRequest) -> HTTPResponse {
+    private func handlePost(_ request: HTTPRequest, skipValidation: Bool = false) -> HTTPResponse {
         // Parse body first so we can determine if it's an initialization request
         guard let body = request.body, !body.isEmpty else {
             return .error(
@@ -224,7 +235,9 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
         )
 
         // Run validation pipeline
-        if let errorResponse = validationPipeline.validate(request, context: context) {
+        if !skipValidation,
+            let errorResponse = validationPipeline.validate(request, context: context)
+        {
             return errorResponse
         }
 

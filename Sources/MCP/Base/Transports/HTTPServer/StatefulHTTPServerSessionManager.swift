@@ -22,7 +22,7 @@ public actor StatefulHTTPServerSessionManager {
     private let validationPipeline: any HTTPRequestValidationPipeline
     private let retryInterval: Int?
     private let sessionTimeout: TimeInterval
-    private let maxSessions: Int
+    private let maxSessions: Int?
     private let logger: Logger
     private var sessions: [String: Session] = [:]
     private var creatingSessions = 0
@@ -30,17 +30,18 @@ public actor StatefulHTTPServerSessionManager {
     private var stopped = false
 
     /// `serverFactory` must return a new `Server` for each session.
-    /// `maxSessions` limits active sessions, including sessions still being created.
+    /// Set `maxSessions` to limit active sessions, including sessions still being created.
+    /// The default is `nil`, so deployments can choose a limit for their capacity.
     public init(
         sessionTimeout: TimeInterval = 3600,
-        maxSessions: Int = 100,
+        maxSessions: Int? = nil,
         validationPipeline: (any HTTPRequestValidationPipeline)? = nil,
         retryInterval: Int? = nil,
         logger: Logger? = nil,
         serverFactory: @escaping ServerFactory
     ) {
         self.sessionTimeout = sessionTimeout
-        self.maxSessions = max(0, maxSessions)
+        self.maxSessions = maxSessions.map { max(0, $0) }
         self.validationPipeline = validationPipeline ?? StandardValidationPipeline(validators: [
             OriginValidator.localhost(),
             AcceptHeaderValidator(mode: .sseRequired),
@@ -116,7 +117,7 @@ public actor StatefulHTTPServerSessionManager {
             return errorResponse
         }
 
-        guard sessions.count + creatingSessions < maxSessions else {
+        if let maxSessions, sessions.count + creatingSessions >= maxSessions {
             return .error(statusCode: 503, .internalError("Session limit reached"))
         }
         creatingSessions += 1
@@ -143,7 +144,7 @@ public actor StatefulHTTPServerSessionManager {
             sessions[sessionID] = Session(
                 server: createdServer, transport: transport, lastAccessedAt: Date()
             )
-            let response = await transport.handleRequest(request)
+            let response = await transport.handleValidatedInitializationRequest(request)
             if case .error = response {
                 sessions.removeValue(forKey: sessionID)
                 await createdServer.stop()

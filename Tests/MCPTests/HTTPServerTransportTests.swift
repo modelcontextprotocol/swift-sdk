@@ -659,15 +659,35 @@ struct StatefulHTTPServerTransportTests {
 
     @Test("Session manager validates initialize before creating a server")
     func testSessionManagerValidatesBeforeFactory() async throws {
+        final class ValidationCalls: @unchecked Sendable {
+            private let lock = NSLock()
+            private var value = 0
+
+            func record() {
+                lock.lock()
+                value += 1
+                lock.unlock()
+            }
+
+            var count: Int {
+                lock.lock()
+                defer { lock.unlock() }
+                return value
+            }
+        }
         actor FactoryCalls {
             var count = 0
             func record() { count += 1 }
         }
         let calls = FactoryCalls()
+        let validationCalls = ValidationCalls()
         let bearer = BearerTokenValidator(
             resourceMetadataURL: authResourceMetadataURL,
             resourceIdentifier: authResourceIdentifier,
-            tokenValidator: { _, _, _ in .valid(BearerTokenInfo()) }
+            tokenValidator: { _, _, _ in
+                validationCalls.record()
+                return .valid(BearerTokenInfo())
+            }
         )
         let manager = StatefulHTTPServerSessionManager(
             validationPipeline: StandardValidationPipeline(validators: [bearer, SessionValidator()])
@@ -689,6 +709,22 @@ struct StatefulHTTPServerTransportTests {
         )
         #expect(authorized.statusCode == 200)
         #expect(await calls.count == 1)
+        #expect(validationCalls.count == 1)
+        await manager.stop()
+    }
+
+    @Test("Session manager has no default session cap")
+    func testSessionManagerDefaultLimit() async {
+        let manager = StatefulHTTPServerSessionManager(
+            validationPipeline: StandardValidationPipeline(validators: [SessionValidator()])
+        ) { _, _ in Server(name: "test", version: "1.0") }
+
+        for index in 0..<101 {
+            let response = await manager.handleRequest(
+                makeStatefulPOSTRequest(body: makeInitializeBody(id: "\(index)"))
+            )
+            #expect(response.statusCode == 200)
+        }
         await manager.stop()
     }
 
