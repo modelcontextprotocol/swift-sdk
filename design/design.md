@@ -3,7 +3,7 @@
 This document records the design of the `MCP` Swift package and the reasons behind it. It covers
 1.x, which adds the 2026-07-28 revision of the
 [Model Context Protocol](https://modelcontextprotocol.io) next to the `initialize`-based revisions
-(2025-11-25 and earlier). The base of this major version is commit `2a44bfd`.
+(2025-11-25 and earlier). The base of 0.13.0 is `main` at `2a44bfd` (the 0.12 line).
 
 Feature notes go deeper on single topics:
 
@@ -165,7 +165,7 @@ public struct HandlerContext: Sendable {
 Why a task-local:
 
 - The handler signature stays `(M.Parameters) async throws -> M.Result`. Per-request data was
-  added in this major version without changing `withMethodHandler`.
+  added in 0.13.0 without changing `withMethodHandler`.
 - The SDK reads the same value: `Server.notify` and server-to-client requests pass
   `currentHandlerContext?.id` as `relatedRequestID`, `Server.log` gates on `logLevel`, the MRTR
   wrapper reads `isStateless` and `clientCapabilities`, and `RequestStateProtection.principal`
@@ -192,7 +192,7 @@ public protocol Transport: Actor {
 
 - A transport moves whole JSON-RPC messages as `Data`. Framing (newline-delimited stdio, HTTP
   bodies, SSE events) is the transport's job; parsing is the client's or server's job.
-- `send(_:relatedRequestID:)` was added in this major version with a default implementation, so
+- `send(_:relatedRequestID:)` was added in 0.13.0 with a default implementation, so
   existing custom transports compile unchanged. Transports with per-request streams use the id
   to deliver progress, log and server-to-client messages on the stream of the request that
   produced them (SEP-1699 behavior at 2025-11-25).
@@ -473,7 +473,7 @@ Registration is by method, not by tool. There is no tool registry, so a feature 
 tool's schema asks the application's `tools/list` handler. `Mcp-Param-*` validation does this
 ([request_headers.md](request_headers.md)).
 
-## Breaking changes in this major version
+## Breaking changes in 0.13.0
 
 Each change and the reason for it. [docs/migration.md](../docs/migration.md) has before/after code.
 
@@ -503,7 +503,7 @@ Layout changes that do not affect the API: fixtures moved from `Sources/MCPConfo
 
 ## Alternatives considered
 
-Decided during this major version, from the change history and the comparison with the Python
+Decided during 0.13.0, from the change history and the comparison with the Python
 and Go SDKs:
 
 - **Version string comparisons at call sites.** Replaced by `ProtocolProfile` flags, so a new

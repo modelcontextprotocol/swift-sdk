@@ -36,7 +36,7 @@ is 100% for clients and servers at 2025-11-25 and 2026-07-28; see
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", branch: "main")
+    .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", .upToNextMinor(from: "0.13.0"))
 ],
 targets: [
     .target(name: "MyTarget", dependencies: [.product(name: "MCP", package: "swift-sdk")])
