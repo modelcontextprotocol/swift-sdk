@@ -10,9 +10,9 @@ import Foundation
 
 /// Configuration for OAuth 2.1 authorization used by ``HTTPClientTransport``.
 ///
-/// Authorization is optional and disabled by default. Configure this type and pass it
-/// to `HTTPClientTransport(oauth:)` to enable automatic Bearer token acquisition for HTTP
-/// transports.
+/// Authorization is optional and disabled by default. Pass an
+/// `OAuthAuthorizer(configuration:)` to `HTTPClientTransport(endpoint:authorizer:)` to
+/// enable automatic Bearer token acquisition.
 ///
 /// Supports both `authorization_code` (interactive, browser-based) and `client_credentials`
 /// (machine-to-machine) grant types via the ``grantType`` property.
@@ -356,8 +356,8 @@ public struct OAuthConfiguration: Sendable {
     }
 
     /// The `application_type` sent during dynamic client registration.
-    /// `nil` infers it: `web` for an `https` redirect URI on a non-loopback
-    /// host, otherwise `native`.
+    /// `nil` infers it: `web` for the authorization code grant with an
+    /// `https` redirect URI on a non-loopback host, otherwise `native`.
     public let applicationType: ApplicationType?
 
     /// The `application_type` to register with.

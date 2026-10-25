@@ -425,6 +425,7 @@ public enum BearerTokenValidationResult: Sendable, Equatable {
 /// ```swift
 /// let validator = BearerTokenValidator(
 ///     resourceMetadataURL: metadataURL,
+///     resourceIdentifier: URL(string: "https://api.example.com")!,
 ///     tokenValidator: { token, request, context in
 ///         guard let claims = verifyAndDecode(token) else {
 ///             return .invalidToken(errorDescription: "Token verification failed")
@@ -433,7 +434,7 @@ public enum BearerTokenValidationResult: Sendable, Equatable {
 ///         guard claims.audience.contains("https://api.example.com") else {
 ///             return .invalidToken(errorDescription: "Token audience mismatch")
 ///         }
-///         return .valid
+///         return .valid(BearerTokenInfo(audience: claims.audience, expiresAt: claims.expiry))
 ///     }
 /// )
 /// ```

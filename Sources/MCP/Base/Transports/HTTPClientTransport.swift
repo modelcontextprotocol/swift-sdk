@@ -11,11 +11,11 @@ import Logging
 
 // MARK: - Timeout Helpers
 
-/// Error thrown when an operation times out
 /// An implementation of the MCP Streamable HTTP transport protocol for clients.
 ///
 /// This transport implements the [Streamable HTTP transport](https://spec.modelcontextprotocol.io/specification/2025-11-25/basic/transports#streamable-http)
-/// specification from the Model Context Protocol (version 2025-11-25).
+/// of the Model Context Protocol. On stateless (2026-07-28) connections it
+/// also sends the `Mcp-Method`, `Mcp-Name` and `Mcp-Param-*` request headers.
 ///
 /// It supports:
 /// - Sending JSON-RPC messages via HTTP POST requests

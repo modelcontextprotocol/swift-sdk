@@ -1777,17 +1777,13 @@ public actor Client {
         }
     }
 
-    /// Notify the server that the list of roots has changed
+    /// Notifies the server that the client's roots changed.
     ///
-    /// Clients should send this notification when roots are added, removed,
-    /// or modified to inform connected servers of the change.
+    /// Send it when roots are added, removed or modified. Does nothing on
+    /// stateless connections, where servers ask for roots per request.
     ///
     /// - Throws: MCPError if the client is not connected
     /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/client/roots
-    /// Notifies the server that the client's roots changed.
-    ///
-    /// Does nothing on stateless connections, where servers read roots per
-    /// request instead.
     public func notifyRootsChanged() async throws {
         if isStateless { return }
         let notification = RootsListChangedNotification.message()
@@ -1796,19 +1792,15 @@ public actor Client {
 
     // MARK: - Logging
 
-    /// Set the minimum logging level for server log messages.
+    /// Sets the lowest log level the server should send.
     ///
-    /// Servers that declare the `logging` capability will send log messages via
-    /// `notifications/message` notifications. Use this method to control which
-    /// severity levels the server should send.
+    /// On handshake connections this sends `logging/setLevel`. On stateless
+    /// connections that method does not exist: the level is sent in the
+    /// `_meta` of every following request instead.
     ///
     /// - Parameter level: The minimum log level to receive
     /// - Throws: MCPError if the client is not connected or if the server doesn't support logging
     /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/server/utilities/logging/
-    /// Sets the lowest log level the server should send.
-    ///
-    /// On stateless connections `logging/setLevel` does not exist: the level
-    /// is sent in the `_meta` of every following request instead.
     public func setLoggingLevel(_ level: LogLevel) async throws {
         try validateServerCapability(\.logging, "Logging")
         if isStateless {

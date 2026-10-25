@@ -1,0 +1,67 @@
+# MCP Swift SDK documentation
+
+These guides describe the SDK feature by feature, in the order of the
+[MCP specification](https://modelcontextprotocol.io/specification). Every code
+block is copied from compiled code under `Examples/`, so it builds with the
+SDK.
+
+New to the SDK: start with the [quick start](quick_start.md).
+
+## Base protocol
+
+- [Lifecycle](protocol.md#lifecycle): the `initialize` handshake, `server/discover`, per-request `_meta`.
+- [Transports](protocol.md#transports): stdio, HTTP client, stateful and stateless HTTP servers, request headers, custom transports, concurrency.
+- [Notification streams](protocol.md#notification-streams): `subscriptions/listen`.
+- [Authorization](protocol.md#authorization): OAuth for clients, protected resource metadata and bearer tokens for servers.
+- [Security](protocol.md#security): what the SDK does against confused deputies, token passthrough, SSRF, session hijacking, issuer mix-up and state tampering.
+- [Utilities](protocol.md#utilities): cancellation, ping, progress, error codes.
+- [Protocol versions](protocol_versions.md): the two eras, negotiation, and what each version supports.
+
+## Server features
+
+- [Creating a server](server.md#creating-a-server)
+- [Tools](server.md#tools)
+- [Prompts](server.md#prompts)
+- [Resources](server.md#resources)
+- [List-changed notifications](server.md#list-changed-notifications)
+- [Multi round-trip requests](server.md#multi-round-trip-requests)
+- [Requests to the client](server.md#requests-to-the-client)
+- [Cacheable results](server.md#cacheable-results)
+- [Completion](server.md#completion)
+- [Logging](server.md#logging)
+- [Handler context](server.md#handler-context)
+- [Capabilities and extensions](server.md#capabilities-and-extensions)
+- [Pagination](server.md#pagination)
+- [Lifecycle](server.md#lifecycle)
+
+## Client features
+
+- [Connecting](client.md#connecting)
+- [Calling tools](client.md#calling-tools)
+- [Prompts, resources and completions](client.md#prompts-resources-and-completions)
+- [Roots](client.md#roots)
+- [Sampling](client.md#sampling)
+- [Elicitation](client.md#elicitation)
+- [Multi round-trip requests](client.md#multi-round-trip-requests)
+- [Notifications and subscriptions](client.md#notifications-and-subscriptions)
+- [Logging](client.md#logging)
+- [Cancellation and progress](client.md#cancellation-and-progress)
+- [Batching](client.md#batching)
+- [Capabilities and extensions](client.md#capabilities-and-extensions)
+- [Errors](client.md#errors)
+
+## Testing and troubleshooting
+
+- [Testing](testing.md): in-memory pairs, both eras, HTTP without sockets, the conformance suite.
+- [Troubleshooting](troubleshooting.md): logging, and the causes of common errors.
+
+## Backwards compatibility
+
+- [Migration guide](migration.md): breaking and behavior changes in this major version.
+- [Rough edges](rough_edges.md): known API decisions kept for compatibility, and what is not implemented.
+
+## More
+
+- [Examples](../Examples): runnable hello and HTTP servers, and the snippet sources.
+- [Design notes](../design/design.md): why the SDK is built the way it is.
+- [Roadmap](../ROADMAP.md), [versioning](../VERSIONING.md), [dependency policy](../DEPENDENCY_POLICY.md), [contributing](../CONTRIBUTING.md).

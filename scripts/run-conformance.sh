@@ -85,11 +85,11 @@ if [[ -n "$REQUIREMENTS" ]]; then
   HARNESS_SELECT=(--requirements "$REQUIREMENTS")
 elif [[ -n "$SPEC_VERSION" ]]; then
   LEG="$SPEC_VERSION"
-  BASELINE_FILE="$ROOT/conformance-baseline.$SPEC_VERSION.yml"
+  BASELINE_FILE="$ROOT/conformance/baseline.$SPEC_VERSION.yml"
   HARNESS_SELECT=(--suite all --spec-version "$SPEC_VERSION")
 else
   LEG="default"
-  BASELINE_FILE="$ROOT/conformance-baseline.yml"
+  BASELINE_FILE="$ROOT/conformance/baseline.yml"
   HARNESS_SELECT=(--suite all)
 fi
 LEG_DIR="$OUTPUT_DIR/$LEG"
