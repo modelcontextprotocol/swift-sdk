@@ -18,3 +18,12 @@ public protocol Transport: Actor {
     /// Receives data in an async sequence
     func receive() -> AsyncThrowingStream<Data, Swift.Error>
 }
+
+/// Client transports that can abort an in-flight request's response stream.
+///
+/// ``Client/cancelRequest(_:reason:)`` uses this so a cancelled
+/// `subscriptions/listen` (or any long-lived POST SSE) actually closes the
+/// HTTP connection instead of only sending `notifications/cancelled`.
+public protocol RequestStreamCancelling: Sendable {
+    func cancelInFlightRequestStream(for id: ID) async
+}

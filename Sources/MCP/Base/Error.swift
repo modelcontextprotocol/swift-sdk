@@ -39,6 +39,8 @@ public enum MCPError: Swift.Error, Sendable {
 
     // MCP specific errors
     case urlElicitationRequired(message: String, elicitations: [URLElicitationInfo])  // -32042
+    /// Modern protocol: requested version is unknown or unimplemented (-32022).
+    case unsupportedProtocolVersion(requested: String, supported: [String])
 
     // Transport specific errors
     case connectionClosed
@@ -54,6 +56,7 @@ public enum MCPError: Swift.Error, Sendable {
         case .internalError: return -32603
         case .serverError(let code, _): return code
         case .urlElicitationRequired: return -32042
+        case .unsupportedProtocolVersion: return -32022
         case .connectionClosed: return -32000
         case .transportError: return -32001
         }
@@ -93,6 +96,9 @@ extension MCPError: LocalizedError {
             return "Server error: \(message)"
         case .urlElicitationRequired(let message, _):
             return "URL elicitation required: \(message)"
+        case .unsupportedProtocolVersion(let requested, let supported):
+            let list = supported.joined(separator: ", ")
+            return "Unsupported protocol version: \(requested). Supported: \(list)"
         case .connectionClosed:
             return "Connection closed"
         case .transportError(let error):
@@ -116,6 +122,8 @@ extension MCPError: LocalizedError {
             return "Server-defined error occurred"
         case .urlElicitationRequired:
             return "The server requires user authentication or input via external URL"
+        case .unsupportedProtocolVersion:
+            return "The requested MCP protocol version is not implemented by this server"
         case .connectionClosed:
             return "The connection to the server was closed"
         case .transportError(let error):
@@ -203,6 +211,18 @@ extension MCPError: Codable {
                 ["elicitations": Value.array(elicitationsData.map { .object($0) })],
                 forKey: .data
             )
+        case .unsupportedProtocolVersion(let requested, let supported):
+            try container.encode(
+                errorDescription ?? "Unsupported protocol version",
+                forKey: .message
+            )
+            try container.encode(
+                [
+                    "requested": Value.string(requested),
+                    "supported": Value.array(supported.map { .string($0) }),
+                ] as [String: Value],
+                forKey: .data
+            )
         case .connectionClosed:
             try container.encode(errorDescription ?? "Unknown error", forKey: .message)
         case .transportError(let error):
@@ -257,6 +277,24 @@ extension MCPError: Codable {
                 }
             }
             self = .urlElicitationRequired(message: message, elicitations: elicitations)
+        case -32022:
+            let requested: String
+            if case .string(let value) = data?["requested"] {
+                requested = value
+            } else {
+                // Keep `requested` as a bare version (or empty). Do not re-feed
+                // the human-readable RPC message into this field.
+                requested = ""
+            }
+            var supported: [String] = []
+            if case .array(let items) = data?["supported"] {
+                for item in items {
+                    if case .string(let version) = item {
+                        supported.append(version)
+                    }
+                }
+            }
+            self = .unsupportedProtocolVersion(requested: requested, supported: supported)
         case -32000:
             self = .connectionClosed
         case -32001:
@@ -293,6 +331,11 @@ extension MCPError: Equatable {
             return c1 == c2 && m1 == m2
         case (.urlElicitationRequired(let m1, let e1), .urlElicitationRequired(let m2, let e2)):
             return m1 == m2 && e1 == e2
+        case (
+            .unsupportedProtocolVersion(let r1, let s1),
+            .unsupportedProtocolVersion(let r2, let s2)
+        ):
+            return r1 == r2 && s1 == s2
         case (.connectionClosed, .connectionClosed): return true
         case (.transportError(let a), .transportError(let b)):
             return a.localizedDescription == b.localizedDescription
@@ -322,6 +365,9 @@ extension MCPError: Hashable {
         case .urlElicitationRequired(let message, let elicitations):
             hasher.combine(message)
             hasher.combine(elicitations)
+        case .unsupportedProtocolVersion(let requested, let supported):
+            hasher.combine(requested)
+            hasher.combine(supported)
         case .connectionClosed:
             break
         case .transportError(let error):

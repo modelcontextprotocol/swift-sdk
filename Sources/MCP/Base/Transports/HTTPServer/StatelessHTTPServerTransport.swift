@@ -191,12 +191,23 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
             )
         }
 
+        let bodyProtocolVersion = JSONRPCMessageKind.protocolVersion(inBody: body)
+        let headerProtocolVersion = request.header(HTTPHeaderName.protocolVersion)
+        let isModern = JSONRPCMessageKind.isModernProfile(
+            kind: messageKind,
+            body: body,
+            headerProtocolVersion: headerProtocolVersion
+        )
+
         // Build validation context
         let context = HTTPValidationContext(
             httpMethod: "POST",
             sessionID: nil,
             isInitializationRequest: messageKind.isInitializeRequest,
-            supportedProtocolVersions: Version.supported
+            isDiscoverRequest: messageKind.isDiscoverRequest,
+            isModernRequest: isModern,
+            bodyProtocolVersion: bodyProtocolVersion,
+            supportedProtocolVersions: isModern ? Version.modern : Version.supported
         )
 
         // Run validation pipeline
@@ -211,7 +222,17 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
             incomingContinuation.yield(body)
             return .accepted()
 
-        case .request(let id, _):
+        case .request(let id, let method):
+            // subscriptions/listen parks until cancel and requires a per-request
+            // SSE stream; the stateless transport waits for a single JSON body.
+            if method == SubscriptionsListen.name {
+                return .error(
+                    statusCode: 400,
+                    .invalidRequest(
+                        "subscriptions/listen requires a streaming (stateful) HTTP transport"
+                    )
+                )
+            }
             return await handleJSONRPCRequest(body, requestID: id, request: request)
         }
     }
@@ -247,6 +268,15 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
 
     public func httpRequestContext(for id: ID) -> HTTPRequest? {
         httpRequestContexts[id.description]
+    }
+
+    public func closeRequestStream(for id: ID) {
+        // Stateless responses are single-shot JSON; there is no parked SSE to close.
+        // Drop any waiter so a cancelled handler cannot leave the POST hung.
+        if let waiter = responseWaiters.removeValue(forKey: id.description) {
+            httpRequestContexts.removeValue(forKey: id.description)
+            waiter.resume(throwing: CancellationError())
+        }
     }
 
     // MARK: - Termination

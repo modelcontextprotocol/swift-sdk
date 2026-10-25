@@ -1,4 +1,5 @@
 import Foundation
+import CoreFoundation
 
 // MARK: - Session ID Generator
 
@@ -125,15 +126,22 @@ public enum HTTPResponse: Sendable {
         case .data(let data, _):
             return data
         case .error(_, let error, _, _):
-            let errorBody: [String: Any] = [
-                "jsonrpc": "2.0",
-                "error": [
-                    "code": error.code,
-                    "message": error.errorDescription ?? "Unknown error",
-                ],
-                "id": NSNull(),
-            ]
-            return try? JSONSerialization.data(withJSONObject: errorBody)
+            // Encode via MCPError's Codable so `data` (e.g. -32022 requested/supported) is preserved.
+            struct Envelope: Encodable {
+                let jsonrpc = "2.0"
+                let error: MCPError
+                let id: Value? = nil
+
+                enum CodingKeys: String, CodingKey { case jsonrpc, error, id }
+
+                func encode(to encoder: Encoder) throws {
+                    var container = encoder.container(keyedBy: CodingKeys.self)
+                    try container.encode(jsonrpc, forKey: .jsonrpc)
+                    try container.encode(error, forKey: .error)
+                    try container.encodeNil(forKey: .id)
+                }
+            }
+            return try? JSONEncoder().encode(Envelope(error: error))
         }
     }
 }
@@ -223,6 +231,15 @@ public protocol HTTPContextProviding: Sendable {
     /// transport still has it on hand. Implementations must return `nil` once the
     /// corresponding response has been delivered or the session has terminated.
     func httpRequestContext(for id: ID) async -> HTTPRequest?
+
+    /// Closes the per-request SSE (or equivalent) stream for `id` without sending
+    /// a JSON-RPC response.
+    ///
+    /// Used when a modern request is cancelled (`notifications/cancelled` or
+    /// `CancellationError`) so the client is not left with an open stream that
+    /// still receives fan-out notifications. Idempotent when the stream is
+    /// already gone.
+    func closeRequestStream(for id: ID) async
 }
 
 // MARK: - JSON-RPC Message Classification
@@ -274,11 +291,101 @@ package enum JSONRPCMessageKind {
         return false
     }
 
+    package var isDiscoverRequest: Bool {
+        if case .request(_, let method) = self {
+            return method == "server/discover"
+        }
+        return false
+    }
+
+    package var isSubscriptionsListenRequest: Bool {
+        if case .request(_, let method) = self {
+            return method == SubscriptionsListen.name
+        }
+        return false
+    }
+
+    /// Shared modern-profile classifier for HTTP transports and Server.
+    ///
+    /// A message is modern when it is `server/discover` / `subscriptions/listen`,
+    /// or when body `_meta` (requests) / header (responses & notifications)
+    /// carries a modern protocol version.
+    package static func isModernProfile(
+        kind: JSONRPCMessageKind,
+        body: Data,
+        headerProtocolVersion: String?
+    ) -> Bool {
+        if kind.isDiscoverRequest || kind.isSubscriptionsListenRequest {
+            return true
+        }
+        let bodyVersion = protocolVersion(inBody: body)
+        if let bodyVersion, Version.isModern(bodyVersion) {
+            return true
+        }
+        let isRequest: Bool = {
+            if case .request = kind { return true }
+            return false
+        }()
+        if !isRequest, let headerProtocolVersion, Version.isModern(headerProtocolVersion) {
+            return true
+        }
+        return false
+    }
+
+    /// Method name for request messages; nil otherwise.
+    package var methodName: String? {
+        switch self {
+        case .request(_, let method), .notification(let method):
+            return method
+        case .response:
+            return nil
+        }
+    }
+
     private static func extractID(from json: [String: Any]) -> String? {
         if let stringID = json["id"] as? String {
             return stringID
         } else if let intID = json["id"] as? Int {
             return String(intID)
+        }
+        return nil
+    }
+
+    /// JSON-RPC request id string from a raw body, if present.
+    package static func extractIDString(from data: Data) -> String? {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return extractID(from: json)
+    }
+
+    /// Protocol version from params._meta, if present in the raw body.
+    package static func protocolVersion(inBody data: Data) -> String? {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let params = json["params"] as? [String: Any],
+            let meta = params["_meta"] as? [String: Any],
+            let version = meta[ProtocolMetaKey.protocolVersion] as? String
+        else { return nil }
+        return version
+    }
+
+    /// Preserves JSON-RPC id type (string vs number) from a raw request body.
+    package static func jsonRPCID(inBody data: Data) -> ID? {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        if let stringID = json["id"] as? String {
+            return .string(stringID)
+        }
+        if let intID = json["id"] as? Int {
+            return .number(intID)
+        }
+        if let number = json["id"] as? NSNumber {
+            // Avoid treating Bool as Int (Bool is an NSNumber subclass).
+            let typeID = CFGetTypeID(number as CFTypeRef)
+            if typeID != CFBooleanGetTypeID() {
+                return .number(number.intValue)
+            }
         }
         return nil
     }

@@ -38,18 +38,39 @@ public struct HTTPValidationContext: Sendable {
     /// Whether the request body contains an `initialize` JSON-RPC request.
     public let isInitializationRequest: Bool
 
+    /// Whether the request is a modern `server/discover` call.
+    public let isDiscoverRequest: Bool
+
+    /// Whether the request declares a modern (2026-07-28+) protocol version.
+    public let isModernRequest: Bool
+
+    /// Protocol version from `params._meta.io.modelcontextprotocol/protocolVersion`, if present.
+    /// When set, this is authoritative for modern requests and must agree with the HTTP header.
+    public let bodyProtocolVersion: String?
+
     /// The set of protocol versions this server supports.
     public let supportedProtocolVersions: Set<String>
+
+    /// Requests that do not require a legacy MCP session id.
+    public var isSessionExempt: Bool {
+        isInitializationRequest || isDiscoverRequest || isModernRequest
+    }
 
     public init(
         httpMethod: String,
         sessionID: String? = nil,
         isInitializationRequest: Bool = false,
+        isDiscoverRequest: Bool = false,
+        isModernRequest: Bool = false,
+        bodyProtocolVersion: String? = nil,
         supportedProtocolVersions: Set<String> = Version.supported
     ) {
         self.httpMethod = httpMethod
         self.sessionID = sessionID
         self.isInitializationRequest = isInitializationRequest
+        self.isDiscoverRequest = isDiscoverRequest
+        self.isModernRequest = isModernRequest
+        self.bodyProtocolVersion = bodyProtocolVersion
         self.supportedProtocolVersions = supportedProtocolVersions
     }
 }
@@ -156,38 +177,89 @@ public struct ContentTypeValidator: HTTPRequestValidator {
 
 // MARK: - Protocol Version Validator
 
-/// Validates the `MCP-Protocol-Version` header against supported versions.
+/// Validates protocol version from the `MCP-Protocol-Version` header and/or body `_meta`.
 ///
-/// Per spec:
-/// - If the header is absent, the server assumes the default negotiated version
-/// - If the header is present but unsupported, the server returns 400 Bad Request
-/// - Initialization requests are exempt (protocol version comes from the request body)
+/// Per MCP 2026-07-28:
+/// - Body `_meta` version is authoritative for modern requests
+/// - Header and body MUST agree when both are present
+/// - Unsupported versions return HTTP 400 with ``MCPError/unsupportedProtocolVersion(requested:supported:)`` (-32022)
+/// - Legacy: if neither is present, assume the negotiated version
+/// - Initialization requests are exempt (version is negotiated in the initialize body)
 public struct ProtocolVersionValidator: HTTPRequestValidator {
     public init() {}
 
     public func validate(_ request: HTTPRequest, context: HTTPValidationContext) -> HTTPResponse? {
-        // Skip for initialization requests (version is in the body, not the header)
+        // Skip for initialization requests (version is in the initialize body)
         guard !context.isInitializationRequest else { return nil }
 
-        // Skip for non-POST methods (GET/DELETE don't carry protocol version)
-        // Actually, per spec, all subsequent requests should include it
-        guard let version = request.header(HTTPHeaderName.protocolVersion) else {
-            // Per spec: if not received, assume default version
-            return nil
-        }
+        let headerVersion = request.header(HTTPHeaderName.protocolVersion)
+        let bodyVersion = context.bodyProtocolVersion
+        let supported = Array(Array(context.supportedProtocolVersions).sorted().reversed())
 
-        guard context.supportedProtocolVersions.contains(version) else {
-            let supported = context.supportedProtocolVersions.sorted().joined(separator: ", ")
+        if let bodyVersion, let headerVersion, headerVersion != bodyVersion {
+            // Both values may be supported — this is disagreement, not "unsupported".
             return .error(
                 statusCode: 400,
                 .invalidRequest(
-                    "Bad Request: Unsupported protocol version: \(version). Supported: \(supported)"
+                    "MCP-Protocol-Version header (\(headerVersion)) disagrees with params._meta.\(ProtocolMetaKey.protocolVersion) (\(bodyVersion))"
                 ),
                 sessionID: context.sessionID
             )
         }
 
+        // A modern header without body `_meta.protocolVersion` would otherwise be
+        // accepted here and then mishandled as legacy by the server. Only JSON-RPC
+        // *requests* need `_meta`; responses/notifications and GET/DELETE do not.
+        if context.httpMethod == "POST",
+            let headerVersion, Version.isModern(headerVersion), bodyVersion == nil,
+            Self.isJSONRPCRequest(request.body)
+        {
+            return .error(
+                statusCode: 400,
+                .invalidRequest(
+                    "Modern MCP-Protocol-Version requires params._meta.\(ProtocolMetaKey.protocolVersion)"
+                ),
+                sessionID: context.sessionID
+            )
+        }
+
+        let version = bodyVersion ?? headerVersion
+        guard let version else {
+            // Modern-classified POSTs (discover/listen / modern body) require a version.
+            if context.httpMethod == "POST",
+                context.isModernRequest,
+                Self.isJSONRPCRequest(request.body)
+            {
+                return .error(
+                    statusCode: 400,
+                    .invalidRequest(
+                        "Modern requests require params._meta.\(ProtocolMetaKey.protocolVersion)"
+                    ),
+                    sessionID: context.sessionID
+                )
+            }
+            // Legacy: if not received, assume default version.
+            return nil
+        }
+
+        guard context.supportedProtocolVersions.contains(version) else {
+            return .error(
+                statusCode: 400,
+                .unsupportedProtocolVersion(requested: version, supported: supported),
+                sessionID: context.sessionID
+            )
+        }
+
         return nil
+    }
+
+    private static func isJSONRPCRequest(_ body: Data?) -> Bool {
+        guard let body,
+            let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+            json["method"] is String,
+            json["id"] != nil
+        else { return false }
+        return true
     }
 }
 
@@ -202,8 +274,8 @@ public struct SessionValidator: HTTPRequestValidator {
     public init() {}
 
     public func validate(_ request: HTTPRequest, context: HTTPValidationContext) -> HTTPResponse? {
-        // Skip validation for initialization requests
-        guard !context.isInitializationRequest else { return nil }
+        // Skip validation for initialize, discover, and modern per-request profile.
+        guard !context.isSessionExempt else { return nil }
 
         // Non-initialization requests require an established session.
         guard let expectedSessionID = context.sessionID else {

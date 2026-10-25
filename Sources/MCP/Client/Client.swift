@@ -4,6 +4,7 @@ import struct Foundation.Data
 import struct Foundation.Date
 import class Foundation.JSONDecoder
 import class Foundation.JSONEncoder
+import class Foundation.JSONSerialization
 
 /// Model Context Protocol client
 public actor Client {
@@ -171,6 +172,15 @@ public actor Client {
     private var serverVersion: String?
     /// The server instructions
     private var instructions: String?
+    /// When set, outbound requests/notifications get modern per-request `_meta`.
+    private var modernProtocolVersion: String?
+    /// Parked modern `subscriptions/listen` request (inbound notification channel).
+    private var modernListenContext: RequestContext<SubscriptionsListen.Result>?
+    /// URIs included in the modern listen `resourceSubscriptions` filter.
+    private var trackedResourceSubscriptions: Set<String> = []
+    /// Serializes listen open/refresh so concurrent subscribe calls do not
+    /// leave multiple parked listen streams.
+    private var modernListenRefreshInFlight = false
 
     /// A dictionary of type-erased notification handlers, keyed by method name
     private var notificationHandlers: [String: [NotificationHandlerBox]] = [:]
@@ -278,8 +288,186 @@ public actor Client {
             }
         }
 
-        // Automatically initialize after connecting
+        // Legacy transports negotiate via initialize. Modern (2026-07-28+) HTTP
+        // clients skip initialize and use server/discover + per-request `_meta`.
+        if let http = self.connection as? HTTPClientTransport,
+            let version = await http.protocolVersion,
+            Version.isModern(version)
+        {
+            return try await _connectModern(protocolVersion: version)
+        }
+
         return try await _initialize()
+    }
+
+    /// Modern connect path: `server/discover` instead of `initialize`.
+    private func _connectModern(protocolVersion: String) async throws -> Initialize.Result {
+        // Enable per-request `_meta` injection before the discover call.
+        self.modernProtocolVersion = protocolVersion
+
+        let discover: Discover.Result
+        do {
+            discover = try await send(Discover.request(.init())).value
+        } catch {
+            self.modernProtocolVersion = nil
+            throw error
+        }
+        guard discover.supportedVersions.contains(where: { Version.modern.contains($0) })
+        else {
+            self.modernProtocolVersion = nil
+            throw MCPError.unsupportedProtocolVersion(
+                requested: protocolVersion,
+                supported: Array(Version.modern).sorted(by: >)
+            )
+        }
+        // Only claim revisions this SDK implements.
+        let negotiated =
+            discover.supportedVersions.first(where: { Version.modern.contains($0) && $0 == protocolVersion })
+            ?? discover.supportedVersions.first(where: { Version.modern.contains($0) })
+            ?? Version.latest
+        guard Version.modern.contains(negotiated) else {
+            throw MCPError.unsupportedProtocolVersion(
+                requested: protocolVersion,
+                supported: Array(Version.modern).sorted(by: >)
+            )
+        }
+        self.modernProtocolVersion = negotiated
+        self.serverCapabilities = discover.capabilities
+        self.instructions = discover.instructions
+
+        // Open subscriptions/listen so server notifications arrive on the POST SSE
+        // (modern clients must not use the legacy GET stream).
+        await openModernListen(protocolVersion: negotiated)
+
+        var serverInfo = Server.Info(name: "unknown", version: "0")
+        if let meta = discover._meta,
+            case .object(let info) = meta[ProtocolMetaKey.serverInfo]
+        {
+            serverInfo = Server.Info(
+                name: info["name"]?.stringValue ?? serverInfo.name,
+                version: info["version"]?.stringValue ?? serverInfo.version
+            )
+        }
+        self.serverVersion = serverInfo.version
+
+        return Initialize.Result(
+            protocolVersion: negotiated,
+            capabilities: discover.capabilities,
+            serverInfo: serverInfo,
+            instructions: discover.instructions,
+            _meta: discover._meta
+        )
+    }
+
+    /// Ensures modern outbound JSON-RPC messages carry required per-request `_meta`,
+    /// and that success results include `resultType: "complete"`.
+    private func ensureModernRequestMeta(in data: Data) throws -> Data {
+        guard let version = modernProtocolVersion else { return data }
+        guard var json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return data
+        }
+
+        // Client→server responses to server-initiated requests need resultType.
+        if json["method"] == nil {
+            if var result = json["result"] as? [String: Any] {
+                if result["resultType"] == nil {
+                    result["resultType"] = ResultType.complete.rawValue
+                }
+                json["result"] = result
+                return try JSONSerialization.data(withJSONObject: json)
+            }
+            return data
+        }
+
+        var params = json["params"] as? [String: Any] ?? [:]
+        var meta = params["_meta"] as? [String: Any] ?? [:]
+        if meta[ProtocolMetaKey.protocolVersion] == nil {
+            meta[ProtocolMetaKey.protocolVersion] = version
+        }
+        if meta[ProtocolMetaKey.clientCapabilities] == nil {
+            let capsData = try encoder.encode(capabilities)
+            meta[ProtocolMetaKey.clientCapabilities] =
+                try JSONSerialization.jsonObject(with: capsData) ?? [String: Any]()
+        }
+        if meta[ProtocolMetaKey.clientInfo] == nil {
+            let infoData = try encoder.encode(clientInfo)
+            meta[ProtocolMetaKey.clientInfo] =
+                try JSONSerialization.jsonObject(with: infoData) ?? [String: Any]()
+        }
+        params["_meta"] = meta
+        json["params"] = params
+        return try JSONSerialization.data(withJSONObject: json)
+    }
+
+
+
+    private func openModernListen(protocolVersion: String) async {
+        let listenMeta = Metadata(
+            additionalFields: [
+                ProtocolMetaKey.protocolVersion: .string(protocolVersion),
+                ProtocolMetaKey.clientInfo: .object([
+                    "name": .string(clientInfo.name),
+                    "version": .string(clientInfo.version),
+                ]),
+            ]
+        )
+        // Best-effort listen; stateful streaming is required. Stateless servers
+        // reject listen — connect still succeeds without a notification channel.
+        do {
+            modernListenContext = try send(
+                SubscriptionsListen.request(
+                    .init(
+                        _meta: listenMeta,
+                        notifications: .init(
+                            toolsListChanged: true,
+                            resourcesListChanged: true,
+                            promptsListChanged: true,
+                            resourceSubscriptions: Array(trackedResourceSubscriptions).sorted()
+                        )
+                    )
+                )
+            )
+
+            if let listenContext = modernListenContext {
+                let listenRequestID = listenContext.requestID
+                Task {
+                    do {
+                        _ = try await listenContext.value
+                    } catch {
+                        await self.logger?.warning(
+                            "subscriptions/listen ended",
+                            metadata: ["error": "\(error)"]
+                        )
+                    }
+                    await self.clearModernListenContext(ifMatching: listenRequestID)
+                }
+            }
+        } catch {
+            await logger?.warning(
+                "subscriptions/listen unavailable; continuing without notification stream",
+                metadata: ["error": "\(error)"]
+            )
+            modernListenContext = nil
+        }
+    }
+
+    /// Re-open listen with the current resource subscription filter.
+    private func refreshModernListen() async {
+        guard let version = modernProtocolVersion else { return }
+        if modernListenRefreshInFlight { return }
+        modernListenRefreshInFlight = true
+        defer { modernListenRefreshInFlight = false }
+        if let existing = modernListenContext {
+            modernListenContext = nil
+            try? await cancelRequest(existing.requestID, reason: "Refreshing listen filter")
+        }
+        await openModernListen(protocolVersion: version)
+    }
+
+    private func clearModernListenContext(ifMatching requestID: ID) {
+        if modernListenContext?.requestID == requestID {
+            modernListenContext = nil
+        }
     }
 
     /// Disconnect the client and cancel all pending requests
@@ -289,6 +477,16 @@ public actor Client {
         // Part 1: Inside actor - Grab state and clear internal references
         let taskToCancel = self.task
         let connectionToDisconnect = self.connection
+
+        let listenToCancel = modernListenContext
+        self.modernListenContext = nil
+        self.trackedResourceSubscriptions = []
+        // Cancel listen while modernProtocolVersion is still set so
+        // notifications/cancelled keeps modern `_meta` / header agreement.
+        if let listenToCancel {
+            try? await cancelRequest(listenToCancel.requestID, reason: "Client disconnected")
+        }
+        self.modernProtocolVersion = nil
         let pendingRequestsToCancel = self.pendingRequests
 
         self.task = nil
@@ -354,7 +552,8 @@ public actor Client {
             throw MCPError.internalError("Client connection not initialized")
         }
 
-        let notificationData = try encoder.encode(notification)
+        var notificationData = try encoder.encode(notification)
+        notificationData = try ensureModernRequestMeta(in: notificationData)
         try await connection.send(notificationData)
     }
 
@@ -363,7 +562,8 @@ public actor Client {
         guard let connection = connection else {
             throw MCPError.internalError("Client connection not initialized")
         }
-        let responseData = try encoder.encode(response)
+        var responseData = try encoder.encode(response)
+        responseData = try ensureModernRequestMeta(in: responseData)
         try await connection.send(responseData)
     }
 
@@ -392,7 +592,8 @@ public actor Client {
             throw MCPError.internalError("Client connection not initialized")
         }
 
-        let requestData = try encoder.encode(request)
+        var requestData = try encoder.encode(request)
+        requestData = try ensureModernRequestMeta(in: requestData)
 
         let requestTask = Task<M.Result, Error> {
             try await withCheckedThrowingContinuation { continuation in
@@ -442,6 +643,11 @@ public actor Client {
         if let pendingRequest = removePendingRequest(id: requestID) {
             pendingRequest.resume(throwing: CancellationError())
         }
+
+        // Close the client's in-flight POST/SSE for this id (listen refresh
+        // must not leave the old stream registered for fan-out).
+        await (connection as? any RequestStreamCancelling)?
+            .cancelInFlightRequestStream(for: requestID)
 
         // Send cancellation notification to server
         let notification = CancelledNotification.message(
@@ -580,6 +786,11 @@ public actor Client {
     /// - Throws: `MCPError.internalError` if the client is not connected.
     ///           Can also rethrow errors from the `body` closure or from sending the batch request.
     public func withBatch(body: @escaping @Sendable (Batch) async throws -> Void) async throws {
+        if modernProtocolVersion != nil {
+            throw MCPError.invalidRequest(
+                "JSON-RPC batching is not supported on modern protocol versions"
+            )
+        }
         guard let connection = connection else {
             throw MCPError.internalError("Client connection not initialized")
         }
@@ -630,7 +841,7 @@ public actor Client {
     private func _initialize() async throws -> Initialize.Result {
         let request = Initialize.request(
             .init(
-                protocolVersion: Version.latest,
+                protocolVersion: Version.latestLegacy,
                 capabilities: capabilities,
                 clientInfo: clientInfo
             ))
@@ -706,6 +917,34 @@ public actor Client {
     }
 
     public func subscribeToResource(uri: String) async throws {
+        // On the modern profile, delivery is gated by the listen filter — update
+        // it first so notifications arrive even if resources/subscribe is absent.
+        if modernProtocolVersion != nil {
+            trackedResourceSubscriptions.insert(uri)
+            await refreshModernListen()
+            let request = ResourceSubscribe.request(.init(uri: uri))
+            do {
+                _ = try await send(request).value
+            } catch let error as MCPError {
+                // Best-effort legacy subscribe; listen filter already covers delivery.
+                if error.code == MCPError.methodNotFound(nil).code {
+                    await logger?.debug(
+                        "resources/subscribe not available; listen filter updated",
+                        metadata: ["uri": "\(uri)"]
+                    )
+                    return
+                }
+                trackedResourceSubscriptions.remove(uri)
+                await refreshModernListen()
+                throw error
+            } catch {
+                trackedResourceSubscriptions.remove(uri)
+                await refreshModernListen()
+                throw error
+            }
+            return
+        }
+
         try validateServerCapability(\.resources?.subscribe, "Resource subscription")
         let request = ResourceSubscribe.request(.init(uri: uri))
         _ = try await send(request).value
