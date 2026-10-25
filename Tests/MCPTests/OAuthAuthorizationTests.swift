@@ -307,6 +307,17 @@ struct OAuthAuthorizationTests {
         #expect(challenge?.scope == "read")
     }
 
+    @Test("Parse Bearer unescapes RFC 7230 quoted-string backslashes")
+    func testParseBearerUnescapesBackslashes() {
+        // RFC 7230 allows escaping any character with a backslash.
+        let challenge = DefaultOAuthWWWAuthenticateParser().parseBearer(
+            from: ["WWW-Authenticate": "Bearer error=\"insufficient\\_scope\", scope=\"read\\\"write\\\\test\""]
+        )
+        #expect(challenge != nil)
+        #expect(challenge?.error == "insufficient_scope")
+        #expect(challenge?.scope == "read\"write\\test")
+    }
+
     @Test("Parse Bearer returns nil when only non-Bearer schemes present")
     func testParseBearerReturnsNilForNonBearerScheme() {
         let challenge = DefaultOAuthWWWAuthenticateParser().parseBearer(
