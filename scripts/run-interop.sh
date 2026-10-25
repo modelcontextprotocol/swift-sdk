@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Interop matrix: the Swift SDK against the Go and Python SDKs (interop/README.md).
 #
-#   scripts/run-interop.sh [--update-results]
+#   scripts/run-interop.sh [--update-results | --check]
 #
 # The other SDKs are pinned releases: the Go SDK in interop/go-client/go.mod
 # (from the Go module proxy) and the Python SDK in
@@ -13,6 +13,8 @@
 # the HTTP servers, runs every client against every server in both protocol
 # eras with each check profile (basic, advanced, connect, session), and writes
 # .build/interop/report.md. --update-results copies it to interop/RESULTS.md.
+# --check fails the run when the report's results differ from
+# interop/RESULTS.md (CI's gate; see interop/report.py).
 #
 # Needs: Swift, Go 1.25 or later, uv, curl, sha256sum or shasum, and network
 # access on the first run. Behind a TLS-intercepting proxy, export UV_SYSTEM_CERTS=1.
@@ -24,7 +26,13 @@ BIN_GO="$WORK/bin"
 RESULTS="$WORK/results"
 LOGS="$WORK/logs"
 UPDATE=0
-[[ "${1:-}" == "--update-results" ]] && UPDATE=1
+CHECK=0
+case "${1:-}" in
+    --update-results) UPDATE=1 ;;
+    --check) CHECK=1 ;;
+    "") ;;
+    *) echo "usage: scripts/run-interop.sh [--update-results | --check]" >&2; exit 2 ;;
+esac
 
 GO_MODULE=github.com/modelcontextprotocol/go-sdk
 GO_SDK_VERSION="$(awk -v m="$GO_MODULE" '$1 == m || $2 == m { print ($1 == m ? $2 : $3); exit }' "$ROOT/interop/go-client/go.mod")"
@@ -80,12 +88,24 @@ if ! cat "$PY_CLIENT/requirements.in" "$PY_CLIENT/requirements.txt" | cmp -s - "
     cat "$PY_CLIENT/requirements.in" "$PY_CLIENT/requirements.txt" >"$STAMP"
 fi
 PY="$VENV/bin/python"
-# The example servers, downloaded once and checked before every run.
+# The example servers, downloaded once and checked before every run: from
+# raw.githubusercontent.com, or from a shallow fetch of the commit where only
+# github.com is reachable.
 EXAMPLES="$WORK/python-examples"
 if ! (cd "$EXAMPLES" && verify_sha256 "$PY_CLIENT/examples.sha256" 2>/dev/null); then
     rm -f "$EXAMPLES"/*.py
     while read -r _ example; do
-        curl -fsSL -o "$EXAMPLES/$example" "$PY_SDK_RAW/examples/snippets/servers/$example"
+        if ! curl -fsSL -o "$EXAMPLES/$example" "$PY_SDK_RAW/examples/snippets/servers/$example"; then
+            clone="$WORK/python-sdk-$PY_SDK_COMMIT"
+            if [[ ! -d "$clone/.git" ]]; then
+                rm -rf "$clone"
+                git init --quiet "$clone"
+                git -C "$clone" fetch --quiet --depth 1 \
+                    https://github.com/modelcontextprotocol/python-sdk "$PY_SDK_COMMIT"
+                git -C "$clone" checkout --quiet FETCH_HEAD
+            fi
+            cp "$clone/examples/snippets/servers/$example" "$EXAMPLES/$example"
+        fi
     done <"$PY_CLIENT/examples.sha256"
     (cd "$EXAMPLES" && verify_sha256 "$PY_CLIENT/examples.sha256") || {
         echo "the Python example servers do not match interop/python-client/examples.sha256" >&2
@@ -370,4 +390,7 @@ info "report: $WORK/report.md"
 if [[ $UPDATE == 1 ]]; then
     cp "$WORK/report.md" "$ROOT/interop/RESULTS.md"
     info "updated interop/RESULTS.md"
+fi
+if [[ $CHECK == 1 ]]; then
+    python3 "$ROOT/interop/report.py" "$RESULTS" --expect "$ROOT/interop/RESULTS.md" >/dev/null
 fi

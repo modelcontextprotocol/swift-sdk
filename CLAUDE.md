@@ -223,14 +223,38 @@ The SDK stays dual-era: a request carrying `io.modelcontextprotocol/protocolVers
 
 ## Interop
 
-`scripts/run-interop.sh [--update-results]` runs the Swift, Go and Python SDKs' clients and
+`scripts/run-interop.sh [--update-results | --check]` runs the Swift, Go and Python SDKs' clients and
 servers against each other (profiles basic, advanced, connect, session), in both eras, over
 HTTP and stdio, and writes `.build/interop/report.md` (`--update-results` copies it to
-`interop/RESULTS.md`). The other SDKs are pinned releases: `interop/go-client/go.mod` and
+`interop/RESULTS.md`; `--check` fails when the result rows differ from it, via
+`interop/report.py --expect`). The other SDKs are pinned releases: `interop/go-client/go.mod` and
 `interop/python-client/requirements.in` (hashed lock `requirements.txt`, example servers
 checked against `examples.sha256`); no local checkouts. The three drivers in
 `interop/{swift-client,go-client,python-client}` take the same flags and checks; keep them in
 step. Findings: `interop/README.md`.
+
+## CI
+
+One job list, two runners. `scripts/ci/jobs` lists every job as
+`<id> <gate|advisory> <script> [args]`; `scripts/ci/<script>.sh` is the job (`build-test`,
+`docs`, `conformance` (flags of run-conformance.sh), `interop`). `scripts/ci/run-jobs.sh
+[--gate|--advisory] [--strict] [--timeout m] [id-regex...]` runs a selection and prints a
+summary. Add or change a job there, not in a runner.
+
+- **GitHub Actions** (`.github/workflows/ci.yml`): Linux jobs use
+  `swift:6.1-rhel-ubi9`, not Ubuntu (see below).
+- **Desk**: `scripts/ci/run-jobs.sh` on macOS; `scripts/ci-linux.sh <job>|all|--shell` on Linux
+  through Apple's `container` (`brew install container && container system start`).
+  `scripts/ci/deps-linux.sh` installs Node, Go and uv (dnf or apt) into a derived image;
+  `/w/.build` and caches are named volumes; results go to `.build/linux/<image>-<arch>/`;
+  `--job-timeout` (default 30 min) stops a hung job.
+
+Linux is not conformant yet, and fixing it is deferred. Baselines and `interop/RESULTS.md`
+are shared by both platforms, so the jobs Linux fails are marked `advisory`: they run, report,
+and do not gate on Linux (every job gates on macOS). The cause is the Linux path of
+`HTTPClientTransport` (`data(for:)`, no SSE parsing, no GET stream); the scenarios and interop
+rows are in `design/linux.md`. On Ubuntu 24.04 (libcurl 8.5) the Linux client also hangs in
+`json-schema-ref-no-deref` at 2026-07-28, so Linux CI uses RHEL UBI 9 images (libcurl 7.76).
 
 ## Conformance fixtures
 

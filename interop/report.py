@@ -1,6 +1,7 @@
 """Builds the interop report from the JSONL files of scripts/run-interop.sh.
 
     python3 interop/report.py <results-dir> > report.md
+    python3 interop/report.py <results-dir> --expect interop/RESULTS.md > report.md
 
 Each file is named <client>__<server>__<transport>__<era>[__<profile>].jsonl
 (no profile: the basic battery or one example tool call), with the client's
@@ -11,6 +12,11 @@ A cell fails when a check fails, and also when it has no meta line or no
 checks, or when the client exited with an error without reporting a failed
 check (a crash, or the time limit). An example client fails when its exit
 status is not 0.
+
+With --expect, the report's table rows are compared with those of a recorded
+report: every cell's counts, every example client's exit status, and every
+failing check (without its detail text, which carries timings). Any
+difference is printed to stderr and the exit status is 1.
 """
 
 from __future__ import annotations
@@ -57,7 +63,13 @@ def load(path: Path) -> tuple[dict | None, list[dict]]:
 
 
 def main() -> None:
-    root = Path(sys.argv[1])
+    args = sys.argv[1:]
+    expect: Path | None = None
+    if "--expect" in args:
+        i = args.index("--expect")
+        expect = Path(args[i + 1])
+        del args[i : i + 2]
+    root = Path(args[0])
     cells = []
     for path in sorted(root.glob("*.jsonl")):
         parts = path.stem.split("__")
@@ -130,6 +142,43 @@ def main() -> None:
             detail = escape(str(c.get("detail", ""))[:200])
             w(f"| {profile} | {client} | {server} | {transport} | {era} | {escape(c.get('check', '?'))} | {detail} |")
     print("\n".join(out))
+    if expect is not None and not matches(out, expect.read_text().splitlines(), expect):
+        sys.exit(1)
+
+
+def table_rows(lines: list[str]) -> list[str]:
+    """The comparable rows of a report: table rows under their heading, minus
+    header and separator rows, and minus the detail column of failure rows."""
+    rows: list[str] = []
+    heading = ""
+    for line in lines:
+        if line and not line.startswith("|"):
+            heading = line
+            continue
+        if not line.startswith("|") or line.startswith("|---"):
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if cells[0] in ("Client", "Example", "Profile"):
+            continue
+        if heading.startswith("Failures"):
+            cells = cells[:6]
+        rows.append(f"{heading} " + " | ".join(cells))
+    return rows
+
+
+def matches(report: list[str], expected: list[str], path: Path) -> bool:
+    got, want = table_rows(report), table_rows(expected)
+    missing = [row for row in want if row not in got]
+    unexpected = [row for row in got if row not in want]
+    if not missing and not unexpected:
+        print(f"interop: matches {path}", file=sys.stderr)
+        return True
+    print(f"interop: differs from {path}", file=sys.stderr)
+    for row in missing:
+        print(f"  - {row}", file=sys.stderr)
+    for row in unexpected:
+        print(f"  + {row}", file=sys.stderr)
+    return False
 
 
 if __name__ == "__main__":

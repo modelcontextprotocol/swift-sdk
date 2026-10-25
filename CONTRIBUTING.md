@@ -35,7 +35,8 @@ Open an issue and agree on the approach before writing code for:
 ## Development setup
 
 - Swift 6.1 or later. On macOS use the toolchain of Xcode 16.3 or later.
-- Linux: a Swift 6.1 toolchain and `libcurl4-openssl-dev` (FoundationNetworking).
+- Linux: a Swift 6.1 toolchain and `libcurl4-openssl-dev` (FoundationNetworking), or
+  `scripts/ci-linux.sh` on a Mac (see [CI and Linux](#ci-and-linux)).
 - Conformance runs: Node.js (CI uses 22) and access to the public npm registry.
 
 With a private npm registry configured, use the public one:
@@ -95,14 +96,48 @@ Rules:
 
 - Entries should only go down. A pull request that adds entries explains why.
 - The fixtures use the public API only. Do not special-case a scenario in a fixture; fix the SDK.
-- CI runs the three legs and the tier score for both revisions on pushes and pull requests to
-  `main`.
+- CI runs every leg and tier score, on macOS and Linux, on pushes and pull requests to `main`
+  (see [CI and Linux](#ci-and-linux)).
 
 ## Interop
 
 `scripts/run-interop.sh` runs the Swift SDK's clients and servers against pinned releases of the
 Go and Python SDKs (needs Go and `uv`). Run it after protocol or transport changes, and record a
-changed outcome with `--update-results`. Details: [interop/README.md](interop/README.md).
+changed outcome with `--update-results`. `--check` fails when the results differ from
+`interop/RESULTS.md`; CI runs it that way. Details: [interop/README.md](interop/README.md).
+
+## CI and Linux
+
+The CI jobs are listed once, in `scripts/ci/jobs`; each is a script in `scripts/ci/`.
+`scripts/ci/run-jobs.sh [<id-regex>...]` runs them, and GitHub Actions
+(`.github/workflows/ci.yml`) calls it. On macOS run it directly:
+
+```sh
+scripts/ci/run-jobs.sh                        # every job
+scripts/ci/run-jobs.sh 'conformance-.*' interop
+```
+
+On a Mac, `scripts/ci-linux.sh` runs the same jobs on Linux in a container, in a RHEL UBI 9
+Swift image (Apple silicon, macOS 26 or later):
+
+```sh
+brew install container && container system start
+scripts/ci-linux.sh all                       # every job, then a summary
+scripts/ci-linux.sh conformance-2026-07-28-client
+scripts/ci-linux.sh conformance --spec-version 2025-11-25 --mode client   # any script and flags
+scripts/ci-linux.sh --shell                   # a shell in the container, at /w
+scripts/ci-linux.sh --image swift:6.1-noble all       # Ubuntu 24.04
+```
+
+The container gets a copy of the working tree, including uncommitted changes. Builds and
+package caches persist in named volumes, so reruns are incremental; results land in
+`.build/linux/<image>-<arch>/`. `--platform linux/amd64` runs x86_64 under
+emulation. `--update-baseline` and `--update-results` copy their output back into the tree.
+
+Conformance baselines and `interop/RESULTS.md` are shared by macOS and Linux. Jobs that the
+Linux HTTP client fails today are marked `advisory` in `scripts/ci/jobs`: on Linux they run and
+report but do not fail CI. [design/linux.md](design/linux.md) records where and why. When an
+advisory job passes, `run-jobs.sh` says so; mark it `gate`.
 
 ## Documentation
 

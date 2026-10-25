@@ -1,0 +1,26 @@
+# The CI jobs, one per line: `<id> <linux> <script> [args...]`.
+#
+#   <script>  scripts/ci/<script>.sh, run with [args...].
+#   <linux>   `gate` or `advisory`: whether a Linux failure fails CI. On macOS
+#             every job gates. The advisory jobs fail on Linux today because
+#             the Linux HTTP client does not stream (design/linux.md); they
+#             still run, so the gap stays visible, and move to `gate` when it
+#             is closed. Conformance baselines and interop/RESULTS.md are
+#             shared by both platforms.
+#
+# `scripts/ci-linux.sh all` runs every line; .github/workflows/ci.yml runs the
+# same scripts with the same arguments.
+build-test                     gate      build-test
+docs                           gate      docs
+conformance-scripts            gate      conformance-scripts
+conformance-2025-11-25-client  advisory  conformance --spec-version 2025-11-25 --mode client
+conformance-2025-11-25-server  gate      conformance --spec-version 2025-11-25 --mode server
+conformance-2026-07-28-client  gate      conformance --spec-version 2026-07-28 --mode client
+conformance-2026-07-28-server  gate      conformance --spec-version 2026-07-28 --mode server
+conformance-default-client     advisory  conformance --mode client
+conformance-default-server     gate      conformance --mode server
+tier-2025-11-25-client         advisory  conformance --requirements 2025-11-25 --mode client
+tier-2025-11-25-server         gate      conformance --requirements 2025-11-25 --mode server
+tier-2026-07-28-client         gate      conformance --requirements 2026-07-28 --mode client
+tier-2026-07-28-server         gate      conformance --requirements 2026-07-28 --mode server
+interop                        advisory  interop --check
