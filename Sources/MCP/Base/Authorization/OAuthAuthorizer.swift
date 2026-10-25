@@ -599,8 +599,18 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
             guard let token = tokenStorage.load(),
                 token.isExpired(skewSeconds: configuration.proactiveRefreshWindowSeconds)
             else { return }
-            guard let refreshToken = token.refreshToken else { return }
             guard let asMeta = authorizationServerMetadata, asMeta.tokenEndpoint != nil else { return }
+            guard let refreshToken = token.refreshToken else {
+                // Grants without user interaction get a new token before
+                // this one expires; a failure leaves the 401 path to recover.
+                guard configuration.grantType == .jwtBearer || configuration.grantType == .clientCredentials,
+                    let metadata = protectedResourceMetadata
+                else { return }
+                try? await acquireToken(
+                    endpoint: endpoint, metadata: metadata,
+                    requestedScopes: token.scopes.isEmpty ? nil : token.scopes, session: session)
+                return
+            }
 
             let resource: URL
             do {
@@ -758,6 +768,8 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
                 session: session)
         } catch OAuthAuthorizationError.authorizationServerMetadataDiscoveryFailed
             where metadata.isFallback && configuration.endpointOverrides.authorizationServerURL == nil
+                // The jwt-bearer grant postdates 2025-03-26.
+                && configuration.grantType != .jwtBearer
         {
             // 2025-03-26: a server without metadata serves the endpoints at its root.
             guard let origin = candidates.first else { throw OAuthAuthorizationError.missingAuthorizationServer }
@@ -799,7 +811,73 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
                 asMetadata: asMetadata,
                 session: session
             )
+        case .jwtBearer:
+            try await acquireTokenViaJWTBearer(
+                resource: resource,
+                requestedScopes: requestedScopes,
+                asMetadata: asMetadata,
+                session: session
+            )
         }
+    }
+
+    /// RFC 7523 §2.1: presents the provider's JWT. A failed request throws:
+    /// the grant is not retried and no other grant is tried.
+    private func acquireTokenViaJWTBearer(
+        resource: URL,
+        requestedScopes: Set<String>?,
+        asMetadata: OAuthAuthorizationServerMetadata,
+        session: URLSession
+    ) async throws {
+        guard let assertionProvider = configuration.assertionProvider else {
+            throw OAuthAuthorizationError.assertionProviderMissing
+        }
+        let overrides = configuration.endpointOverrides
+        let pinned = overrides.authorizationServerURL != nil || overrides.tokenEndpoint != nil
+        guard pinned || configuration.allowsDiscoveredAuthorizationServer else {
+            throw OAuthAuthorizationError.authorizationServerNotConfigured
+        }
+        let tokenEndpoint = try resolveTokenEndpoint(asMetadata: asMetadata)
+        guard let audience = asMetadata.issuer ?? selectedAuthorizationServer else {
+            throw OAuthAuthorizationError.missingAuthorizationServer
+        }
+        let assertion = try await assertionProvider(
+            OAuthConfiguration.AssertionContext(
+                audience: audience, resource: resource, tokenEndpoint: tokenEndpoint,
+                requestedScopes: requestedScopes),
+            session)
+        // A server the MCP server chose gets only an assertion meant for it.
+        if !pinned, let claimed = Self.audiences(of: assertion) {
+            let expected = [audience.absoluteString, tokenEndpoint.absoluteString]
+            guard claimed.contains(where: { claim in expected.contains { OAuthIssuer.matches(claim, $0) } }) else {
+                throw OAuthAuthorizationError.assertionAudienceMismatch(expected: expected, actual: claimed)
+            }
+        }
+
+        var bodyParameters: [String: String] = configuration.additionalTokenRequestParameters
+        bodyParameters[OAuthParameterName.grantType] = OAuthGrantTypeValue.jwtBearer
+        bodyParameters[OAuthParameterName.assertion] = assertion
+        bodyParameters[OAuthParameterName.resource] = resource.absoluteString
+        if let scope = requestedScopes.flatMap(scopeSelector.serialize) {
+            bodyParameters[OAuthParameterName.scope] = scope
+        }
+        let decoded = try await tokenEndpointClient.request(
+            parameters: &bodyParameters,
+            endpoint: tokenEndpoint,
+            authentication: configuration.authentication,
+            session: session
+        )
+        storeTokenResponse(decoded, requestedScopes: requestedScopes)
+    }
+
+    /// The `aud` claim of a JWT, or `nil` when `token` is not a JWT with one.
+    static func audiences(of token: String) -> [String]? {
+        let parts = token.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 3, let payload = Data(base64URLEncoded: String(parts[1])),
+            let claims = try? JSONSerialization.jsonObject(with: payload) as? [String: Any]
+        else { return nil }
+        if let single = claims["aud"] as? String { return [single] }
+        return claims["aud"] as? [String]
     }
 
     private func acquireTokenViaClientCredentials(
@@ -982,6 +1060,8 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
 
         guard !clientRegistrationAttempted else { return }
         guard case .none = configuration.authentication else { return }
+        // The assertion identifies the client: nothing to register.
+        guard configuration.grantType != .jwtBearer else { return }
 
         clientRegistrationAttempted = true
         registrationAttemptIssuer = selectedAuthorizationServer

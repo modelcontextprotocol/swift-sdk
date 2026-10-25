@@ -41,7 +41,7 @@ struct OAuthTokenEndpointClient: Sendable {
             bodyParameters: &parameters,
             tokenEndpoint: endpoint
         )
-        urlRequest.httpBody = encodeForm(parameters)
+        urlRequest.httpBody = OAuthFormEncoding.encode(parameters)
 
         let (data, response) = try await session.oauthData(
             for: urlRequest, redirects: .none, validator: urlValidator)
@@ -71,7 +71,13 @@ struct OAuthTokenEndpointClient: Sendable {
         return decoded
     }
 
-    private func encodeForm(_ params: [String: String]) -> Data {
+}
+
+extension OAuthTokenEndpointClient: OAuthTokenRequesting {}
+
+/// `application/x-www-form-urlencoded` bodies of token requests.
+enum OAuthFormEncoding {
+    static func encode(_ params: [String: String]) -> Data {
         let body = params
             .sorted { $0.key < $1.key }
             .map { key, value in "\(percentEncode(key))=\(percentEncode(value))" }
@@ -79,7 +85,7 @@ struct OAuthTokenEndpointClient: Sendable {
         return Data(body.utf8)
     }
 
-    private func percentEncode(_ string: String) -> String {
+    private static func percentEncode(_ string: String) -> String {
         let allowed = CharacterSet(
             charactersIn:
                 "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
@@ -87,5 +93,3 @@ struct OAuthTokenEndpointClient: Sendable {
         return string.addingPercentEncoding(withAllowedCharacters: allowed) ?? string
     }
 }
-
-extension OAuthTokenEndpointClient: OAuthTokenRequesting {}

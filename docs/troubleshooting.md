@@ -365,6 +365,9 @@ authorizer, a 401 is `Authentication required` and a 403 is
 | `Authorization server metadata must include code_challenge_methods_supported` | `pkceCodeChallengeMethodsMissing` | The metadata does not advertise PKCE. |
 | `Authorization server metadata must support PKCE S256` | `pkceS256NotSupported` | The metadata lists PKCE methods without `S256`. |
 | `No authorization server was found` | `missingAuthorizationServer` | The protected resource metadata names no authorization server. |
+| `The jwt-bearer grant requires an assertion provider` | `assertionProviderMissing` | `grantType` is `.jwtBearer` and `assertionProvider` is `nil`. |
+| `Token exchange issued` | `issuedTokenTypeMismatch` | The identity provider returned another token type than requested, for example an access token instead of an ID-JAG. |
+| `Token request failed with status 400 (oauth_error: invalid_grant)` | `tokenRequestFailed` | With `.jwtBearer`: the assertion is expired, has the wrong audience, or is not trusted. The request is not retried. |
 | `Authorization response state mismatch` | `authorizationResponseStateMismatch` | The redirect does not belong to this authorization request. |
 
 Issuer mismatches are configuration errors on the server side: the issuer in

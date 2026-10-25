@@ -43,6 +43,3 @@ client:
   - "auth/dpop:sep-1932-client-dpop-auth-scheme"
   - "auth/dpop:sep-1932-client-fresh-proof"
   - "auth/dpop:sep-1932-client-token-request-proof"
-  - "auth/enterprise-managed-authorization:complete-flow-jwt-bearer"
-  - "auth/enterprise-managed-authorization:complete-flow-token-exchange"
-  - "auth/wif-jwt-bearer:wif-grant-type"

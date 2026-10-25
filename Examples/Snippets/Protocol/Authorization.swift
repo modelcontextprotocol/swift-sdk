@@ -36,8 +36,9 @@ func authorizationCodeTransport(
     let configuration = OAuthConfiguration(
         grantType: .authorizationCode,
         // An https URL with a path is used as a Client ID Metadata Document
-        // when the server supports it. Any other value enables dynamic
-        // client registration when the server has a registration endpoint.
+        // when the server supports it. An empty ID, or a URL the server does
+        // not accept as a metadata document, registers dynamically; a plain
+        // ID is pre-registered.
         authentication: .none(clientID: "https://app.example.com/oauth/client.json"),
         authorizationRedirectURI: URL(string: "http://127.0.0.1:8765/callback")!,
         clientName: "Example App",
@@ -47,6 +48,40 @@ func authorizationCodeTransport(
         endpoint: endpoint, authorizer: OAuthAuthorizer(configuration: configuration))
     // endsnippet
     return transport
+}
+
+/// A client in an enterprise that manages access to MCP servers (SEP-990).
+func enterpriseConfiguration(signIn: @escaping @Sendable () async throws -> String) -> OAuthConfiguration {
+    // snippet: auth-enterprise
+    let configuration = OAuthConfiguration.enterpriseManaged(
+        // The client's credentials at the MCP authorization server.
+        authentication: .clientSecretBasic(clientID: "chat-app", clientSecret: "app-secret"),
+        // Pinned: the MCP server cannot send the identity assertion elsewhere.
+        authorizationServer: URL(string: "https://auth.example.com")!,
+        identityProvider: .init(
+            endpoint: .issuer(URL(string: "https://login.example.com")!),
+            authentication: .clientSecretPost(clientID: "chat-app-idp", clientSecret: "idp-secret")),
+        // The user's ID token, from the app's sign-in at the identity provider.
+        idToken: { _ in try await signIn() })
+    // endsnippet
+    return configuration
+}
+
+/// A workload that authenticates with its platform identity (SEP-1933).
+func workloadConfiguration(readToken: @escaping @Sendable () throws -> String) -> OAuthConfiguration {
+    // snippet: auth-workload-identity
+    let configuration = OAuthConfiguration(
+        grantType: .jwtBearer,
+        authentication: .none(clientID: ""),
+        // Pinned: the workload's JWT goes only to this authorization server.
+        endpointOverrides: .init(authorizationServerURL: URL(string: "https://auth.example.com")!),
+        assertionProvider: { context, _ in
+            // A JWT for `context.audience`, issued by the workload's platform,
+            // for example read from a projected service account token file.
+            try readToken()
+        })
+    // endsnippet
+    return configuration
 }
 
 // snippet: auth-token-storage

@@ -140,6 +140,32 @@ public enum OAuthAuthorizationError: LocalizedError {
     /// but the response has none (RFC 9207).
     case authorizationResponseMissingIssuer
 
+    /// The configuration uses ``OAuthConfiguration/GrantType/jwtBearer`` without
+    /// an ``OAuthConfiguration/assertionProvider``.
+    case assertionProviderMissing
+
+    /// A token exchange (RFC 8693) returned another token type than the one
+    /// requested.
+    ///
+    /// - Parameters:
+    ///   - expected: The `requested_token_type` of the request.
+    ///   - actual: The `issued_token_type` of the response, if any.
+    case issuedTokenTypeMismatch(expected: String, actual: String?)
+
+    /// The ``OAuthConfiguration/GrantType/jwtBearer`` grant has no configured
+    /// authorization server or token endpoint, and
+    /// ``OAuthConfiguration/allowsDiscoveredAuthorizationServer`` is off, so
+    /// the assertion is not sent to a server the MCP server chose.
+    case authorizationServerNotConfigured
+
+    /// The assertion of a ``OAuthConfiguration/GrantType/jwtBearer`` request is
+    /// for another audience than the discovered authorization server.
+    ///
+    /// - Parameters:
+    ///   - expected: The issuer and the token endpoint of the authorization server.
+    ///   - actual: The `aud` claim of the assertion.
+    case assertionAudienceMismatch(expected: [String], actual: [String])
+
     public var errorDescription: String? {
         switch self {
         case .missingAuthorizationServer:
@@ -211,6 +237,16 @@ public enum OAuthAuthorizationError: LocalizedError {
             return "Authorization response issuer mismatch. Expected \(expected), got \(actual)"
         case .authorizationResponseMissingIssuer:
             return "Authorization response is missing the iss parameter the server advertised"
+        case .assertionProviderMissing:
+            return "The jwt-bearer grant requires an assertion provider"
+        case .issuedTokenTypeMismatch(let expected, let actual):
+            return "Token exchange issued \(actual ?? "no token type"), expected \(expected)"
+        case .authorizationServerNotConfigured:
+            return
+                "The jwt-bearer grant needs endpointOverrides.authorizationServerURL or tokenEndpoint, or allowsDiscoveredAuthorizationServer"
+        case .assertionAudienceMismatch(let expected, let actual):
+            return
+                "The assertion audience \(actual.joined(separator: ", ")) is none of \(expected.joined(separator: ", "))"
         }
     }
 }

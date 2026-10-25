@@ -44,6 +44,9 @@ lifecycle and [docs/migration.md](docs/migration.md) for upgrading.
 | `application_type` in DCR | SEP-837 | `OAuthConfiguration.applicationType` |
 | Authorization server migration | SEP-2352 | `OAuthAuthorizer` 401 handling |
 | 2025-03-26 default endpoints | 2025-03-26 spec | fallback in `OAuthAuthorizer` |
+| JWT bearer grant | RFC 7523 | `OAuthConfiguration.GrantType.jwtBearer`, `assertionProvider` |
+| Enterprise-managed authorization | SEP-990, RFC 8693 | `OAuthConfiguration.enterpriseManaged(...)`, `OAuthTokenExchange` |
+| Workload identity | SEP-1933 | `.jwtBearer` with a public client |
 
 Details: [design/auth.md](design/auth.md).
 
@@ -62,8 +65,6 @@ scenarios that do not count toward a tier; they are the entries in
 |---|---|---|
 | Tasks extension `io.modelcontextprotocol/tasks` | SEP-2663 | 25 (server, `tasks-*`) |
 | DPoP-bound access tokens | SEP-1932 | 8 (client, `auth/dpop`, `auth/dpop-nonce`) |
-| Enterprise-managed authorization | ext-auth | 2 (client) |
-| Workload identity `jwt-bearer` grant | — | 1 (client) |
 
 Other known gaps are listed under "Open questions" in each design note.
 
@@ -81,6 +82,6 @@ Harness: `@modelcontextprotocol/conformance@0.2.0-alpha.11` (pinned in
 |---|---|
 | `--spec-version 2025-11-25` | 0 / 0 |
 | `--spec-version 2026-07-28` | 0 / 0 |
-| default | 25 / 11, extension scenarios only |
+| default | 25 / 8, extension scenarios only (tasks, DPoP) |
 
 How the legs work: [conformance/README.md](conformance/README.md).

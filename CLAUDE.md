@@ -49,7 +49,9 @@ Keep the two manifests' target/dependency lists in sync when adding to the `MCP`
   `NetworkTransport` (Apple platforms only, Network.framework).
 - `MCPRequestHeaders.swift` implements SEP-2243 (`Mcp-Method`/`Mcp-Name`/`Mcp-Param-*`).
 - `Authorization/` implements OAuth 2.1 client-side flows: discovery (RFC 9728/8414), dynamic
-  client registration (RFC 7591), PKCE, token endpoint calls and `private_key_jwt` assertions.
+  client registration (RFC 7591), PKCE, token endpoint calls, `private_key_jwt` assertions, the
+  RFC 7523 jwt-bearer grant (`assertionProvider`, no DCR, no retry), RFC 8693 token exchange
+  (`OAuthTokenExchange`) and `OAuthConfiguration.enterpriseManaged(...)` (SEP-990).
   This is opt-in — wired in via an `OAuthAuthorizer` passed to `HTTPClientTransport`.
 - `Utilities/` holds cross-cutting concerns used by both Client and Server: `Cancellation`,
   `Progress`, `Ping`, and `RequestContext` (the client's handle on a pending request: id and

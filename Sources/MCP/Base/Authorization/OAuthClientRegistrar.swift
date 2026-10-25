@@ -96,6 +96,10 @@ struct OAuthClientRegistrar: Sendable {
         case .clientCredentials:
             grantTypes = [OAuthGrantTypeValue.clientCredentials]
             responseTypes = []
+        case .jwtBearer:
+            // The authorizer does not register for this grant.
+            grantTypes = [OAuthGrantTypeValue.jwtBearer]
+            responseTypes = []
         }
 
         var registrationPayload: [String: Any] = [
