@@ -20,6 +20,9 @@ Most code compiles unchanged; the breaking changes are in `MCPError`,
 | `Client` | Connects at 2026-07-28 by default, with a fallback to `initialize` | Nothing, or opt out |
 | `Version.supported` | Lists 2026-07-28 | Read `Version.handshake` for the `initialize` revisions |
 | Handlers | Undecodable parameters fail with -32602, not -32603 | Update tests that check the code |
+| Client handlers | Run outside the receive loop; at most 4 server-to-client requests at once | Remove `Task` wrappers that worked around the old loop, if you like |
+| `.stateless(version)` | No retry with another version | Use `.automatic` for negotiation |
+| `.none(clientID:)` | A plain client ID is pre-registered: no dynamic registration | Pass `""` to register |
 | HTTP transports | New error bodies, status codes and streaming | See below |
 | `HTTPClientTransport` | Default per-host connection limit 64; POST streams resume per stream | Raise `httpMaximumConnectionsPerHost` in custom configurations |
 | Package | Depends on swift-crypto | Resolve packages again |
@@ -73,6 +76,7 @@ Decoding an error response changed for these codes:
 | -32602 with `data.uri` and no `data.detail` | `invalidParams(_:)` | `resourceNotFound(uri:message:)` |
 | -32002 with `data.uri` | `serverError` | `resourceNotFound(uri:message:)` |
 | -32020, -32021, -32022 | `serverError` | the new cases |
+| -32603 without `data.detail` | `internalError(nil)` | `internalError(message)`; a bare "Internal error" stays `internalError(nil)` |
 
 `connectionClosed` and `transportError` are local errors only: transports
 throw them, and they are never decoded from the wire.
@@ -199,6 +203,34 @@ or a shorter `discoveryTimeout`.
   requests pass the id of the request being handled to the transport.
   `StatefulHTTPServerTransport` sends such messages on that request's SSE
   stream instead of the standalone GET stream.
+- A server whose `protocolVersions` lists no handshake revision answers
+  `initialize`, and every request without a stateless `_meta`, with -32022.
+  The previous release negotiated a handshake revision anyway.
+- A `strict` server ignores notifications before `initialize`. The previous
+  release answered them with an error response with a random id. A message
+  the server cannot read, and an empty batch, are answered with `"id": null`.
+- `Tool` leaves a `nil` description out of the JSON instead of writing
+  `"description": null`.
+
+### Client handlers and requests
+
+- Handlers no longer run on the receive loop. Notification handlers run one
+  at a time, in order, and may await requests on the same client. A response
+  is delivered at once, after the queued progress notifications of its own
+  request. Server-to-client requests at 2025-11-25 run concurrently, each in
+  its own task, at most `Configuration.maxConcurrentServerRequests` (4) at
+  once, and `notifications/cancelled` from the server cancels the task. The
+  previous release ran every handler on the receive loop, so a handler that
+  awaited a request on the same client never returned.
+- Cancelling the task that awaits `RequestContext.value` cancels the request.
+- A request is registered before `send(_:)` returns. `cancelRequest(_:reason:)`
+  right after `send` always ends the request; a request cancelled before it
+  was sent is not sent.
+- `withBatch(body:)` requests get the 2026-07-28 `_meta` envelope, header
+  parameters and the multi round-trip loop. On a stateless connection they
+  are sent one by one. When the closure throws, its requests fail.
+- `.stateless(version)` no longer retries with another version on -32022:
+  it connects at `version` or throws.
 
 ### HTTP server transports
 
@@ -228,6 +260,15 @@ or a shorter `discoveryTimeout`.
   concurrent clients may reuse ids.
 - When the transport stops before a response, the request gets HTTP 503
   instead of 500.
+- One `Server` behind the transport answers every `initialize`. The previous
+  release answered the first and sent -32600 to later clients.
+- When the HTTP adapter cancels a request whose JSON response is pending (the
+  client went away), the server's handler is cancelled, as for an SSE stream.
+
+`StatefulHTTPServerTransport` keeps at most `eventStoreCapacity` events
+(default 1000) and `eventStoreByteCapacity` bytes (default 16 MiB) per session
+for `Last-Event-ID` replay. The previous release kept every event until the
+session ended.
 
 ### HTTP client transport
 
@@ -275,11 +316,23 @@ or a shorter `discoveryTimeout`.
 - handle concurrent challenges one at a time. `InMemoryTokenStorage` is now
   thread-safe; custom `TokenStorage` implementations are called from several
   tasks.
+- treat a `.none(clientID:)` client ID that is not empty and not a URL as
+  pre-registered: no dynamic registration happens. Pass `.none(clientID: "")`
+  to register. The previous release registered and replaced the ID;
+- check the registration endpoint for private addresses, follow discovery
+  redirects only to `https` hosts that are not private addresses, and follow
+  no redirect for token and registration requests;
+- no longer block host names that begin with `fc`, `fd` or `fe8` through
+  `fe8b`: only IP literals are checked;
+- compute PKCE challenges and sign `private_key_jwt` assertions with
+  swift-crypto, so they work on Linux. `pkceS256Unavailable` and
+  `cryptographyUnavailable` are no longer thrown.
 
 ### Package
 
 The `MCP` target depends on swift-crypto (`3.0.0..<5.0.0`), in both manifests.
-It seals `requestState` with AES-GCM.
+It seals `requestState` with AES-GCM, computes PKCE challenges and signs
+`private_key_jwt` assertions.
 
 ## New opt-in features
 

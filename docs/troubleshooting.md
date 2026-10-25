@@ -199,7 +199,7 @@ the request again without `requestState`. See [server.md](server.md#protecting-r
 | Detail | Cause | Fix |
 |---|---|---|
 | `<method> cannot be sent at protocol version 2026-07-28` | A handler of a stateless request called `requestSampling`, `requestElicitation` or `listRoots`. | Return an input-required result; see [Era mix-ups](#era-mix-ups). |
-| `Server is already initialized` | A second `initialize` reached the same `Server`. | Use one `Server` per session or connection. |
+| `Server is already initialized` | A second `initialize` reached the same `Server` on a connection or session. | Use one `Server` per session or connection. |
 | `Server is not initialized` | A `strict` server received a request before `initialize`. | Connect with `connect(transport:)`, which initializes. |
 | `<method> requires input; enable Configuration.multiRoundTrip or use send(_:)` | `callTool`, `getPrompt` or `readResource` received an input-required result while `multiRoundTrip.isEnabled` is `false`. | Enable it, or call `send(_:)` and run the rounds. |
 | `subscriptions/listen requires protocol version 2026-07-28 or later` | `Client.listen(_:)` on a handshake connection. | Register list-changed handlers instead; the server sends the notifications on the connection. |

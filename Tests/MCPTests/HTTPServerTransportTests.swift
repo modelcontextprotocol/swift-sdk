@@ -1165,6 +1165,45 @@ struct StatefulHTTPServerTransportTests {
         #expect(await readToEnd(resumed)?.contains(requestID) == true)
         await transport.disconnect()
     }
+
+    @Test("The replay store keeps the newest events only")
+    func testEventStoreCapacity() async throws {
+        let transport = StatefulHTTPServerTransport(
+            validationPipeline: StandardValidationPipeline(validators: []), eventStoreCapacity: 2)
+        let sessionID = try await initializeSession(transport: transport)
+
+        // No GET stream is open: each message is stored for replay.
+        let notification = makeNotificationBody(method: "notifications/tools/list_changed")
+        try await transport.send(notification)
+        let first = try #require(await transport.storedEventIDs.last)
+        try await transport.send(notification)
+        try await transport.send(notification)
+        let eventIDs = await transport.storedEventIDs
+        #expect(eventIDs.count == 2)
+        #expect(!eventIDs.contains(first))
+
+        // Resuming from before a dropped event fails; from the dropped
+        // event itself, nothing after it is lost.
+        let separator = try #require(first.lastIndex(of: "_"))
+        let prefix = first[..<separator]
+        let stale = await transport.handleRequest(
+            makeGETRequest(sessionID: sessionID, lastEventID: "\(prefix)_0"))
+        #expect(stale.statusCode == 400)
+        let fromDropped = await transport.handleRequest(
+            makeGETRequest(sessionID: sessionID, lastEventID: first))
+        #expect(fromDropped.statusCode == 200)
+
+        // The oldest kept event can; the newer one is replayed.
+        let resumed = await transport.handleRequest(
+            makeGETRequest(sessionID: sessionID, lastEventID: eventIDs[0]))
+        #expect(resumed.statusCode == 200)
+        if case .stream(let stream, _) = resumed {
+            var iterator = stream.makeAsyncIterator()
+            let replayed = String(decoding: try #require(try await iterator.next()), as: UTF8.self)
+            #expect(replayed.contains("id: \(eventIDs[1])"))
+        }
+        await transport.disconnect()
+    }
 }
 
 // MARK: - StatelessHTTPServerTransport Tests
@@ -1371,6 +1410,31 @@ struct StatelessHTTPServerTransportTests {
         let response = await handleTask.value
         // The server never answered: 503 Service Unavailable.
         #expect(response.statusCode == 503)
+    }
+
+    @Test("A client that goes away before a JSON reply cancels the request")
+    func testCancelledJSONExchangeCancelsRequest() async throws {
+        let transport = makeStatelessTransport()
+        try await transport.connect()
+        let incoming = Task { () -> [String] in
+            var methods: [String] = []
+            for try await data in await transport.receive() {
+                let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+                methods.append(json?["method"] as? String ?? "")
+                if methods.count == 2 { break }
+            }
+            return methods
+        }
+        let handleTask = Task {
+            await transport.handleRequest(makeStatelessPOSTRequest(body: makeRequestBody(id: "gone")))
+        }
+        try await Task.sleep(for: .milliseconds(50))
+        handleTask.cancel()
+
+        // The server sees the request, then its cancellation.
+        #expect(try await incoming.value == ["tools/list", "notifications/cancelled"])
+        #expect(await handleTask.value.statusCode == 503)
+        await transport.disconnect()
     }
 }
 
@@ -1653,3 +1717,62 @@ struct ServerHandlerContextTests {
         await transport.disconnect()
     }
 }
+
+@Suite("Stateful replay store")
+struct StatefulReplayStoreTests {
+    @Test("A quiet stream can be resumed after other streams filled the store")
+    func quietStreamSurvives() async throws {
+        let transport = StatefulHTTPServerTransport(
+            validationPipeline: StandardValidationPipeline(validators: []), eventStoreCapacity: 3)
+        let sessionID = try await initializeSession(transport: transport)
+        // Open the GET stream and read its priming event.
+        let get = await transport.handleRequest(makeGETRequest(sessionID: sessionID))
+        guard case .stream(let events, _) = get else {
+            Issue.record("expected a stream")
+            return
+        }
+        var iterator = events.makeAsyncIterator()
+        let priming = String(decoding: try #require(try await iterator.next()), as: UTF8.self)
+        let primingID = try #require(
+            priming.split(separator: "\n").first { $0.hasPrefix("id: ") }.map { String($0.dropFirst(4)) })
+
+        // Traffic of request streams fills the store many times over.
+        for index in 0..<10 {
+            let response = Data(#"{"jsonrpc":"2.0","id":"x\#(index)","result":{}}"#.utf8)
+            try await transport.send(response, relatedRequestID: .string("x\(index)"))
+        }
+        let resumed = await transport.handleRequest(makeGETRequest(sessionID: sessionID, lastEventID: primingID))
+        #expect(resumed.statusCode == 200)
+        await transport.disconnect()
+    }
+
+    @Test("The store keeps at most its byte capacity, and always the newest event")
+    func byteCapacity() async throws {
+        let transport = StatefulHTTPServerTransport(
+            validationPipeline: StandardValidationPipeline(validators: []), eventStoreByteCapacity: 1000)
+        _ = try await initializeSession(transport: transport)
+        let big = String(repeating: "x", count: 400)
+        for _ in 0..<5 {
+            try await transport.send(
+                Data(#"{"jsonrpc":"2.0","method":"notifications/message","params":{"level":"info","data":"\#(big)"}}"#.utf8))
+        }
+        #expect(await transport.storedEventIDs.count == 2)
+        let huge = String(repeating: "y", count: 5000)
+        try await transport.send(
+            Data(#"{"jsonrpc":"2.0","method":"notifications/message","params":{"level":"info","data":"\#(huge)"}}"#.utf8))
+        #expect(await transport.storedEventIDs.count == 1)
+        await transport.disconnect()
+    }
+
+    @Test("A malformed or unknown Last-Event-ID gets 400")
+    func unknownEventID() async throws {
+        let transport = StatefulHTTPServerTransport(validationPipeline: StandardValidationPipeline(validators: []))
+        let sessionID = try await initializeSession(transport: transport)
+        for lastEventID in ["garbage", "nope_1", "_GET_stream_99999"] {
+            let response = await transport.handleRequest(makeGETRequest(sessionID: sessionID, lastEventID: lastEventID))
+            #expect(response.statusCode == 400, "\(lastEventID)")
+        }
+        await transport.disconnect()
+    }
+}
+

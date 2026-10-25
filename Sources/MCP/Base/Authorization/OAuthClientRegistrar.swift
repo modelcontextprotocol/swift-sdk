@@ -31,7 +31,8 @@ struct OAuthClientRegistrar: Sendable {
     ///
     /// Returns `nil` if registration is not needed:
     /// - Credentials are already configured (not `.none`)
-    /// - CIMD is in use and the server supports it (pre-registered)
+    /// - The client ID is not empty and not a URL: a pre-registered public client
+    /// - CIMD is in use and the server supports it
     /// - No registration endpoint is available and no CIMD mismatch error
     ///
     /// Throws if registration was attempted but failed (4xx, 5xx, or unexpected response).
@@ -61,6 +62,11 @@ struct OAuthClientRegistrar: Sendable {
             return nil
         }
 
+        // A plain client ID was issued by the authorization server in advance.
+        if !clientID.isEmpty, !clientIDLooksLikeURL(clientID) {
+            return nil
+        }
+
         guard let registrationEndpoint = asMetadata.registrationEndpoint else {
             if hasClientIDMetadataDocument && !supportsClientIDMetadataDocument {
                 throw OAuthAuthorizationError.cimdNotSupported(clientID: clientID)
@@ -69,6 +75,12 @@ struct OAuthClientRegistrar: Sendable {
         }
         try urlValidator.validateAuthorizationServer(
             registrationEndpoint, context: "Client registration endpoint")
+        if let host = URLComponents(url: registrationEndpoint, resolvingAgainstBaseURL: false)?
+            .host?.lowercased(), urlValidator.isPrivateIPHost(host)
+        {
+            throw OAuthAuthorizationError.privateIPAddressBlocked(
+                context: "Client registration endpoint", url: registrationEndpoint.absoluteString)
+        }
 
         var request = URLRequest(url: registrationEndpoint)
         request.httpMethod = "POST"
@@ -105,7 +117,8 @@ struct OAuthClientRegistrar: Sendable {
 
         request.httpBody = httpBody
 
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await session.oauthData(
+            for: request, redirects: .none, validator: urlValidator)
         if let httpResponse = response as? HTTPURLResponse,
             (400..<500).contains(httpResponse.statusCode)
         {

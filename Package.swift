@@ -97,6 +97,7 @@ let package = Package(
                 "MCP",
                 .product(name: "SystemPackage", package: "swift-system"),
                 .product(name: "Logging", package: "swift-log"),
+                .product(name: "Crypto", package: "swift-crypto"),
                 .product(
                     name: "EventSource", package: "eventsource",
                     condition: .when(platforms: [.macOS, .iOS, .tvOS, .visionOS, .watchOS, .macCatalyst])),

@@ -37,8 +37,8 @@ The parameters of `Server.init`:
 
 | Field | Default | Effect |
 | --- | --- | --- |
-| `strict` | `false` | Handshake era only: requests other than `initialize` and `ping` before `initialize` fail with -32600 "Server is not initialized". Server-to-client requests check the client's declared capabilities. |
-| `protocolVersions` | `Version.stateless + Version.handshake` | The revisions the server serves, newest first. `initialize` negotiates among the handshake revisions in this list. |
+| `strict` | `false` | Handshake era only: requests other than `initialize` and `ping` before `initialize` fail with -32600 "Server is not initialized", and notifications before it are ignored. Server-to-client requests check the client's declared capabilities. No effect behind a `StatelessHTTPServerTransport`. |
+| `protocolVersions` | `Version.stateless + Version.handshake` | The revisions the server serves, newest first. `initialize` negotiates among the handshake revisions in this list. With no handshake revision, `initialize` and every handshake-era request fail with -32022. |
 | `cacheHints`, `defaultCacheHint` | `[:]`, `.uncached` | See [Cacheable results](#cacheable-results). |
 
 A server for handshake clients only lists `Version.handshake`:
@@ -116,7 +116,7 @@ func registerToolList(on server: Server) async {
 }
 ```
 
-- `description` has no default value: pass `nil` when the tool has none.
+- `description` has no default value: pass `nil` when the tool has none. A `nil` description is left out of the JSON.
 - `annotations` are hints for clients (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`, `title`). Clients must not trust them from untrusted servers.
 - The SDK does not validate arguments against `inputSchema`. Check them in the handler.
 
@@ -989,7 +989,8 @@ The `statelessRequestHook` of `start` runs before each stateless request, with `
 
 | Code | Cause |
 | --- | --- |
-| -32600 | "Server is already initialized": a second `initialize` on the same server |
+| -32600 | "Server is already initialized": a second `initialize` on the same connection or session. Behind a `StatelessHTTPServerTransport` every `initialize` is answered. |
+| -32022 | `Configuration.protocolVersions` lists no handshake revision |
 | any | The error the hook threw |
 
 The server answers with the requested version if it is a handshake revision in `Configuration.protocolVersions`, otherwise with the first handshake revision in that list.

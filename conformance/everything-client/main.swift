@@ -199,15 +199,16 @@ private func makeOAuthConfiguration(
             accessTokenProvider: makeCrossAppAccessTokenProvider(context: context)
         )
 
+    // An empty client ID registers dynamically; a supplied one is pre-registered.
     case let s where s.hasPrefix("auth/client-credentials"):
         configuration = .init(
-            authentication: .none(clientID: clientID)
+            authentication: .none(clientID: context["client_id"] ?? "")
         )
 
     default:
         configuration = .init(
             grantType: .authorizationCode,
-            authentication: .none(clientID: clientID)
+            authentication: .none(clientID: context["client_id"] ?? "")
         )
     }
 

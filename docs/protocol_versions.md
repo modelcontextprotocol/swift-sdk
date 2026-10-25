@@ -227,8 +227,8 @@ the `_meta` envelope of the requested version, then:
    `Version.stateless`, or sends `initialize` when there is none, and
    `.stateless` throws `MCPError.unsupportedProtocolVersion`.
 2. On -32022, `.automatic` retries `server/discover` once, with the first
-   version in `data.supported` that is in `Version.stateless`. `.stateless(_:)`
-   never retries with another version.
+   version in `data.supported` that is in `Version.stateless`. `.stateless`
+   throws the error: a pinned client never connects at another version.
 3. When no retry is possible, `.automatic` sends `initialize` if
    `data.supported` is empty or lists a handshake revision; otherwise the
    client throws the -32022 error.

@@ -69,9 +69,10 @@ func callBothWays(_ client: Client, tool: String) async throws -> (Bool?, CallTo
   of yours for these methods that were registered before. Register
   replacements after `start`.
 
-- A `Server` accepts `initialize` once. Behind one
-  `StatelessHTTPServerTransport`, which serves every client with one server,
-  a second handshake client gets -32600 `Server is already initialized`.
+- Behind a `StatelessHTTPServerTransport`, handshake clients are served
+  without a session: every `initialize` is answered, but the server keeps no
+  client info or capabilities, so `Server.currentHandlerContext` has none for
+  their requests, and there is no GET stream for messages outside a request.
 
   **Workaround**: route `initialize` clients to a
   `StatefulHTTPServerTransport`, with one `Server` per session.
@@ -122,10 +123,6 @@ func textContent(_ string: String) -> Tool.Content {
 
 - `resourceNotFound` and `invalidParams` share -32602. Decoding picks
   `resourceNotFound` when `data` has a `uri` and no `detail`.
-
-- Decoding -32603 keeps `data.detail` and drops the message: an error from a
-  peer that sends no `data.detail` decodes as `internalError(nil)`. Errors
-  from this SDK carry the detail.
 
 - `HTTPClientTransport` reports OAuth failures as
   `MCPError.internalError("Authorization flow failed: ...")` with the

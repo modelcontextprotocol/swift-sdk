@@ -120,10 +120,9 @@ older servers:
 
 %include Examples/Snippets/QuickStart/QuickStart.swift http-client
 
-Clients that use `initialize` need a session: route them to a
-`StatefulHTTPServerTransport`, one per session. A single stateless transport
-accepts only one `initialize` for its server; see
-[rough_edges.md](rough_edges.md#server-api). [protocol.md](protocol.md) describes the
+Clients that use `initialize` expect a session: route them to a
+`StatefulHTTPServerTransport`, one per session. A stateless transport answers
+their requests without one; see [rough_edges.md](rough_edges.md#server-api). [protocol.md](protocol.md) describes the
 transports and the routing, and
 [`Examples/http-server/main.swift`](../Examples/http-server/main.swift) is a
 complete server built on SwiftNIO.

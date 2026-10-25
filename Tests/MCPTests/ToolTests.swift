@@ -24,6 +24,16 @@ struct ToolTests {
         #expect(tool.outputSchema == nil)
     }
 
+    @Test("A tool without a description encodes no description key")
+    func testToolWithoutDescriptionOmitsKey() throws {
+        let tool = Tool(name: "bare", description: nil, inputSchema: ["type": "object"])
+        let object = try JSONDecoder().decode(Value.self, from: JSONEncoder().encode(tool)).objectValue
+        #expect(object?["description"] == nil)
+        #expect(object?["name"] == "bare")
+        let decoded = try JSONDecoder().decode(Tool.self, from: JSONEncoder().encode(tool))
+        #expect(decoded.description == nil)
+    }
+
     @Test("Tool Annotations initialization and properties")
     func testToolAnnotationsInitialization() throws {
         // Empty annotations

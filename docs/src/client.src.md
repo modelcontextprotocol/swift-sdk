@@ -50,7 +50,7 @@ This guide covers the `Client` actor: connecting at either protocol era, calling
 - `HTTPClientTransport` reports HTTP 400, 404 or 405 without a JSON-RPC error for the request: how a server that serves only the handshake refuses a request without a session;
 - no answer arrives within `discoveryTimeout`. A late answer is ignored.
 
-On -32022, `.automatic` first retries once with the first stateless version in the server's `data.supported` list (servers list versions newest first). Other transport errors are rethrown, so the caller can retry: authorization failures, 401 and 403 after the authorization attempts, 408, 429, 5xx, `transportError` and errors that are not `MCPError`, such as a `URLError`. Other requests and `connect` as a whole have no timeout.
+On -32022, `.automatic` first retries once with the first stateless version in the server's `data.supported` list (servers list versions newest first). `.stateless(version)` never retries: it connects at `version` or throws. Other transport errors are rethrown, so the caller can retry: authorization failures, 401 and 403 after the authorization attempts, 408, 429, 5xx, `transportError` and errors that are not `MCPError`, such as a `URLError`. Other requests and `connect` as a whole have no timeout.
 
 %include Examples/Snippets/Client/Client.swift connect-automatic
 
@@ -291,7 +291,11 @@ Keep the method, name and arguments unchanged between rounds. An SDK server seal
 
 `onNotification(_:handler:)` registers a handler for one notification type. Several handlers per type are allowed; they run in registration order, and an error thrown by one is logged.
 
-Handlers run on the client's receive loop. While a handler runs, no other message is read, so a handler that awaits a request on the same client never gets the response. Start a `Task` for such work, as the snippets below do. The same applies to the roots, sampling and elicitation handlers at 2025-11-25, which also run on the receive loop: a handler that waits for the user delays every other message on the connection. At 2026-07-28 these handlers run in the task of the request that received the input-required result, not on the receive loop.
+Handlers do not run on the client's receive loop, so they may await requests on the same client. Notification handlers run one at a time, in arrival order; a slow one delays later notifications, so start a `Task` for long work. Responses do not wait for them, with one exception: a request with a progress token is answered after the progress notifications for that token that arrived before its response were handled. For a request sent from a notification handler the result comes first, and its progress after the handler returns. Log notifications are not ordered with results.
+
+At 2025-11-25 each roots, sampling or elicitation request from the server runs in its own task. At most `Configuration.maxConcurrentServerRequests` (4) run at once; up to 64 more wait, and further ones are refused with -32603. A request whose id is already in progress is refused with -32600. When the server sends `notifications/cancelled` for one, its task is cancelled, or it is dropped while it waits, and no response is sent. At 2026-07-28 the server cannot send requests: the client answers them with -32601; these handlers run in the task of the request that received the input-required result.
+
+Cancelling the task that awaits `RequestContext.value`, or a convenience method such as `callTool`, cancels the request, as `cancelRequest(_:reason:)` does.
 
 ### List changes
 
@@ -357,9 +361,9 @@ At 2026-07-28 log notifications belong to the request that caused them. Set `log
 - The client sends `notifications/cancelled` with the id and reason. At 2026-07-28 over `HTTPClientTransport` it closes the request's HTTP stream instead, which cancels the request on the server.
 - Cancellation is advisory: the server may have finished already.
 - In a multi round-trip exchange, pass the first `requestID`; the client cancels the current round.
-- The request is registered as pending asynchronously after `send` returns. A `cancelRequest` issued immediately, before that happens, does not end `value`.
+- The request is registered before `send` returns, so `cancelRequest` always ends `value`. A request cancelled before the transport sent it is not sent, and no notification is sent for it. The notification never overtakes its request.
 
-A notification `notifications/cancelled` from the server ends the matching pending request with `CancellationError` too.
+A `notifications/cancelled` from the server stops the handler of the server-to-client request with that id. When there is no such request, it ends the matching pending request with `CancellationError`.
 
 ### Progress
 
@@ -375,7 +379,7 @@ To receive progress for a request, put a progress token in its `_meta` and handl
 
 %include Examples/Snippets/Client/Notifications.swift batch
 
-JSON-RPC batching was removed from the specification in 2025-06-18. Use it only with peers that accept batches; an SDK server does. Batched requests bypass the code in `send(_:)`, so they do not get the 2026-07-28 `_meta` envelope, the multi round-trip loop or the header parameters. Use batching on handshake connections only.
+JSON-RPC batching was removed from the specification in 2025-06-18. Use it only with peers that accept batches; an SDK server does. Each request gets what `send(_:)` adds: the 2026-07-28 `_meta` envelope, the header parameters and the multi round-trip loop. On a stateless connection the requests are sent one by one, because each 2026-07-28 request carries its own HTTP headers. A request cancelled with `cancelRequest(_:reason:)` before the batch is sent is left out. When the closure throws, the requests it added fail with the same error and nothing is sent.
 
 `withBatch` throws `internalError("Client connection not initialized")` when not connected. An empty batch sends nothing.
 

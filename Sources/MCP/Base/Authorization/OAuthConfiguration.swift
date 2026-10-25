@@ -4,9 +4,7 @@ import Foundation
     import FoundationNetworking
 #endif
 
-#if canImport(CryptoKit)
-    import CryptoKit
-#endif
+import Crypto
 
 /// Configuration for OAuth 2.1 authorization used by ``HTTPClientTransport``.
 ///
@@ -102,6 +100,7 @@ public struct OAuthConfiguration: Sendable {
     /// Errors thrown while creating SDK-generated `private_key_jwt` assertions.
     public enum PrivateKeyJWTAssertionError: LocalizedError, Sendable {
         case invalidLifetime(TimeInterval)
+        /// Not thrown: signing uses swift-crypto on every platform.
         case cryptographyUnavailable
 
         public var errorDescription: String? {
@@ -109,7 +108,7 @@ public struct OAuthConfiguration: Sendable {
             case .invalidLifetime(let lifetime):
                 return "private_key_jwt assertion lifetime must be greater than zero seconds, got \(lifetime)"
             case .cryptographyUnavailable:
-                return "private_key_jwt assertion signing requires CryptoKit support"
+                return "private_key_jwt assertion signing is unavailable"
             }
         }
     }
@@ -130,7 +129,7 @@ public struct OAuthConfiguration: Sendable {
     /// ```
     ///
     /// The assertion is a compact-serialized JWS signed with the specified private key.
-    /// Only ES256 (P-256 ECDSA) is supported by this helper; the algorithm requires CryptoKit.
+    /// Only ES256 (P-256 ECDSA) is supported by this helper.
     /// To use other algorithms, supply a custom ``JWTAssertionFactory`` closure directly to
     /// ``TokenEndpointAuthentication/privateKeyJWT(clientID:assertionFactory:)``.
     ///
@@ -144,7 +143,7 @@ public struct OAuthConfiguration: Sendable {
     ///   - expiresIn: Lifetime of the assertion in seconds. Defaults to 300 (5 minutes). Must be > 0.
     /// - Returns: A compact-serialized JWT string (`header.payload.signature`).
     /// - Throws: ``PrivateKeyJWTAssertionError/invalidLifetime(_:)`` if `expiresIn` ≤ 0,
-    ///   or ``PrivateKeyJWTAssertionError/cryptographyUnavailable`` on platforms without CryptoKit.
+    ///   or the error of `P256.Signing.PrivateKey(pemRepresentation:)` for an invalid key.
     public static func makePrivateKeyJWTAssertion(
         clientID: String,
         tokenEndpoint: URL,
@@ -176,16 +175,12 @@ public struct OAuthConfiguration: Sendable {
 
         let signingInput = "\(header.base64URLEncodedString()).\(payload.base64URLEncodedString())"
 
-        #if canImport(CryptoKit)
-            switch signingAlgorithm {
-            case .ES256:
-                let privateKey = try P256.Signing.PrivateKey(pemRepresentation: privateKeyPEM)
-                let signature = try privateKey.signature(for: Data(signingInput.utf8)).rawRepresentation
-                return "\(signingInput).\(signature.base64URLEncodedString())"
-            }
-        #else
-            throw PrivateKeyJWTAssertionError.cryptographyUnavailable
-        #endif
+        switch signingAlgorithm {
+        case .ES256:
+            let privateKey = try P256.Signing.PrivateKey(pemRepresentation: privateKeyPEM)
+            let signature = try privateKey.signature(for: Data(signingInput.utf8)).rawRepresentation
+            return "\(signingInput).\(signature.base64URLEncodedString())"
+        }
     }
 
     /// Returns a loopback redirect URI with a random ephemeral port.

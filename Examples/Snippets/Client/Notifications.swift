@@ -21,11 +21,8 @@ actor ToolCache {
 func watchToolList(_ client: Client, cache: ToolCache) async {
     // snippet: list-changed
     await client.onNotification(ToolListChangedNotification.self) { _ in
-        // The notification carries no list: fetch it again. Handlers run on
-        // the client's receive loop, so send requests from a new task.
-        Task {
-            do { try await cache.refresh(from: client) } catch { print("refresh failed: \(error)") }
-        }
+        // The notification carries no list: fetch it again.
+        do { try await cache.refresh(from: client) } catch { print("refresh failed: \(error)") }
     }
     // endsnippet
 }
@@ -53,10 +50,8 @@ func listenForChanges(_ client: Client) async throws -> SubscriptionFilter {
 func watchNotes(_ client: Client) async throws -> Set<String> {
     // snippet: subscribe-resource
     await client.onNotification(ResourceUpdatedNotification.self) { message in
-        Task {
-            guard let contents = try? await client.readResource(uri: message.params.uri) else { return }
-            print("\(message.params.uri) now has \(contents.count) parts")
-        }
+        guard let contents = try? await client.readResource(uri: message.params.uri) else { return }
+        print("\(message.params.uri) now has \(contents.count) parts")
     }
     // resources/subscribe at 2025-11-25; a listen stream per URI at 2026-07-28.
     try await client.subscribeToResource(uri: "file:///notes.txt")

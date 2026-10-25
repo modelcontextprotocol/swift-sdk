@@ -42,22 +42,29 @@ public actor Client {
         /// How the client answers input-required results (SEP-2322).
         public var multiRoundTrip: MultiRoundTrip
 
+        /// The most server-to-client requests (sampling, elicitation, roots)
+        /// whose handlers run at once. Up to 64 more wait; beyond that a
+        /// request is refused with -32603.
+        public var maxConcurrentServerRequests: Int
+
         public init(
             strict: Bool = false,
             protocolMode: ProtocolMode = .automatic,
             logLevel: LogLevel? = nil,
             discoveryTimeout: Duration? = .seconds(10),
-            multiRoundTrip: MultiRoundTrip = .init()
+            multiRoundTrip: MultiRoundTrip = .init(),
+            maxConcurrentServerRequests: Int = 4
         ) {
             self.strict = strict
             self.protocolMode = protocolMode
             self.logLevel = logLevel
             self.discoveryTimeout = discoveryTimeout
             self.multiRoundTrip = multiRoundTrip
+            self.maxConcurrentServerRequests = maxConcurrentServerRequests
         }
 
         private enum CodingKeys: String, CodingKey {
-            case strict, protocolMode, logLevel, discoveryTimeout, multiRoundTrip
+            case strict, protocolMode, logLevel, discoveryTimeout, multiRoundTrip, maxConcurrentServerRequests
         }
 
         /// Decodes a configuration; keys added after `strict` are optional.
@@ -70,6 +77,8 @@ public actor Client {
                 container.contains(.discoveryTimeout)
                 ? try container.decodeIfPresent(Duration.self, forKey: .discoveryTimeout) : .seconds(10)
             multiRoundTrip = try container.decodeIfPresent(MultiRoundTrip.self, forKey: .multiRoundTrip) ?? .init()
+            maxConcurrentServerRequests =
+                try container.decodeIfPresent(Int.self, forKey: .maxConcurrentServerRequests) ?? 4
         }
 
         public func encode(to encoder: Encoder) throws {
@@ -79,6 +88,7 @@ public actor Client {
             try container.encodeIfPresent(logLevel, forKey: .logLevel)
             try container.encode(discoveryTimeout, forKey: .discoveryTimeout)
             try container.encode(multiRoundTrip, forKey: .multiRoundTrip)
+            try container.encode(maxConcurrentServerRequests, forKey: .maxConcurrentServerRequests)
         }
 
         /// How the client answers input-required results (SEP-2322).
@@ -134,7 +144,9 @@ public actor Client {
         /// such as authorization failures, 429 or 5xx, are rethrown.
         /// The default.
         case automatic
-        /// Use one stateless revision; fail if the server does not serve it.
+        /// Use one stateless revision; fail with
+        /// ``MCPError/unsupportedProtocolVersion(supported:requested:)`` if the
+        /// server does not serve it. Never retries or falls back.
         case stateless(String)
     }
 
@@ -341,6 +353,47 @@ public actor Client {
 
     /// A dictionary of type-erased pending requests, keyed by request ID
     private var pendingRequests: [ID: AnyPendingRequest] = [:]
+    /// Registered requests not yet handed to the transport. A request
+    /// cancelled while here is never sent.
+    private var unsentRequests: Set<ID> = []
+    /// A running handler of a server-to-client request.
+    private struct IncomingHandler {
+        /// Tells this run from a later request that reuses the id.
+        let token: UUID
+        let task: Task<Void, Never>
+    }
+
+    /// Handlers of server-to-client requests that are still running.
+    private var incomingRequests: [ID: IncomingHandler] = [:]
+    /// Server-to-client requests waiting for a free handler slot.
+    private var queuedIncomingRequests: [Request<AnyMethod>] = []
+    /// The most server-to-client requests that wait for a slot.
+    static let incomingRequestBacklog = 64
+
+    /// Notifications in arrival order. Their handlers run one at a time.
+    private var inboundQueue: AsyncStream<Message<AnyNotification>>.Continuation?
+    private var inboundTask: Task<Void, Never>?
+    /// Requests sent from a notification handler. Their responses never
+    /// wait for queued notifications, so that the handler can wait for them.
+    private var immediateResponses: Set<ID> = []
+    /// The progress tokens of requests in flight, recorded while progress
+    /// handlers are registered.
+    private var progressTokens: [ID: ProgressToken] = [:]
+    /// Progress notifications queued and not yet handled, by token.
+    private var queuedProgress: [ProgressToken: Int] = [:]
+    /// Responses that wait for the queued progress notifications of their
+    /// request, by token.
+    private var parkedResponses: [ProgressToken: [Response<AnyMethod>]] = [:]
+
+    /// Set while a notification handler runs.
+    @TaskLocal private static var isHandlingNotification = false
+
+    /// Notifications the client itself handles inside the receive loop,
+    /// before later messages: it only updates its state. Handlers registered
+    /// for them run in the inbound queue, like any other.
+    private static let inlineNotifications: Set<String> = [
+        CancelledNotification.name, SubscriptionsAcknowledgedNotification.name,
+    ]
     // Add reusable JSON encoder/decoder
     private let encoder = JSONEncoder()
     /// Decodes incoming messages with `data:` URL strings kept as strings;
@@ -384,6 +437,21 @@ public actor Client {
         await logger?.debug(
             "Client connected", metadata: ["name": "\(name)", "version": "\(version)"])
 
+        // Notification handlers run in arrival order, outside the receive
+        // loop, so that a handler may await a request on this client.
+        let (inbound, queue) = AsyncStream<Message<AnyNotification>>.makeStream()
+        inboundQueue = queue
+        inboundTask = Task {
+            for await message in inbound {
+                await Client.$isHandlingNotification.withValue(true) {
+                    await self.handleMessage(message)
+                }
+                if let token = Self.progressToken(of: message) {
+                    await self.progressHandled(token)
+                }
+            }
+        }
+
         // Start message handling loop
         task = Task {
             guard let connection = self.connection else { return }
@@ -399,13 +467,23 @@ public actor Client {
                         // Attempt to decode data
                         // Try decoding as a batch response first
                         if let batchResponse = try? decoder.decode([AnyResponse].self, from: data) {
-                            await handleBatchResponse(batchResponse)
+                            for response in batchResponse {
+                                await deliver(response)
+                            }
                         } else if let response = try? decoder.decode(AnyResponse.self, from: data) {
-                            await handleResponse(response)
+                            await deliver(response)
                         } else if let request = try? decoder.decode(AnyRequest.self, from: data) {
-                            await handleIncomingRequest(request)
+                            startIncomingRequest(request)
                         } else if let message = try? decoder.decode(AnyMessage.self, from: data) {
-                            await handleMessage(message)
+                            if Self.inlineNotifications.contains(message.method) {
+                                await handleBuiltIn(message)
+                            }
+                            if notificationHandlers[message.method]?.isEmpty == false {
+                                if let token = Self.progressToken(of: message) {
+                                    queuedProgress[token, default: 0] += 1
+                                }
+                                inboundQueue?.yield(message)
+                            }
                         } else {
                             var metadata: Logger.Metadata = [:]
                             if let string = String(data: data, encoding: .utf8) {
@@ -427,34 +505,6 @@ public actor Client {
                 }
             } while true
             await self.logger?.debug("Client message handling loop task is terminating.")
-        }
-
-        // Acknowledgements of subscriptions/listen streams
-        await self.onNotification(SubscriptionsAcknowledgedNotification.self) { message in
-            guard let id = message._meta?.subscriptionID else { return }
-            await self.acknowledge(id, message.params.notifications)
-        }
-
-        // Register cancellation notification handler
-        await self.onNotification(CancelledNotification.self) { message in
-
-            let requestId = message.params.requestId
-            let reason = message.params.reason
-
-            await self.logger?.debug(
-                "Received cancellation notification",
-                metadata: [
-                    "requestId": requestId.map { "\($0)" } ?? "none",
-                    "reason": reason.map { "\($0)" } ?? "none",
-                ]
-            )
-
-            // Remove the pending request and resume with cancellation error
-            if let requestId = requestId,
-                let pendingRequest = await self.removePendingRequest(id: requestId)
-            {
-                pendingRequest.resume(throwing: CancellationError())
-            }
         }
 
         // Open the protocol connection
@@ -508,6 +558,23 @@ public actor Client {
         roundTrips = [:]
         cancelledRoundTrips = []
         self.toolHeaderParameters = [:]
+        self.unsentRequests = []
+
+        // Stop the handlers. They are not awaited: disconnect may be called
+        // from one of them.
+        for handler in incomingRequests.values {
+            handler.task.cancel()
+        }
+        incomingRequests = [:]
+        queuedIncomingRequests = []
+        immediateResponses = []
+        progressTokens = [:]
+        queuedProgress = [:]
+        parkedResponses = [:]
+        inboundQueue?.finish()
+        inboundQueue = nil
+        inboundTask?.cancel()
+        inboundTask = nil
 
         // A subscribeToResource call made while the stream was closing.
         subscribedResources = []
@@ -615,19 +682,26 @@ public actor Client {
     /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/cancellation
     public func send<M: Method>(_ request: Request<M>) throws -> RequestContext<M.Result> {
         let first = try dispatch(request)
+        return RequestContext(requestID: request.id, requestTask: withRoundTrips(request, first: first))
+    }
+
+    /// Runs the multi round-trip loop on the result of `first` when the
+    /// method can return an input-required result (SEP-2322).
+    private func withRoundTrips<M: Method>(
+        _ request: Request<M>, first: Task<M.Result, Error>
+    ) -> Task<M.Result, Error> {
         let options = configuration.multiRoundTrip
-        guard MRTR.carriers.contains(M.name), options.isEnabled else {
-            return RequestContext(requestID: request.id, requestTask: first)
-        }
+        guard MRTR.carriers.contains(M.name), options.isEnabled else { return first }
         // Registered before the first response can arrive, so a
         // cancelRequest always finds the exchange.
         roundTrips[request.id] = request.id
         let task = Task<M.Result, Error> {
             defer { self.endRoundTrips(request.id) }
-            return try await self.resolveInputRequests(request, first: first.value, options: options)
+            return try await self.resolveInputRequests(
+                request, first: Self.result(of: first), options: options)
         }
         roundTripCancellers[request.id] = { task.cancel() }
-        return RequestContext(requestID: request.id, requestTask: task)
+        return task
     }
 
     /// Fulfills input requests and retries until the result is complete (SEP-2322).
@@ -666,9 +740,18 @@ public actor Client {
             params = current.retrying(inputResponses: responses, requestState: asking.requestState) as! M.Parameters
             let retry = Request<M>(method: M.name, params: params, _meta: request._meta)
             roundTrips[request.id] = retry.id
-            result = try await dispatch(retry).value
+            result = try await Self.result(of: dispatch(retry))
         }
         return result
+    }
+
+    /// The value of `task`; cancelling the caller cancels `task`.
+    private static func result<T>(of task: Task<T, Error>) async throws -> T {
+        try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+        }
     }
 
     private func endRoundTrips(_ id: ID) {
@@ -708,6 +791,65 @@ public actor Client {
         }
     }
 
+    /// A request encoded and registered, ready to be handed to the transport.
+    struct OutgoingRequest: Sendable {
+        let id: ID
+        let data: Data
+        /// SEP-2243 `Mcp-Param-*` headers, for HTTP.
+        let headers: [String: String]
+    }
+
+    /// Adds the 2026-07-28 envelope, encodes the request and registers its
+    /// response slot. The request is not sent: it is in `unsentRequests`.
+    ///
+    /// Registration happens before this returns, so a response or a
+    /// `cancelRequest(_:)` that follows always finds the request.
+    private func register<M: Method>(_ request: Request<M>) throws -> (OutgoingRequest, Task<M.Result, Error>) {
+        var request = request
+        var headers: [String: String] = [:]
+        if isStateless, let version = negotiatedProtocolVersion {
+            request._meta = requestMeta(version: version, merging: request._meta)
+            if let call = request.params as? CallTool.Parameters,
+                let parameters = toolHeaderParameters[call.name]
+            {
+                headers = MCPRequestHeaders.parameterHeaders(
+                    parameters, arguments: call.arguments.map(Value.object))
+            }
+        }
+        let data = try encoder.encode(request)
+        let firstToolPage = (request.params as? ListTools.Parameters).map { $0.cursor == nil } ?? false
+
+        let slot = ResponseSlot<M.Result>()
+        pendingRequests[request.id] = AnyPendingRequest(slot)
+        unsentRequests.insert(request.id)
+        if Client.isHandlingNotification {
+            immediateResponses.insert(request.id)
+        }
+        if notificationHandlers[ProgressNotification.name]?.isEmpty == false,
+            let token = Self.progressToken(ofRequest: data)
+        {
+            progressTokens[request.id] = token
+        }
+
+        let id = request.id
+        let task = Task<M.Result, Error> {
+            // Cancelling the task cancels the request.
+            let value = try await withTaskCancellationHandler {
+                try await slot.value()
+            } onCancel: {
+                slot.resolve(.failure(CancellationError()))
+                Task { try? await self.cancelRequest(id, reason: "Cancelled") }
+            }
+            if let listed = value as? ListTools.Result,
+                let filtered = await self.recordTools(listed, firstPage: firstToolPage)
+            {
+                return filtered as! M.Result
+            }
+            return value
+        }
+        return (OutgoingRequest(id: request.id, data: data, headers: headers), task)
+    }
+
     /// A transport error raised while sending a request, as opposed to the
     /// peer's answer.
     private struct SendFailure: Swift.Error {
@@ -722,55 +864,27 @@ public actor Client {
         guard let connection = connection else {
             throw MCPError.internalError("Client connection not initialized")
         }
+        let (outgoing, task) = try register(request)
+        Task { await self.transmit(outgoing, on: connection, markingSendFailures: markingSendFailures) }
+        return task
+    }
 
-        var request = request
-        var headers: [String: String] = [:]
-        if isStateless, let version = negotiatedProtocolVersion {
-            request._meta = requestMeta(version: version, merging: request._meta)
-            if let call = request.params as? CallTool.Parameters,
-                let parameters = toolHeaderParameters[call.name]
-            {
-                headers = MCPRequestHeaders.parameterHeaders(
-                    parameters, arguments: call.arguments.map(Value.object))
+    /// Hands a registered request to the transport, unless it was cancelled
+    /// first. A failed send fails the request.
+    private func transmit(
+        _ outgoing: OutgoingRequest, on connection: any Transport, markingSendFailures: Bool = false
+    ) async {
+        guard unsentRequests.remove(outgoing.id) != nil else { return }
+        do {
+            if !outgoing.headers.isEmpty {
+                try await connection.send(outgoing.data, additionalHeaders: outgoing.headers)
+            } else {
+                try await connection.send(outgoing.data)
             }
+        } catch {
+            removePendingRequest(id: outgoing.id)?.resume(
+                throwing: markingSendFailures ? SendFailure(error: error) : error)
         }
-        let requestData = try encoder.encode(request)
-        let firstToolPage = (request.params as? ListTools.Parameters).map { $0.cursor == nil } ?? false
-
-        let requestTask = Task<M.Result, Error> {
-            let value: M.Result = try await withCheckedThrowingContinuation { continuation in
-                Task {
-                    // Add the pending request before attempting to send
-                    self.addPendingRequest(
-                        id: request.id,
-                        continuation: continuation,
-                        type: M.Result.self
-                    )
-
-                    // Send the request data
-                    do {
-                        if !headers.isEmpty {
-                            try await connection.send(requestData, additionalHeaders: headers)
-                        } else {
-                            try await connection.send(requestData)
-                        }
-                    } catch {
-                        // If send fails, try to remove the pending request.
-                        if self.removePendingRequest(id: request.id) != nil {
-                            continuation.resume(throwing: markingSendFailures ? SendFailure(error: error) : error)
-                        }
-                    }
-                }
-            }
-            if let listed = value as? ListTools.Result,
-                let filtered = await self.recordTools(listed, firstPage: firstToolPage)
-            {
-                return filtered as! M.Result
-            }
-            return value
-        }
-
-        return requestTask
     }
 
     // MARK: - Subscriptions (2026-07-28)
@@ -1103,6 +1217,11 @@ public actor Client {
             return
         }
 
+        // Not sent yet: it never will be, and the server has nothing to cancel.
+        if unsentRequests.remove(requestID) != nil {
+            return
+        }
+
         // At 2026-07-28 over HTTP, closing the response stream cancels the request.
         if isStateless, let http = connection as? HTTPClientTransport {
             await http.cancelRequest(requestID)
@@ -1117,18 +1236,88 @@ public actor Client {
     }
 
 
-    private func addPendingRequest<T: Sendable & Decodable>(
-        id: ID,
-        continuation: CheckedContinuation<T, Swift.Error>,
-        type: T.Type  // Keep type for AnyPendingRequest internal logic
-    ) {
-        pendingRequests[id] = AnyPendingRequest(
-            PendingRequest(continuation: continuation)
-        )
+    private func removePendingRequest(id: ID) -> AnyPendingRequest? {
+        immediateResponses.remove(id)
+        progressTokens[id] = nil
+        return pendingRequests.removeValue(forKey: id)
     }
 
-    private func removePendingRequest(id: ID) -> AnyPendingRequest? {
-        return pendingRequests.removeValue(forKey: id)
+    // MARK: - Inbound ordering
+
+    /// Delivers a response at once, unless progress notifications of its
+    /// request are still queued: then after them.
+    private func deliver(_ response: Response<AnyMethod>) async {
+        if !immediateResponses.contains(response.id), let token = progressTokens[response.id],
+            queuedProgress[token, default: 0] > 0
+        {
+            parkedResponses[token, default: []].append(response)
+            return
+        }
+        await handleResponse(response)
+    }
+
+    private func progressHandled(_ token: ProgressToken) async {
+        let remaining = (queuedProgress[token] ?? 1) - 1
+        queuedProgress[token] = remaining > 0 ? remaining : nil
+        guard remaining <= 0, let parked = parkedResponses.removeValue(forKey: token) else { return }
+        for response in parked {
+            await handleResponse(response)
+        }
+    }
+
+    /// The token of a `notifications/progress` message.
+    private static func progressToken(of message: Message<AnyNotification>) -> ProgressToken? {
+        guard message.method == ProgressNotification.name else { return nil }
+        switch message.params.objectValue?["progressToken"] {
+        case .string(let string): return .string(string)
+        case .int(let int): return .integer(int)
+        default: return nil
+        }
+    }
+
+    /// The `params._meta.progressToken` of an encoded request.
+    private static func progressToken(ofRequest data: Data) -> ProgressToken? {
+        struct Probe: Decodable {
+            struct Params: Decodable {
+                struct Meta: Decodable { let progressToken: ProgressToken? }
+                let _meta: Meta?
+            }
+            let params: Params?
+        }
+        return (try? JSONDecoder().decode(Probe.self, from: data))?.params?._meta?.progressToken
+    }
+
+    private static func decode<T: Decodable>(_ value: Value, as type: T.Type) -> T? {
+        guard let data = try? JSONEncoder().encode(value) else { return nil }
+        return try? JSONDecoder().decode(T.self, from: data)
+    }
+
+    /// The client's own handling of `notifications/cancelled` and
+    /// `notifications/subscriptions/acknowledged`.
+    private func handleBuiltIn(_ message: Message<AnyNotification>) async {
+        switch message.method {
+        case SubscriptionsAcknowledgedNotification.name:
+            guard let id = message._meta?.subscriptionID,
+                let params = Self.decode(message.params, as: SubscriptionsAcknowledgedNotification.Parameters.self)
+            else { return }
+            acknowledge(id, params.notifications)
+        case CancelledNotification.name:
+            guard let params = Self.decode(message.params, as: CancelledNotification.Parameters.self) else { return }
+            await logger?.debug(
+                "Received cancellation notification",
+                metadata: [
+                    "requestId": params.requestId.map { "\($0)" } ?? "none",
+                    "reason": params.reason.map { "\($0)" } ?? "none",
+                ])
+            guard let requestId = params.requestId else { return }
+            // The server cancels a request it sent: stop its handler.
+            if cancelIncomingRequest(requestId) { return }
+            if let pendingRequest = removePendingRequest(id: requestId) {
+                pendingRequest.resume(throwing: CancellationError())
+            }
+        default:
+            break
+        }
     }
 
     // MARK: - Batching
@@ -1139,7 +1328,7 @@ public actor Client {
     /// of the ``Client/withBatch(body:)`` method.
     public actor Batch {
         unowned let client: Client
-        var requests: [AnyRequest] = []
+        var requests: [OutgoingRequest] = []
 
         init(client: Client) {
             self.client = client
@@ -1147,27 +1336,59 @@ public actor Client {
 
         /// Adds a request to the batch and prepares its expected response task.
         /// The actual sending happens when the `withBatch` scope completes.
+        ///
+        /// The request gets what ``Client/send(_:)`` adds: the 2026-07-28
+        /// `_meta` envelope and header parameters, and the multi round-trip
+        /// loop for `tools/call`, `prompts/get` and `resources/read`.
         /// - Returns: A `Task` that will eventually produce the result or throw an error.
         public func addRequest<M: Method>(_ request: Request<M>) async throws -> Task<
             M.Result, Swift.Error
         > {
-            requests.append(try AnyRequest(request))
+            let (outgoing, task) = try await client.registerBatchRequest(request)
+            requests.append(outgoing)
+            return task
+        }
+    }
 
-            // Return a Task that registers the pending request and awaits its result.
-            // The continuation is resumed when the response arrives.
-            return Task<M.Result, Swift.Error> {
-                try await withCheckedThrowingContinuation { continuation in
-                    // We are already inside a Task, but need another Task
-                    // to bridge to the client actor's context.
-                    Task {
-                        await client.addPendingRequest(
-                            id: request.id,
-                            continuation: continuation,
-                            type: M.Result.self
-                        )
-                    }
-                }
+    private func registerBatchRequest<M: Method>(_ request: Request<M>) throws -> (
+        OutgoingRequest, Task<M.Result, Error>
+    ) {
+        guard connection != nil else {
+            throw MCPError.internalError("Client connection not initialized")
+        }
+        let (outgoing, first) = try register(request)
+        return (outgoing, withRoundTrips(request, first: first))
+    }
+
+    /// Fails registered batch requests that will not be sent.
+    private func abandonBatch(_ requests: [OutgoingRequest], with error: Swift.Error) {
+        for request in requests where unsentRequests.remove(request.id) != nil {
+            removePendingRequest(id: request.id)?.resume(throwing: error)
+        }
+    }
+
+    /// Sends the batch requests that were not cancelled as one JSON array.
+    /// On a stateless connection each request is sent alone: 2026-07-28
+    /// requests carry per-request HTTP headers.
+    private func sendBatch(_ requests: [OutgoingRequest], on connection: any Transport) async throws {
+        if isStateless {
+            for request in requests {
+                Task { await self.transmit(request, on: connection) }
             }
+            return
+        }
+        let ready = requests.filter { unsentRequests.remove($0.id) != nil }
+        guard !ready.isEmpty else { return }
+        var data = Data("[".utf8)
+        data.append(Data(ready.map(\.data).joined(separator: Data(",".utf8))))
+        data.append(Data("]".utf8))
+        do {
+            try await connection.send(data)
+        } catch {
+            for request in ready {
+                removePendingRequest(id: request.id)?.resume(throwing: error)
+            }
+            throw error
         }
     }
 
@@ -1254,7 +1475,13 @@ public actor Client {
         let batch = Batch(client: self)
 
         // Populate the batch actor by calling the user's closure.
-        try await body(batch)
+        do {
+            try await body(batch)
+        } catch {
+            // The requests added so far are never sent.
+            abandonBatch(await batch.requests, with: error)
+            throw error
+        }
 
         // Get the collected requests from the batch actor
         let requests = await batch.requests
@@ -1267,10 +1494,7 @@ public actor Client {
 
         await logger?.debug(
             "Sending batch request", metadata: ["count": "\(requests.count)"])
-
-        // Encode the array of AnyMethod requests into a single JSON payload
-        let data = try encoder.encode(requests)
-        try await connection.send(data)
+        try await sendBatch(requests, on: connection)
 
         // Responses will be handled asynchronously by the message loop and handleBatchResponse/handleResponse.
     }
@@ -1369,10 +1593,12 @@ public actor Client {
 
     /// Opens a stateless connection with `server/discover` (SEP-2575).
     ///
-    /// On -32022 the request is retried once with the newest stateless
-    /// version the server lists. With `fallback`, any other protocol error,
-    /// or a server without a stateless revision in common, falls back to
-    /// `initialize`. Transport errors are rethrown.
+    /// - Parameter fallback: `true` for `.automatic`: on -32022 retry once
+    ///   with the newest stateless version the server lists; fall back to
+    ///   `initialize` on a JSON-RPC error, a server without a stateless
+    ///   revision in common, an HTTP 400/404/405 refusal or no answer within
+    ///   ``Configuration/discoveryTimeout``. Other transport errors are
+    ///   rethrown. `false` for `.stateless(_:)`: only `preferred` is accepted.
     private func discoverOrInitialize(_ preferred: String, fallback: Bool) async throws
         -> Initialize.Result
     {
@@ -1947,6 +2173,72 @@ public actor Client {
         }
     }
 
+    /// Runs the handler of a server-to-client request in its own task, so
+    /// that the receive loop keeps reading while it runs. At most
+    /// ``Configuration/maxConcurrentServerRequests`` run at once; up to
+    /// ``incomingRequestBacklog`` more wait, and further ones are refused.
+    private func startIncomingRequest(_ request: Request<AnyMethod>) {
+        func refuse(_ error: MCPError) {
+            Task { try? await self.send(AnyMethod.response(id: request.id, error: error)) }
+        }
+        // 2026-07-28 has no server-to-client requests.
+        if isStateless {
+            refuse(.methodNotFound("\(request.method) cannot be sent at protocol version \(negotiatedProtocolVersion ?? "")"))
+            return
+        }
+        if incomingRequests[request.id] != nil || queuedIncomingRequests.contains(where: { $0.id == request.id }) {
+            refuse(.invalidRequest("A request with id \(request.id) is already in progress"))
+            return
+        }
+        guard incomingRequests.count >= max(configuration.maxConcurrentServerRequests, 1) else {
+            runIncomingRequest(request)
+            return
+        }
+        guard queuedIncomingRequests.count < Self.incomingRequestBacklog else {
+            refuse(.internalError("Too many requests from the server"))
+            return
+        }
+        queuedIncomingRequests.append(request)
+    }
+
+    private func runIncomingRequest(_ request: Request<AnyMethod>) {
+        let token = UUID()
+        let task = Task {
+            await self.handleIncomingRequest(request)
+            self.incomingRequestFinished(request.id, token: token)
+        }
+        incomingRequests[request.id] = IncomingHandler(token: token, task: task)
+    }
+
+    /// Frees the slot of a finished handler and starts waiting requests.
+    private func incomingRequestFinished(_ id: ID, token: UUID) {
+        if incomingRequests[id]?.token == token {
+            incomingRequests[id] = nil
+        }
+        startQueuedIncomingRequests()
+    }
+
+    private func startQueuedIncomingRequests() {
+        while incomingRequests.count < max(configuration.maxConcurrentServerRequests, 1),
+            !queuedIncomingRequests.isEmpty
+        {
+            runIncomingRequest(queuedIncomingRequests.removeFirst())
+        }
+    }
+
+    /// Cancels the handler of a server-to-client request, or drops it while
+    /// it waits. Returns `false` when there is no such request.
+    private func cancelIncomingRequest(_ id: ID) -> Bool {
+        if let index = queuedIncomingRequests.firstIndex(where: { $0.id == id }) {
+            queuedIncomingRequests.remove(at: index)
+            return true
+        }
+        guard let handler = incomingRequests.removeValue(forKey: id) else { return false }
+        handler.task.cancel()
+        startQueuedIncomingRequests()
+        return true
+    }
+
     private func handleIncomingRequest(_ request: Request<AnyMethod>) async {
         await logger?.trace(
             "Processing incoming request from server",
@@ -1970,8 +2262,11 @@ public actor Client {
 
         do {
             let response = try await handler(request)
+            // A cancelled request is not answered.
+            guard !Task.isCancelled else { return }
             try await send(response)
         } catch {
+            guard !Task.isCancelled else { return }
             let mcpError = error as? MCPError ?? MCPError.internalError(error.localizedDescription)
             let response = AnyMethod.response(id: request.id, error: mcpError)
             do {

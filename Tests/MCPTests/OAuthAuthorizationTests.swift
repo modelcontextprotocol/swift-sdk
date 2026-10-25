@@ -1,20 +1,14 @@
 import Foundation
 import Testing
 
-#if canImport(CryptoKit)
-import CryptoKit
-#endif
+import Crypto
 
 @testable import MCP
 
 @Suite("OAuth Authorization Helpers")
 struct OAuthAuthorizationTests {
-    #if canImport(CryptoKit)
-        // Generated fresh each test run — no hardcoded key material in source.
-        private static let testPrivateKeyPEM: String = P256.Signing.PrivateKey().pemRepresentation
-    #else
-        private static let testPrivateKeyPEM: String = ""
-    #endif
+    // Generated fresh each test run — no hardcoded key material in source.
+    private static let testPrivateKeyPEM: String = P256.Signing.PrivateKey().pemRepresentation
 
     private var metadataDiscovery: DefaultOAuthMetadataDiscovery { DefaultOAuthMetadataDiscovery() }
 
@@ -230,40 +224,38 @@ struct OAuthAuthorizationTests {
         #expect(omitted == nil)
     }
 
-    #if canImport(CryptoKit)
-        @Test("private_key_jwt helper builds signed JWT with expected claims")
-        func testPrivateKeyJWTAssertionHelper() throws {
-            let tokenEndpoint = URL(string: "https://auth.example.com/oauth/token")!
-            let assertion = try OAuthConfiguration.makePrivateKeyJWTAssertion(
-                clientID: "test-client",
-                tokenEndpoint: tokenEndpoint,
-                privateKeyPEM: Self.testPrivateKeyPEM,
-                audience: "https://auth.example.com",
-                issuedAt: Date(timeIntervalSince1970: 1_700_000_000),
-                expiresIn: 300
-            )
+    @Test("private_key_jwt helper builds signed JWT with expected claims")
+    func testPrivateKeyJWTAssertionHelper() throws {
+        let tokenEndpoint = URL(string: "https://auth.example.com/oauth/token")!
+        let assertion = try OAuthConfiguration.makePrivateKeyJWTAssertion(
+            clientID: "test-client",
+            tokenEndpoint: tokenEndpoint,
+            privateKeyPEM: Self.testPrivateKeyPEM,
+            audience: "https://auth.example.com",
+            issuedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            expiresIn: 300
+        )
 
-            let parts = assertion.split(separator: ".")
-            #expect(parts.count == 3)
+        let parts = assertion.split(separator: ".")
+        #expect(parts.count == 3)
 
-            let headerData = Self.decodeBase64URL(parts[0])
-            let payloadData = Self.decodeBase64URL(parts[1])
-            #expect(headerData != nil)
-            #expect(payloadData != nil)
+        let headerData = Self.decodeBase64URL(parts[0])
+        let payloadData = Self.decodeBase64URL(parts[1])
+        #expect(headerData != nil)
+        #expect(payloadData != nil)
 
-            let header = try JSONSerialization.jsonObject(with: headerData!) as? [String: Any]
-            let payload = try JSONSerialization.jsonObject(with: payloadData!) as? [String: Any]
+        let header = try JSONSerialization.jsonObject(with: headerData!) as? [String: Any]
+        let payload = try JSONSerialization.jsonObject(with: payloadData!) as? [String: Any]
 
-            #expect(header?["alg"] as? String == "ES256")
-            #expect(header?["typ"] as? String == "JWT")
-            #expect(payload?["iss"] as? String == "test-client")
-            #expect(payload?["sub"] as? String == "test-client")
-            #expect(payload?["aud"] as? String == "https://auth.example.com")
-            #expect(payload?["iat"] as? Int == 1_700_000_000)
-            #expect(payload?["exp"] as? Int == 1_700_000_300)
-            #expect((payload?["jti"] as? String)?.isEmpty == false)
-        }
-    #endif
+        #expect(header?["alg"] as? String == "ES256")
+        #expect(header?["typ"] as? String == "JWT")
+        #expect(payload?["iss"] as? String == "test-client")
+        #expect(payload?["sub"] as? String == "test-client")
+        #expect(payload?["aud"] as? String == "https://auth.example.com")
+        #expect(payload?["iat"] as? Int == 1_700_000_000)
+        #expect(payload?["exp"] as? Int == 1_700_000_300)
+        #expect((payload?["jti"] as? String)?.isEmpty == false)
+    }
 
     @Test("private_key_jwt helper rejects non-positive lifetime")
     func testPrivateKeyJWTAssertionRejectsNonPositiveLifetime() {

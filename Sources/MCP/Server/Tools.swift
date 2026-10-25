@@ -292,7 +292,7 @@ public struct Tool: Hashable, Codable, Sendable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(name, forKey: .name)
         try container.encodeIfPresent(title, forKey: .title)
-        try container.encode(description, forKey: .description)
+        try container.encodeIfPresent(description, forKey: .description)
         try container.encode(inputSchema, forKey: .inputSchema)
         try container.encodeIfPresent(outputSchema, forKey: .outputSchema)
         if !annotations.isEmpty {
