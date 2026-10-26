@@ -912,10 +912,6 @@ public actor Server {
         // Initialize
         withMethodHandler(Initialize.self) { params in
 
-            guard await !self.isInitialized else {
-                throw MCPError.invalidRequest("Server is already initialized")
-            }
-
             // Call initialization hook if registered
             if let hook = initializeHook {
                 try await hook(params.clientInfo, params.capabilities)
