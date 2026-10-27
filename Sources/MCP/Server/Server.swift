@@ -174,6 +174,9 @@ public actor Server {
     private var notificationHandlers: [String: [NotificationHandlerBox]] = [:]
     /// Pending request tasks (for cancellation support)
     private var pendingRequestTasks: [ID: Task<Response<AnyMethod>, Error>] = [:]
+    /// Requests received whose handler task is not registered yet, and
+    /// whether `notifications/cancelled` arrived for them meanwhile.
+    private var startingRequests: [ID: Bool] = [:]
 
     /// Pending requests sent to the client, awaiting responses
     private var pendingRequests: [ID: AnyPendingRequest] = [:]
@@ -248,6 +251,7 @@ public actor Server {
                             await handleResponse(response)
                         } else if let request = try? decoder.decode(AnyRequest.self, from: data) {
                             // Handle request in a separate task to avoid blocking the receive loop
+                            startingRequests[request.id] = false
                             Task {
                                 _ = try? await self.handleRequest(request, sendResponse: true)
                             }
@@ -387,14 +391,18 @@ public actor Server {
         try await connection.send(responseData)
     }
 
-    /// Send a notification to connected clients
+    /// Send a notification to connected clients.
+    ///
+    /// Called from a method handler, the notification is delivered on the
+    /// stream of the request being handled when the transport has one.
     public func notify<N: Notification>(_ notification: Message<N>) async throws {
         guard let connection = connection else {
             throw MCPError.internalError("Server connection not initialized")
         }
 
         let notificationData = try encoder.encode(notification)
-        try await connection.send(notificationData)
+        try await connection.send(
+            notificationData, relatedRequestID: Server.currentHandlerContext?.id)
     }
 
     /// Send a request to the client and return a Task for the response
@@ -404,6 +412,7 @@ public actor Server {
         }
 
         let requestData = try encoder.encode(request)
+        let relatedRequestID = Server.currentHandlerContext?.id
 
         let requestTask = Task<M.Result, Error> {
             try await withCheckedThrowingContinuation { continuation in
@@ -417,7 +426,8 @@ public actor Server {
 
                     // Send the request
                     do {
-                        try await connection.send(requestData)
+                        try await connection.send(
+                            requestData, relatedRequestID: relatedRequestID)
                     } catch {
                         // If send fails, remove pending response and resume with error
                         if self.removePendingResponse(id: request.id) != nil {
@@ -747,6 +757,13 @@ public actor Server {
             )
         }
 
+        // Until the handler task is registered, a cancellation of this
+        // request is recorded in `startingRequests`.
+        var registered = false
+        defer {
+            if !registered { startingRequests.removeValue(forKey: request.id) }
+        }
+
         await logger?.trace(
             "Processing request",
             metadata: [
@@ -814,6 +831,11 @@ public actor Server {
 
         // Store the handler task for potential cancellation
         pendingRequestTasks[request.id] = handlerTask
+        registered = true
+        if startingRequests.removeValue(forKey: request.id) == true {
+            // `notifications/cancelled` arrived before the task was registered.
+            handlerTask.cancel()
+        }
 
         // Ensure cleanup happens regardless of success or failure
         defer {
@@ -966,9 +988,17 @@ public actor Server {
         self.isInitialized = true
     }
 
-    /// Cancel and remove a pending request task
-    private func removePendingRequest(id: ID) -> Task<Response<AnyMethod>, Error>? {
-        pendingRequestTasks.removeValue(forKey: id)
+    /// Cancels the handler of the request `id` and stops tracking it. A
+    /// request whose handler task is not registered yet is cancelled when it
+    /// registers. Returns `false` for a request that is unknown or complete.
+    private func cancelRequestHandler(id: ID) -> Bool {
+        if let task = pendingRequestTasks.removeValue(forKey: id) {
+            task.cancel()
+            return true
+        }
+        guard startingRequests[id] != nil else { return false }
+        startingRequests[id] = true
+        return true
     }
 
     private func registerCancellationHandler() {
@@ -994,8 +1024,7 @@ public actor Server {
             }
 
             // Cancel the pending request task if it exists and remove from tracking
-            if let task = await self.removePendingRequest(id: requestId) {
-                task.cancel()
+            if await self.cancelRequestHandler(id: requestId) {
                 await self.logger?.debug(
                     "Cancelled request",
                     metadata: ["requestId": "\(requestId)"]

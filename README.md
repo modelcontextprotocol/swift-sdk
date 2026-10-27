@@ -1459,6 +1459,12 @@ public actor MyCustomTransport: Transport {
 }
 ```
 
+Transports with one stream per request can also implement
+`send(_:relatedRequestID:)`. The server calls it for notifications and
+requests produced while handling a request, passing that request's ID, so
+they can be delivered on the request's stream. The default implementation
+calls `send(_:)`.
+
 ## Authentication
 
 `HTTPClientTransport` supports OAuth 2.1 Bearer token authorization per the

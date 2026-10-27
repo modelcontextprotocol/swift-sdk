@@ -7,6 +7,7 @@ import Logging
 /// - Assigns a session ID during initialization (via `Mcp-Session-Id` header)
 /// - POST requests receive SSE-streamed responses
 /// - GET requests establish a standalone SSE stream for server-initiated messages
+///   that are not related to an in-flight request
 /// - DELETE requests terminate the session
 /// - Built-in event store for resumability (reconnection with `Last-Event-ID`)
 ///
@@ -59,6 +60,11 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
     /// the stream is closed, or the session terminates.
     private var httpRequestContexts: [String: HTTPRequest] = [:]
 
+    /// IDs of client requests that have not been answered yet. Messages
+    /// related to one of these are stored on its stream even while the
+    /// stream is disconnected, so a resuming client receives them.
+    private var openRequestIDs: Set<String> = []
+
     // MARK: - Standalone GET SSE stream
 
     /// The standalone SSE stream continuation for server-initiated messages.
@@ -67,6 +73,12 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
 
     /// Internal identifier for the standalone GET stream in the event store.
     private let standaloneStreamID = "_GET_stream"
+
+    /// The generation of each registered SSE stream, by stream ID. A stream
+    /// the client disconnects unregisters itself only while it is still the
+    /// current one for its ID, so it never removes a stream that replaced it.
+    private var streamGenerations: [String: Int] = [:]
+    private var streamGenerationCounter = 0
 
     // MARK: - Event Store (Resumability)
 
@@ -137,6 +149,15 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
     /// - Responses are routed to the SSE stream matching the response's JSON-RPC ID.
     /// - Notifications and server-initiated requests are routed to the standalone GET stream.
     public func send(_ data: Data) async throws {
+        try await send(data, relatedRequestID: nil)
+    }
+
+    /// Routes outgoing server messages to the appropriate client connection.
+    ///
+    /// Notifications and server-initiated requests related to a request that
+    /// has not been answered yet go to that request's SSE stream; others go
+    /// to the standalone GET stream.
+    public func send(_ data: Data, relatedRequestID: ID?) async throws {
         guard !terminated else {
             throw MCPError.connectionClosed
         }
@@ -150,7 +171,11 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
         case .response(let id):
             routeResponse(data, requestID: id)
         case .notification, .request:
-            routeServerInitiatedMessage(data)
+            if let related = relatedRequestID?.description, openRequestIDs.contains(related) {
+                routeToRequestStream(data, requestID: related)
+            } else {
+                routeServerInitiatedMessage(data)
+            }
         }
     }
 
@@ -233,7 +258,16 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
 
         // Handle by message type
         switch messageKind {
-        case .notification, .response:
+        case .notification(let method):
+            if method == CancelledNotification.name,
+                let cancelled = JSONRPCMessageKind.cancelledRequestID(in: body)
+            {
+                releaseCancelledRequest(cancelled)
+            }
+            incomingContinuation.yield(body)
+            return .accepted(headers: sessionHeaders())
+
+        case .response:
             // Yield to server and return 202 Accepted
             incomingContinuation.yield(body)
             return .accepted(headers: sessionHeaders())
@@ -284,8 +318,9 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
     private func handleJSONRPCRequest(_ body: Data, requestID: String, request: HTTPRequest) -> HTTPResponse {
         // Create SSE stream for this request
         let (sseStream, sseContinuation) = AsyncThrowingStream<Data, Swift.Error>.makeStream()
-        requestSSEContinuations[requestID] = sseContinuation
+        register(sseContinuation, streamID: requestID)
         httpRequestContexts[requestID] = request
+        openRequestIDs.insert(requestID)
 
         // Extract protocol version for priming event decision
         let protocolVersion = extractProtocolVersion(from: body, request: request)
@@ -341,7 +376,7 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
 
         // Create standalone SSE stream
         let (sseStream, sseContinuation) = AsyncThrowingStream<Data, Swift.Error>.makeStream()
-        standaloneSSEContinuation = sseContinuation
+        register(sseContinuation, streamID: standaloneStreamID)
 
         // Extract protocol version for priming event
         let protocolVersion = request.header(HTTPHeaderName.protocolVersion) ?? Version.latest
@@ -382,6 +417,54 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
         return .ok(headers: sessionHeaders())
     }
 
+    // MARK: - Stream Registration
+
+    /// Registers `continuation` as the current stream for `streamID` and
+    /// unregisters it when the client disconnects. A stream it replaces is
+    /// finished: nothing is sent on it any more.
+    private func register(
+        _ continuation: AsyncThrowingStream<Data, Swift.Error>.Continuation, streamID: String
+    ) {
+        streamGenerationCounter += 1
+        let generation = streamGenerationCounter
+        streamGenerations[streamID] = generation
+        let replaced: AsyncThrowingStream<Data, Swift.Error>.Continuation?
+        if streamID == standaloneStreamID {
+            replaced = standaloneSSEContinuation
+            standaloneSSEContinuation = continuation
+        } else {
+            replaced = requestSSEContinuations.updateValue(continuation, forKey: streamID)
+        }
+        replaced?.finish()
+        continuation.onTermination = { [weak self] termination in
+            guard case .cancelled = termination else { return }
+            Task { await self?.streamDisconnected(streamID, generation: generation) }
+        }
+    }
+
+    /// Forgets a stream the client disconnected. Messages for it are still
+    /// stored, so a client that resumes receives them.
+    private func streamDisconnected(_ streamID: String, generation: Int) {
+        guard streamGenerations[streamID] == generation else { return }
+        streamGenerations[streamID] = nil
+        if streamID == standaloneStreamID {
+            standaloneSSEContinuation = nil
+        } else {
+            requestSSEContinuations[streamID] = nil
+        }
+        logger.debug("SSE stream disconnected", metadata: ["streamID": "\(streamID)"])
+    }
+
+    /// Releases a request the client cancelled (`notifications/cancelled`).
+    /// The server sends no response for it, so nothing else would.
+    private func releaseCancelledRequest(_ requestID: String) {
+        guard openRequestIDs.remove(requestID) != nil else { return }
+        httpRequestContexts.removeValue(forKey: requestID)
+        streamGenerations[requestID] = nil
+        requestSSEContinuations.removeValue(forKey: requestID)?.finish()
+        logger.debug("Released a cancelled request", metadata: ["requestID": "\(requestID)"])
+    }
+
     // MARK: - Message Routing
 
     /// Routes a message to a specific request's SSE stream without closing it.
@@ -406,8 +489,10 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
     /// Used for final responses to client requests.
     private func routeResponse(_ data: Data, requestID: String) {
         routeToRequestStream(data, requestID: requestID)
+        openRequestIDs.remove(requestID)
 
         // Response means the request is complete — close the stream
+        streamGenerations[requestID] = nil
         if let continuation = requestSSEContinuations[requestID] {
             continuation.finish()
             requestSSEContinuations.removeValue(forKey: requestID)
@@ -446,12 +531,18 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
             sseContinuation.yield(sseEvent.formatted())
         }
 
-        // Re-register the stream for future messages
-        if replay.streamID == standaloneStreamID {
-            standaloneSSEContinuation = sseContinuation
-        } else {
-            requestSSEContinuations[replay.streamID] = sseContinuation
+        // A request stream whose request is answered or cancelled has
+        // nothing more to send: replay it and close it.
+        if replay.streamID != standaloneStreamID, !openRequestIDs.contains(replay.streamID) {
+            sseContinuation.finish()
+            var headers = sessionHeaders()
+            headers[HTTPHeaderName.contentType] = ContentType.sse
+            headers[HTTPHeaderName.cacheControl] = "no-cache, no-transform"
+            return .stream(sseStream, headers: headers)
         }
+
+        // Re-register the stream for future messages
+        register(sseContinuation, streamID: replay.streamID)
 
         // Send a new priming event so the client can resume again if disconnected
         let protocolVersion = request.header(HTTPHeaderName.protocolVersion) ?? Version.latest
@@ -540,6 +631,7 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
     /// when eventually sent, will be stored and replayed to the reconnected stream.
     package func closeSSEStream(forRequestID requestID: String) {
         guard let continuation = requestSSEContinuations[requestID] else { return }
+        streamGenerations[requestID] = nil
         continuation.finish()
         requestSSEContinuations.removeValue(forKey: requestID)
         httpRequestContexts.removeValue(forKey: requestID)
@@ -567,6 +659,8 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
         }
         requestSSEContinuations.removeAll()
         httpRequestContexts.removeAll()
+        openRequestIDs.removeAll()
+        streamGenerations.removeAll()
 
         // Close standalone GET stream
         standaloneSSEContinuation?.finish()

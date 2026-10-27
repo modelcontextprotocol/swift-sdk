@@ -1,4 +1,5 @@
 import Foundation
+import Logging
 import Testing
 
 @testable import MCP
@@ -245,5 +246,115 @@ struct CancellationTests {
 
         await client.disconnect()
         await server.stop()
+    }
+
+    @Test(
+        "A cancellation that arrives before the handler is registered cancels it",
+        .timeLimit(.minutes(1)))
+    func testCancellationBeforeHandlerRegistration() async throws {
+        let transport = GatedContextTransport(gating: .string("call-1"))
+        let server = Server(name: "TestServer", version: "1.0", capabilities: .init(tools: .init()))
+        await server.withMethodHandler(CallTool.self) { _ in
+            CallTool.Result(content: [.text(text: "ran", annotations: nil, _meta: nil)])
+        }
+        try await server.start(transport: transport)
+        // Registered after the server's own handler, so it runs after it.
+        await server.onNotification(CancelledNotification.self) { _ in
+            transport.note("cancellation handled")
+        }
+
+        var events = transport.events.makeAsyncIterator()
+        let encoder = JSONEncoder()
+        await transport.deliver(
+            try encoder.encode(CallTool.request(id: .string("call-1"), .init(name: "t"))))
+        while let event = await events.next(), event != "context call-1" {}
+
+        // The handler task is not registered while its context lookup waits.
+        await transport.deliver(
+            try encoder.encode(CancelledNotification.message(.init(requestId: .string("call-1")))))
+        while let event = await events.next(), event != "cancellation handled" {}
+        await transport.release()
+
+        var outcome: String?
+        while let event = await events.next() {
+            if event.hasPrefix("sent ") || event == "log Request cancelled" {
+                outcome = event
+                break
+            }
+        }
+        #expect(outcome == "log Request cancelled")
+        await server.stop()
+    }
+}
+
+/// A transport whose HTTP context lookup for one request waits until the
+/// test releases it. It reports the context lookup, every message the server
+/// sends and every message the server logs as events.
+private actor GatedContextTransport: Transport, HTTPContextProviding {
+    nonisolated let logger: Logger
+    nonisolated let events: AsyncStream<String>
+    private nonisolated let eventSink: AsyncStream<String>.Continuation
+    private let incoming: AsyncThrowingStream<Data, Swift.Error>
+    private let incomingSink: AsyncThrowingStream<Data, Swift.Error>.Continuation
+    private let gatedID: ID
+    private var gate: CheckedContinuation<Void, Never>?
+    private var released = false
+
+    init(gating id: ID) {
+        let (events, eventSink) = AsyncStream<String>.makeStream()
+        self.events = events
+        self.eventSink = eventSink
+        logger = Logger(label: "mcp.test.gated") { _ in EventLogHandler(sink: eventSink) }
+        (incoming, incomingSink) = AsyncThrowingStream<Data, Swift.Error>.makeStream()
+        gatedID = id
+    }
+
+    func connect() async throws {}
+
+    func disconnect() async {
+        incomingSink.finish()
+        release()
+    }
+
+    func send(_ data: Data) async throws {
+        eventSink.yield("sent " + String(decoding: data, as: UTF8.self))
+    }
+
+    func receive() -> AsyncThrowingStream<Data, Swift.Error> { incoming }
+
+    func deliver(_ data: Data) { incomingSink.yield(data) }
+
+    nonisolated func note(_ event: String) { eventSink.yield(event) }
+
+    func release() {
+        released = true
+        gate?.resume()
+        gate = nil
+    }
+
+    func httpRequestContext(for id: ID) async -> HTTPRequest? {
+        guard id == gatedID, !released else { return nil }
+        eventSink.yield("context \(id)")
+        await withCheckedContinuation { gate = $0 }
+        return nil
+    }
+}
+
+/// Reports each log message as a `log <message>` event.
+private struct EventLogHandler: LogHandler {
+    let sink: AsyncStream<String>.Continuation
+    var metadata: Logger.Metadata = [:]
+    var logLevel: Logger.Level = .trace
+
+    subscript(metadataKey key: String) -> Logger.Metadata.Value? {
+        get { metadata[key] }
+        set { metadata[key] = newValue }
+    }
+
+    func log(
+        level: Logger.Level, message: Logger.Message, metadata: Logger.Metadata?,
+        source: String, file: String, function: String, line: UInt
+    ) {
+        sink.yield("log \(message)")
     }
 }

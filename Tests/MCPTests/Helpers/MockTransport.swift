@@ -59,6 +59,14 @@ actor MockTransport: Transport {
         sentData.append(message)
     }
 
+    /// Related request IDs passed to `send(_:relatedRequestID:)`, in call order.
+    private(set) var relatedRequestIDs: [ID?] = []
+
+    public func send(_ message: Data, relatedRequestID: ID?) async throws {
+        try await send(message)
+        relatedRequestIDs.append(relatedRequestID)
+    }
+
     public func receive() -> AsyncThrowingStream<Data, Swift.Error> {
         return AsyncThrowingStream<Data, Swift.Error> { continuation in
             dataStreamContinuation = continuation
