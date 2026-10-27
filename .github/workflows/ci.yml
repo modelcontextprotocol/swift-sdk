@@ -6,9 +6,9 @@ on:
   pull_request:
     branches: ["main", "rel/**"]
 
+# Actions are pinned by commit; the comment names the release.
 permissions:
   contents: read
-  pull-requests: write
 
 jobs:
   test:
@@ -32,7 +32,7 @@ jobs:
     name: Test (${{ matrix.os }}, Swift ${{ matrix.swift-version }})
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Prepare Linux apt dependencies
         if: matrix.os == 'ubuntu-24.04'
@@ -42,7 +42,7 @@ jobs:
 
       - name: Setup Swift on Linux
         if: matrix.os == 'ubuntu-24.04'
-        uses: vapor/swiftly-action@v0.2
+        uses: vapor/swiftly-action@bedb227456c5f495afbef80baebee17a8a02cef4 # v0.2.1
         with:
           toolchain: ${{ matrix.swift-version }}
       - name: Select Xcode
@@ -58,59 +58,117 @@ jobs:
       - name: Run tests
         run: swift test -v
 
-  conformance:
-    timeout-minutes: 10
+  conformance-fixtures:
+    timeout-minutes: 20
     runs-on: macos-latest
-    name: MCP Conformance Tests
-
+    name: Build conformance fixtures
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+
+      - name: Test the conformance scripts
+        run: scripts/tests/run-conformance-test.sh
 
       - name: Show Swift version
         run: swift --version
 
-      - name: Build Swift executables
+      - name: Build fixtures
         run: |
           swift build --product mcp-everything-client
           swift build --product mcp-everything-server
+          mkdir -p fixtures
+          cp "$(swift build --show-bin-path)"/mcp-everything-{client,server} fixtures/
 
-      - name: Run client conformance tests
-        uses: modelcontextprotocol/conformance@v0.1.15
+      - name: Upload fixtures
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          mode: client
-          command: '.build/debug/mcp-everything-client'
-          suite: 'core'
-          expected-failures: './conformance-baseline.yml'
+          name: conformance-fixtures
+          path: fixtures/
+          if-no-files-found: error
+          retention-days: 1
+
+  conformance:
+    timeout-minutes: 20
+    needs: conformance-fixtures
+    runs-on: macos-latest
+    name: MCP Conformance (${{ matrix.leg }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # Each leg checks its own baseline; see scripts/run-conformance.sh.
+        leg: ["2025-11-25", "2026-07-28", "default"]
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
           node-version: '22'
 
-      - name: Start server for testing
-        run: |
-          .build/debug/mcp-everything-server &
-          echo "SERVER_PID=$!" >> $GITHUB_ENV
-          sleep 3
-
-      - name: Run server conformance tests
-        uses: modelcontextprotocol/conformance@v0.1.15
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          mode: server
-          url: 'http://localhost:3001/mcp'
-          suite: 'core'
-          expected-failures: './conformance-baseline.yml'
-          node-version: '22'
+          name: conformance-fixtures
+          path: fixtures
 
-      - name: Cleanup server
-        if: always()
+      # Artifacts do not keep the executable bit.
+      - name: Prepare fixtures
+        run: chmod +x fixtures/mcp-everything-client fixtures/mcp-everything-server
+
+      - name: Run conformance
         run: |
-          if [ -n "$SERVER_PID" ]; then
-            kill $SERVER_PID 2>/dev/null || true
+          if [ "${{ matrix.leg }}" = "default" ]; then
+            scripts/run-conformance.sh --mode both --bin-path fixtures
+          else
+            scripts/run-conformance.sh --spec-version "${{ matrix.leg }}" --mode both --bin-path fixtures
           fi
+
+      - name: Upload conformance results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: conformance-${{ matrix.leg }}
+          path: .build/conformance/
+          if-no-files-found: ignore
+
+  tier-score:
+    timeout-minutes: 20
+    needs: conformance-fixtures
+    runs-on: macos-latest
+    name: Tier score (${{ matrix.revision }})
+    # Report only until every scored scenario passes.
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        revision: ["2025-11-25", "2026-07-28"]
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: conformance-fixtures
+          path: fixtures
+
+      - name: Prepare fixtures
+        run: chmod +x fixtures/mcp-everything-client fixtures/mcp-everything-server
+
+      - name: Score frozen requirement set
+        run: scripts/run-conformance.sh --requirements "${{ matrix.revision }}" --mode both --bin-path fixtures
 
   documentation:
     name: Documentation
     runs-on: macos-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Show Swift version
         run: swift --version
       - name: Build Documentation
@@ -128,11 +186,12 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Check out code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install static SDK and build
         env:
           BUILD_FLAGS: ""
         run: |
           which curl || (apt -q update && apt -yq install curl)
-          curl -s --retry 3 https://raw.githubusercontent.com/swiftlang/github-workflows/refs/heads/main/.github/workflows/scripts/install-and-build-with-sdk.sh | \
+          # Pinned commit of swiftlang/github-workflows (main on 2026-10-24).
+          curl -sf --retry 3 https://raw.githubusercontent.com/swiftlang/github-workflows/87329d126a6992483ba89aabefa1eaef1e5b0aad/.github/workflows/scripts/install-and-build-with-sdk.sh | \
           bash -s -- --static --flags="$BUILD_FLAGS" ${{ matrix.swift-version }}

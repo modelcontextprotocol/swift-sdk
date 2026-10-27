@@ -1723,6 +1723,29 @@ let server = Server(name: "MyServer", version: "1.0.0")
 try await server.start(transport: StdioTransport(logger: logger))
 ```
 
+## Conformance
+
+The SDK is tested against the
+[MCP conformance suite](https://github.com/modelcontextprotocol/conformance)
+with the `mcp-everything-client` and `mcp-everything-server` fixtures in
+`Sources/MCPConformance`. Requires Node.js.
+
+```bash
+scripts/run-conformance.sh --spec-version 2025-11-25   # one revision's wire
+scripts/run-conformance.sh                             # harness default wire
+scripts/run-conformance.sh --requirements 2025-11-25   # tier score
+```
+
+Each leg checks a generated baseline of known failures
+(`conformance-baseline*.yml`). A run fails on any unlisted failure and on any
+listed failure that now passes; regenerate with `--update-baseline`.
+
+The harness and its dependency tree are pinned by
+`scripts/conformance-harness/package-lock.json` and installed with `npm ci`
+into `.build/conformance-harness`. To try another harness version, set
+`CONFORMANCE_PKG` (for example `@modelcontextprotocol/conformance@0.2.0`);
+it then runs with `npx`.
+
 ## Additional Resources
 
 - [MCP Specification](https://modelcontextprotocol.io/specification/2025-11-25)
