@@ -9,6 +9,11 @@ public enum Value: Hashable, Sendable {
     case int(Int)
     case double(Double)
     case string(String)
+
+    /// Binary data encoded as a data URL string.
+    ///
+    /// Generic JSON string decoding produces `.string`; use
+    /// `Data.parseDataURL(_:)` to opt in to data-URL parsing.
     case data(mimeType: String? = nil, Data)
     case array([Value])
     case object([String: Value])
@@ -95,13 +100,7 @@ extension Value: Codable {
         } else if let value = try? container.decode(Double.self) {
             self = .double(value)
         } else if let value = try? container.decode(String.self) {
-            if Data.isDataURL(string: value),
-                case let (mimeType, data)? = Data.parseDataURL(value)
-            {
-                self = .data(mimeType: mimeType, data)
-            } else {
-                self = .string(value)
-            }
+            self = .string(value)
         } else if let value = try? container.decode([Value].self) {
             self = .array(value)
         } else if let value = try? container.decode([String: Value].self) {
