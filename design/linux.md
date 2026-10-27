@@ -3,7 +3,8 @@
 The SDK behaves the same on Linux and macOS: every CI job passes on both, against one set of
 conformance baselines and one `interop/RESULTS.md`. Measured with `scripts/ci-linux.sh --strict
 all` on 2026-10-24 (Swift 6.1.3, conformance `0.2.0-alpha.11`, Go SDK v1.8.0, Python SDK
-v2.3.0).
+v2.3.0). Re-checked on 2026-10-27 with conformance `0.2.0-alpha.12` on ubi9 arm64 and macOS:
+every job passes, with the same baselines and tier scores.
 
 | Job | ubi9 arm64 | ubi9 amd64 (emulated) | `swift:6.1-noble` arm64 | macOS |
 |---|---|---|---|---|

@@ -70,7 +70,7 @@ they belong to the serialized `HTTP Client Transport Tests` suite.
 ## Conformance
 
 `scripts/run-conformance.sh` runs `@modelcontextprotocol/conformance` (pinned to
-`0.2.0-alpha.11`) against `mcp-everything-server` and `mcp-everything-client`. Details:
+`0.2.0-alpha.12`) against `mcp-everything-server` and `mcp-everything-client`. Details:
 [conformance/README.md](conformance/README.md).
 
 | Leg | Command | Baseline |

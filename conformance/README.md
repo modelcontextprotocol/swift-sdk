@@ -1,7 +1,8 @@
 # Conformance
 
 Fixtures and baselines for the [MCP conformance suite](https://github.com/modelcontextprotocol/conformance)
-(`@modelcontextprotocol/conformance`, pinned to `0.2.0-alpha.11` in `scripts/run-conformance.sh`).
+(`@modelcontextprotocol/conformance`, pinned to `0.2.0-alpha.12` by
+`scripts/conformance-harness/package-lock.json`).
 
 | Path | Product | Role |
 |---|---|---|
@@ -18,7 +19,7 @@ fixture.
 |---|---|---|
 | 2025-11-25 wire | `scripts/run-conformance.sh --spec-version 2025-11-25` | `baseline.2025-11-25.yml` |
 | 2026-07-28 wire | `scripts/run-conformance.sh --spec-version 2026-07-28` | `baseline.2026-07-28.yml` |
-| default wire | `scripts/run-conformance.sh` | `baseline.yml`; the only leg with extension scenarios (`tasks-*`, `auth/dpop*`) |
+| default wire | `scripts/run-conformance.sh` | `baseline.yml`; the only leg with extension scenarios (`tasks-*`, the skills `sep-2640-*`, the `auth/` extensions) |
 | tier score | `scripts/run-conformance.sh --requirements <rev>` | none; scores the frozen requirement set |
 
 - Every baseline leg runs `--suite all`, including pending and draft scenarios.
@@ -36,7 +37,7 @@ fixture.
 export npm_config_registry=https://registry.npmjs.org
 swift build
 BIN="$(swift build --show-bin-path)"
-H=@modelcontextprotocol/conformance@0.2.0-alpha.11
+H=@modelcontextprotocol/conformance@0.2.0-alpha.12
 
 # server scenario
 "$BIN/mcp-everything-server" --port 3001 &

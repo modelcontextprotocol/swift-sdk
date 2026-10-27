@@ -1,6 +1,7 @@
 # Expected failures for the bare '--suite all' leg: every scenario shipped
 # with the pinned harness, each at the harness's default wire. This is the
-# only leg that reaches extension-tagged scenarios (tasks-*, auth/dpop*).
+# only leg that reaches extension-tagged scenarios (tasks-*, the sep-2640-*
+# skills scenarios and the auth/ extensions).
 #
 # Generated; do not edit. Regenerate with:
 #   scripts/run-conformance.sh --mode both --update-baseline
