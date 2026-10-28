@@ -68,6 +68,8 @@ Behavior that can break working code ([docs/migration.md](docs/migration.md#beha
 - Sampling with tools (SEP-1577): `Server.requestSampling` takes `tools` and `toolChoice`. Server
   and client check the `sampling.tools` and `sampling.context` capabilities and the rules for
   tool uses and tool results.
+- Request association (SEP-2260): a sampling or elicitation request sent while the server handles
+  no client request logs one warning for each method. At 2025-11-25 it is still sent.
 - A built-in `logging/setLevel` handler that filters `Server.log`.
 - `statelessRequestHook` on `Server.start`, `HTTPClientTransport.cancelRequest(_:)`,
   `BearerTokenValidationResult.tokenInfo`, and the `HTTPClientAuthorizer` requirement

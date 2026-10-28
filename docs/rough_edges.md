@@ -19,6 +19,14 @@ will change in a later major version.
 - `Configuration.strict` defaults to `false`: in the handshake era a server
   serves requests sent before `initialize`.
 
+- In the handshake era, `requestSampling` and `requestElicitation` send the
+  request also when the server handles no client request, for example from a
+  background task. SEP-2260 forbids this, but 2025-11-25 and earlier allow it.
+  The SDK logs one warning for each method. At 2026-07-28 these calls throw.
+
+  **Workaround**: call them from the handler of the request that needs the
+  answer, or return input requests from that handler.
+
 ## Content and results
 
 - `Client.Capabilities.Elicitation()` declares form elicitation, and decoding

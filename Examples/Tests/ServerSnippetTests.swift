@@ -305,25 +305,33 @@ struct ServerSnippetTests {
     @Test("Requests to the client work at handshake only", arguments: eras)
     func serverRequests(mode: Client.ProtocolMode) async throws {
         let server = Server(name: "cleaner", version: "1.0", capabilities: .init(tools: .init()))
-        let changes = Inbox<Bool>()
-        await watchRoots(on: server) { await changes.add(true) }
-        await server.withMethodHandler(CallTool.self) { _ in
-            let confirmed = try await confirmDirectly(on: server)
-            return .init(content: [.text(text: "\(confirmed)")])
-        }
+        let cache = RootsCache()
+        await watchRoots(on: server, cache: cache)
+        await registerCleanTool(on: server, roots: cache)
+        let fetches = Inbox<Bool>()
         let client = try await connect(
             server, mode: mode, capabilities: .init(elicitation: .init(), roots: .init(listChanged: true))
         ) { client in
-            await client.withRootsHandler { [Root(uri: "file:///work", name: "work")] }
+            await client.withRootsHandler {
+                await fetches.add(true)
+                return [Root(uri: "file:///work", name: "work")]
+            }
             await client.withElicitationHandler { _ in .init(action: .accept, content: ["confirm": true]) }
         }
         defer { Task { await client.disconnect(); await server.stop() } }
         if await client.isStateless {
             #expect(await code { _ = try await client.callTool(name: "clean") } == -32600)
         } else {
+            // The roots are fetched once, and again after they changed.
             #expect(text(try await client.callTool(name: "clean").content) == "true")
+            #expect(text(try await client.callTool(name: "clean").content) == "true")
+            #expect(await fetches.items.count == 1)
             try await client.notifyRootsChanged()
-            #expect(await eventually { await changes.items == [true] })
+            #expect(
+                await eventually {
+                    _ = try? await client.callTool(name: "clean")
+                    return await fetches.items.count == 2
+                })
         }
     }
 

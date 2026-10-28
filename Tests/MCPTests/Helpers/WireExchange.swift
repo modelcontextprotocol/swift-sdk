@@ -1,4 +1,5 @@
 import Foundation
+import Logging
 import Testing
 
 @testable import MCP
@@ -9,10 +10,11 @@ import Testing
 /// check the exact bytes a peer sees rather than Swift-level types.
 struct WireExchange {
     let server: Server
-    let transport = MockTransport()
+    let transport: MockTransport
 
-    init(server: Server) {
+    init(server: Server, logger: Logger? = nil) {
         self.server = server
+        transport = logger.map { MockTransport(logger: $0) } ?? MockTransport()
     }
 
     func start() async throws {

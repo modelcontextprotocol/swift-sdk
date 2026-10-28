@@ -82,8 +82,7 @@ Details: [design/auth.md](design/auth.md).
 
 ## Planned
 
-The SEPs marked Planned in [SEP coverage](#sep-coverage), and the gap of SEP-2260 (server
-requests outside a client request at 2025-11-25).
+The SEPs marked Planned in [SEP coverage](#sep-coverage).
 
 The conformance harness exercises extensions only in the default leg, as scenarios that do not
 count toward a tier; their failing checks would be entries in
@@ -142,7 +141,7 @@ A change that implements a SEP updates its row.
 | 2164 | Resource not found error code | Standards | Implemented | `MCPError.resourceNotFound(uri:message:)` |
 | 2207 | OIDC refresh token guidance | Standards | Partial | Dynamic registration declares the `refresh_token` grant (a SHOULD). The client does not add `offline_access` (a MAY). |
 | 2243 | HTTP header standardization | Standards | Implemented | [2026-07-28 core](#2026-07-28-core) |
-| 2260 | Server requests belong to a client request | Standards | Partial | Met at 2026-07-28, which has no server-to-client requests. At 2025-11-25 a server can send a request outside a handler. |
+| 2260 | Server requests belong to a client request | Standards | Implemented | Met at 2026-07-28, which has no server-to-client requests. At 2025-11-25 and earlier, which allow them, a sampling or elicitation request sent while the server handles no client request is sent, with one warning for each method. The client answers such requests. [Requests to the client](docs/server.md#requests-to-the-client) |
 | 2322 | Multi round-trip requests | Standards | Implemented | [2026-07-28 core](#2026-07-28-core) |
 | 2352 | Client credentials bound to their authorization server | Not in the index | Implemented | [Authorization](#authorization) |
 | 2468 | `iss` in authorization responses | Standards | Implemented | [Authorization](#authorization) |

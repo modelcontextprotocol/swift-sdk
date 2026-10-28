@@ -462,7 +462,8 @@ Handshake clients accept requests from the server. `Server` has methods for them
 
 %include Examples/Snippets/Server/MultiRoundTrip.swift server-requests
 
-- Call them from a handler, so that over HTTP the request goes on the stream of the request being handled.
+- Send them from the handler of the request that needs them, as the snippet does. The request then belongs to that client request, as SEP-2260 requires, and over HTTP it goes on that request's stream. A request sent after the handler returned, or from code that handles no request, is sent anyway, because 2025-11-25 allows it; the SDK logs one warning for each method (`sampling/createMessage`, `elicitation/create`). `roots/list` is not checked.
+- Fetch roots in the handler that needs them. When the client sends `notifications/roots/list_changed`, mark them stale, and fetch them again in the next handler, as `RootsCache` does.
 - In strict mode they fail with -32601 when the client did not declare the capability. Otherwise the request is sent, and a client without a handler answers with an error.
 - `requestSampling` with `tools` or `toolChoice` fails with -32601 when the client did not declare `sampling.tools`, also when the server is not strict: the specification forbids the request. It fails with -32602 when the messages break the rules in [Sampling with tools](#sampling-with-tools). It checks both before it sends the request.
 - At 2026-07-28 they throw -32600 "... cannot be sent at protocol version 2026-07-28". Use [multi round-trip requests](#multi-round-trip-requests), which serve both eras.
