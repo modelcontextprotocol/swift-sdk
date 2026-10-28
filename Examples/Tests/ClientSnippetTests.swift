@@ -3,6 +3,7 @@ import Testing
 
 @testable import ClientSnippets
 @testable import MCP
+@testable import ServerSnippets
 
 // Runs the docs/client.md snippets against an in-process server.
 
@@ -507,6 +508,20 @@ struct ClientSnippetTests {
             #expect(describe(error) == "no resource at file:///missing.txt")
         }
         #expect(describe(CancellationError()).hasPrefix("not an MCP error"))
+        await client.disconnect()
+        await server.stop()
+    }
+
+    // MARK: Tasks
+
+    @Test("tasks: callTool returns the task's result at both eras", arguments: bothEras)
+    func tasks(mode: Client.ProtocolMode) async throws {
+        let server = await makeReportServer(tasks: TaskManager(configuration: .init(pollInterval: .milliseconds(10))))
+        let (client, content) = try await buildReport(transport: try await start(server), mode: mode)
+        #expect(texts(content) == ["Report with drafts"])
+        let (id, result) = try await followReport(client: client)
+        #expect(id != nil)
+        #expect(texts(result.content) == ["Report with drafts"])
         await client.disconnect()
         await server.stop()
     }

@@ -19,10 +19,13 @@ enum StatelessRequests {
     static let removedMethods: Set<String> = [
         Initialize.name, Ping.name, SetLoggingLevel.name,
         ResourceSubscribe.name, ResourceUnsubscribe.name,
+        GetTaskPayload.name, ListTasks.name,
     ]
 
     /// Methods that exist only at 2026-07-28 and later.
-    static let statelessOnlyMethods: Set<String> = [ServerDiscover.name, SubscriptionsListen.name]
+    static let statelessOnlyMethods: Set<String> = [
+        ServerDiscover.name, SubscriptionsListen.name, UpdateTask.name,
+    ]
 
     /// Methods whose results carry SEP-2549 cache hints.
     static let cacheableMethods: Set<String> = [

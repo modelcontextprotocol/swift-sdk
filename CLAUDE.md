@@ -229,17 +229,36 @@ The SDK stays dual-era: a request carrying `io.modelcontextprotocol/protocolVers
 - Client: `send(_:)` loops through `resolveInputRequests` with the registered
   sampling/elicitation/roots handlers (`Configuration.multiRoundTrip`).
 
+## Tasks (SEP-1686, SEP-2663)
+
+One model, two wire forms (`design/tasks.md`): v1 at 2025-11-25 (`task` param, `tasks/result`,
+`tasks/list`) and v2, the `io.modelcontextprotocol/tasks` extension at 2026-07-28 (server
+decides, outcome inlined in `tasks/get`, `tasks/update`). `Base/TaskTypes.swift` has the wire
+types; `TaskSnapshot`'s internal `generation` picks the encoding.
+- Server: `withTasks(manager)`; a `tools/call` handler returns `runAsTask { task in ... }`.
+  `Server/TaskManager.swift`: `TaskManager` (work, limits, principal, input exchanges, ordered
+  observers) over a `TaskStore`. `Server.taskRuntime` reads `execution.taskSupport` from the
+  `tools/list` handler (`ToolInfo` cache) and refuses before the handler (-32601 v1, -32021
+  v2). Capabilities are derived (`advertisedCapabilities`); `execution` is stripped except at
+  2025-11-25. v1 `tasks/result` delivers input on its own stream with related-task `_meta`.
+- Client: `Configuration.tasks` (`nil` = no tasks); `callTool` drives a task
+  (`ClientTasks.swift`, `TaskHandle`); v1 augmentation from `toolTaskSupport`.
+- Tests: `Tests/MCPTests/TaskTests.swift`; the default conformance leg's `tasks-*` scenarios;
+  the interop `tasks` profile (Swift and TypeScript at 2025-11-25).
+
 ## Interop
 
 `scripts/run-interop.sh [--update-results | --check]` runs the Swift, Go and Python SDKs' clients and
-servers against each other (profiles basic, advanced, connect, session), in both eras, over
+servers against each other (profiles basic, advanced, connect, session, tasks), in both eras, over
 HTTP and stdio, and writes `.build/interop/report.md` (`--update-results` copies it to
 `interop/RESULTS.md`; `--check` fails when the result rows differ from it, via
-`interop/report.py --expect`). The other SDKs are pinned releases: `interop/go-client/go.mod` and
+`interop/report.py --expect`). The other SDKs are pinned releases: `interop/go-client/go.mod`,
 `interop/python-client/requirements.in` (hashed lock `requirements.txt`, example servers
-checked against `examples.sha256`); no local checkouts. The three drivers in
-`interop/{swift-client,go-client,python-client}` take the same flags and checks; keep them in
-step. Findings: `interop/README.md`.
+checked against `examples.sha256`) and `interop/ts-client/package.json` (`npm ci` from
+`package-lock.json`); no local checkouts. The TypeScript SDK (2025-11-25 only) runs the tasks
+profile: `ts-client/client.mjs` and a task server, `ts-client/server.mjs`, on its SEP-1686
+runtime. The drivers in `interop/{swift-client,go-client,python-client,ts-client}` take the same
+flags and checks; keep them in step. Findings: `interop/README.md`.
 
 ## CI
 

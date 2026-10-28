@@ -1,22 +1,24 @@
 #!/usr/bin/env bash
-# Interop matrix: the Swift SDK against the Go and Python SDKs (interop/README.md).
+# Interop matrix: the Swift SDK against the Go, Python and TypeScript SDKs (interop/README.md).
 #
 #   scripts/run-interop.sh [--update-results | --check]
 #
 # The other SDKs are pinned releases: the Go SDK in interop/go-client/go.mod
 # (from the Go module proxy) and the Python SDK in
 # interop/python-client/requirements.in (PyPI, and a GitHub commit for its
-# conformance server), installed from the hashed lock requirements.txt. The
+# conformance server), installed from the hashed lock requirements.txt, and
+# the TypeScript SDK in interop/ts-client/package.json, installed with npm ci
+# from package-lock.json (tasks profile only, 2025-11-25). The
 # example servers come from the same commit and are checked against
 # examples.sha256. The script builds the Swift fixtures, the Go conformance server and
 # examples at the pinned version, installs the Python SDK in a venv, starts
 # the HTTP servers, runs every client against every server in both protocol
-# eras with each check profile (basic, advanced, connect, session), and writes
+# eras with each check profile (basic, advanced, connect, session, tasks), and writes
 # .build/interop/report.md. --update-results copies it to interop/RESULTS.md.
 # --check fails the run when the report's results differ from
 # interop/RESULTS.md (CI's gate; see interop/report.py).
 #
-# Needs: Swift, Go 1.25 or later, uv, curl, sha256sum or shasum, and network
+# Needs: Swift, Go 1.25 or later, uv, Node 18 or later with npm, curl, sha256sum or shasum, and network
 # access on the first run. Behind a TLS-intercepting proxy, export UV_SYSTEM_CERTS=1.
 set -euo pipefail
 
@@ -43,7 +45,7 @@ PY_SDK_COMMIT="$(sed -n 's/^mcp-everything-server @ .*@\([0-9a-f]\{40\}\)#.*/\1/
 [[ -n "$PY_SDK_COMMIT" ]] || { echo "requirements.in must pin the conformance server to a commit" >&2; exit 2; }
 PY_SDK_RAW="https://raw.githubusercontent.com/modelcontextprotocol/python-sdk/$PY_SDK_COMMIT"
 
-for tool in swift go uv curl perl python3; do
+for tool in swift go uv node npm curl perl python3; do
     command -v "$tool" >/dev/null || { echo "run-interop.sh needs $tool" >&2; exit 2; }
 done
 if command -v sha256sum >/dev/null; then
@@ -114,6 +116,18 @@ if ! (cd "$EXAMPLES" && verify_sha256 "$PY_CLIENT/examples.sha256" 2>/dev/null);
     }
 fi
 
+TS_CLIENT="$ROOT/interop/ts-client"
+TS_SDK_VERSION="$(sed -n 's/.*"@modelcontextprotocol\/sdk": "\([^"]*\)".*/\1/p' "$TS_CLIENT/package.json")"
+info "installing TypeScript SDK $TS_SDK_VERSION"
+TS="$WORK/ts"
+mkdir -p "$TS"
+if ! cmp -s "$TS_CLIENT/package-lock.json" "$TS/package-lock.json" 2>/dev/null || [[ ! -d "$TS/node_modules" ]]; then
+    cp "$TS_CLIENT/package.json" "$TS_CLIENT/package-lock.json" "$TS/"
+    (cd "$TS" && npm ci --ignore-scripts --no-audit --no-fund --silent)
+fi
+cp "$TS_CLIENT"/*.mjs "$TS/"
+NODE="$(command -v node)"
+
 # MARK: Servers
 
 # Live background processes: servers and the session cells' clients. A PID
@@ -169,7 +183,7 @@ wait_for() { # url, pid: the server at url answers and is the process pid
     exit 1
 }
 
-require_free 3101 3111 3201 3202 3211 3301 3311 8000
+require_free 3101 3111 3201 3202 3211 3301 3311 3401 8000
 
 serve swift "$BIN_SWIFT/mcp-everything-server" --port 3101
 wait_for http://127.0.0.1:3101/mcp "$LAST_PID"
@@ -177,6 +191,8 @@ serve go-stateful "$BIN_GO/go-everything-server" -http 127.0.0.1:3201 -stateless
 wait_for http://127.0.0.1:3201/ "$LAST_PID"
 serve go-stateless "$BIN_GO/go-everything-server" -http 127.0.0.1:3202
 wait_for http://127.0.0.1:3202/ "$LAST_PID"
+serve ts "$NODE" "$TS/server.mjs" --port 3401
+wait_for http://127.0.0.1:3401/mcp "$LAST_PID"
 serve python "$VENV/bin/mcp-everything-server" --port 3301
 wait_for http://127.0.0.1:3301/mcp "$LAST_PID"
 serve python-quickstart "$PY" "$EXAMPLES/mcpserver_quickstart.py"
@@ -249,6 +265,7 @@ run_cell() {
         swift*) limit 300 "$BIN_SWIFT/mcp-interop-client" --era "$era" ${extra[@]+"${extra[@]}"} "${target[@]}" ;;
         go*) limit 300 "$BIN_GO/go-interop-client" -era "$era" ${extra[@]+"${extra[@]}"} "${target[@]}" ;;
         python*) limit 300 "$PY" "$ROOT/interop/python-client/client.py" --era "$era" ${extra[@]+"${extra[@]}"} "${target[@]}" ;;
+        ts*) limit 300 "$NODE" "$TS/client.mjs" --era "$era" ${extra[@]+"${extra[@]}"} "${target[@]}" ;;
     esac >"$out" 2>"$log" || status=$?
     echo "$status" >"$RESULTS/$cell.exit"
 }
@@ -364,6 +381,22 @@ for client in swift go python; do
     session_cell "$client" go-stateful handshake http://127.0.0.1:3211/ \
         "$BIN_GO/go-everything-server" -http 127.0.0.1:3211 -stateless=false
 done
+
+# Tasks: the task tools of the Swift everything-server and of the TypeScript
+# task server (2025-11-25 only). The Swift and TypeScript clients run the task
+# lifecycle; every client checks that a client without tasks can call them
+# (the Go and Python SDKs have no tasks runtime).
+PROFILE=tasks
+PROFILE_ARGS=(--profile tasks)
+for client in swift go python ts; do
+    for era in handshake stateless; do
+        [[ "$client" == ts && "$era" == stateless ]] && continue
+        run_cell "$client" swift http "$era" http://127.0.0.1:3101/mcp
+        run_cell "$client" swift stdio "$era" "$BIN_SWIFT/mcp-everything-server" --stdio
+    done
+    run_cell "$client" ts http handshake http://127.0.0.1:3401/mcp
+    run_cell "$client" ts stdio handshake "$NODE" "$TS/server.mjs" --stdio
+done
 unset PROFILE PROFILE_ARGS
 
 # The SDKs' own example clients against the other SDKs' servers.
@@ -383,7 +416,7 @@ example_client "go-listfeatures__python-quickstart-http" "$BIN_GO/go-listfeature
 
 {
     echo "Generated by scripts/run-interop.sh on $(date -u +%Y-%m-%d)."
-    echo "Swift SDK $(git -C "$ROOT" log -1 --format=%h -- Sources) (last change to Sources/), Go SDK $GO_SDK_VERSION, Python SDK $PY_SDK_TAG."
+    echo "Swift SDK $(git -C "$ROOT" log -1 --format=%h -- Sources) (last change to Sources/), Go SDK $GO_SDK_VERSION, Python SDK $PY_SDK_TAG, TypeScript SDK $TS_SDK_VERSION."
     echo
     python3 "$ROOT/interop/report.py" "$RESULTS"
 } >"$WORK/report.md"

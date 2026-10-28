@@ -354,7 +354,7 @@ Some notifications do not belong to a request: list changes (`notifications/tool
 
 The server answers on the request's stream:
 
-1. `notifications/subscriptions/acknowledged` first, with the honored subset of the filter. The server honors a list-change kind only when it declares `listChanged` for that feature, and resource URIs only when it declares `resources.subscribe`. Kinds it does not honor are omitted.
+1. `notifications/subscriptions/acknowledged` first, with the honored subset of the filter. The server honors a list-change kind only when it declares `listChanged` for that feature, resource URIs only when it declares `resources.subscribe`, and `taskIds` (the tasks extension) only for the caller's own tasks of a server with [tasks](server.md#tasks). Kinds it does not honor are omitted. A filter with `taskIds` from a client that did not declare the tasks extension is refused with -32021.
 2. Every matching notification, each with `_meta["io.modelcontextprotocol/subscriptionId"]` set to the listen request's JSON-RPC id.
 3. A `SubscriptionsListen.Result` (with the same `subscriptionId` in `_meta`) when the server ends the stream gracefully, for example on `stop()` or `closeSubscriptions()`.
 
@@ -372,7 +372,7 @@ By default any caller may listen to any list change and resource URI. To restric
 
 %include Examples/Snippets/Protocol/Streams.swift listen-authorizer
 
-`Server.Configuration.maxSubscriptionStreams` (1000) caps the open streams and `maxResourceSubscriptions` (256) the URIs of one stream; duplicate URIs are dropped before the acknowledgement.
+`Server.Configuration.maxSubscriptionStreams` (1000) caps the open streams and `maxResourceSubscriptions` (256) the URIs, and the task ids, of one stream; duplicates are dropped before the acknowledgement.
 
 ### Listening from the client
 
@@ -663,11 +663,11 @@ Every JSON-RPC error the SDK sends or receives is an `MCPError`. `code` is the J
 | `parseError(_:)` | -32700 | `{"detail"}` | Body is not JSON or not a JSON-RPC message. |
 | `invalidRequest(_:)` | -32600 | `{"detail"}` | Request before `initialize` (strict); second `initialize`; server-to-client request at 2026-07-28; HTTP validation failures. |
 | `methodNotFound(_:)` | -32601 | `{"detail"}` | No handler; method removed at 2026-07-28; stateless-only method on a handshake connection; undeclared capability at 2026-07-28. |
-| `invalidParams(_:)` | -32602 | `{"detail"}` | Parameters do not decode; invalid stateless `_meta`; invalid or expired `requestState`. |
+| `invalidParams(_:)` | -32602 | `{"detail"}` | Parameters do not decode; invalid stateless `_meta`; invalid or expired `requestState`; unknown, expired or foreign task id; cancelling a finished 2025-11-25 task. |
 | `internalError(_:)` | -32603 | `{"detail"}` | Handler threw a non-`MCPError`; local transport and HTTP failures; client disconnected. |
 | `resourceNotFound(uri:message:)` | -32602 | `{"uri"}` | No resource at the URI (SEP-2164). Decoded from -32602 or the old -32002 when `data.uri` is set. |
 | `headerMismatch(_:)` | -32020 | `{"detail"}` | `Mcp-Method`, `Mcp-Name`, `Mcp-Param-*` or `MCP-Protocol-Version` missing or different from the body. |
-| `missingRequiredClientCapabilities(_:message:)` | -32021 | `{"requiredCapabilities"}` | An input-required result needs a client capability the request did not declare. |
+| `missingRequiredClientCapabilities(_:message:)` | -32021 | `{"requiredCapabilities"}` | An input-required result needs a client capability the request did not declare; a tool that requires tasks, a task method or a listen stream naming tasks from a client without the tasks extension. |
 | `unsupportedProtocolVersion(supported:requested:)` | -32022 | `{"supported", "requested"}` | Version not served; stateless request to the stateful transport. |
 | `urlElicitationRequired(message:elicitations:)` | -32042 | `{"elicitations"}` | The user must complete URL elicitations first. |
 | `serverError(code:message:data:)` | any other | as sent | Implementation-defined codes; -32000 and -32001 from a peer. |

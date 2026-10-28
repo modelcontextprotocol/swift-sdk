@@ -280,6 +280,43 @@ Keep the method, name and arguments unchanged between rounds. An SDK server seal
 | `internalError` (-32603) | A server handler returned both content and input requests, `maxRounds` was exceeded, or a result carried more than `maxInputRequests` input requests. From an SDK server at 2025-11-25: a client handler failed one of the server's input requests. |
 | `invalidRequest` (-32600) "... requires input ..." | The loop is disabled and a convenience method got an input-required result. |
 
+## Tasks
+
+A server may run a tool call as a task: it answers at once with a task, and the result comes later. `Client.Configuration.tasks` opts in; it is `nil` by default.
+
+%include Examples/Snippets/Client/Tasks.swift client-tasks
+
+- At 2026-07-28 the client declares the `io.modelcontextprotocol/tasks` extension in each request, and the server decides which calls become tasks. Without `tasks`, a server runs the work inline or refuses a tool that requires tasks with -32021.
+- At 2025-11-25 the client asks for a task with `task` on `tools/call`, as `augmentation` says: `.whenRequired` (the default) for tools listed with `execution.taskSupport: "required"`, `.whenSupported` also for `"optional"`, `.never` for none. It asks only when the server declares `tasks.requests.tools.call` and the client has listed the tool. `requestedTTL` sets `task.ttl`.
+
+`callTool` returns a task's result as it returns any other: it polls `tasks/get` at the interval the server suggests, kept between `minimumPollInterval` (100 ms) and `maximumPollInterval` (30 s), `defaultPollInterval` (1 s) when the server suggests none. A task notification from the server ends a wait early. The task's input requests go to the handlers registered with `withElicitationHandler`, `withSamplingHandler` and `withRootsHandler`, at both revisions: at 2026-07-28 the client answers `inputRequests` with `tasks/update`, any it has not answered yet; at 2025-11-25 it calls `tasks/result` once the task waits for input or finished, and the server sends its requests on that stream.
+
+| Outcome | `callTool` |
+|---|---|
+| Completed | Returns the tool's result, which may report `isError` |
+| Failed with a protocol error | Throws the `MCPError` |
+| Failed with a tool error (2025-11-25) | Returns the `isError` result, from `tasks/result` |
+| Cancelled | Throws `TaskCancelledError` |
+
+When a handler throws, or the Swift task that calls `callTool` is cancelled, the client sends `tasks/cancel` and rethrows.
+
+### Following a task
+
+`startToolCall` returns the result that creates the task as is; `client.task(_:)` gives a `TaskHandle` to follow it, and `client.task(id:)` one for a task known by its id, for example after a restart:
+
+%include Examples/Snippets/Client/Tasks.swift client-task-handle
+
+| Call | Method | Revisions |
+|---|---|---|
+| `getTask(_:)`, `TaskHandle.snapshot()` | `tasks/get` | both; at 2026-07-28 the snapshot carries `result`, `error` or `inputRequests` |
+| `updateTask(_:inputResponses:)`, `TaskHandle.update(_:)` | `tasks/update` | 2026-07-28 |
+| `cancelTask(_:)`, `TaskHandle.cancel()` | `tasks/cancel` | both; returns the cancelled task at 2025-11-25, `nil` at 2026-07-28 |
+| `taskResult(_:)` | `tasks/result` | 2025-11-25 |
+| `listTasks(cursor:)` | `tasks/list` | 2025-11-25, when the server declares `tasks.list` |
+| `TaskHandle.result()` | the loop `callTool` runs | both |
+
+To receive `notifications/tasks` at 2026-07-28, name the tasks in `SubscriptionFilter.taskIds` when you [listen](#listening-by-hand); at 2025-11-25 the server sends `notifications/tasks/status` on its own. Register `onNotification(TaskUpdatedNotification.self)` or `onNotification(TaskStatusNotification.self)` to see them.
+
 ## Notifications and subscriptions
 
 `onNotification(_:handler:)` registers a handler for one notification type. Several handlers per type are allowed; they run in registration order, and an error thrown by one is logged.

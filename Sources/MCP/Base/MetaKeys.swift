@@ -15,6 +15,8 @@ public enum MetaKey {
     public static let serverInfo = "io.modelcontextprotocol/serverInfo"
     /// The `subscriptions/listen` request a notification belongs to.
     public static let subscriptionID = "io.modelcontextprotocol/subscriptionId"
+    /// The task a message belongs to (2025-11-25): `{"taskId": ...}`.
+    public static let relatedTask = "io.modelcontextprotocol/related-task"
 }
 
 extension Metadata {
@@ -46,6 +48,13 @@ extension Metadata {
     public var serverInfo: Server.Info? {
         get { decodeField(MetaKey.serverInfo) }
         set { encodeField(newValue, MetaKey.serverInfo) }
+    }
+
+    /// The `taskId` of `io.modelcontextprotocol/related-task`; `nil` when
+    /// absent or invalid.
+    public var relatedTaskID: String? {
+        get { fields[MetaKey.relatedTask]?.objectValue?["taskId"]?.stringValue }
+        set { fields[MetaKey.relatedTask] = newValue.map { ["taskId": .string($0)] } }
     }
 
     private func decodeField<T: Decodable>(_ key: String) -> T? {

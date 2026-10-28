@@ -111,6 +111,20 @@ public struct ProtocolProfile: Hashable, Sendable {
     /// SSE priming events with empty data are safe for the client.
     public let allowsPrimingEvents: Bool
 
+    /// Tasks are part of the protocol (SEP-1686): the client augments a
+    /// request with `task` and reads the outcome with `tasks/result`.
+    public let usesTaskAugmentation: Bool
+
+    /// Tasks are the `io.modelcontextprotocol/tasks` extension (SEP-2663): the
+    /// server decides, and `tasks/get` inlines the outcome.
+    public let usesTasksExtension: Bool
+
+    /// The task generation of this revision; `nil` before 2025-11-25.
+    var taskGeneration: TaskGeneration? {
+        if usesTasksExtension { return .v2 }
+        return usesTaskAugmentation ? .v1 : nil
+    }
+
     init(version: String) {
         // Only dates are ordered; anything else would sort above every revision.
         let comparable = Version.isDateVersion(version) ? version : Version.latestHandshake
@@ -124,5 +138,7 @@ public struct ProtocolProfile: Hashable, Sendable {
         self.usesSubscriptionsListen = stateless
         self.usesStandardHeaders = stateless
         self.allowsPrimingEvents = !stateless && comparable >= Version.v2025_03_26
+        self.usesTaskAugmentation = !stateless && comparable >= Version.v2025_11_25
+        self.usesTasksExtension = stateless
     }
 }

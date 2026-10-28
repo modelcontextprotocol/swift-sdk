@@ -837,6 +837,7 @@ CODEOWNERS changed (#155, #294, #306, #308, #318, #320, #331, #333).
 | Discovery | `ServerDiscover` | [protocol.md](protocol.md#discovery-and-protocol-modes) |
 | Notification streams | `Client.listen(_:)`, `Client.Subscription`, `unsubscribeFromResource(uri:)`, `subscribedResourceURIs`, `Server.closeSubscriptions()`, `SubscriptionFilter` | [client.md](client.md#notifications-and-subscriptions) |
 | Multi round-trip requests | `.inputRequired(_:requestState:_meta:)`, `InputRequest`, `InputResponse`, `Client.Configuration.multiRoundTrip` | [server.md](server.md#multi-round-trip-requests) |
+| Tasks (SEP-1686, SEP-2663) | `Server.withTasks(_:)`, `TaskManager`, `HandlerContext.runAsTask(ttl:pollInterval:_:)`, `TaskContext`, `Tool.Execution`, `Client.Configuration.tasks`, `TaskHandle`, `TaskSnapshot`, `SubscriptionFilter.taskIds` | [server.md](server.md#tasks), [client.md](client.md#tasks) |
 | Error codes | `MCPError.Code`, `MCPError.errorCode` | [`MCPError` cases](#mcperror-cases) |
 | Sealed request state | `Server.init(requestStateProtection:)`, `RequestStateProtection`, `AESGCMRequestStateCodec`, `RequestStateCodec` | [server.md](server.md#protecting-requeststate) |
 | Cache hints | `CacheableResult`, `ttlMs`, `cacheScope`, `CacheHint`, `Server.Configuration.cacheHints` | [server.md](server.md#cacheable-results) |

@@ -55,6 +55,9 @@ Behavior that can break working code ([docs/migration.md](docs/migration.md#beha
   `StatelessHTTPServerTransport`, `resultType`, multi round-trip requests with sealed
   `requestState`, `Mcp-Method`/`Mcp-Name`/`Mcp-Param-*` headers, cache hints, `extensions`, error
   codes -32020 to -32022.
+- Tasks for `tools/call` at 2025-11-25 (SEP-1686) and the 2026-07-28 tasks extension
+  (SEP-2663): `Server.withTasks(_:)`, `runAsTask`, `TaskManager` and `TaskStore` on the server;
+  `Client.Configuration.tasks`, `callTool` that drives a task, and `TaskHandle` on the client.
 - Authorization: issuer checks (RFC 8414, RFC 9207), `application_type`, authorization server
   migration, the JWT bearer grant, enterprise-managed authorization with token exchange, workload
   identity, DPoP.

@@ -9,30 +9,5 @@
 # Entries are '<scenario>:<check-id>', or '<scenario>' for a scenario that
 # failed without producing a failing check. The harness fails a run on any
 # unlisted failure and on any listed entry that now passes.
-server:
-  - "tasks-capability-negotiation:sep-2663-tasks-methods-non-declaring"
-  - "tasks-capability-negotiation:tasks-extension-advertised"
-  - "tasks-capability-negotiation:tasks-per-request-meta-opt-in"
-  - "tasks-dispatch-and-envelope:sep-2663-durable-create-strong-consistency"
-  - "tasks-dispatch-and-envelope:sep-2663-tasks-get-invalid-task-id-32602"
-  - "tasks-dispatch-and-envelope:tasks-server-directed-creation-no-hint"
-  - "tasks-lifecycle:sep-2663-cancel-ack-empty-result"
-  - "tasks-lifecycle:sep-2663-result-type-task-on-create"
-  - "tasks-lifecycle:sep-2663-tasks-get-status-completed"
-  - "tasks-lifecycle:sep-2663-tasks-get-status-failed"
-  - "tasks-lifecycle:sep-2663-tasks-get-status-working"
-  - "tasks-lifecycle:sep-2663-tool-error-uses-completed-status"
-  - "tasks-lifecycle:tasks-cancel-terminal-idempotent-ack"
-  - "tasks-mrtr-composition:sep-2663-mrtr-synchronous-before-task-creation"
-  - "tasks-mrtr-input:sep-2663-tasks-get-status-input-required"
-  - "tasks-mrtr-input:tasks-mrtr-partial-fulfillment"
-  - "tasks-mrtr-input:tasks-mrtr-tasks-update-resumes"
-  - "tasks-request-headers:sep-2663-routing-headers-accepted-on-tasks-get"
-  - "tasks-request-headers:sep-2663-server-rejects-mismatched-mcp-name-on-tasks-get"
-  - "tasks-request-headers:tasks-headers-tolerate-mcp-method-on-tools-call"
-  - "tasks-request-state-removal:tasks-request-state-removal-setup"
-  - "tasks-required-task-error:sep-2663-server-returns-missing-capability-when-required"
-  - "tasks-wire-fields:tasks-no-early-ttl-expiry"
-  - "tasks-wire-fields:tasks-no-related-task-meta-on-inlined-result"
-  - "tasks-wire-fields:tasks-wire-field-renames"
+server: []
 client: []

@@ -699,6 +699,143 @@ func makeServerWithPlainState() -> Server {
 }
 ```
 
+## Tasks
+
+A task lets a tool call outlive its request: the server answers at once with a task, and the client polls it until the result is ready. Tasks exist at two revisions, with different wire forms:
+
+| | 2025-11-25 (SEP-1686) | 2026-07-28 (`io.modelcontextprotocol/tasks`, SEP-2663) |
+|---|---|---|
+| Who decides | The client asks with `task` on `tools/call` | The server, for clients that declare the extension |
+| Declared as | `capabilities.tasks` in `initialize` | `extensions["io.modelcontextprotocol/tasks"]` in `server/discover` |
+| Result | `tasks/result`, which waits for the task | Inlined in `tasks/get` |
+| Input during the task | Server requests sent on the `tasks/result` stream | `inputRequests` in `tasks/get`, answered with `tasks/update` |
+| Tool error (`isError`) | The task fails | The task completes |
+| Listing | `tasks/list`, with a principal | None |
+
+One handler serves both. Set the server up with `withTasks(_:)`, declare each tool's `execution.taskSupport` in `tools/list`, and return `runAsTask` from the `tools/call` handler:
+
+```swift
+/// A server whose `report` tool runs as a task when the client can use one.
+func makeReportServer(tasks: TaskManager = TaskManager()) async -> Server {
+    let server = Server(name: "reports", version: "1.0.0", capabilities: .init(tools: .init()))
+    await server.withTasks(tasks)
+    await server.withMethodHandler(ListTools.self) { _ in
+        .init(tools: [
+            Tool(
+                name: "report", description: "Builds a report", inputSchema: ["type": "object"],
+                execution: .init(taskSupport: .optional))
+        ])
+    }
+    await server.withMethodHandler(CallTool.self) { params in
+        guard params.name == "report" else { throw MCPError.invalidParams("Unknown tool: \(params.name)") }
+        return try await Server.runAsTask { task in
+            await task.setStatusMessage("Collecting data")
+            let answer = try await task.elicit(
+                message: "Include drafts?",
+                requestedSchema: .init(properties: ["drafts": ["type": "boolean"]], required: ["drafts"]))
+            try await task.reportProgress(1, total: 1)
+            let drafts = answer.action == .accept && answer.content?["drafts"]?.boolValue == true
+            return CallTool.Result(content: [.text(text: drafts ? "Report with drafts" : "Report")])
+        }
+    }
+    return server
+}
+```
+
+`runAsTask` creates a task when the client can use one: it declared the extension (2026-07-28) or sent `task` (2025-11-25). The result then describes the task, and the work runs on after the handler returns. Otherwise the work runs inline and its result is returned. The `TaskContext` the work receives:
+
+| Member | Effect |
+|---|---|
+| `requestInput(_:)`, `elicit(message:requestedSchema:)` | Asks the client and waits. In a task the requests are reported with the task; inline they go to the client directly (handshake), or fail with -32021 at 2026-07-28, where inline work cannot ask. The SDK renames a key the task used before. |
+| `setStatusMessage(_:)` | Sets the task's `statusMessage`. |
+| `reportProgress(_:total:message:)` | Progress for the call's token: for the task's lifetime at 2025-11-25, nothing in a 2026-07-28 task. |
+| `isTask`, `taskID`, `request` | Whether the work runs as a task, its id, and the context of the request that started it. |
+
+The work's outcome becomes the task's: a returned result completes it (a 2025-11-25 task with an `isError` result fails), an `MCPError` fails it as is, any other error fails it with -32603, and cancelling the task cancels the work.
+
+Which tools may run as tasks comes from the `tools/list` handler's output, read once and kept until the tool list changes:
+
+| `execution.taskSupport` | 2025-11-25 | 2026-07-28 |
+|---|---|---|
+| absent or `forbidden` | A call with `task`: -32601 | Never a task |
+| `optional` | The client's choice | A task for clients that declare the extension |
+| `required` | A call without `task`: -32601 | Clients that do not declare the extension: -32021 |
+
+`execution` reaches clients only at 2025-11-25; the SDK removes it from `tools/list` at other revisions. A tool whose work asks for input should be `required`: at 2026-07-28 inline work cannot ask.
+
+### Task managers
+
+A `TaskManager` runs the work and keeps the tasks in a `TaskStore` (`InMemoryTaskStore` by default). Give every `Server` of the process the same manager: a stateful HTTP server creates one per session, and a task outlives the session that created it.
+
+```swift
+/// One manager for every server of the process, so a task outlives the
+/// session that created it. `authenticatedUser` reads the identity your
+/// authentication established, such as the subject of a verified bearer
+/// token.
+func makeTaskManager(authenticatedUser: @escaping @Sendable (HTTPRequest) -> String?) -> TaskManager {
+    TaskManager(
+        configuration: .init(
+            defaultTTL: .seconds(600),  // when the client asks for none
+            maximumTTL: .seconds(3600),  // a longer requested ttl is shortened
+            pollInterval: .seconds(2),
+            maxActiveTasks: 200,
+            maxActiveTasksPerPrincipal: 10)
+    ) { context in
+        // Never a header the client sets itself, such as X-User-ID.
+        context.httpContext.flatMap(authenticatedUser)
+    }
+}
+```
+
+| `TaskManager.Configuration` | Default | Effect |
+|---|---|---|
+| `defaultTTL` | 1 hour | A task's lifetime when the client asks for none |
+| `maximumTTL` | 24 hours | A longer lifetime the client asks for is shortened |
+| `pollInterval` | 1 second | The interval suggested to clients |
+| `maxActiveTasks` | 1000 | At the limit, a `required` tool or a 2025-11-25 call with `task` fails with -32603 "Too many tasks are running"; any other call runs inline |
+| `maxActiveTasksPerPrincipal` | 100 | The same, per principal; only with a principal |
+| `sendsStatusNotifications` | `true` | 2025-11-25: the server that created a task sends `notifications/tasks/status` when its status changes |
+
+Without `principal`, any client that knows a task id can read, answer and cancel the task. Ids carry 128 random bits, and 2025-11-25 clients cannot list tasks. With one, a task is visible only to the principal that created it (-32602, as for an unknown task, to anyone else), and 2025-11-25 clients may list theirs. A task is a durable handle, not durable execution: its work runs in this process. After a restart, a stored task that was working has no work behind it.
+
+### Work outside the task
+
+Work that another system runs, such as a job queue, finishes the task itself with `TaskManager.complete(_:with:)` or `fail(_:with:)`. Both also end the task's work, which waits with `untilFinished()`:
+
+```swift
+/// Hands the work to a job system, which completes the task when the job ends.
+func startExternalJob(
+    _ name: String, manager: TaskManager,
+    submit: @escaping @Sendable (_ name: String, _ done: @escaping @Sendable (String) async -> Void) -> Void
+) async throws -> CallTool.Result {
+    try await Server.runAsTask { task in
+        guard let id = task.taskID else {
+            throw MCPError.invalidRequest("\(name) runs only as a task")
+        }
+        submit(name) { output in
+            try? await manager.complete(id, with: CallTool.Result(content: [.text(text: output)]))
+        }
+        return try await task.untilFinished()
+    }
+}
+```
+
+### Task methods and errors
+
+| Method | 2025-11-25 | 2026-07-28 |
+|---|---|---|
+| `tasks/get` | The task | The task with its outcome or `inputRequests` |
+| `tasks/update` | -32601 | Records the responses, any subset; unknown keys are ignored; empty acknowledgement |
+| `tasks/cancel` | The cancelled task; a finished task: -32602 | Empty acknowledgement, for a finished task too |
+| `tasks/result` | Waits, then the call's result with related-task `_meta`, or its error; a cancelled task: -32603 | -32601 |
+| `tasks/list` | The caller's tasks, 100 a page, with a principal; -32601 without | -32601 |
+
+At 2026-07-28 a client that did not declare the extension gets -32021 for `tasks/get`, `tasks/update` and `tasks/cancel`, before any task is looked up, and for a listen stream that names tasks. An unknown, expired or foreign task id is -32602. A response in `tasks/update` that does not fit its request is -32602. Over HTTP, `Mcp-Name` must carry the task id (-32020 otherwise).
+
+### Notifications
+
+At 2025-11-25 the server that created a task sends `notifications/tasks/status` on its connection each time the status changes. At 2026-07-28 a client names tasks in `SubscriptionFilter.taskIds` on a `subscriptions/listen` stream; the acknowledgement keeps the caller's own tasks, and each change arrives as `notifications/tasks` with the task as `tasks/get` returns it. Both are optional for clients, which keep polling.
+
 ## Requests to the client
 
 Handshake clients accept requests from the server. `Server` has methods for them:
@@ -903,6 +1040,7 @@ The SDK does not infer capabilities from the handlers you register. Declare them
 | `resources` | `resources/list`, `resources/templates/list`, `resources/read` | `listChanged`, `subscribe` |
 | `completions` | `completion/complete` | |
 | `logging` | `logging/setLevel` (handshake) | |
+| `tasks` (2025-11-25) | `tasks/get`, `tasks/result`, `tasks/cancel`, `tasks/list` | derived by `withTasks(_:)`; see [Tasks](#tasks) |
 
 At 2026-07-28 the SDK answers -32601 for the methods of an undeclared capability, and listen streams honor only the declared `listChanged` and `subscribe` options. At handshake a registered handler runs whether or not the capability is declared, so declare every capability you implement.
 
