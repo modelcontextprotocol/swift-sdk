@@ -271,6 +271,16 @@ At 2026-07-28 the SDK checks each input request against the capabilities the cli
 
 %include Examples/Snippets/Server/MultiRoundTrip.swift mrtr-capabilities
 
+### Sampling with tools
+
+A sampling request can give the client's model tools (SEP-1577). The tools need not be tools of the server. The model answers with one tool use for each call and the stop reason `toolUse`. The handler runs the tools and asks again with the history: the messages so far, the assistant message with the tool uses, and a user message with the tool results. This handler keeps the history in `requestState`:
+
+%include Examples/Snippets/Server/MultiRoundTrip.swift mrtr-sampling-tools
+
+- `tools` and `toolChoice` need the client's `sampling.tools` capability. An `includeContext` other than `none` needs `sampling.context`. Without them the call fails with -32021 at both eras.
+- The SDK checks the messages of each sampling request before it goes to the client. A message with tool results holds only tool results. Each tool use has a result in the next message, which is a user message. Each tool result answers a tool use in the message before it. A request that breaks a rule fails the call with -32603.
+- Limit the rounds. On the last round, send `toolChoice: .init(mode: .none)`: the model must then answer without tools.
+
 ### Errors
 
 | Code | Cause |
@@ -279,6 +289,7 @@ At 2026-07-28 the SDK checks each input request against the capabilities the cli
 | -32603 | `.inputRequired()` with neither input requests nor `requestState` |
 | -32603 | (Handshake) The 10th handler call still asks for input |
 | -32603 | (Handshake) The client failed one of the bridged requests |
+| -32603 | A sampling request breaks the rules for tool uses and tool results |
 | -32021 | (Handshake) An input request needs a capability the client did not declare |
 | -32021 | (2026-07-28) An input request needs a capability the client did not declare |
 | -32602 | (2026-07-28) "Invalid or expired requestState" |
@@ -444,7 +455,7 @@ Handshake clients accept requests from the server. `Server` has methods for them
 
 | Method | Request | Client capability |
 | --- | --- | --- |
-| `requestSampling(messages:modelPreferences:systemPrompt:includeContext:temperature:maxTokens:stopSequences:_meta:)` | `sampling/createMessage` | `sampling` |
+| `requestSampling(messages:modelPreferences:systemPrompt:includeContext:temperature:maxTokens:stopSequences:tools:toolChoice:_meta:)` | `sampling/createMessage` | `sampling`; `sampling.tools` for `tools` or `toolChoice` |
 | `requestElicitation(message:requestedSchema:mode:_meta:)` | `elicitation/create` (form) | `elicitation` |
 | `requestElicitation(message:url:elicitationId:_meta:)` | `elicitation/create` (URL) | `elicitation` |
 | `listRoots()` | `roots/list` | `roots` |
@@ -453,6 +464,7 @@ Handshake clients accept requests from the server. `Server` has methods for them
 
 - Call them from a handler, so that over HTTP the request goes on the stream of the request being handled.
 - In strict mode they fail with -32601 when the client did not declare the capability. Otherwise the request is sent, and a client without a handler answers with an error.
+- `requestSampling` with `tools` or `toolChoice` fails with -32601 when the client did not declare `sampling.tools`, also when the server is not strict: the specification forbids the request. It fails with -32602 when the messages break the rules in [Sampling with tools](#sampling-with-tools). It checks both before it sends the request.
 - At 2026-07-28 they throw -32600 "... cannot be sent at protocol version 2026-07-28". Use [multi round-trip requests](#multi-round-trip-requests), which serve both eras.
 - `notifications/roots/list_changed` exists only in the handshake era. Stateless clients send their roots per request.
 

@@ -867,9 +867,10 @@ public struct TaskContext: Sendable {
     /// naming the tasks extension.
     ///
     /// - Throws: -32021 when the client did not declare a capability the
-    ///   requests need; `CancellationError` when the task is cancelled.
+    ///   requests need; -32603 when a sampling request breaks the message
+    ///   rules for tools; `CancellationError` when the task is cancelled.
     public func requestInput(_ requests: [String: InputRequest]) async throws -> [String: InputResponse] {
-        try Server.checkCapabilities(requests, method: request.method ?? CallTool.name, declared: request.clientCapabilities)
+        try Server.checkInputRequests(requests, method: request.method ?? CallTool.name, declared: request.clientCapabilities)
         if let taskID, let manager {
             return try await manager.requestInput(taskID, requests)
         }

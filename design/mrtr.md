@@ -103,8 +103,11 @@ await server.withMethodHandler(CallTool.self) { params in
 The capability check uses the request's `clientCapabilities`: elicitation needs `elicitation`
 (`elicitation.url` for URL mode; `elicitation.form`, or a declaration with neither, which the
 decoder reads as form, for form mode; any declaration for a mode the SDK does not know), sampling
-needs `sampling`, roots needs `roots`. For an unknown mode, `requiredCapabilities` names
-`elicitation` with no sub-capability.
+needs `sampling` (and `sampling.tools` with `tools` or `toolChoice`, `sampling.context` with an
+`includeContext` other than `none`), roots needs `roots`. For an unknown mode,
+`requiredCapabilities` names `elicitation` with no sub-capability. Before it, a sampling request
+whose messages break the rules for tool uses and tool results (SEP-1577) fails the call with
+-32603: the handler built it.
 
 The bridge, for handshake clients:
 

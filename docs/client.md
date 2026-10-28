@@ -380,7 +380,14 @@ try await client.connect(transport: transport)
 
 The specification expects the client to let the user review the request and the completion. The SDK leaves that to the handler.
 
-`Client.Capabilities.Sampling` has `tools` and `context` sub-capabilities. They only declare support: a client that declares `tools` must handle `tools`, `toolChoice` and the `.toolUse` and `.toolResult` content blocks in its handler.
+`Client.Capabilities.Sampling` has `tools` and `context` sub-capabilities (SEP-1577). A client that declares `tools` handles `tools`, `toolChoice` and the `.toolUse` and `.toolResult` content blocks in its handler. When the model calls tools, the handler returns one `.toolUse` block for each call, with the stop reason `.toolUse`. The server runs the tools and sends a new request with their results.
+
+The client checks each sampling request before the handler runs. It answers with -32602, and the handler does not run, when:
+
+- The request has `tools` or `toolChoice`, and `capabilities` has no `sampling.tools`.
+- The messages break the rules for tools. A message with tool results holds only tool results. Each tool use has a result in the next message, which is a user message. Each tool result answers a tool use in the message before it.
+
+At 2026-07-28 the call that received the input request fails with that error. The client does not refuse an `includeContext` it did not declare `context` for: it can ignore the field.
 
 The two eras differ as for [Roots](#roots): `sampling/createMessage` from the server at 2025-11-25, a `sampling/createMessage` input request at 2026-07-28, the same handler for both. The errors are the same, with `sampling/createMessage` as the method.
 

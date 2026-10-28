@@ -56,7 +56,11 @@ public enum InputRequest: Hashable, Sendable {
             // The SDK does not know which sub-capability the mode needs.
             case .unknown: return true
             }
-        case .sampling: return capabilities.sampling != nil
+        case .sampling(let params):
+            guard let sampling = capabilities.sampling else { return false }
+            if params.usesTools, sampling.tools == nil { return false }
+            if params.usesContext, sampling.context == nil { return false }
+            return true
         case .listRoots: return capabilities.roots != nil
         // The SDK does not know which capability it needs.
         case .unknown: return true
@@ -74,7 +78,11 @@ public enum InputRequest: Hashable, Sendable {
             case .unknown: break
             }
             capabilities.elicitation = elicitation
-        case .sampling: capabilities.sampling = capabilities.sampling ?? .init()
+        case .sampling(let params):
+            var sampling = capabilities.sampling ?? .init()
+            if params.usesTools { sampling.tools = .init() }
+            if params.usesContext { sampling.context = .init() }
+            capabilities.sampling = sampling
         case .listRoots: capabilities.roots = capabilities.roots ?? .init()
         case .unknown: break
         }

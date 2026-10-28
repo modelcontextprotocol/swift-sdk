@@ -598,6 +598,49 @@ func confirmation(_ message: String) -> CallTool.Result {
 }
 ```
 
+### Sampling with tools
+
+A sampling request can give the client's model tools (SEP-1577). The tools need not be tools of the server. The model answers with one tool use for each call and the stop reason `toolUse`. The handler runs the tools and asks again with the history: the messages so far, the assistant message with the tool uses, and a user message with the tool results. This handler keeps the history in `requestState`:
+
+```swift
+/// Lets the client's model call `get_weather` before it answers. The
+/// history goes in requestState. On the last round the model must answer
+/// without tools.
+func adviseTravel(_ params: CallTool.Parameters, maxRounds: Int = 4) throws -> CallTool.Result {
+    var history: [Sampling.Message] = [.user("Paris or London for a walk today?")]
+    if let state = params.requestState {
+        history = try JSONDecoder().decode([Sampling.Message].self, from: Data(state.utf8))
+    }
+    if let reply = params.inputResponses?["model"]?.sampling {
+        guard reply.stopReason == .toolUse else {
+            let answer = reply.content.asArray.compactMap { block -> Tool.Content? in
+                if case .text(let text) = block { return .text(text: text) }
+                return nil
+            }
+            return CallTool.Result(content: answer)
+        }
+        history.append(.assistant(reply.content))
+        // One tool result for each tool use, and no other content.
+        let results = reply.content.asArray.compactMap { block -> Sampling.Message.Content.ContentBlock? in
+            guard case .toolUse(let call) = block else { return nil }
+            let city = call.input["city"]?.stringValue ?? ""
+            return .toolResult(.init(toolUseId: call.id, content: [.text(currentWeather(in: city))]))
+        }
+        history.append(.user(.multiple(results)))
+    }
+    let round = (history.count + 1) / 2
+    let request = CreateSamplingMessage.Parameters(
+        messages: history, maxTokens: 500, tools: [weatherTool],
+        toolChoice: round >= maxRounds ? .init(mode: .none) : nil)
+    let state = String(decoding: try JSONEncoder().encode(history), as: UTF8.self)
+    return .inputRequired(["model": .sampling(request)], requestState: state)
+}
+```
+
+- `tools` and `toolChoice` need the client's `sampling.tools` capability. An `includeContext` other than `none` needs `sampling.context`. Without them the call fails with -32021 at both eras.
+- The SDK checks the messages of each sampling request before it goes to the client. A message with tool results holds only tool results. Each tool use has a result in the next message, which is a user message. Each tool result answers a tool use in the message before it. A request that breaks a rule fails the call with -32603.
+- Limit the rounds. On the last round, send `toolChoice: .init(mode: .none)`: the model must then answer without tools.
+
 ### Errors
 
 | Code | Cause |
@@ -606,6 +649,7 @@ func confirmation(_ message: String) -> CallTool.Result {
 | -32603 | `.inputRequired()` with neither input requests nor `requestState` |
 | -32603 | (Handshake) The 10th handler call still asks for input |
 | -32603 | (Handshake) The client failed one of the bridged requests |
+| -32603 | A sampling request breaks the rules for tool uses and tool results |
 | -32021 | (Handshake) An input request needs a capability the client did not declare |
 | -32021 | (2026-07-28) An input request needs a capability the client did not declare |
 | -32602 | (2026-07-28) "Invalid or expired requestState" |
@@ -939,7 +983,7 @@ Handshake clients accept requests from the server. `Server` has methods for them
 
 | Method | Request | Client capability |
 | --- | --- | --- |
-| `requestSampling(messages:modelPreferences:systemPrompt:includeContext:temperature:maxTokens:stopSequences:_meta:)` | `sampling/createMessage` | `sampling` |
+| `requestSampling(messages:modelPreferences:systemPrompt:includeContext:temperature:maxTokens:stopSequences:tools:toolChoice:_meta:)` | `sampling/createMessage` | `sampling`; `sampling.tools` for `tools` or `toolChoice` |
 | `requestElicitation(message:requestedSchema:mode:_meta:)` | `elicitation/create` (form) | `elicitation` |
 | `requestElicitation(message:url:elicitationId:_meta:)` | `elicitation/create` (URL) | `elicitation` |
 | `listRoots()` | `roots/list` | `roots` |
@@ -964,6 +1008,7 @@ func watchRoots(on server: Server, changed: @escaping @Sendable () async -> Void
 
 - Call them from a handler, so that over HTTP the request goes on the stream of the request being handled.
 - In strict mode they fail with -32601 when the client did not declare the capability. Otherwise the request is sent, and a client without a handler answers with an error.
+- `requestSampling` with `tools` or `toolChoice` fails with -32601 when the client did not declare `sampling.tools`, also when the server is not strict: the specification forbids the request. It fails with -32602 when the messages break the rules in [Sampling with tools](#sampling-with-tools). It checks both before it sends the request.
 - At 2026-07-28 they throw -32600 "... cannot be sent at protocol version 2026-07-28". Use [multi round-trip requests](#multi-round-trip-requests), which serve both eras.
 - `notifications/roots/list_changed` exists only in the handshake era. Stateless clients send their roots per request.
 

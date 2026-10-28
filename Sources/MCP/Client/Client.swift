@@ -1003,16 +1003,36 @@ public actor Client {
     }
 
     /// Register a handler for server-to-client requests
+    ///
+    /// The handler also fulfills input requests of the same method at
+    /// 2026-07-28. Before a `sampling/createMessage` handler runs, the client
+    /// refuses the request with -32602 when it has `tools` or `toolChoice` and
+    /// ``capabilities`` has no `sampling.tools`, or when its messages break the
+    /// rules for tool uses and tool results.
     @discardableResult
     public func withMethodHandler<M: Method>(
         _ type: M.Type,
         handler: @escaping @Sendable (M.Parameters) async throws -> M.Result
     ) -> Self {
-        methodHandlers[M.name] = TypedRequestHandler { (request: Request<M>) -> Response<M> in
+        methodHandlers[M.name] = TypedRequestHandler { [weak self] (request: Request<M>) -> Response<M> in
+            if let sampling = request.params as? CreateSamplingMessage.Parameters {
+                try await self?.checkSamplingRequest(sampling)
+            }
             let result = try await handler(request.params)
             return Response(id: request.id, result: result)
         }
         return self
+    }
+
+    /// Refuses a sampling request the client must not receive (SEP-1577).
+    private func checkSamplingRequest(_ params: CreateSamplingMessage.Parameters) throws {
+        if params.usesTools, capabilities.sampling?.tools == nil {
+            throw MCPError.invalidParams(
+                "The client did not declare sampling.tools, so the request cannot have tools or toolChoice")
+        }
+        if let problem = params.toolMessageProblem() {
+            throw MCPError.invalidParams(problem)
+        }
     }
 
     /// Send a notification to the server
@@ -2412,6 +2432,12 @@ public actor Client {
     /// 3. Client samples from an LLM (via this handler)
     /// 4. Client reviews the completion (via this handler)
     /// 5. Client returns the result to the server
+    ///
+    /// To receive requests with tools, declare `sampling.tools` in
+    /// ``capabilities``. Without it, the client answers a request with `tools`
+    /// or `toolChoice` with -32602, and the handler does not run. The client
+    /// also answers -32602 when the messages break the rules for tool uses and
+    /// tool results.
     ///
     /// - Parameter handler: A closure that processes sampling requests and returns completions
     /// - Returns: Self for method chaining

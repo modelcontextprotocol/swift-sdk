@@ -82,8 +82,8 @@ Details: [design/auth.md](design/auth.md).
 
 ## Planned
 
-The SEPs marked Planned in [SEP coverage](#sep-coverage), and the gaps of SEP-1577 (sampling
-with tools) and SEP-2260 (server requests outside a client request at 2025-11-25).
+The SEPs marked Planned in [SEP coverage](#sep-coverage), and the gap of SEP-2260 (server
+requests outside a client request at 2025-11-25).
 
 The conformance harness exercises extensions only in the default leg, as scenarios that do not
 count toward a tier; their failing checks would be entries in
@@ -124,7 +124,7 @@ A change that implements a SEP updates its row.
 | 1303 | Input validation errors as tool execution errors | Standards | Not applicable | Guidance for tool handlers, given in the server guide ([Errors and isError](docs/server.md#errors-and-iserror)). The SDK does not validate tool arguments. |
 | 1319 | Request payloads decoupled from method definitions | Standards | Not applicable | A schema refactor. The SDK already models each method's `Parameters` as its own type (`Method`). |
 | 1330 | Elicitation enum schemas | Standards | Implemented | The requested schema is `Value`; conformance `elicitation-sep1330-*` |
-| 1577 | Sampling with tools | Standards | Partial | The wire types have `tools`, `toolChoice`, `toolUse` and `toolResult`. `Server.requestSampling` cannot send tools, and the `sampling.tools` capability and the message rules are not checked. |
+| 1577 | Sampling with tools | Standards | Implemented | `Server.requestSampling(...tools:toolChoice:...)` and sampling input requests; `sampling.tools` and `sampling.context` checks at both eras; the rules for tool uses and tool results, checked by server and client. [Sampling with tools](docs/server.md#sampling-with-tools) |
 | 1613 | JSON Schema 2020-12 as the default dialect | Standards | Partial | Schemas are `Value`. The SDK does not validate them. |
 | 1686 | Tasks (2025-11-25) | Standards | Implemented | [Tasks](#tasks) |
 | 1699 | SSE polling through server-side disconnect | Standards | Implemented | `HTTPClientTransport` resumes a closed stream with a GET and its last event ID; `StatefulHTTPServerTransport` sends priming events (`retryInterval`) |

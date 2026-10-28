@@ -1277,7 +1277,7 @@ public actor Server {
             }
 
             if context.isStateless {
-                try Self.checkCapabilities(
+                try Self.checkInputRequests(
                     asking.inputRequests ?? [:], method: M.name, declared: context.clientCapabilities)
                 if let state = asking.requestState, let boundary = requestStateBoundary {
                     asking.requestState = try boundary.seal(
@@ -1301,9 +1301,9 @@ public actor Server {
                 // As at 2026-07-28, whatever `strict` says. A sessionless
                 // request carries no capabilities: the client answers.
                 let sessionless = await isSessionless
-                if context.clientCapabilities != nil || !sessionless {
-                    try Self.checkCapabilities(requests, method: M.name, declared: context.clientCapabilities)
-                }
+                try Self.checkInputRequests(
+                    requests, method: M.name, declared: context.clientCapabilities,
+                    checkingCapabilities: context.clientCapabilities != nil || !sessionless)
             }
             let responses = try await fulfill(requests)
             params = params.retrying(
@@ -1312,10 +1312,23 @@ public actor Server {
         }
     }
 
-    /// Throws -32021 when input requests need capabilities the client did not declare.
-    static func checkCapabilities(
-        _ requests: [String: InputRequest], method: String, declared: Client.Capabilities?
+    /// Checks input requests before they go to the client.
+    ///
+    /// Throws -32603 when a sampling request breaks the message rules for
+    /// tools, which is a server bug, and -32021 when the requests need
+    /// capabilities the client did not declare. `checkingCapabilities: false`
+    /// skips the second check, for a sessionless client whose capabilities
+    /// are unknown.
+    static func checkInputRequests(
+        _ requests: [String: InputRequest], method: String, declared: Client.Capabilities?,
+        checkingCapabilities: Bool = true
     ) throws {
+        for (key, request) in requests.sorted(by: { $0.key < $1.key }) {
+            if case .sampling(let params) = request, let problem = params.toolMessageProblem() {
+                throw MCPError.internalError("Server bug: input request \(key) of \(method): \(problem)")
+            }
+        }
+        guard checkingCapabilities else { return }
         var missing = Client.Capabilities()
         var methods: Set<String> = []
         for request in requests.values where !request.isSupported(by: declared ?? .init()) {
@@ -1741,6 +1754,14 @@ public actor Server {
     /// 4. Client reviews the completion
     /// 5. Client returns the result to the server
     ///
+    /// With `tools`, the model can ask for tool calls: the result then has
+    /// ``Sampling/StopReason/toolUse`` and one tool use block for each call.
+    /// To continue, send a new request with the history, the assistant
+    /// message with the tool uses, and a user message with one tool result
+    /// for each tool use. Limit the number of rounds, and send
+    /// `toolChoice: .init(mode: .none)` on the last round to get a final
+    /// answer.
+    ///
     /// - Parameters:
     ///   - messages: The conversation history to send to the LLM
     ///   - modelPreferences: Model selection preferences
@@ -1749,10 +1770,19 @@ public actor Server {
     ///   - temperature: Controls randomness (0.0 to 1.0)
     ///   - maxTokens: Maximum tokens to generate
     ///   - stopSequences: Array of sequences that stop generation
+    ///   - tools: Tools the model can use during this request. They do not
+    ///     need to be tools of the server.
+    ///   - toolChoice: Whether the model can, must, or must not use the tools.
     ///   - _meta: Optional request metadata
     /// - Returns: The sampling result containing the model used, stop reason, role, and content
-    /// - Throws: MCPError if the request fails
-    /// - SeeAlso: https://modelcontextprotocol.io/docs/concepts/sampling#how-sampling-works
+    /// - Throws: ``MCPError/methodNotFound(_:)`` when the request has `tools`
+    ///   or `toolChoice` and the client did not declare `sampling.tools`. In
+    ///   strict mode, also when the client did not declare `sampling`, or when
+    ///   `includeContext` is not `none` and the client did not declare
+    ///   `sampling.context`. ``MCPError/invalidParams(_:)`` when the messages
+    ///   break the rules for tool uses and tool results. The SDK checks these
+    ///   before it sends the request.
+    /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/client/sampling
     public func requestSampling(
         messages: [Sampling.Message],
         modelPreferences: Sampling.ModelPreferences? = nil,
@@ -1761,29 +1791,42 @@ public actor Server {
         temperature: Double? = nil,
         maxTokens: Int,
         stopSequences: [String]? = nil,
+        tools: [Tool]? = nil,
+        toolChoice: CreateSamplingMessage.ToolChoice? = nil,
         _meta: Metadata? = nil
     ) async throws -> CreateSamplingMessage.Result {
         guard connection != nil else {
             throw MCPError.internalError("Server connection not initialized")
         }
 
-        try validateClientCapability(\.sampling, "Sampling")
-
-        let request = CreateSamplingMessage.request(
-            .init(
-                messages: messages,
-                modelPreferences: modelPreferences,
-                systemPrompt: systemPrompt,
-                includeContext: includeContext,
-                temperature: temperature,
-                maxTokens: maxTokens,
-                stopSequences: stopSequences,
-                _meta: _meta
-            )
+        let params = CreateSamplingMessage.Parameters(
+            messages: messages,
+            modelPreferences: modelPreferences,
+            systemPrompt: systemPrompt,
+            includeContext: includeContext,
+            temperature: temperature,
+            maxTokens: maxTokens,
+            stopSequences: stopSequences,
+            _meta: _meta,
+            tools: tools,
+            toolChoice: toolChoice
         )
+        try validateClientCapability(\.sampling, "Sampling")
+        // The specification forbids tools without `sampling.tools` (a MUST),
+        // so this check does not depend on strict mode.
+        if params.usesTools {
+            try validateClientCapability("Sampling with tools", evenIfNotStrict: true) {
+                $0.sampling?.tools != nil
+            }
+        }
+        if params.usesContext {
+            try validateClientCapability("Sampling with context") { $0.sampling?.context != nil }
+        }
+        if let problem = params.toolMessageProblem() {
+            throw MCPError.invalidParams(problem)
+        }
 
-        let result = try await send(request).value
-        return result
+        return try await send(CreateSamplingMessage.request(params)).value
     }
 
     // MARK: - Elicitation
@@ -2582,18 +2625,26 @@ public actor Server {
     )
         throws
     {
-        if configuration.strict {
-            guard let capabilities = Server.currentHandlerContext?.clientCapabilities
-                ?? clientCapabilities
-            else {
-                // A sessionless handshake request carries no capabilities:
-                // let the client answer.
-                if isSessionless { return }
-                throw MCPError.methodNotFound("Client capabilities not initialized")
-            }
-            guard capabilities[keyPath: keyPath] != nil else {
-                throw MCPError.methodNotFound("\(name) is not supported by the client")
-            }
+        try validateClientCapability(name) { $0[keyPath: keyPath] != nil }
+    }
+
+    /// Throws -32601 when the client did not declare a capability. Checks only
+    /// in strict mode, unless `evenIfNotStrict` is set.
+    private func validateClientCapability(
+        _ name: String, evenIfNotStrict: Bool = false,
+        _ isDeclared: (Client.Capabilities) -> Bool
+    ) throws {
+        guard configuration.strict || evenIfNotStrict else { return }
+        guard let capabilities = Server.currentHandlerContext?.clientCapabilities
+            ?? clientCapabilities
+        else {
+            // A sessionless handshake request carries no capabilities:
+            // let the client answer.
+            if isSessionless { return }
+            throw MCPError.methodNotFound("Client capabilities not initialized")
+        }
+        guard isDeclared(capabilities) else {
+            throw MCPError.methodNotFound("\(name) is not supported by the client")
         }
     }
 
