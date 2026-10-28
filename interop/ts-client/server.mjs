@@ -1,6 +1,7 @@
 // ts-interop-server: an MCP server on the TypeScript SDK's task runtime
 // (SEP-1686, protocol 2025-11-25) with the task tools of the interop
-// `tasks` profile (interop/README.md).
+// `tasks` profile, and the view and tools of the `apps` profile (SEP-1865)
+// on the ext-apps server helpers (interop/README.md).
 //
 //   node server.mjs --port 3401    Streamable HTTP at http://127.0.0.1:3401/mcp
 //   node server.mjs --stdio
@@ -10,6 +11,11 @@
 // keeps a failed task's result, not a JSON-RPC error, so there is no
 // protocol_error_job, and 2025-11-25 has no input_required results, so no
 // test_tool_with_task.
+//
+// The apps fixture matches the Swift everything-server's (Apps.swift): the
+// view ui://interop/weather.html, show_weather, which renders in it, and
+// refresh_weather, for the view only. registerAppTool also writes the
+// deprecated flat key _meta["ui/resourceUri"].
 
 import { randomUUID } from 'node:crypto';
 import * as z from 'zod/v4';
@@ -19,6 +25,12 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { createMcpExpressApp } from '@modelcontextprotocol/sdk/server/express.js';
 import { ElicitResultSchema, isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { InMemoryTaskStore, InMemoryTaskMessageQueue } from '@modelcontextprotocol/sdk/experimental/tasks';
+import {
+    getUiCapability,
+    registerAppResource,
+    registerAppTool,
+    RESOURCE_MIME_TYPE
+} from '@modelcontextprotocol/ext-apps/server';
 
 const taskStore = new InMemoryTaskStore();
 const taskMessageQueue = new InMemoryTaskMessageQueue();
@@ -123,6 +135,42 @@ function makeServer() {
         ]);
         return text(`Received ${answers.map(a => a.content?.name ?? '?').join(' and ')}`);
     });
+
+    const viewUri = 'ui://interop/weather.html';
+    const viewMeta = { ui: { csp: { connectDomains: ['https://api.example.com'] }, prefersBorder: true } };
+    registerAppResource(server, 'weather-view', viewUri, { description: 'The weather view', _meta: viewMeta }, async () => ({
+        contents: [
+            {
+                uri: viewUri,
+                mimeType: RESOURCE_MIME_TYPE,
+                text: '<!DOCTYPE html><html><body>interop weather view</body></html>',
+                _meta: viewMeta
+            }
+        ]
+    }));
+    registerAppTool(
+        server,
+        'show_weather',
+        {
+            description: 'Shows the weather in a view',
+            inputSchema: { city: z.string().optional() },
+            _meta: { ui: { resourceUri: viewUri } }
+        },
+        async ({ city }) => {
+            const declared = getUiCapability(server.server.getClientCapabilities())?.mimeTypes?.includes(RESOURCE_MIME_TYPE);
+            return text(`Weather in ${city ?? 'Paris'}: sunny (view ${declared ? 'declared' : 'not declared'})`);
+        }
+    );
+    registerAppTool(
+        server,
+        'refresh_weather',
+        {
+            description: 'Refreshes the weather view; for the view only',
+            inputSchema: {},
+            _meta: { ui: { resourceUri: viewUri, visibility: ['app'] } }
+        },
+        async () => text('Refreshed')
+    );
     return server;
 }
 

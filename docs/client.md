@@ -14,6 +14,7 @@ This guide covers the `Client` actor: connecting at either protocol era, calling
 1. [Tasks](#tasks)
 1. [Skills](#skills)
 1. [Server Cards](#server-cards)
+1. [MCP Apps](#mcp-apps)
 1. [Notifications and subscriptions](#notifications-and-subscriptions)
 1. [Logging](#logging)
 1. [Cancellation and progress](#cancellation-and-progress)
@@ -701,6 +702,41 @@ func checkCard(_ card: ServerCard, with client: Client) async throws -> [ServerC
 - `ServerCard.cardURL(forEndpoint:)` gives the recommended location, `<endpoint>/server-card`. The SDK does not read AI Catalogs: get the card's URL from the catalog yourself.
 - `Remote.url(resolving:)` fills in the `{variable}` placeholders of a remote's URL: from the values you pass, then the variable's `value`, then its `default`. A required variable, or a variable the remote does not declare, without a value throws. Values are percent-encoded except for letters, digits and `-._~`, so a value cannot change the host or add a path or query; a placeholder at the start of the URL, as in `{base}/mcp`, is inserted as given, and the others are encoded even when it is empty. The result can be `http` on any host, since a card may list a plaintext endpoint: the `https` rule of `fetch` covers the card, not its remotes, so check the scheme before you connect when the connection needs TLS.
 - A card is advisory: do not use it for security decisions. After connecting, `mismatches(with:)` lists what `server/discover` contradicts: the name, the version, the title, and protocol versions the server does not serve. Prefer the live values.
+
+## MCP Apps
+
+A host that renders the HTML views of MCP Apps (SEP-1865) declares the extension in its capabilities, reads each tool's `ui`, and reads the views with `readAppResource(uri:listing:)`:
+
+```swift
+/// A host that renders HTML views.
+func makeAppHost() -> Client {
+    var capabilities = Client.Capabilities()
+    capabilities.ui = UIExtensionSettings()
+    return Client(name: "host", version: "1.0.0", capabilities: capabilities)
+}
+
+/// The tools to give the model, and the view of each tool that has one.
+func appTools(_ client: Client) async throws -> (model: [Tool], views: [String: AppResourceContents]) {
+    let tools = try await client.listTools().tools
+    let listing = try await client.listResources().resources
+    var views: [String: AppResourceContents] = [:]
+    for tool in tools {
+        guard let uri = tool.ui?.resourceUri else { continue }
+        // The content item's _meta.ui, or the listing entry's.
+        views[tool.name] = try await client.readAppResource(uri: uri, listing: listing.first { $0.uri == uri })
+    }
+    // A tool that only the view calls is not for the model.
+    return (tools.filter(\.isVisibleToModel), views)
+}
+```
+
+- `Client.Capabilities.ui` writes `extensions["io.modelcontextprotocol/ui"]`. `UIExtensionSettings()` declares `text/html;profile=mcp-app`, the only view type of the specification. At 2026-07-28 the client sends it with each request.
+- `Tool.ui` reads `_meta.ui`, and the deprecated flat key `_meta["ui/resourceUri"]` when `_meta.ui` has no `resourceUri`; the SDK never writes the flat key.
+- Do not give the agent a tool for which `isVisibleToModel` is `false`. When a view calls a tool, refuse a tool for which `isCallableFromApp` is `false`, and every tool of another server.
+- `readAppResource(uri:listing:)` throws `AppResourceError` without a request for a URI that is not `ui://`, and after the read for content that is not an HTML view. The view's metadata is the content item's `_meta.ui` or, when it has none, the `resources/list` entry's. Pass the entry when you have it; otherwise the client reads up to 100 `resources/list` pages to find it.
+- `AppResourceContents.contentSecurityPolicy` is the policy for the view's frame: the specification's construction from `csp`, or its restrictive default without `csp`. Origins that could add a directive are dropped. You can make the policy stricter, but do not allow more. `permissions?.policyFeatures` are the features for the frame's `allow` attribute.
+
+The SDK does not render views and does not implement the View-Host bridge (`ui/*` messages).
 
 ## Notifications and subscriptions
 

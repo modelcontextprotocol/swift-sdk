@@ -538,6 +538,30 @@ struct ServerCardSnippetTests {
     }
 }
 
+@Suite("MCP Apps snippets")
+struct AppSnippetTests {
+    @Test("The view is listed and read; the tool refers to it; the result has text", arguments: eras)
+    func weatherApp(mode: Client.ProtocolMode) async throws {
+        let server = try await makeWeatherAppServer()
+        let client = try await connect(server, mode: mode)
+        let tools = try await client.listTools().tools
+        #expect(tools.map(\.name) == ["get_weather", "refresh_dashboard"])
+        #expect(tools.map(\.isVisibleToModel) == [true, false])
+        let uri = try #require(tools.first?.ui?.resourceUri)
+        #expect(try await client.listResources().resources.map(\.uri) == [uri])
+        let view = try await client.readAppResource(uri: uri)
+        #expect(view.html.hasPrefix("<!DOCTYPE html>"))
+        #expect(view.contentSecurityPolicy.contains("connect-src 'self' https://api.weather.example"))
+        let result = try await client.callTool(name: "get_weather", arguments: ["city": "Paris"])
+        #expect(text(result.content) == "Paris: sunny, 21 °C")
+        #expect(result.structuredContent?.objectValue?["celsius"] == 21)
+        let capabilities = try #require(await client.serverCapabilities)
+        #expect(capabilities.extensions?[ExtensionID.ui] == [:])
+        await client.disconnect()
+        await server.stop()
+    }
+}
+
 @Suite("Skill snippets")
 struct SkillSnippetTests {
     @Test("Skills from a directory: listed, loaded and read", arguments: eras)

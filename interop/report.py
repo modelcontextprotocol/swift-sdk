@@ -27,7 +27,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 SDKS = {"swift": "Swift", "go": "Go", "python": "Python", "ts": "TypeScript"}
-PROFILES = ["basic", "advanced", "connect", "session", "tasks"]
+PROFILES = ["basic", "advanced", "connect", "session", "tasks", "apps"]
 
 
 def escape(value: object) -> str:

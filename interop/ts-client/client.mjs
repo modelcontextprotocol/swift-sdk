@@ -1,10 +1,12 @@
-// ts-interop-client: runs the interop `tasks` profile (interop/README.md) on
-// the TypeScript SDK, and prints one JSON object per line: a `meta` line,
-// then one line per check. The SDK speaks 2025-11-25 only.
+// ts-interop-client: runs the interop `tasks` and `apps` profiles
+// (interop/README.md) on the TypeScript SDK, and prints one JSON object per
+// line: a `meta` line, then one line per check. The SDK speaks 2025-11-25
+// only.
 //
 //   node client.mjs --profile tasks --url http://127.0.0.1:3101/mcp [--era handshake|auto]
-//   node client.mjs --profile tasks --stdio path/to/server [args...]
+//   node client.mjs --profile apps --stdio path/to/server [args...]
 
+import { isDeepStrictEqual } from 'node:util';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -14,6 +16,7 @@ import {
     ElicitRequestSchema,
     McpError
 } from '@modelcontextprotocol/sdk/types.js';
+import { EXTENSION_ID, RESOURCE_MIME_TYPE, RESOURCE_URI_META_KEY } from '@modelcontextprotocol/ext-apps/server';
 
 function emit(object) {
     process.stdout.write(JSON.stringify(object) + '\n');
@@ -56,6 +59,48 @@ function require(condition, message) {
     if (!condition) throw new Error(message);
 }
 
+// The apps fixture (conformance/everything-server/Apps.swift, server.mjs).
+const viewUri = 'ui://interop/weather.html';
+const viewUi = { csp: { connectDomains: ['https://api.example.com'] }, prefersBorder: true };
+
+// The apps profile: the client declares the extension and reads the fixture
+// as a host does, from the raw _meta.
+async function runApps(client, check) {
+    await check('apps-tools', async () => {
+        const tools = (await client.listTools()).tools;
+        const show = tools.find(tool => tool.name === 'show_weather');
+        const refresh = tools.find(tool => tool.name === 'refresh_weather');
+        require(show && refresh, 'no show_weather and refresh_weather');
+        require(show._meta?.ui?.resourceUri === viewUri, `show_weather _meta ${JSON.stringify(show._meta)}`);
+        require(show._meta.ui.visibility === undefined, `show_weather visibility ${show._meta.ui.visibility}`);
+        require(refresh._meta?.ui?.resourceUri === viewUri, `refresh_weather _meta ${JSON.stringify(refresh._meta)}`);
+        require(isDeepStrictEqual(refresh._meta.ui.visibility, ['app']), `refresh_weather visibility ${refresh._meta.ui.visibility}`);
+        const flat = show._meta[RESOURCE_URI_META_KEY] !== undefined;
+        return `show_weather -> ${viewUri}, refresh_weather app-only` + (flat ? ', flat key too' : '');
+    });
+    await check('apps-list', async () => {
+        const view = (await client.listResources()).resources.find(resource => resource.uri === viewUri);
+        require(view, `${viewUri} is not listed`);
+        require(view.mimeType === RESOURCE_MIME_TYPE, `mimeType ${view.mimeType}`);
+        require(isDeepStrictEqual(view._meta?.ui, viewUi), `listing ui ${JSON.stringify(view._meta?.ui)}`);
+        return `${view.uri} with _meta.ui`;
+    });
+    await check('apps-read', async () => {
+        const read = await client.readResource({ uri: viewUri });
+        const content = read.contents.find(item => item.uri === viewUri);
+        require(content, `no content for ${viewUri}`);
+        require(content.mimeType === RESOURCE_MIME_TYPE, `mimeType ${content.mimeType}`);
+        require(content.text?.includes('interop weather view'), `text ${content.text}`);
+        require(isDeepStrictEqual(content._meta?.ui, viewUi), `content ui ${JSON.stringify(content._meta?.ui)}`);
+        return `${content.text.length} bytes with _meta.ui`;
+    });
+    await check('apps-call', async () => {
+        const result = await client.callTool({ name: 'show_weather', arguments: { city: 'Oslo' } });
+        require(texts(result.content) === 'Weather in Oslo: sunny (view declared)', texts(result.content));
+        return texts(result.content);
+    });
+}
+
 async function main() {
     let options;
     try {
@@ -65,10 +110,9 @@ async function main() {
         return 2;
     }
     const counts = { elicitation: 0 };
-    const client = new Client(
-        { name: 'ts-interop-client', version: '1.0.0' },
-        { capabilities: { elicitation: { form: {} } } }
-    );
+    const capabilities = { elicitation: { form: {} } };
+    if (options.profile === 'apps') capabilities.extensions = { [EXTENSION_ID]: { mimeTypes: [RESOURCE_MIME_TYPE] } };
+    const client = new Client({ name: 'ts-interop-client', version: '1.0.0' }, { capabilities });
     client.setRequestHandler(ElicitRequestSchema, async request => {
         counts.elicitation += 1;
         const content = {};
@@ -96,13 +140,12 @@ async function main() {
         status: !expected || expected === 'handshake' ? 'pass' : 'fail',
         detail: `${version} (handshake)` + (expected ? `, expected ${expected}` : '')
     });
-    if (options.profile !== 'tasks') {
-        emit({ check: 'profile', status: 'fail', detail: `the TypeScript driver runs only the tasks profile` });
+    if (options.profile !== 'tasks' && options.profile !== 'apps') {
+        emit({ check: 'profile', status: 'fail', detail: `the TypeScript driver runs only the tasks and apps profiles` });
         await client.close();
         return 2;
     }
 
-    const tools = new Set((await client.listTools()).tools.map(tool => tool.name));
     async function check(id, body) {
         try {
             const detail = await withTimeout(options.timeout, body);
@@ -112,6 +155,13 @@ async function main() {
             else emit({ check: id, status: 'fail', detail: String(error.message ?? error) });
         }
     }
+    if (options.profile === 'apps') {
+        await runApps(client, check);
+        await client.close();
+        return 0;
+    }
+
+    const tools = new Set((await client.listTools()).tools.map(tool => tool.name));
     function needs(name) {
         if (!tools.has(name)) throw new Skip(`the server has no ${name}`);
     }

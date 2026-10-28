@@ -69,6 +69,7 @@ func createConformanceServer(state: ServerState, transport: any Transport) async
 
     await server.withTasks(conformanceTasks)
     await server.withSkills(conformanceSkills)
+    await server.withAppResources(conformanceApps)
 
     // Tools
     await server.withMethodHandler(ListTools.self) { _ in
@@ -128,12 +129,13 @@ func createConformanceServer(state: ServerState, transport: any Transport) async
                 "additionalProperties": false,
             ]),
         ]
-        return .init(tools: listed + inputRequiredTools + taskTools + (dynamic ? [Tool(name: "test_dynamic_tool", description: "Listed after test_trigger_tool_change", inputSchema: .object(["type": "object", "properties": [:]]))] : []))
+        return .init(tools: listed + inputRequiredTools + taskTools + appTools + (dynamic ? [Tool(name: "test_dynamic_tool", description: "Listed after test_trigger_tool_change", inputSchema: .object(["type": "object", "properties": [:]]))] : []))
     }
 
     await server.withMethodHandler(CallTool.self) { [weak server, transport] params in
         if let result = try callInputRequiredTool(params) { return result }
         if let result = try await callTaskTool(params) { return result }
+        if let result = callAppTool(params) { return result }
         switch params.name {
         case "test_simple_text":
             return .init(content: [.text(text: "This is a simple text response for testing.")], isError: false)

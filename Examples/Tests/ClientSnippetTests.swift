@@ -546,6 +546,39 @@ struct ClientSkillSnippetTests {
     }
 }
 
+@Suite("Client MCP Apps snippets")
+struct ClientAppSnippetTests {
+    @Test("The host gets the model's tools and the views", arguments: bothEras)
+    func host(mode: Client.ProtocolMode) async throws {
+        let server = Server(name: "weather", version: "1", capabilities: .init(tools: .init()))
+        let view = try UIResource(
+            uri: "ui://weather/view", name: "view", html: "<html>view</html>",
+            meta: UIResourceMeta(prefersBorder: true))
+        await server.withAppResources([view])
+        var shown = Tool(name: "show", description: "Shows", inputSchema: ["type": "object"])
+        shown.ui = ToolUIMeta(resourceUri: view.uri)
+        var hidden = Tool(name: "hidden", description: "For the view", inputSchema: ["type": "object"])
+        hidden.ui = ToolUIMeta(resourceUri: view.uri, visibility: [.app])
+        let plain = Tool(name: "plain", description: "Text only", inputSchema: ["type": "object"])
+        let tools = [shown, hidden, plain]
+        await server.withMethodHandler(ListTools.self) { _ in
+            // The host declares the extension in both eras.
+            .init(tools: Server.currentHandlerContext?.clientUISettings == UIExtensionSettings() ? tools : [])
+        }
+        let capabilities = await makeAppHost().capabilities
+        let client = Client(
+            name: "host", version: "1.0", capabilities: capabilities, configuration: .init(protocolMode: mode))
+        try await client.connect(transport: try await start(server))
+        let (model, views) = try await appTools(client)
+        #expect(model.map(\.name) == ["show", "plain"])
+        #expect(views.keys.sorted() == ["hidden", "show"])
+        #expect(views["show"]?.html == "<html>view</html>")
+        #expect(views["show"]?.meta?.prefersBorder == true)
+        await client.disconnect()
+        await server.stop()
+    }
+}
+
 /// Answers every request with the same Server Card, or 404 for a path other
 /// than /mcp/server-card.
 private final class FixedCardProtocol: URLProtocol, @unchecked Sendable {

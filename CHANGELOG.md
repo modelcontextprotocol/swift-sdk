@@ -75,6 +75,9 @@ Behavior that can break working code ([docs/migration.md](docs/migration.md#beha
   listed name that does not have the format of the specification.
 - Server Cards (SEP-2127): `ServerCard`, `ServerCardValidator`, which serves a card at
   `<endpoint>/server-card`, and `ServerCard.fetch`, which reads one.
+- MCP Apps (SEP-1865): `Server.withAppResources` serves `ui://` views, `Tool.ui` and
+  `Resource.ui` read and write `_meta.ui`, and `Client.readAppResource` reads a view with its
+  effective metadata and Content Security Policy. No View-Host bridge.
 - A built-in `logging/setLevel` handler that filters `Server.log`.
 - `statelessRequestHook` on `Server.start`, `HTTPClientTransport.cancelRequest(_:)`,
   `BearerTokenValidationResult.tokenInfo`, and the `HTTPClientAuthorizer` requirement

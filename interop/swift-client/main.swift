@@ -12,6 +12,7 @@
 //   connect     era negotiation only; --expect-era handshake|stateless|unsupported
 //   session     2025-11-25 session expiry: --pause-file F; the runner restarts the server
 //   tasks       tasks (SEP-1686, SEP-2663) against the Swift everything-server
+//   apps        MCP Apps (SEP-1865): the view and tools of the apps fixture
 //   tool        one tool call, for the SDKs' example servers
 //
 // INTEROP_LOG=trace (or debug, info) logs the HTTP transport on stderr.
@@ -735,16 +736,71 @@ extension Battery {
     }
 }
 
-func makeClient(_ options: Options, _ counters: Counters, tasks: Bool = false) async -> Client {
+// MARK: - MCP Apps
+
+/// The apps fixture (conformance/everything-server/Apps.swift,
+/// interop/ts-client/server.mjs).
+enum AppsFixture {
+    static let viewURI = "ui://interop/weather.html"
+    static let meta = UIResourceMeta(csp: .init(connectDomains: ["https://api.example.com"]), prefersBorder: true)
+}
+
+extension Battery {
+    /// The apps profile: the client declares the extension and reads the
+    /// fixture as a host does.
+    func runApps() async {
+        await check("apps-tools") {
+            let tools = try await client.listTools().tools
+            guard let show = tools.first(where: { $0.name == "show_weather" }),
+                let refresh = tools.first(where: { $0.name == "refresh_weather" })
+            else { throw Failure("no show_weather and refresh_weather") }
+            try require(show.ui?.resourceUri == AppsFixture.viewURI, "show_weather ui \(String(describing: show.ui))")
+            try require(show.isVisibleToModel && show.isCallableFromApp, "show_weather visibility \(String(describing: show.ui?.visibility))")
+            try require(refresh.ui?.resourceUri == AppsFixture.viewURI, "refresh_weather ui \(String(describing: refresh.ui))")
+            try require(!refresh.isVisibleToModel && refresh.isCallableFromApp, "refresh_weather visibility \(String(describing: refresh.ui?.visibility))")
+            let flat = show._meta?["ui/resourceUri"] != nil
+            return "show_weather -> \(AppsFixture.viewURI), refresh_weather app-only" + (flat ? ", flat key too" : "")
+        }
+        await check("apps-list") {
+            let resources = try await client.listResources().resources
+            guard let view = resources.first(where: { $0.uri == AppsFixture.viewURI }) else {
+                throw Failure("\(AppsFixture.viewURI) is not listed")
+            }
+            try require(view.mimeType == UIResource.mimeType, "mimeType \(view.mimeType ?? "none")")
+            try require(view.ui == AppsFixture.meta, "listing ui \(String(describing: view.ui))")
+            return "\(view.uri) with _meta.ui"
+        }
+        await check("apps-read") {
+            let view = try await client.readAppResource(uri: AppsFixture.viewURI)
+            try require(view.html.contains("interop weather view"), view.html)
+            try require(view.content.ui == AppsFixture.meta, "content ui \(String(describing: view.content.ui))")
+            try require(
+                view.contentSecurityPolicy.contains("connect-src 'self' https://api.example.com;"),
+                view.contentSecurityPolicy)
+            return "\(view.html.utf8.count) bytes, CSP from _meta.ui"
+        }
+        await check("apps-call") {
+            let result = try await callTool("show_weather", ["city": "Oslo"])
+            let reply = text(result.content)
+            try require(reply == "Weather in Oslo: sunny (view declared)", reply)
+            return reply
+        }
+    }
+}
+
+func makeClient(_ options: Options, _ counters: Counters, tasks: Bool = false, apps: Bool = false) async -> Client {
     let mode: Client.ProtocolMode =
         switch options.era {
         case "handshake": .handshake
         case "stateless": .stateless(Version.v2026_07_28)
         default: .automatic
         }
+    var capabilities = Client.Capabilities(
+        sampling: .init(), elicitation: .init(form: .init()), roots: .init(listChanged: false))
+    if apps { capabilities.ui = UIExtensionSettings() }
     let client = Client(
         name: "swift-interop-client", version: "1.0.0",
-        capabilities: .init(sampling: .init(), elicitation: .init(form: .init()), roots: .init(listChanged: false)),
+        capabilities: capabilities,
         configuration: .init(
             protocolMode: mode, logLevel: .debug,
             tasks: tasks ? .init(minimumPollInterval: .milliseconds(50), augmentation: .whenSupported) : nil))
@@ -837,7 +893,8 @@ func run() async throws -> Int32 {
     }
 
     let counters = Counters()
-    let client = await makeClient(options, counters, tasks: options.profile == "tasks")
+    let client = await makeClient(
+        options, counters, tasks: options.profile == "tasks", apps: options.profile == "apps")
     let connection = try Connection(options)
     defer { connection.close() }
 
@@ -895,6 +952,8 @@ func run() async throws -> Int32 {
         await battery.runAdvanced()
     case "tasks":
         await battery.runTasks(options)
+    case "apps":
+        await battery.runApps()
     case "connect":
         await battery.check("tools-list") { "\(try await client.listTools().tools.count) tools" }
     case "session":
