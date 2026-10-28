@@ -69,6 +69,7 @@ A tool is a function the client's model can call. A server lists its tools in a 
 
 %include Examples/Snippets/Server/Tools.swift tools-list
 
+- Give each tool a unique name of 1 to 128 characters: ASCII letters, digits, `_`, `-` and `.`, such as `getUser`, `DATA_EXPORT_v2` or `admin.tools.list` (SEP-986). Names are case-sensitive. `Tool.isValidName(_:)` checks the format. The SDK lists a tool with another name, and logs a warning once for each such name, and for each name that a `tools/list` result has more than once. A Swift client logs a warning for each name that does not have the format.
 - `description` has no default value: pass `nil` when the tool has none. A `nil` description is left out of the JSON.
 - `annotations` are hints for clients (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`, `title`). Clients must not trust them from untrusted servers.
 - The SDK does not validate arguments against `inputSchema`. Check them in the handler.

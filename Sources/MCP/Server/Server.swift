@@ -331,6 +331,8 @@ public actor Server {
     /// The methods of requests sent while no client request was handled,
     /// each logged once per connection (SEP-2260).
     private var unassociatedRequestMethods: Set<String> = []
+    /// Tool names logged as invalid or duplicate (SEP-986).
+    private var toolNameWarnings = ToolNameWarnings()
 
     /// Runs and keeps tasks; set by ``withTasks(_:)``.
     private var taskManager: TaskManager?
@@ -2394,6 +2396,7 @@ public actor Server {
                         return try await handler(request)
                     }
                     if request.method == ListTools.name {
+                        await self.warnAboutToolNames(in: response)
                         if handlerContext.isStateless {
                             response = await self.droppingInvalidHeaderTools(response)
                         }
@@ -2581,6 +2584,21 @@ public actor Server {
 
     /// Removes tools with invalid `x-mcp-header` annotations from a
     /// `tools/list` result: clients must ignore them (SEP-2243).
+    /// Logs the names in a `tools/list` result that do not have the format
+    /// the specification recommends, or that appear more than once in it
+    /// (SEP-986), each once. The result is sent unchanged.
+    private func warnAboutToolNames(in response: Response<AnyMethod>) async {
+        guard case .success(let value) = response.result,
+            let tools = value.objectValue?["tools"]?.arrayValue
+        else { return }
+        let names = tools.compactMap { $0.objectValue?["name"]?.stringValue }
+        for (name, problem) in toolNameWarnings.warnings(for: names, checkDuplicates: true) {
+            await logger?.warning(
+                "Tool name does not follow the specification (SEP-986): \(problem)",
+                metadata: ["tool": "\(MCPRequestHeaders.sanitized(name))"])
+        }
+    }
+
     private func droppingInvalidHeaderTools(_ response: Response<AnyMethod>) async
         -> Response<AnyMethod>
     {

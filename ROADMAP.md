@@ -111,7 +111,7 @@ A change that implements a SEP updates its row.
 | 932 | Governance | Process | Not applicable | Project governance; no protocol surface. |
 | 973 | Icons and other metadata for implementations, resources, tools and prompts | Standards | Implemented | `Icon`; `icons` on `Tool`, `Resource`, `Resource.Template`, `Prompt`, `Client.Info` and `Server.Info`; `websiteUrl` on `Client.Info` and `Server.Info` |
 | 985 | Protected resource metadata aligned with RFC 9728 | Standards | Implemented | `OAuthDiscovery` (the `WWW-Authenticate` URL, then the well-known URLs); `ProtectedResourceMetadataValidator` |
-| 986 | Tool name format | Standards | Planned | Tool names are not checked. |
+| 986 | Tool name format | Standards | Implemented | `Tool.isValidName(_:)`. The server logs a warning once for each listed name that does not have the format or that a result has twice; the client logs one for each name without the format. Nothing is refused: the specification says SHOULD. |
 | 990 | Enterprise IdP policy controls | Standards | Implemented | `OAuthConfiguration.enterpriseManaged(...)`, `OAuthTokenExchange` |
 | 991 | Client ID metadata documents | Standards | Implemented | An https `clientID` URL, used when the authorization server sets `client_id_metadata_document_supported`; otherwise dynamic registration |
 | 994 | Shared communication practices | Process | Not applicable | Community process. |

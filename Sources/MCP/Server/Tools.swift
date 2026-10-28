@@ -300,6 +300,79 @@ public struct Tool: Hashable, Codable, Sendable {
     var taskSupport: TaskSupport { execution?.taskSupport ?? .forbidden }
 }
 
+// MARK: - Tool names (SEP-986)
+
+extension Tool {
+    /// The longest tool name the specification recommends.
+    static let maximumNameLength = 128
+
+    /// Whether `name` has the format the specification recommends for tool
+    /// names: 1 to 128 characters, each an ASCII letter (`A-Z`, `a-z`), a
+    /// digit, `_`, `-` or `.`.
+    ///
+    /// The specification says SHOULD, so the SDK does not refuse other names.
+    /// It logs a warning when a server lists a tool with such a name.
+    /// Names are case-sensitive: `getUser` and `GetUser` are two names.
+    public static func isValidName(_ name: String) -> Bool {
+        nameProblem(name) == nil
+    }
+
+    /// Why `name` does not have the recommended format, or `nil`.
+    static func nameProblem(_ name: String) -> String? {
+        if name.isEmpty { return "the name is empty" }
+        var invalid: [Unicode.Scalar] = []
+        for scalar in name.unicodeScalars where !isNameCharacter(scalar) && !invalid.contains(scalar) {
+            invalid.append(scalar)
+        }
+        if !invalid.isEmpty {
+            let list = invalid.map { MCPRequestHeaders.sanitized(String($0)) }.map { "\"\($0)\"" }
+            return "the name has characters other than A-Z, a-z, 0-9, _, - and .: "
+                + list.joined(separator: ", ")
+        }
+        if name.utf8.count > maximumNameLength {
+            return "the name has \(name.utf8.count) characters, more than \(maximumNameLength)"
+        }
+        return nil
+    }
+
+    private static func isNameCharacter(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar {
+        case "A"..."Z", "a"..."z", "0"..."9", "_", "-", ".": return true
+        default: return false
+        }
+    }
+}
+
+/// Tool names that were logged as invalid or duplicate, so that each is
+/// logged once. Kept to `limit` names: a server that makes up names cannot
+/// make the set grow without bound.
+struct ToolNameWarnings: Sendable {
+    private var logged: Set<String> = []
+    private let limit = 1000
+
+    /// The warnings for `names` not logged before: one for each name with the
+    /// wrong format and, when `checkDuplicates` is set, one for each name that
+    /// appears more than once.
+    mutating func warnings(for names: [String], checkDuplicates: Bool) -> [(name: String, problem: String)] {
+        var result: [(name: String, problem: String)] = []
+        var seen: Set<String> = []
+        for name in names {
+            if let problem = Tool.nameProblem(name), record("format:" + name) {
+                result.append((name, problem))
+            }
+            if checkDuplicates, !seen.insert(name).inserted, record("duplicate:" + name) {
+                result.append((name, "the name is listed more than once; tool names should be unique within a server"))
+            }
+        }
+        return result
+    }
+
+    private mutating func record(_ key: String) -> Bool {
+        guard logged.count < limit else { return false }
+        return logged.insert(key).inserted
+    }
+}
+
 // MARK: -
 
 /// To discover available tools, clients send a `tools/list` request.
