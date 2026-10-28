@@ -51,6 +51,27 @@ will change in a later major version.
 - `resourceNotFound` and `invalidParams` share -32602. Decoding picks
   `resourceNotFound` when `data` has a `uri` and no `detail`.
 
+## Deprecated by the specification
+
+The specification deprecates these features
+([deprecated features](https://modelcontextprotocol.io/specification/2026-07-28/deprecated)). They
+work on every revision that has them. The SDK marks their entry points with
+`@available(*, deprecated)`, and logs a notice the first time the peer declares a deprecated
+capability: the server for a client's `roots` or `sampling`, the client for a server's `logging`.
+Each notice is logged once for each process.
+
+| Feature | Deprecated by | Earliest removal | What the SDK does | Migration |
+| --- | --- | --- | --- | --- |
+| Roots | SEP-2577 | First revision on or after 2027-07-28 | `Server.listRoots()`, `Client.withRootsHandler(_:)` and `notifyRootsChanged()` are deprecated. `Root`, `ListRoots`, `InputRequest.listRoots` and `Client.Capabilities.roots` carry a note. | Pass directories or files in tool arguments, resource URIs or server configuration. |
+| Sampling | SEP-2577 | First revision on or after 2027-07-28 | `Server.requestSampling(...)` and `Client.withSamplingHandler(_:)` are deprecated. `Sampling`, `CreateSamplingMessage`, `InputRequest.sampling` and `Client.Capabilities.sampling` carry a note. | Call the API of an LLM provider from the server. |
+| Logging | SEP-2577 | First revision on or after 2027-07-28 | `Server.log(level:logger:data:)` and `Client.setLoggingLevel(_:)` are deprecated. `LogLevel`, `SetLoggingLevel`, `LogMessageNotification`, `Server.Capabilities.logging` and the `logLevel` accessors carry a note. | Log to stderr (stdio), or use OpenTelemetry. |
+| `includeContext` `thisServer` and `allServers` | SEP-2596 | With sampling | The two cases of `Sampling.ContextInclusion` are deprecated. They still decode and encode. | Omit `includeContext`, or use `.none`. |
+| HTTP+SSE transport (2024-11-05) | SEP-2596 | Three months after SEP-2596 became Final | Not implemented. | Streamable HTTP: `HTTPClientTransport` and the HTTP server transports. |
+| Dynamic client registration | PR #2858 | First revision on or after 2027-07-28 | Used when the client ID is empty, and when it is a client ID metadata document URL that the authorization server does not support. A plain client ID is a pre-registered client. | An https `clientID` URL with a client ID metadata document. |
+
+Types and capabilities carry a documentation note instead of `@available`: the SDK uses them
+itself on every revision, so a native marker would warn in the SDK's own code.
+
 ## Not implemented
 
 | Item | Status |

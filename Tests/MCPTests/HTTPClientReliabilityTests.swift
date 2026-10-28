@@ -40,12 +40,17 @@ struct HTTPClientRetryBoundsTests {
     }
 }
 
-/// Collects log messages at warning level and above.
+/// Collects log messages at `minimumLevel` (default: warning) and above.
 final class CapturingLogHandler: LogHandler, @unchecked Sendable {
     private let lock = NSLock()
     private var captured: [String] = []
+    private let minimumLevel: Logger.Level
     var metadata: Logger.Metadata = [:]
     var logLevel: Logger.Level = .trace
+
+    init(minimumLevel: Logger.Level = .warning) {
+        self.minimumLevel = minimumLevel
+    }
 
     var messages: [String] { lock.withLock { captured } }
 
@@ -58,7 +63,7 @@ final class CapturingLogHandler: LogHandler, @unchecked Sendable {
         level: Logger.Level, message: Logger.Message, metadata: Logger.Metadata?,
         source: String, file: String, function: String, line: UInt
     ) {
-        guard level >= .warning else { return }
+        guard level >= minimumLevel else { return }
         lock.withLock { captured.append(message.description) }
     }
 }

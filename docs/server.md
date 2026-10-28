@@ -980,6 +980,8 @@ struct DailyReportSkill: SkillCatalog {
 
 ## Requests to the client
 
+`requestSampling` and `listRoots` are deprecated by the specification (SEP-2577); elicitation is not. See [Deprecated by the specification](rough_edges.md#deprecated-by-the-specification).
+
 Handshake clients accept requests from the server. `Server` has methods for them:
 
 | Method | Request | Client capability |
@@ -1116,6 +1118,8 @@ func registerCompletions(on server: Server) async {
 - At 2026-07-28 `completion/complete` without the `completions` capability fails with -32601.
 
 ## Logging
+
+Logging is deprecated by the specification (SEP-2577), with roots and sampling. It works on every revision that has it. To migrate, log to stderr (stdio) or use OpenTelemetry. See [Deprecated by the specification](rough_edges.md#deprecated-by-the-specification).
 
 A server sends log messages to the client with `Server.log(level:logger:data:)`. `data` is a `Value` or any `Codable` value. `LogLevel` is `Comparable`, from `.debug` to `.emergency`. Declare the `logging` capability so that clients know they may set a level.
 

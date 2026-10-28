@@ -115,7 +115,8 @@ makes `ProtocolMode.automatic` the client default ([docs/migration.md](docs/migr
 - A revision is dropped only in a major release, and only after a minor release that announced
   it in the release notes and in [ROADMAP.md](ROADMAP.md).
 - Protocol features that the specification deprecates follow the specification's timeline. The
-  SDK keeps them working on connections that negotiate a revision that has them.
+  SDK keeps them working on connections that negotiate a revision that has them. The list:
+  [Deprecated by the specification](docs/rough_edges.md#deprecated-by-the-specification).
 
 ## Deprecation
 

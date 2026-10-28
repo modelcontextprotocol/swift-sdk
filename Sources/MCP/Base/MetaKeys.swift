@@ -39,6 +39,10 @@ extension Metadata {
     }
 
     /// `io.modelcontextprotocol/logLevel`; `nil` when absent or unknown.
+    ///
+    /// > Important: Logging is deprecated by the specification (SEP-2577) and can be removed in the
+    ///   first revision released on or after 2027-07-28. It works on every revision that has it. To
+    ///   migrate, log to stderr (stdio) or use OpenTelemetry.
     public var logLevel: LogLevel? {
         get { fields[MetaKey.logLevel]?.stringValue.flatMap(LogLevel.init(rawValue:)) }
         set { fields[MetaKey.logLevel] = newValue.map { .string($0.rawValue) } }

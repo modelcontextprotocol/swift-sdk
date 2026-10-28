@@ -19,8 +19,16 @@ public enum InputRequest: Hashable, Sendable {
     /// `elicitation/create`: ask the user for input.
     case elicitation(CreateElicitation.Parameters)
     /// `sampling/createMessage`: ask the client's model for a completion.
+    ///
+    /// > Important: Sampling is deprecated by the specification (SEP-2577) and can be removed in
+    ///   the first revision released on or after 2027-07-28. It works on every revision that has it.
+    ///   To migrate, call the API of an LLM provider from the server.
     case sampling(CreateSamplingMessage.Parameters)
     /// `roots/list`: ask for the client's roots.
+    ///
+    /// > Important: Roots is deprecated by the specification (SEP-2577) and can be removed in the
+    ///   first revision released on or after 2027-07-28. It works on every revision that has it. To
+    ///   migrate, pass directories or files in tool arguments, resource URIs or server configuration.
     case listRoots
     /// A request the SDK does not know, from a later revision: its method and
     /// `params`. The client fulfills it with the handler registered for the
@@ -146,8 +154,16 @@ public enum InputResponse: Hashable, Sendable {
     /// The result of `elicitation/create`.
     case elicitation(CreateElicitation.Result)
     /// The result of `sampling/createMessage`.
+    ///
+    /// > Important: Sampling is deprecated by the specification (SEP-2577) and can be removed in
+    ///   the first revision released on or after 2027-07-28. It works on every revision that has it.
+    ///   To migrate, call the API of an LLM provider from the server.
     case sampling(CreateSamplingMessage.Result)
     /// The result of `roots/list`.
+    ///
+    /// > Important: Roots is deprecated by the specification (SEP-2577) and can be removed in the
+    ///   first revision released on or after 2027-07-28. It works on every revision that has it. To
+    ///   migrate, pass directories or files in tool arguments, resource URIs or server configuration.
     case roots(ListRoots.Result)
     /// The result of a request the SDK does not know, as received.
     case unknown(Value)
