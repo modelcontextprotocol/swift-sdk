@@ -31,6 +31,7 @@ enum StatelessRequests {
     static let cacheableMethods: Set<String> = [
         ListTools.name, ListPrompts.name, ListResources.name,
         ListResourceTemplates.name, ReadResource.name, ServerDiscover.name,
+        ListSkills.name, GetSkill.name,
     ]
 
     /// Classifies a request by the protocol version in its `_meta`.
@@ -85,6 +86,10 @@ enum StatelessRequests {
             return capabilities.resources != nil
         case Complete.name:
             return capabilities.completions != nil
+        case ListSkills.name, GetSkill.name:
+            return SkillsSettings(capabilities.extensions) != nil
+        case ReadResourceDirectory.name:
+            return SkillsSettings(capabilities.extensions)?.directoryRead == true
         default:
             return true
         }

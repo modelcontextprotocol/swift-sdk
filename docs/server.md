@@ -836,6 +836,102 @@ At 2026-07-28 a client that did not declare the extension gets -32021 for `tasks
 
 At 2025-11-25 the server that created a task sends `notifications/tasks/status` on its connection each time the status changes. At 2026-07-28 a client names tasks in `SubscriptionFilter.taskIds` on a `subscriptions/listen` stream; the acknowledgement keeps the caller's own tasks, and each change arrives as `notifications/tasks` with the task as `tasks/get` returns it. Both are optional for clients, which keep polling.
 
+## Skills
+
+A skill is a directory of files with a `SKILL.md` at its root, whose YAML frontmatter has a `name` and a `description` ([Agent Skills](https://agentskills.io/specification)). The skills extension (SEP-2640) serves each file as a resource, at `skill://<skill-path>/<file-path>`, and lists the skills with `skills/list`. `withSkills(_:)` serves a catalog of them:
+
+```swift
+/// A server that serves the skills in `directory`, one subdirectory each:
+/// `pdf-processing/SKILL.md`, `pdf-processing/references/FORMS.md`, ...
+func makeSkillsServer(directory: URL) async throws -> Server {
+    let server = Server(
+        name: "docs", version: "1.0.0", capabilities: .init(resources: .init(listChanged: true)))
+    var skills: [SkillPackage] = []
+    for entry in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) {
+        guard (try? entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { continue }
+        // Checks the skill and computes its entry; throws for an invalid one.
+        skills.append(try SkillPackage(path: entry.lastPathComponent, directory: entry))
+    }
+    await server.withSkills(InMemorySkillCatalog(skills))
+    return server
+}
+```
+
+The server then:
+
+- declares `extensions["io.modelcontextprotocol/skills"]`, with `directoryRead` when the catalog reads directories, and the `resources` capability;
+- answers `skills/list`, `skills/get` (-32602 for a URI that is not a skill) and `resources/directory/read` (-32602 for a URI that is not a directory);
+- answers `resources/read` of a skill file from the catalog, before your `resources/read` handler, which serves your other resources;
+- adds the skills' `SKILL.md` to `resources/list`, with the name and description of their frontmatter: the first page is your handler's first page and the catalog's first page, so a client that reads one page sees both; later pages continue your listing, then the catalog's. The cursors are the server's; your handler sees its own. Pass `listInResources: false` to leave `resources/list` to your handler.
+
+At 2026-07-28 `skills/list` and `skills/get` carry [cache hints](#cacheable-results), and a client that calls them on a server that does not declare the extension gets -32601. At handshake revisions the same methods are served when the extension is declared.
+
+### Skill packages
+
+`SkillPackage` is one skill, from a directory or from files in memory. The path is where the skill sits in the namespace; its last segment is the skill's name:
+
+```swift
+/// A skill from files in memory, under the prefix `acme/billing`.
+func makeRefundsSkill() throws -> SkillPackage {
+    try SkillPackage(
+        path: "acme/billing/refunds",
+        files: [
+            "SKILL.md": Data(
+                """
+                ---
+                name: refunds
+                description: Process customer refund requests per company policy
+                ---
+
+                Answer with the template in examples/email.md.
+                """.utf8),
+            "examples/email.md": Data("Dear customer, your refund is on its way.\n".utf8),
+        ])
+}
+```
+
+Creating a package checks the skill and throws `SkillPackage.ValidationError` for one that does not follow SEP-2640:
+
+| Rule | Example |
+|---|---|
+| A UTF-8 `SKILL.md` at the root, starting with YAML frontmatter, between `---` lines, that has `name` and `description` | `name: refunds` |
+| The name: 1 to 64 lowercase letters, digits and single hyphens, not at either end | `pdf-processing`, not `PDF` or `a--b` |
+| The last segment of the path is the name | `acme/billing/refunds` for `refunds` |
+| Path segments of letters, digits, `-`, `.`, `_` and `~` | |
+| File paths relative and inside the skill | `references/FORMS.md`, not `../x` |
+| At most 512 files and 16 MiB, unless `enforcesLimits` is `false` | Hosts need not accept more |
+
+The package computes the entry: every file with the SHA-256 and length of its bytes, `SKILL.md` first, and the frontmatter as JSON. The frontmatter is read as YAML 1.2 with the core schema, as the other implementations read it: `yes` and `2024-01-01` stay strings. Read from a directory, files whose names start with `.` and links that lead out of the directory are skipped. Files are sent as `text` when they are UTF-8 with a textual MIME type, chosen from the extension, and as `blob` otherwise.
+
+`InMemorySkillCatalog` serves packages, 100 to a page, and reads every directory of the namespace: each skill's root and subdirectories, and the prefixes of the paths, such as `skill://acme`. After `setSkills(_:)`, send a `ResourceListChangedNotification`.
+
+### Custom catalogs
+
+A `SkillCatalog` answers four questions: a page of the listing, the entry of a skill, the contents of a file, and, optionally, the children of a directory. The listing may be empty or partial: a skill that is not listed is still served by URI. A skill generated on each read has no digests to publish; its entry says `resources: "dynamic"`:
+
+```swift
+/// A skill generated on each read: not listed, served by URI, with no
+/// digests to publish.
+struct DailyReportSkill: SkillCatalog {
+    static let uri = "skill://reports/daily/SKILL.md"
+    static let frontmatter: [String: Value] = ["name": "daily", "description": "Today's figures"]
+
+    func listSkills(cursor: String?) async throws -> ListSkills.Result {
+        ListSkills.Result(skills: [])
+    }
+
+    func skill(uri: String) async throws -> Skill? {
+        uri == Self.uri ? Skill(uri: uri, frontmatter: Self.frontmatter, resources: .dynamic) : nil
+    }
+
+    func readResource(uri: String) async throws -> ReadResource.Result? {
+        guard uri == Self.uri else { return nil }
+        let text = "---\nname: daily\ndescription: Today's figures\n---\n\nSales: \(Int.random(in: 1...100))\n"
+        return ReadResource.Result(contents: [.text(text, uri: uri, mimeType: "text/markdown")])
+    }
+}
+```
+
 ## Requests to the client
 
 Handshake clients accept requests from the server. `Server` has methods for them:
@@ -1041,6 +1137,7 @@ The SDK does not infer capabilities from the handlers you register. Declare them
 | `completions` | `completion/complete` | |
 | `logging` | `logging/setLevel` (handshake) | |
 | `tasks` (2025-11-25) | `tasks/get`, `tasks/result`, `tasks/cancel`, `tasks/list` | derived by `withTasks(_:)`; see [Tasks](#tasks) |
+| `extensions["io.modelcontextprotocol/skills"]` | `skills/list`, `skills/get`, `resources/directory/read` | set by `withSkills(_:)`; see [Skills](#skills) |
 
 At 2026-07-28 the SDK answers -32601 for the methods of an undeclared capability, and listen streams honor only the declared `listChanged` and `subscribe` options. At handshake a registered handler runs whether or not the capability is declared, so declare every capability you implement.
 

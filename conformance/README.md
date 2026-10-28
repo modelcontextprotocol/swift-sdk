@@ -30,6 +30,10 @@ fixture.
 - A tier-scored scenario passes with at least one `SUCCESS` check and no `FAILURE` check
   (`scripts/conformance-score.mjs`).
 - Results and logs go to `.build/conformance/<leg>/`.
+- Run the harness on Node 22, as CI does. On Node 26 `server-sse-multiple-streams` can end the
+  harness with an unhandled promise rejection after its checks pass: Node's web streams reject a
+  `pipeTo` write that arrives after the harness cancels the reader, and nothing handles it.
+  Whether it happens depends on when the server's events arrive.
 
 ## One scenario
 

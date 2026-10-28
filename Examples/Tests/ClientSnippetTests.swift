@@ -526,3 +526,18 @@ struct ClientSnippetTests {
         await server.stop()
     }
 }
+
+@Suite("Client skill snippets")
+struct ClientSkillSnippetTests {
+    @Test("A skill loaded and its template read", arguments: bothEras)
+    func refunds(mode: Client.ProtocolMode) async throws {
+        let server = Server(name: "billing", version: "1", capabilities: .init(resources: .init()))
+        await server.withSkills(InMemorySkillCatalog([try makeRefundsSkill()]))
+        let client = Client(name: "test", version: "1.0", configuration: .init(protocolMode: mode))
+        try await client.connect(transport: try await start(server))
+        let answer = try #require(try await answerRefund(client))
+        #expect(answer.contains("Answer with the template") && answer.contains("your refund is on its way"))
+        await client.disconnect()
+        await server.stop()
+    }
+}

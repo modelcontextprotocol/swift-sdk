@@ -11,7 +11,7 @@ set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 
 SECONDS_PER_TARGET="${1:-60}"
-TARGETS=(FuzzDecode FuzzSSE FuzzStatelessHTTP FuzzStatefulHTTP)
+TARGETS=(FuzzDecode FuzzSSE FuzzStatelessHTTP FuzzStatefulHTTP FuzzFrontmatter)
 
 if [[ "$(uname -s)" != Linux ]]; then
     echo "fuzz: needs a Linux toolchain with libFuzzer; skipped"

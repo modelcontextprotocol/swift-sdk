@@ -48,6 +48,17 @@ the harness has none for 2025-11-25, which the interop `tasks` profile checks ag
 TypeScript SDK. Tasks hosted by the client (2025-11-25 task-augmented sampling and elicitation)
 are not implemented.
 
+### Skills
+
+| Feature | SEP | API | Design |
+|---|---|---|---|
+| The `io.modelcontextprotocol/skills` extension: `skills/list`, `skills/get`, `resources/directory/read`, skill files through `resources/read` and `resources/list` | SEP-2640 | `Server.withSkills(_:listInResources:)`, `SkillCatalog`, `SkillPackage`, `InMemorySkillCatalog`; `Client.listSkills(cursor:)`, `getSkill(uri:)`, `readResourceDirectory(uri:cursor:)` | [skills.md](design/skills.md) |
+| Loading with verification (size, digest, frontmatter) and no prefetching | SEP-2640 | `Client.loadSkill(_:options:)`, `LoadedSkill`, `SkillVerificationError`, `Skill.manifestFingerprint` | [skills.md](design/skills.md) |
+
+Frontmatter is YAML 1.2 (core schema) through Yams, as the conformance harness reads it. The
+server passes the 3 `sep-2640-*` server scenarios and the client the 4 client scenarios; no
+other SDK implements the extension.
+
 ### Authorization
 
 | Feature | Reference | API |
@@ -71,17 +82,9 @@ Details: [design/auth.md](design/auth.md).
 
 ## Planned
 
-Not implemented yet. The conformance harness exercises these only in the default leg, as
-extension scenarios that do not count toward a tier; their failing checks would be entries in
-[conformance/baseline.yml](conformance/baseline.yml).
-
-| Item | Reference | Baseline entries |
-|---|---|---|
-| Skills extension `io.modelcontextprotocol/skills` | SEP-2640 | 0: the 7 `sep-2640-*` scenarios (3 server, 4 client) SKIP while no fixture declares the extension |
-
-Skills scope: wire types, a `SkillCatalog` that serves skills through `skills/list`,
-`skills/get`, `resources/read` and `resources/directory/read`, and a client loader that
-verifies size, digest and frontmatter. Frontmatter is parsed with Yams.
+Nothing is planned beyond 1.0.0 today. The conformance harness exercises extensions only in the
+default leg, as scenarios that do not count toward a tier; their failing checks would be entries
+in [conformance/baseline.yml](conformance/baseline.yml).
 
 Other known gaps are listed under "Open questions" in each design note.
 
@@ -100,6 +103,6 @@ that release.
 |---|---|
 | `--spec-version 2025-11-25` | 0 / 0 |
 | `--spec-version 2026-07-28` | 0 / 0 |
-| default | 0 / 0; the skills scenarios SKIP |
+| default | 0 / 0 |
 
 How the legs work: [conformance/README.md](conformance/README.md).

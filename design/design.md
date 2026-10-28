@@ -14,6 +14,7 @@ Feature notes go deeper on single topics:
 | [subscriptions.md](subscriptions.md) | SEP-2575 `subscriptions/listen` |
 | [mrtr.md](mrtr.md) | SEP-2322 multi round-trip requests and sealed `requestState` |
 | [tasks.md](tasks.md) | Tasks at 2025-11-25 (SEP-1686) and the 2026-07-28 tasks extension (SEP-2663) |
+| [skills.md](skills.md) | The skills extension (SEP-2640): frontmatter, catalogs, serving and verified loading |
 | [auth.md](auth.md) | OAuth client architecture |
 | [linux.md](linux.md) | Linux status and what differs there by design |
 | [threat_model.md](threat_model.md) | Trust boundaries, defenses and their limits |

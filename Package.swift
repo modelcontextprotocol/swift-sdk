@@ -77,6 +77,7 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-log.git", from: "1.5.0"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
         .package(url: "https://github.com/apple/swift-crypto.git", "3.0.0"..<"5.0.0"),
+        .package(url: "https://github.com/jpsim/Yams.git", from: "6.0.0"),
     ],
     targets: [
         .target(
@@ -85,6 +86,7 @@ let package = Package(
                 .product(name: "SystemPackage", package: "swift-system"),
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "Crypto", package: "swift-crypto"),
+                .product(name: "Yams", package: "Yams"),
             ],
             swiftSettings: [
                 .enableUpcomingFeature("StrictConcurrency")

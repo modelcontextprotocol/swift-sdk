@@ -58,6 +58,10 @@ Behavior that can break working code ([docs/migration.md](docs/migration.md#beha
 - Tasks for `tools/call` at 2025-11-25 (SEP-1686) and the 2026-07-28 tasks extension
   (SEP-2663): `Server.withTasks(_:)`, `runAsTask`, `TaskManager` and `TaskStore` on the server;
   `Client.Configuration.tasks`, `callTool` that drives a task, and `TaskHandle` on the client.
+- The skills extension (SEP-2640): `Server.withSkills(_:listInResources:)`, `SkillCatalog`,
+  `SkillPackage` and `InMemorySkillCatalog` on the server; `listSkills`, `getSkill`,
+  `readResourceDirectory` and `loadSkill`, which verifies size, digest and frontmatter, on the
+  client.
 - Authorization: issuer checks (RFC 8414, RFC 9207), `application_type`, authorization server
   migration, the JWT bearer grant, enterprise-managed authorization with token exchange, workload
   identity, DPoP.
@@ -113,6 +117,7 @@ Behavior that can break working code ([docs/migration.md](docs/migration.md#beha
 
 - Added swift-crypto (`3.0.0..<5.0.0`): `requestState` sealing, PKCE and `private_key_jwt`, also
   on Linux.
+- Added Yams (`from: "6.0.0"`): the YAML frontmatter of skills (SEP-2640).
 - Removed eventsource: `HTTPClientTransport` parses server-sent events itself.
 - swift-docc-plugin is required `from: "1.4.0"` instead of its `main` branch, so packages can
   depend on a released version of `MCP`.
