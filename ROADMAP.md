@@ -59,6 +59,17 @@ Frontmatter is YAML 1.2 (core schema) through Yams, as the conformance harness r
 server passes the 3 `sep-2640-*` server scenarios and the client the 4 client scenarios; no
 other SDK implements the extension.
 
+### Server Cards
+
+| Feature | SEP | API | Design |
+|---|---|---|---|
+| The Server Card document, built from `Server.Info`, with the checks of the format | SEP-2127 | `ServerCard`, `ServerCard.validate()`, `ServerCardError` | [server_cards.md](design/server_cards.md) |
+| Serving at `<endpoint>/server-card`, with `ETag`, `If-None-Match`, caching and CORS | SEP-2127 | `ServerCardValidator` | [server_cards.md](design/server_cards.md) |
+| Fetching, URL templates, and checks against `server/discover` | SEP-2127 | `ServerCard.fetch(from:ifNoneMatch:session:)`, `cardURL(forEndpoint:)`, `Remote.url(resolving:)`, `mismatches(with:)` | [server_cards.md](design/server_cards.md) |
+
+The format is the one of `modelcontextprotocol/ext-server-card` at `526201bb`; the tests use its
+examples. The SDK does not read AI Catalogs: the application passes the card URL.
+
 ### Authorization
 
 | Feature | Reference | API |
@@ -134,7 +145,7 @@ A change that implements a SEP updates its row.
 | 1933 | Workload identity federation | Not in the index | Implemented | [Authorization](#authorization) |
 | 2085 | Governance succession and amendment | Process | Not applicable | Governance. |
 | 2106 | `inputSchema` and `outputSchema` as JSON Schema 2020-12 | Standards | Partial | Schemas are `Value`, so any keyword is kept, and the client never fetches a network `$ref`. The SDK does not resolve `$ref` or bound composition keywords, because it does not validate. |
-| 2127 | Server Cards | Extensions | Planned | Not implemented. |
+| 2127 | Server Cards | Extensions | Implemented | [Server Cards](#server-cards); no AI Catalog discovery |
 | 2133 | Extensions | Standards | Implemented | `extensions` on both capability structs |
 | 2148 | Contributor ladder | Process | Not applicable | Governance. |
 | 2149 | Group charter template | Process | Not applicable | Governance. |

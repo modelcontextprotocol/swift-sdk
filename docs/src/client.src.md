@@ -9,6 +9,9 @@ This guide covers the `Client` actor: connecting at either protocol era, calling
 1. [Sampling](#sampling)
 1. [Elicitation](#elicitation)
 1. [Multi round-trip requests](#multi-round-trip-requests)
+1. [Tasks](#tasks)
+1. [Skills](#skills)
+1. [Server Cards](#server-cards)
 1. [Notifications and subscriptions](#notifications-and-subscriptions)
 1. [Logging](#logging)
 1. [Cancellation and progress](#cancellation-and-progress)
@@ -352,6 +355,18 @@ Each throws -32601 without a request when the server does not declare the extens
 | `enforcesLimits` | `true` | Refuse skills of more than 512 files or 16 MiB |
 
 The SDK verifies; the host decides. Ask the user before a skill is used, and bind the approval to `Skill.manifestFingerprint`, which changes when any file does. Identify a skill by the server and its URI, never by its name: two servers, or two skills of one server, may share a name. A `SKILL.md` read with plain `readResource(uri:)` is not a loaded skill.
+
+## Server Cards
+
+A Server Card describes a server before the client connects (SEP-2127): its name, version, endpoints and the protocol versions they serve. `ServerCard.fetch(from:session:)` gets one:
+
+%include Examples/Snippets/Client/ServerCards.swift server-card
+
+- The request asks for `application/mcp-server-card+json`. The URL, and the URL after redirects, must be `https`, or `http` on a loopback host. A card larger than 1 MiB, an answer other than 200, a body that is not a card, and a card that breaks a rule of the format throw `ServerCardError`.
+- `fetch(from:ifNoneMatch:session:)` sends the `ETag` of an earlier fetch, and returns `.notModified` when the card did not change. Keep a card for its `Cache-Control` time.
+- `ServerCard.cardURL(forEndpoint:)` gives the recommended location, `<endpoint>/server-card`. The SDK does not read AI Catalogs: get the card's URL from the catalog yourself.
+- `Remote.url(resolving:)` fills in the `{variable}` placeholders of a remote's URL: from the values you pass, then the variable's `value`, then its `default`. A required variable, or a variable the remote does not declare, without a value throws.
+- A card is advisory: do not use it for security decisions. After connecting, `mismatches(with:)` lists what `server/discover` contradicts: the name, the version, the title, and protocol versions the server does not serve. Prefer the live values.
 
 ## Notifications and subscriptions
 

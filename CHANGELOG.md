@@ -73,6 +73,8 @@ Behavior that can break working code ([docs/migration.md](docs/migration.md#beha
   2026-07-28 a request to the client throws -32600, also from code that handles no request.
 - Tool names (SEP-986): `Tool.isValidName(_:)`; server and client log a warning once for each
   listed name that does not have the format of the specification.
+- Server Cards (SEP-2127): `ServerCard`, `ServerCardValidator`, which serves a card at
+  `<endpoint>/server-card`, and `ServerCard.fetch`, which reads one.
 - A built-in `logging/setLevel` handler that filters `Server.log`.
 - `statelessRequestHook` on `Server.start`, `HTTPClientTransport.cancelRequest(_:)`,
   `BearerTokenValidationResult.tokenInfo`, and the `HTTPClientAuthorizer` requirement

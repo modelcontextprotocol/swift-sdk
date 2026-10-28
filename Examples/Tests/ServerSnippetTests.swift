@@ -520,6 +520,24 @@ struct ServerSnippetTests {
     }
 }
 
+@Suite("Server Card snippets")
+struct ServerCardSnippetTests {
+    @Test("The card is answered before the MCP endpoint")
+    func serverCard() async throws {
+        let card = try makeServerCard()
+        let mcp = StatelessHTTPServerTransport()
+        let response = await route(
+            HTTPRequest(method: "GET", headers: [:], body: nil, path: "/mcp/server-card"), card: card, mcp: mcp)
+        #expect(response.statusCode == 200)
+        let served = try JSONDecoder().decode(ServerCard.self, from: try #require(response.bodyData))
+        #expect(served.name == "com.example/weather")
+        #expect(served.remotes?.first?.url == "https://mcp.example.com/mcp")
+        // Other requests go to the MCP endpoint, which serves only POST.
+        let other = await route(HTTPRequest(method: "GET", headers: [:], body: nil, path: "/mcp"), card: card, mcp: mcp)
+        #expect(other.statusCode == 405)
+    }
+}
+
 @Suite("Skill snippets")
 struct SkillSnippetTests {
     @Test("Skills from a directory: listed, loaded and read", arguments: eras)

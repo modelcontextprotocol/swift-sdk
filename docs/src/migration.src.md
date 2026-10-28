@@ -746,6 +746,7 @@ CODEOWNERS changed (#155, #294, #306, #308, #318, #320, #331, #333).
 | Discovery | `ServerDiscover` | [protocol.md](protocol.md#discovery-and-protocol-modes) |
 | Notification streams | `Client.listen(_:)`, `Client.Subscription`, `unsubscribeFromResource(uri:)`, `subscribedResourceURIs`, `Server.closeSubscriptions()`, `SubscriptionFilter` | [client.md](client.md#notifications-and-subscriptions) |
 | Multi round-trip requests | `.inputRequired(_:requestState:_meta:)`, `InputRequest`, `InputResponse`, `Client.Configuration.multiRoundTrip` | [server.md](server.md#multi-round-trip-requests) |
+| Server Cards (SEP-2127) | `ServerCard`, `ServerCardValidator`, `ServerCard.fetch(from:ifNoneMatch:session:)` | [server.md](server.md#server-cards), [client.md](client.md#server-cards) |
 | Sampling with tools (SEP-1577) | `Server.requestSampling(...tools:toolChoice:...)`, `.sampling(_:)` input requests with `tools` | [server.md](server.md#sampling-with-tools), [client.md](client.md#sampling) |
 | Skills (SEP-2640) | `Server.withSkills(_:listInResources:)`, `SkillCatalog`, `SkillPackage`, `InMemorySkillCatalog`, `Client.listSkills(cursor:)`, `getSkill(uri:)`, `loadSkill(_:options:)`, `LoadedSkill` | [server.md](server.md#skills), [client.md](client.md#skills) |
 | Tasks (SEP-1686, SEP-2663) | `Server.withTasks(_:)`, `TaskManager`, `HandlerContext.runAsTask(ttl:pollInterval:_:)`, `TaskContext`, `Tool.Execution`, `Client.Configuration.tasks`, `TaskHandle`, `TaskSnapshot`, `SubscriptionFilter.taskIds` | [server.md](server.md#tasks), [client.md](client.md#tasks) |

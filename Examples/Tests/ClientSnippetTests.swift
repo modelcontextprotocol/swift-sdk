@@ -1,6 +1,10 @@
 import Foundation
 import Testing
 
+#if canImport(FoundationNetworking)
+    import FoundationNetworking
+#endif
+
 @testable import ClientSnippets
 @testable import MCP
 @testable import ServerSnippets
@@ -539,5 +543,56 @@ struct ClientSkillSnippetTests {
         #expect(answer.contains("Answer with the template") && answer.contains("your refund is on its way"))
         await client.disconnect()
         await server.stop()
+    }
+}
+
+/// Answers every request with the same Server Card, or 404 for a path other
+/// than /mcp/server-card.
+private final class FixedCardProtocol: URLProtocol, @unchecked Sendable {
+    static let card = ServerCard(
+        name: "com.example/weather", version: "1.2.0", description: "Current weather for a city.",
+        remotes: [
+            .init(
+                type: .streamableHTTP, url: "https://{tenant}.example.com/mcp",
+                variables: ["tenant": .init(isRequired: true)], supportedProtocolVersions: ["2026-07-28"])
+        ])
+
+    private let lock = NSLock()
+    private var stopped = false
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let found = request.url?.path == "/mcp/server-card"
+        let body = found ? ((try? JSONEncoder().encode(Self.card)) ?? Data()) : Data()
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: found ? 200 : 404, httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Type": ServerCard.mediaType])!
+        // swift-corelibs-foundation traps when a stopped protocol calls its client.
+        guard !lock.withLock({ stopped }) else { return }
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() { lock.withLock { stopped = true } }
+}
+
+@Suite("Client Server Card snippets")
+struct ClientServerCardSnippetTests {
+    @Test("Read a card, fill in its URL, and check it against the live server")
+    func serverCard() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [FixedCardProtocol.self]
+        let card = try await readCard(
+            of: URL(string: "https://example.com/mcp")!, session: URLSession(configuration: configuration))
+        #expect(card == FixedCardProtocol.card)
+        #expect(try connectionURL(from: card, tenant: "acme")?.absoluteString == "https://acme.example.com/mcp")
+
+        let (server, client) = try await connected(.automatic)
+        defer { Task { await client.disconnect(); await server.stop() } }
+        // The demo server has another name and version than the card.
+        #expect(try await checkCard(card, with: client).map(\.field) == [.name, .version])
     }
 }

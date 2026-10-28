@@ -450,6 +450,18 @@ A `SkillCatalog` answers four questions: a page of the listing, the entry of a s
 
 %include Examples/Snippets/Server/Skills.swift skills-catalog
 
+## Server Cards
+
+A Server Card is a public JSON document that describes a server before a client connects: its name, version, description, endpoints and the protocol versions they serve (SEP-2127). It lists no tools, resources or prompts, and no capabilities. The SDK follows the `modelcontextprotocol/ext-server-card` extension at `526201bb`. Clients find a card's URL in an AI Catalog, or at the recommended location, `<endpoint>/server-card`:
+
+%include Examples/Snippets/Server/ServerCards.swift server-card
+
+- `ServerCard(info:endpoint:protocolVersions:name:description:)` takes the identity from `Server.Info` and adds one Streamable HTTP remote. A card needs a name in reverse-DNS format with one `/`, such as `com.example/weather`, and a description of 1 to 100 characters. Give the server the same name: a client compares the card with the `serverInfo` it gets when it connects.
+- `ServerCardValidator` checks the card when you create it. It answers GET `<endpointPath>/server-card` with `application/mcp-server-card+json`, an `ETag`, `Cache-Control: public, max-age=3600` (`maxAge:`) and `Access-Control-Allow-Origin: *`. A GET with an `If-None-Match` that matches the `ETag` gets 304 and no body, `HEAD` gets the headers, `OPTIONS` gets 204 for a CORS preflight, and other methods get 405.
+- Call `response(to:)` before the MCP endpoint, as the snippet does. When the card's path reaches a transport, put the validator first in its pipeline instead.
+- A card is public: put no credentials, internal hosts or user data in it, and serve it over https.
+- To publish a changed card, create a new validator.
+
 ## Requests to the client
 
 `requestSampling` and `listRoots` are deprecated by the specification (SEP-2577); elicitation is not. See [Deprecated by the specification](rough_edges.md#deprecated-by-the-specification).

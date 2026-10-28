@@ -255,6 +255,16 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
         case "DELETE":
             return handleDelete(request)
         default:
+            // Validators that answer a request themselves, such as
+            // ServerCardValidator for a CORS preflight, run for every method.
+            let context = HTTPValidationContext(
+                httpMethod: request.method.uppercased(), sessionID: sessionID,
+                supportedProtocolVersions: Set(Version.handshake))
+            if let response = validationPipeline.validate(request, context: context),
+                (200..<300).contains(response.statusCode)
+            {
+                return response
+            }
             return .error(
                 statusCode: 405,
                 .invalidRequest("Method Not Allowed"),
