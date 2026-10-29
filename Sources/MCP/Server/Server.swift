@@ -751,7 +751,17 @@ public actor Server {
             case Initialize.name, Ping.name:
                 break
             default:
-                try checkInitialized()
+                guard isInitialized else {
+                    let response = AnyMethod.response(
+                        id: request.id,
+                        error: MCPError.invalidRequest("Server is not initialized")
+                    )
+                    if sendResponse {
+                        try await send(response)
+                        return nil
+                    }
+                    return response
+                }
             }
         }
 
@@ -843,8 +853,12 @@ public actor Server {
 
         if configuration.strict {
             // Check initialization state unless this is an initialized notification
-            if message.method != InitializedNotification.name {
-                try checkInitialized()
+            // Notifications never get a response, so drop them instead of throwing.
+            if message.method != InitializedNotification.name, !isInitialized {
+                await logger?.warning(
+                    "Ignoring notification before initialization",
+                    metadata: ["method": "\(message.method)"])
+                return
             }
         }
 
@@ -879,12 +893,6 @@ public actor Server {
                 "Received response for unknown request",
                 metadata: ["id": "\(response.id)"]
             )
-        }
-    }
-
-    private func checkInitialized() throws {
-        guard isInitialized else {
-            throw MCPError.invalidRequest("Server is not initialized")
         }
     }
 

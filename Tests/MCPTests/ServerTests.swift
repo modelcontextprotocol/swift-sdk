@@ -216,4 +216,48 @@ struct ServerTests {
         await clientTransport.disconnect()
         await serverTransport.disconnect()
     }
+
+    @Test("Strict mode rejects requests before initialization with an error response")
+    func testStrictModeRejectsRequestBeforeInitialize() async throws {
+        let transport = MockTransport()
+        let server = Server(
+            name: "TestServer",
+            version: "1.0",
+            capabilities: .init(tools: .init()),
+            configuration: .strict
+        )
+        await server.withMethodHandler(ListTools.self) { _ in
+            ListTools.Result(tools: [])
+        }
+        try await server.start(transport: transport)
+
+        try await transport.queue(request: ListTools.request(id: "early", .init()))
+        try await Task.sleep(for: .milliseconds(200))
+
+        #expect(await transport.sentMessages.count == 1)
+        let response = try #require(
+            await transport.decodeLastSentMessage() as Response<ListTools>?)
+        #expect(response.id == "early")
+        guard case .failure(let error) = response.result else {
+            Issue.record("Expected an error response, got \(response.result)")
+            return
+        }
+        #expect(error.code == -32600)
+
+        await server.stop()
+    }
+
+    @Test("Strict mode does not respond to notifications before initialization")
+    func testStrictModeIgnoresNotificationBeforeInitialize() async throws {
+        let transport = MockTransport()
+        let server = Server(name: "TestServer", version: "1.0", configuration: .strict)
+        try await server.start(transport: transport)
+
+        try await transport.queue(notification: RootsListChangedNotification.message())
+        try await Task.sleep(for: .milliseconds(200))
+
+        #expect(await transport.sentMessages.isEmpty)
+
+        await server.stop()
+    }
 }
