@@ -637,6 +637,14 @@ public actor Client {
 
         let result = try await send(request).value
 
+        // If the client does not support the version in the server's response,
+        // it should disconnect.
+        guard Version.supported.contains(result.protocolVersion) else {
+            await disconnect()
+            throw MCPError.internalError(
+                "Server's protocol version is not supported: \(result.protocolVersion)")
+        }
+
         self.serverCapabilities = result.capabilities
         self.serverVersion = result.protocolVersion
         self.instructions = result.instructions
