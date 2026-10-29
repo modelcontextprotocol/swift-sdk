@@ -175,11 +175,17 @@ public actor Server {
     /// Pending request tasks (for cancellation support)
     private var pendingRequestTasks: [ID: Task<Response<AnyMethod>, Error>] = [:]
 
+    /// In-flight `subscriptions/listen` request ids (subset of `pendingRequestTasks`).
+    private var activeListenSubscriptions: Set<ID> = []
+
     /// Pending requests sent to the client, awaiting responses
     private var pendingRequests: [ID: AnyPendingRequest] = [:]
 
     /// Whether the server is initialized
     private var isInitialized = false
+    /// Whether any modern (2026-07-28+) request has been accepted.
+    /// Modern clients never call `initialize`; notifications must still work.
+    private var hasAcceptedModernRequest = false
     /// The client information
     private var clientInfo: Client.Info?
     /// The client capabilities
@@ -292,6 +298,17 @@ public actor Server {
             request.resume(throwing: MCPError.internalError("Server disconnected"))
         }
 
+        // Cancel in-flight method handlers (e.g. parked subscriptions/listen)
+        let pendingTasks = pendingRequestTasks
+        pendingRequestTasks = [:]
+        activeListenSubscriptions = []
+        hasAcceptedModernRequest = false
+        isInitialized = false
+        clientCapabilities = nil
+        for (_, handlerTask) in pendingTasks {
+            handlerTask.cancel()
+        }
+
         if let connection = connection {
             await connection.disconnect()
         }
@@ -310,9 +327,11 @@ public actor Server {
     /// handlers can observe the originating HTTP request (headers, auth, path,
     /// body) without changing the `withMethodHandler` signature.
     public struct HandlerContext: Sendable {
-        /// The JSON-RPC request id of the in-flight request. SDK-internal use
-        /// (e.g. transports closing an SSE stream mid-call per SEP-1699).
-        package let id: ID
+        /// The JSON-RPC request id of the in-flight request.
+        ///
+        /// Use with ``completeSubscriptionsListen(id:)`` to end a parked
+        /// `subscriptions/listen` stream from outside the listen handler.
+        public let id: ID
 
         /// The originating HTTP request, if the active transport conforms to
         /// ``HTTPContextProviding``. `nil` for transports that don't carry HTTP
@@ -320,9 +339,17 @@ public actor Server {
         /// path.
         public let httpContext: HTTPRequest?
 
-        package init(id: ID, httpContext: HTTPRequest?) {
+        /// Per-request client capabilities from modern `_meta`, when present.
+        public let clientCapabilities: Client.Capabilities?
+
+        package init(
+            id: ID,
+            httpContext: HTTPRequest?,
+            clientCapabilities: Client.Capabilities? = nil
+        ) {
             self.id = id
             self.httpContext = httpContext
+            self.clientCapabilities = clientCapabilities
         }
     }
 
@@ -744,11 +771,114 @@ public actor Server {
                 "id": "\(request.id)",
             ])
 
-        if configuration.strict {
+        // Modern (2026-07-28+) requests carry protocol version in params._meta
+        // and do not require initialize. Legacy strict mode still gates other methods.
+        let requestProtocolVersion = ModernRequestMeta.protocolVersion(from: request.params)
+        let hasPerRequestCaps =
+            ModernRequestMeta.clientCapabilities(from: request.params) != nil
+        // `initialize` is always legacy — never classify it as modern.
+        let isModernRequest =
+            request.method != Initialize.name
+            && (request.method == Discover.name
+                || request.method == SubscriptionsListen.name
+                || (requestProtocolVersion.map(Version.isModern) ?? false)
+                || hasPerRequestCaps)
+
+        if request.method == Initialize.name,
+            (requestProtocolVersion.map(Version.isModern) ?? false) || hasPerRequestCaps
+        {
+            let response = AnyMethod.response(
+                id: request.id,
+                error: .invalidRequest(
+                    "initialize must not carry modern per-request metadata; use server/discover"
+                )
+            )
+            if sendResponse {
+                try await send(response)
+                return nil
+            }
+            return response
+        }
+
+        if let requestProtocolVersion {
+            do {
+                if isModernRequest || Version.isModern(requestProtocolVersion) {
+                    // Discover/listen and modern-meta requests only accept modern revisions.
+                    try Version.requireSupported(requestProtocolVersion)
+                } else if !Version.supported.contains(requestProtocolVersion) {
+                    throw MCPError.unsupportedProtocolVersion(
+                        requested: requestProtocolVersion,
+                        supported: Array(Version.supported).sorted(by: >)
+                    )
+                }
+            } catch {
+                let mcpError =
+                    error as? MCPError ?? MCPError.internalError(error.localizedDescription)
+                let response = AnyMethod.response(id: request.id, error: mcpError)
+                if sendResponse {
+                    try await send(response)
+                    return nil
+                }
+                return response
+            }
+        }
+
+        // Modern requests MUST include per-request clientCapabilities (empty object OK).
+        if isModernRequest,
+            !ModernRequestMeta.hasRequiredClientCapabilities(params: request.params)
+        {
+            let response = AnyMethod.response(
+                id: request.id,
+                error: .invalidParams(
+                    "Missing \(ProtocolMetaKey.clientCapabilities) in params._meta"
+                )
+            )
+            if sendResponse {
+                try await send(response)
+                return nil
+            }
+            return response
+        }
+
+        // Modern-shaped requests require a protocol version (discover/listen always,
+        // or any request that already declared clientCapabilities).
+        if requestProtocolVersion == nil,
+            isModernRequest
+                || ModernRequestMeta.clientCapabilities(from: request.params) != nil
+        {
+            let response = AnyMethod.response(
+                id: request.id,
+                error: .invalidParams(
+                    "Missing \(ProtocolMetaKey.protocolVersion) in params._meta"
+                )
+            )
+            if sendResponse {
+                try await send(response)
+                return nil
+            }
+            return response
+        }
+
+        var requestClientCapabilities: Client.Capabilities? = nil
+        if isModernRequest {
+            if let capsValue = ModernRequestMeta.clientCapabilities(from: request.params),
+                case .object = capsValue
+            {
+                if let capsData = try? JSONEncoder().encode(capsValue),
+                    let caps = try? JSONDecoder().decode(Client.Capabilities.self, from: capsData)
+                {
+                    requestClientCapabilities = caps
+                } else {
+                    requestClientCapabilities = Client.Capabilities()
+                }
+            }
+        }
+
+        if configuration.strict && !isModernRequest {
             // The client SHOULD NOT send requests other than pings
             // before the server has responded to the initialize request.
             switch request.method {
-            case Initialize.name, Ping.name:
+            case Initialize.name, Ping.name, Discover.name:
                 break
             default:
                 try checkInitialized()
@@ -768,12 +898,24 @@ public actor Server {
             return response
         }
 
+        if isModernRequest {
+            hasAcceptedModernRequest = true
+        }
+
         // Ask the transport for the originating HTTP request so handlers can observe
         // headers/auth via `Server.currentHandlerContext?.httpContext`. Transports
         // that don't carry HTTP context (stdio, in-memory) don't conform.
         let httpContext = await (connection as? any HTTPContextProviding)?
             .httpRequestContext(for: request.id)
-        let handlerContext = HandlerContext(id: request.id, httpContext: httpContext)
+        let handlerContext = HandlerContext(
+            id: request.id,
+            httpContext: httpContext,
+            clientCapabilities: requestClientCapabilities
+        )
+        let serverInfoValue: [String: Value] = [
+            "name": .string(serverInfo.name),
+            "version": .string(serverInfo.version),
+        ]
 
         // Create a task to handle the request with cancellation support.
         // Set currentHandlerContext as a task local so handlers see it.
@@ -786,7 +928,16 @@ public actor Server {
 
                     // Handle request and get response
                     let response = try await handler(request)
-                    return response
+                    guard isModernRequest else { return response }
+                    switch response.result {
+                    case .success(let value):
+                        let enriched = value.ensuringModernCompleteResult(
+                            serverInfo: serverInfoValue
+                        )
+                        return Response(id: response.id, result: enriched)
+                    case .failure:
+                        return response
+                    }
                 } catch is CancellationError {
                     // Request was cancelled, don't send a response per MCP spec
                     await logger?.debug(
@@ -804,10 +955,16 @@ public actor Server {
 
         // Store the handler task for potential cancellation
         pendingRequestTasks[request.id] = handlerTask
+        if request.method == SubscriptionsListen.name {
+            activeListenSubscriptions.insert(request.id)
+        }
 
         // Ensure cleanup happens regardless of success or failure
         defer {
             pendingRequestTasks.removeValue(forKey: request.id)
+            if request.method == SubscriptionsListen.name {
+                activeListenSubscriptions.remove(request.id)
+            }
         }
 
         do {
@@ -820,7 +977,10 @@ public actor Server {
 
             return response
         } catch is CancellationError {
-            // Request was cancelled, don't send a response per MCP spec
+            // Request was cancelled, don't send a response per MCP spec.
+            // Close any parked HTTP SSE so listen fan-out cannot keep delivering.
+            await (connection as? any HTTPContextProviding)?
+                .closeRequestStream(for: request.id)
             return nil
         } catch {
             // This should not happen as errors are caught in the task
@@ -842,8 +1002,13 @@ public actor Server {
             metadata: ["method": "\(message.method)"])
 
         if configuration.strict {
-            // Check initialization state unless this is an initialized notification
-            if message.method != InitializedNotification.name {
+            // Legacy clients must initialize. Modern clients never call initialize;
+            // after any modern request (or for cancelled during listen setup), allow
+            // notifications through.
+            let modernExempt =
+                hasAcceptedModernRequest
+                || message.method == CancelledNotification.name
+            if message.method != InitializedNotification.name && !modernExempt {
                 try checkInitialized()
             }
         }
@@ -897,7 +1062,9 @@ public actor Server {
         throws
     {
         if configuration.strict {
-            guard let capabilities = clientCapabilities else {
+            let capabilities =
+                Self.currentHandlerContext?.clientCapabilities ?? clientCapabilities
+            guard let capabilities else {
                 throw MCPError.methodNotFound("Client capabilities not initialized")
             }
             guard capabilities[keyPath: keyPath] != nil else {
@@ -943,7 +1110,89 @@ public actor Server {
 
         // Ping
         withMethodHandler(Ping.self) { _ in return Empty() }
+
+        // Modern protocol: server/discover (no initialize required)
+        withMethodHandler(Discover.self) { _ in
+            let versions = Array(Array(Version.supported).sorted().reversed())
+            var meta = Metadata()
+            meta.fields[ProtocolMetaKey.serverInfo] = .object([
+                "name": .string(self.serverInfo.name),
+                "version": .string(self.serverInfo.version),
+            ])
+            return Discover.Result(
+                supportedVersions: versions,
+                capabilities: await self.capabilities,
+                cacheScope: .private,
+                ttlMs: 0,
+                instructions: self.instructions,
+                _meta: meta
+            )
+        }
+
+        // Modern protocol: subscriptions/listen — parks until cancelled.
+        // Client cancellation closes the stream / sends cancelled; no result.
+        // Notification filters are enforced by the stateful HTTP transport.
+        withMethodHandler(SubscriptionsListen.self) { params in
+            if let version = params._meta[ProtocolMetaKey.protocolVersion]?.stringValue {
+                try Version.requireSupported(version)
+            }
+            // Id is tracked at dispatch in handleRequest for completeSubscriptionsListen.
+            while !Task.isCancelled {
+                try await Task.sleep(for: .seconds(3600))
+            }
+            throw CancellationError()
+        }
     }
+
+    /// Ends a modern `subscriptions/listen` stream gracefully with a complete result.
+    ///
+    /// Sends a `resultType: complete` response while the HTTP SSE stream is still
+    /// registered, then cancels the parked listen handler. Unknown, already-finished,
+    /// or non-listen request ids are ignored.
+    ///
+    /// Capture ``HandlerContext/id`` from ``currentHandlerContext`` while a listen
+    /// (or any) request is in flight, or call ``completeAllSubscriptionsListen()``.
+    public func completeSubscriptionsListen(id: ID) async throws {
+        guard activeListenSubscriptions.contains(id) else { return }
+        guard let task = removePendingRequest(id: id) else {
+            activeListenSubscriptions.remove(id)
+            return
+        }
+        activeListenSubscriptions.remove(id)
+        // Emit complete before cancelling so response routing closes the SSE;
+        // cancelling first races with closeRequestStream and drops the result.
+        // Always cancel the parked handler — even when send throws — so it cannot
+        // linger after being removed from pendingRequestTasks.
+        let result = SubscriptionsListen.Result(subscriptionId: id)
+        do {
+            try await send(Response<SubscriptionsListen>(id: id, result: result))
+        } catch {
+            task.cancel()
+            await (connection as? any HTTPContextProviding)?.closeRequestStream(for: id)
+            throw error
+        }
+        task.cancel()
+        _ = try? await task.value
+    }
+
+    /// Ends every in-flight modern `subscriptions/listen` stream.
+    public func completeAllSubscriptionsListen() async throws {
+        let ids = Array(activeListenSubscriptions)
+        var firstError: Error?
+        for id in ids {
+            do {
+                try await completeSubscriptionsListen(id: id)
+            } catch {
+                await logger?.warning(
+                    "completeSubscriptionsListen failed",
+                    metadata: ["id": "\(id)", "error": "\(error)"]
+                )
+                if firstError == nil { firstError = error }
+            }
+        }
+        if let firstError { throw firstError }
+    }
+
 
     private func setInitialState(
         clientInfo: Client.Info,
@@ -998,6 +1247,9 @@ public actor Server {
                     metadata: ["requestId": "\(requestId)"]
                 )
             }
+            // Always attempt to close a parked HTTP SSE for this id (idempotent).
+            await (self.connection as? any HTTPContextProviding)?
+                .closeRequestStream(for: requestId)
         }
     }
 
