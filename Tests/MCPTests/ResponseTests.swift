@@ -2,6 +2,9 @@ import Testing
 
 import class Foundation.JSONDecoder
 import class Foundation.JSONEncoder
+import class Foundation.JSONSerialization
+import class Foundation.NSDictionary
+import struct Foundation.Data
 
 @testable import MCP
 
@@ -115,5 +118,43 @@ struct ResponseTests {
         } else {
             #expect(Bool(false), "Expected success result")
         }
+    }
+
+    @Test("Unsupported protocol version error keeps its structured data")
+    func testUnsupportedVersionErrorData() throws {
+        let json = #"{"jsonrpc":"2.0","id":1,"error":{"code":-32022,"message":"Unsupported protocol version","data":{"supported":["2026-07-28","2025-11-25"],"requested":"1900-01-01"}}}"#
+        let response = try JSONDecoder().decode(Response<EmptyMethod>.self, from: Data(json.utf8))
+
+        guard case .failure(.serverErrorWithData(let code, let message, let data)) = response.result else {
+            Issue.record("Expected a structured server error")
+            return
+        }
+        #expect(code == -32022)
+        #expect(message == "Unsupported protocol version")
+        #expect(data.objectValue?["requested"] == .string("1900-01-01"))
+        #expect(data.objectValue?["supported"] == .array([.string("2026-07-28"), .string("2025-11-25")]))
+
+        let encoded = try JSONEncoder().encode(response)
+        let actual = try JSONSerialization.jsonObject(with: encoded) as? NSDictionary
+        let expected = try JSONSerialization.jsonObject(with: Data(json.utf8)) as? NSDictionary
+        #expect(actual == expected)
+    }
+
+    @Test("Missing capability error retains nested capability object")
+    func testMissingCapabilityErrorData() throws {
+        let json = #"{"jsonrpc":"2.0","id":1,"error":{"code":-32021,"message":"Server requires elicitation","data":{"requiredCapabilities":{"elicitation":{}}}}}"#
+        let response = try JSONDecoder().decode(Response<EmptyMethod>.self, from: Data(json.utf8))
+
+        guard case .failure(.serverErrorWithData(let code, _, let data)) = response.result else {
+            Issue.record("Expected a structured server error")
+            return
+        }
+        #expect(code == -32021)
+        #expect(data.objectValue?["requiredCapabilities"] == .object(["elicitation": .object([:])]))
+
+        let encoded = try JSONEncoder().encode(response)
+        let actual = try JSONSerialization.jsonObject(with: encoded) as? NSDictionary
+        let expected = try JSONSerialization.jsonObject(with: Data(json.utf8)) as? NSDictionary
+        #expect(actual == expected)
     }
 }
