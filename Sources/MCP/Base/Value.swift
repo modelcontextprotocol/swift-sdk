@@ -51,6 +51,31 @@ public enum Value: Hashable, Sendable {
         return value
     }
 
+    /// Returns the underlying number as a `Double`, regardless of
+    /// whether the value is an `int` or a `double`.
+    ///
+    /// JSON has a single `number` type with no distinction between
+    /// integers and floating-point — but Swift's `JSONEncoder` writes
+    /// whole-number `Double`s without a decimal point, and the decoder
+    /// in `Value.init(from:)` tries `Int` first. So `Value.double(0)`
+    /// round-trips through JSON to `Value.int(0)`, and `doubleValue`
+    /// returns `nil`.
+    ///
+    /// This accessor coerces both `.int(_)` and `.double(_)` to
+    /// `Double`, which is what most consumers want when reading
+    /// numeric tool arguments (coordinates, dimensions, angles): the
+    /// value is a number, regardless of whether the JSON shape was
+    /// `0` or `0.0`.
+    ///
+    /// Returns `nil` for any non-numeric case.
+    public var numberValue: Double? {
+        switch self {
+        case .int(let value):    return Double(value)
+        case .double(let value): return value
+        default:                 return nil
+        }
+    }
+
     /// Returns the `String` value if the value is a `string`,
     /// otherwise returns `nil`.
     public var stringValue: String? {
