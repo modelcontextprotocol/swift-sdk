@@ -13,10 +13,10 @@ public enum Value: Hashable, Sendable {
     case array([Value])
     case object([String: Value])
 
-    /// Create a `Value` from a `Codable` value.
-    /// - Parameter value: The codable value
+    /// Create a `Value` from an `Encodable` value.
+    /// - Parameter value: The encodable value
     /// - Returns: A value
-    public init<T: Codable>(_ value: T) throws {
+    public init<T: Encodable>(_ value: T) throws {
         if let valueAsValue = value as? Value {
             self = valueAsValue
         } else {
