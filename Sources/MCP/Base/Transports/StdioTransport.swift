@@ -56,6 +56,7 @@ import struct Foundation.Data
         private var isConnected = false
         private let messageStream: AsyncThrowingStream<Data, Swift.Error>
         private let messageContinuation: AsyncThrowingStream<Data, Swift.Error>.Continuation
+        private var lastSend: Task<Void, Never>?
 
         /// Creates a new stdio transport with the specified file descriptors
         ///
@@ -195,6 +196,18 @@ import struct Foundation.Data
         /// - Parameter message: The message data to send (without a trailing newline)
         /// - Throws: Error if the message cannot be sent
         public func send(_ message: Data) async throws {
+            let previousSend = lastSend
+            let currentSend = Task {
+                await previousSend?.value
+                try await write(message)
+            }
+            lastSend = Task {
+                try? await currentSend.value
+            }
+            try await currentSend.value
+        }
+
+        private func write(_ message: Data) async throws {
             guard isConnected else {
                 throw MCPError.transportError(Errno(rawValue: ENOTCONN))
             }
