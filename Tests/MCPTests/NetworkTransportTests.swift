@@ -9,6 +9,8 @@ import Testing
 
     /// A mock implementation of NetworkConnectionProtocol for testing
     final class MockNetworkConnection: NetworkConnectionProtocol, @unchecked Sendable {
+        private let lock = NSLock()
+
         /// Current state of the connection
         private var mockState: NWConnection.State = .setup
 
@@ -20,11 +22,15 @@ import Testing
         private var sentData: [Data] = []
 
         /// The state update handler
-        public var stateUpdateHandler: ((@Sendable (NWConnection.State) -> Void))?
+        public var stateUpdateHandler: ((@Sendable (NWConnection.State) -> Void))? {
+            get { lock.withLock { _stateUpdateHandler } }
+            set { lock.withLock { _stateUpdateHandler = newValue } }
+        }
+        private var _stateUpdateHandler: ((@Sendable (NWConnection.State) -> Void))?
 
         /// Current state
         var state: NWConnection.State {
-            return mockState
+            lock.withLock { mockState }
         }
 
         /// Initialize a mock connection
@@ -32,14 +38,9 @@ import Testing
 
         /// Start the connection
         func start(queue: DispatchQueue) {
-            // Simulate successful connection by default
-            Task { @MainActor in
-                if mockError != nil {
-                    self.updateState(mockState)
-                } else {
-                    self.updateState(.ready)
-                }
-            }
+            let (error, state) = lock.withLock { (mockError, mockState) }
+            let nextState: NWConnection.State = error != nil ? state : .ready
+            updateState(nextState)
         }
 
         /// Send data through the connection
@@ -49,15 +50,14 @@ import Testing
             isComplete: Bool,
             completion: NWConnection.SendCompletion
         ) {
-            if let content = content {
-                sentData.append(content)
+            let error = lock.withLock {
+                if let content = content { sentData.append(content) }
+                return mockError
             }
 
             switch completion {
             case .contentProcessed(let handler):
-                Task { @MainActor in
-                    handler(self.mockError as? NWError)
-                }
+                handler(error as? NWError)
             default:
                 break
             }
@@ -71,28 +71,24 @@ import Testing
                 Data?, NWConnection.ContentContext?, Bool, NWError?
             ) -> Void
         ) {
-            Task { @MainActor in
-                if self.mockState == .cancelled {
-                    completion(
-                        nil, nil, true,
-                        NWError.posix(POSIXErrorCode.ECANCELED)
-                    )
-                    return
+            let (state, error, data, isLast): (NWConnection.State, Swift.Error?, Data?, Bool) =
+                lock.withLock {
+                    guard mockState != .cancelled, mockError == nil, !dataToReceive.isEmpty else {
+                        return (mockState, mockError, nil, false)
+                    }
+                    let data = dataToReceive.removeFirst()
+                    return (mockState, mockError, data, dataToReceive.isEmpty)
                 }
 
-                if let error = self.mockError {
-                    completion(nil, nil, false, error as? NWError)
-                    return
-                }
-
-                if self.dataToReceive.isEmpty {
-                    completion(Data(), nil, false, nil)
-                    return
-                }
-
-                let data = self.dataToReceive.removeFirst()
-                completion(data, nil, self.dataToReceive.isEmpty, nil)
+            if state == .cancelled {
+                completion(nil, nil, true, NWError.posix(POSIXErrorCode.ECANCELED))
+                return
             }
+            if let error {
+                completion(nil, nil, false, error as? NWError)
+                return
+            }
+            completion(data ?? Data(), nil, isLast, nil)
         }
 
         /// Cancel the connection
@@ -113,10 +109,8 @@ import Testing
         }
 
         /// Simulate a connection failure
-        func simulateFailure(
-            error: Swift.Error? = nil
-        ) {
-            mockError = error
+        func simulateFailure(error: Swift.Error? = nil) {
+            lock.withLock { mockError = error }
             if let nwError = error as? NWError {
                 updateState(.failed(nwError))
             } else {
@@ -131,15 +125,17 @@ import Testing
 
         /// Update the connection state and notify handler
         private func updateState(_ newState: NWConnection.State) {
-            mockState = newState
-            Task { @MainActor in
-                self.stateUpdateHandler?(newState)
+            // Snapshot handler outside the lock to avoid holding the lock during callback
+            let handler = lock.withLock { () -> (@Sendable (NWConnection.State) -> Void)? in
+                mockState = newState
+                return _stateUpdateHandler
             }
+            handler?(newState)
         }
 
         /// Queue data to be received
         func queueDataForReceiving(_ data: Data) {
-            dataToReceive.append(data)
+            lock.withLock { dataToReceive.append(data) }
         }
 
         /// Queue a heartbeat message to be received
@@ -162,12 +158,12 @@ import Testing
 
         /// Get all sent data
         func getSentData() -> [Data] {
-            return sentData
+            lock.withLock { sentData }
         }
 
         /// Clear sent data buffer
         func clearSentData() {
-            sentData.removeAll()
+            lock.withLock { sentData.removeAll() }
         }
     }
 
