@@ -703,9 +703,16 @@ await server.withMethodHandler(ListTools.self) { _ in
             name: "weather",
             description: "Get current weather for a location",
             inputSchema: .object([
+                "type": "object",
                 "properties": .object([
-                    "location": .string("City name or coordinates"),
-                    "units": .string("Units of measurement, e.g., metric, imperial")
+                    "location": .object([
+                        "type": "string",
+                        "description": "City name or coordinates"
+                    ]),
+                    "units": .object([
+                        "type": "string",
+                        "description": "Units of measurement, e.g., metric, imperial"
+                    ])
                 ])
             ])
         ),
@@ -713,8 +720,12 @@ await server.withMethodHandler(ListTools.self) { _ in
             name: "calculator",
             description: "Perform calculations",
             inputSchema: .object([
+                "type": "object",
                 "properties": .object([
-                    "expression": .string("Mathematical expression to evaluate")
+                    "expression": .object([
+                        "type": "string",
+                        "description": "Mathematical expression to evaluate"
+                    ])
                 ])
             ])
         )
@@ -1605,11 +1616,18 @@ LoggingSystem.bootstrap { label in
 // Create logger
 let logger = Logger(label: "com.example.mcp")
 
-// Pass to client/server
+// Create client/server
 let client = Client(name: "MyApp", version: "1.0.0")
+let server = Server(name: "MyServer", version: "1.0.0")
 
-// Pass to transport
+// Create transport with logger
 let transport = StdioTransport(logger: logger)
+
+// Connect client and transport with logger
+try await client.connect(transport: transport)
+
+// Connect server and transport with logger
+try await server.start(transport: transport)
 ```
 
 ## Additional Resources

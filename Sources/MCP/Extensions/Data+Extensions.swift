@@ -4,7 +4,7 @@ import RegexBuilder
 extension Data {
     /// Regex pattern for data URLs
     @inline(__always) private static var dataURLRegex:
-        Regex<(Substring, Substring, Substring?, Substring)>
+        Regex<(Substring, Substring, Substring?, Substring?, Substring)>
     {
         Regex {
             "data:"
@@ -21,7 +21,9 @@ extension Data {
                     }
                 }
             }
-            Optionally { ";base64" }
+            Optionally {
+                Capture { ";base64" }
+            }
             ","
             Capture {
                 ZeroOrMore { .any }
@@ -49,9 +51,9 @@ extension Data {
         }
 
         // Extract components using strongly typed captures
-        let (_, mediatype, charset, encodedData) = match.output
+        let (_, mediatype, charset, base64Marker, encodedData) = match.output
 
-        let isBase64 = string.contains(";base64,")
+        let isBase64 = base64Marker != nil
 
         // Process MIME type
         var mimeType = mediatype.isEmpty ? "text/plain" : String(mediatype)
@@ -65,14 +67,40 @@ extension Data {
             guard let base64Data = Data(base64Encoded: String(encodedData)) else { return nil }
             decodedData = base64Data
         } else {
-            guard
-                let percentDecodedData = String(encodedData).removingPercentEncoding?.data(
-                    using: .utf8)
-            else { return nil }
+            guard let percentDecodedData = percentDecoded(encodedData) else { return nil }
             decodedData = percentDecodedData
         }
 
         return (mimeType: mimeType, data: decodedData)
+    }
+
+    /// Decodes `%XX` escapes directly into bytes, so any byte value is accepted.
+    ///
+    /// - Parameter string: The percent-encoded string.
+    /// - Returns: The decoded bytes, or `nil` if an escape is malformed.
+    private static func percentDecoded(_ string: Substring) -> Data? {
+        var bytes = Data(capacity: string.utf8.count)
+        var iterator = string.utf8.makeIterator()
+        while let byte = iterator.next() {
+            guard byte == UInt8(ascii: "%") else {
+                bytes.append(byte)
+                continue
+            }
+            guard let high = iterator.next().flatMap(hexValue),
+                let low = iterator.next().flatMap(hexValue)
+            else { return nil }
+            bytes.append(high << 4 | low)
+        }
+        return bytes
+    }
+
+    private static func hexValue(_ byte: UInt8) -> UInt8? {
+        switch byte {
+        case UInt8(ascii: "0")...UInt8(ascii: "9"): return byte - UInt8(ascii: "0")
+        case UInt8(ascii: "a")...UInt8(ascii: "f"): return byte - UInt8(ascii: "a") + 10
+        case UInt8(ascii: "A")...UInt8(ascii: "F"): return byte - UInt8(ascii: "A") + 10
+        default: return nil
+        }
     }
 
     /// Encodes the data as a data URL string with an optional MIME type.
