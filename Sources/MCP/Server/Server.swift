@@ -195,11 +195,21 @@ public actor Server {
         name: String,
         version: String,
         title: String? = nil,
+        description: String? = nil,
+        websiteUrl: String? = nil,
+        icons: [Icon]? = nil,
         instructions: String? = nil,
         capabilities: Server.Capabilities = .init(),
         configuration: Configuration = .default
     ) {
-        self.serverInfo = Server.Info(name: name, version: version, title: title)
+        self.serverInfo = Server.Info(
+            name: name,
+            version: version,
+            title: title,
+            description: description,
+            websiteUrl: websiteUrl,
+            icons: icons
+        )
         self.capabilities = capabilities
         self.configuration = configuration
         self.instructions = instructions
@@ -361,8 +371,7 @@ public actor Server {
         _ type: N.Type,
         handler: @escaping @Sendable (Message<N>) async throws -> Void
     ) -> Self {
-        let handlers = notificationHandlers[N.name, default: []]
-        notificationHandlers[N.name] = handlers + [TypedNotificationHandler(handler)]
+        notificationHandlers[N.name, default: []].append(TypedNotificationHandler(handler))
         return self
     }
 
