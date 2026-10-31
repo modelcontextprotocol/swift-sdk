@@ -1,4 +1,5 @@
 import struct Foundation.UUID
+import struct os.OSAllocatedUnfairLock
 
 /// A unique identifier for a request.
 public enum ID: Hashable, Sendable {
@@ -8,9 +9,25 @@ public enum ID: Hashable, Sendable {
     /// A number ID.
     case number(Int)
 
-    /// Generates a random string ID.
+    /// Process-wide counter for monotonic numeric request IDs.
+    ///
+    /// Integer IDs are JSON-RPC 2.0–valid and avoid silent hangs against servers
+    /// that only accept numeric `id` values (e.g. Apple's `mcpbridge`).
+    private static let counter = OSAllocatedUnfairLock(initialState: 0)
+
+    /// Generates a monotonic numeric ID suitable for outbound client requests.
     public static var random: ID {
-        return .string(UUID().uuidString)
+        .number(
+            counter.withLock { value in
+                value += 1
+                return value
+            }
+        )
+    }
+
+    /// Generates a random UUID string ID (previous `random` behavior).
+    public static var randomUUID: ID {
+        .string(UUID().uuidString)
     }
 }
 
