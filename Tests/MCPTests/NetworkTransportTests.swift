@@ -71,10 +71,14 @@ import Testing
                 Data?, NWConnection.ContentContext?, Bool, NWError?
             ) -> Void
         ) {
-            let (state, error, data): (NWConnection.State, Swift.Error?, Data?) = lock.withLock {
-                let d = dataToReceive.isEmpty ? nil : dataToReceive.removeFirst()
-                return (mockState, mockError, d)
-            }
+            let (state, error, data, isLast): (NWConnection.State, Swift.Error?, Data?, Bool) =
+                lock.withLock {
+                    guard mockState != .cancelled, mockError == nil, !dataToReceive.isEmpty else {
+                        return (mockState, mockError, nil, false)
+                    }
+                    let data = dataToReceive.removeFirst()
+                    return (mockState, mockError, data, dataToReceive.isEmpty)
+                }
 
             if state == .cancelled {
                 completion(nil, nil, true, NWError.posix(POSIXErrorCode.ECANCELED))
@@ -84,8 +88,7 @@ import Testing
                 completion(nil, nil, false, error as? NWError)
                 return
             }
-            let isLast = lock.withLock { dataToReceive.isEmpty }
-            completion(data ?? Data(), nil, data == nil ? false : isLast, nil)
+            completion(data ?? Data(), nil, isLast, nil)
         }
 
         /// Cancel the connection
