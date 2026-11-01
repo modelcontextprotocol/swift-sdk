@@ -50,6 +50,18 @@ private func loadConformanceContext() -> [String: String] {
     return parsed
 }
 
+private func conformanceProtocolVersion() throws -> String {
+    guard let version = ProcessInfo.processInfo.environment["MCP_CONFORMANCE_PROTOCOL_VERSION"] else {
+        return Version.latestLegacy
+    }
+    guard Version.supported.contains(version) else {
+        throw ConformanceError.invalidArguments(
+            "Unsupported MCP_CONFORMANCE_PROTOCOL_VERSION: \(version)"
+        )
+    }
+    return version
+}
+
 private func percentEncodeFormValue(_ value: String) -> String {
     let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
     return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
@@ -326,6 +338,7 @@ func runAuthorizationScenario(scenario: String, args: [String]) async throws {
     let transport = HTTPClientTransport(
         endpoint: serverURL,
         streaming: true,
+        protocolVersion: try conformanceProtocolVersion(),
         authorizer: OAuthAuthorizer(configuration: oauthConfig),
         logger: logger
     )
@@ -388,6 +401,7 @@ func runInitializeScenario(_ args: [String]) async throws {
     // Create HTTP transport
     let transport = HTTPClientTransport(
         endpoint: serverURL,
+        protocolVersion: try conformanceProtocolVersion(),
         logger: logger
     )
 
@@ -432,6 +446,7 @@ func runToolsCallScenario(_ args: [String]) async throws {
     // Create HTTP transport
     let transport = HTTPClientTransport(
         endpoint: serverURL,
+        protocolVersion: try conformanceProtocolVersion(),
         logger: logger
     )
 
@@ -490,6 +505,7 @@ func runSSEScenario(_ args: [String]) async throws {
     let transport = HTTPClientTransport(
         endpoint: serverURL,
         streaming: true,
+        protocolVersion: try conformanceProtocolVersion(),
         logger: logger
     )
 
@@ -546,6 +562,7 @@ func runElicitationSEP1034ClientDefaults(_ args: [String]) async throws {
     let transport = HTTPClientTransport(
         endpoint: serverURL,
         streaming: true,
+        protocolVersion: try conformanceProtocolVersion(),
         logger: logger
     )
 
@@ -638,6 +655,7 @@ func runDefaultScenario(_ args: [String]) async throws {
     // Create HTTP transport
     let transport = HTTPClientTransport(
         endpoint: serverURL,
+        protocolVersion: try conformanceProtocolVersion(),
         logger: logger
     )
 
