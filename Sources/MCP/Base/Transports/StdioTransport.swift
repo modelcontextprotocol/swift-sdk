@@ -54,8 +54,19 @@ import struct Foundation.Data
         public nonisolated let logger: Logger
 
         private var isConnected = false
+        private var readTask: Task<Void, Never>?
+        private var disconnectTask: Task<Void, Never>?
+        private var activeSends = 0
+        private var sendsDrained: CheckedContinuation<Void, Never>?
         private let messageStream: AsyncThrowingStream<Data, Swift.Error>
         private let messageContinuation: AsyncThrowingStream<Data, Swift.Error>.Continuation
+        private struct DescriptorState {
+            let flags: CInt
+            let device: UInt64
+            let inode: UInt64
+        }
+        private var inputState: DescriptorState?
+        private var outputState: DescriptorState?
 
         /// Creates a new stdio transport with the specified file descriptors
         ///
@@ -89,17 +100,24 @@ import struct Foundation.Data
         ///
         /// - Throws: Error if the file descriptors cannot be configured
         public func connect() async throws {
+            await disconnectTask?.value
             guard !isConnected else { return }
 
             // Set non-blocking mode
-            try setNonBlocking(fileDescriptor: input)
-            try setNonBlocking(fileDescriptor: output)
+            let originalInputState = try setNonBlocking(fileDescriptor: input)
+            do {
+                outputState = try setNonBlocking(fileDescriptor: output)
+            } catch {
+                restoreFlags(originalInputState, for: input)
+                throw error
+            }
+            inputState = originalInputState
 
             isConnected = true
             logger.debug("Transport connected successfully")
 
             // Start reading loop in background
-            Task {
+            readTask = Task {
                 await readLoop()
             }
         }
@@ -108,11 +126,15 @@ import struct Foundation.Data
         ///
         /// - Parameter fileDescriptor: The file descriptor to configure
         /// - Throws: Error if the operation fails
-        private func setNonBlocking(fileDescriptor: FileDescriptor) throws {
+        private func setNonBlocking(fileDescriptor: FileDescriptor) throws -> DescriptorState {
             #if canImport(Darwin) || canImport(Glibc) || canImport(Musl)
                 // Get current flags
                 let flags = fcntl(fileDescriptor.rawValue, F_GETFL)
                 guard flags >= 0 else {
+                    throw MCPError.transportError(Errno(rawValue: CInt(errno)))
+                }
+                var status = stat()
+                guard fstat(fileDescriptor.rawValue, &status) == 0 else {
                     throw MCPError.transportError(Errno(rawValue: CInt(errno)))
                 }
 
@@ -121,11 +143,27 @@ import struct Foundation.Data
                 guard result >= 0 else {
                     throw MCPError.transportError(Errno(rawValue: CInt(errno)))
                 }
+                return DescriptorState(
+                    flags: flags, device: UInt64(status.st_dev), inode: UInt64(status.st_ino))
             #else
                 // For platforms where non-blocking operations aren't supported
                 throw MCPError.internalError(
                     "Setting non-blocking mode not supported on this platform")
             #endif
+        }
+
+        private func restoreFlags(_ state: DescriptorState, for fileDescriptor: FileDescriptor) {
+            guard state.flags & O_NONBLOCK == 0 else { return }
+            var status = stat()
+            guard fstat(fileDescriptor.rawValue, &status) == 0,
+                UInt64(status.st_dev) == state.device,
+                UInt64(status.st_ino) == state.inode
+            else { return }
+            let currentFlags = fcntl(fileDescriptor.rawValue, F_GETFL)
+            guard currentFlags >= 0 else { return }
+            if fcntl(fileDescriptor.rawValue, F_SETFL, currentFlags & ~O_NONBLOCK) < 0 {
+                logger.warning("Failed to restore file descriptor blocking mode")
+            }
         }
 
         /// Continuous loop that reads and processes incoming messages
@@ -180,9 +218,31 @@ import struct Foundation.Data
         ///
         /// This stops the message reading loop and releases associated resources.
         public func disconnect() async {
+            if let disconnectTask {
+                await disconnectTask.value
+                return
+            }
             guard isConnected else { return }
             isConnected = false
-            messageContinuation.finish()
+            let read = readTask
+            read?.cancel()
+            let cleanup = Task {
+                await read?.value
+                if activeSends > 0 {
+                    await withCheckedContinuation { continuation in
+                        sendsDrained = continuation
+                    }
+                }
+                if let inputState { restoreFlags(inputState, for: input) }
+                if let outputState { restoreFlags(outputState, for: output) }
+                inputState = nil
+                outputState = nil
+                readTask = nil
+                messageContinuation.finish()
+            }
+            disconnectTask = cleanup
+            await cleanup.value
+            disconnectTask = nil
             logger.debug("Transport disconnected")
         }
 
@@ -198,6 +258,14 @@ import struct Foundation.Data
             guard isConnected else {
                 throw MCPError.transportError(Errno(rawValue: ENOTCONN))
             }
+            activeSends += 1
+            defer {
+                activeSends -= 1
+                if activeSends == 0 {
+                    sendsDrained?.resume()
+                    sendsDrained = nil
+                }
+            }
 
             // Add newline as delimiter
             var messageWithNewline = message
@@ -205,6 +273,9 @@ import struct Foundation.Data
 
             var remaining = messageWithNewline
             while !remaining.isEmpty {
+                guard isConnected else {
+                    throw MCPError.transportError(Errno(rawValue: ENOTCONN))
+                }
                 do {
                     let written = try remaining.withUnsafeBytes { buffer in
                         try output.write(UnsafeRawBufferPointer(buffer))

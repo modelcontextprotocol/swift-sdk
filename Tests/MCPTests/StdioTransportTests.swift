@@ -1,6 +1,14 @@
 import Foundation
 import Testing
 
+#if canImport(Darwin)
+    import Darwin.POSIX
+#elseif canImport(Glibc)
+    import Glibc
+#elseif canImport(Musl)
+    import Musl
+#endif
+
 @testable import MCP
 
 #if canImport(System)
@@ -18,6 +26,121 @@ struct StdioTransportTests {
         let transport = StdioTransport(input: input, output: output, logger: nil)
         try await transport.connect()
         await transport.disconnect()
+    }
+
+    @Test("Disconnect restores file descriptor blocking mode")
+    func testDisconnectRestoresBlockingMode() async throws {
+        let (input, writer) = try FileDescriptor.pipe()
+        let (reader, output) = try FileDescriptor.pipe()
+        defer {
+            try? input.close()
+            try? writer.close()
+            try? reader.close()
+            try? output.close()
+        }
+
+        let inputFlags = fcntl(input.rawValue, F_GETFL)
+        let outputFlags = fcntl(output.rawValue, F_GETFL)
+        #expect(inputFlags & O_NONBLOCK == 0)
+        #expect(outputFlags & O_NONBLOCK == 0)
+
+        let transport = StdioTransport(input: input, output: output, logger: nil)
+        try await transport.connect()
+        #expect(fcntl(input.rawValue, F_GETFL) & O_NONBLOCK != 0)
+        #expect(fcntl(output.rawValue, F_GETFL) & O_NONBLOCK != 0)
+
+        await transport.disconnect()
+        #expect(fcntl(input.rawValue, F_GETFL) & O_NONBLOCK == 0)
+        #expect(fcntl(output.rawValue, F_GETFL) & O_NONBLOCK == 0)
+    }
+
+    @Test("Disconnect cancels a backpressured send before restoring descriptor flags")
+    func testDisconnectDuringBackpressuredSend() async throws {
+        let (input, writer) = try FileDescriptor.pipe()
+        let (reader, output) = try FileDescriptor.pipe()
+        defer {
+            try? input.close()
+            try? writer.close()
+            try? reader.close()
+            try? output.close()
+        }
+
+        let transport = StdioTransport(input: input, output: output, logger: nil)
+        try await transport.connect()
+        let send = Task { try await transport.send(Data(repeating: 65, count: 512 * 1024)) }
+        try await Task.sleep(for: .milliseconds(50))
+
+        await transport.disconnect()
+        do {
+            try await send.value
+            Issue.record("Expected the incomplete send to fail on disconnect")
+        } catch {
+            // The caller must be released before the descriptor becomes blocking.
+        }
+        #expect(fcntl(output.rawValue, F_GETFL) & O_NONBLOCK == 0)
+    }
+
+    @Test("Disconnect preserves an already nonblocking descriptor")
+    func testDisconnectPreservesNonblockingMode() async throws {
+        let (input, writer) = try FileDescriptor.pipe()
+        let (reader, output) = try FileDescriptor.pipe()
+        defer {
+            try? input.close()
+            try? writer.close()
+            try? reader.close()
+            try? output.close()
+        }
+        let flags = fcntl(output.rawValue, F_GETFL)
+        #expect(fcntl(output.rawValue, F_SETFL, flags | O_NONBLOCK) == 0)
+
+        let transport = StdioTransport(input: input, output: output, logger: nil)
+        try await transport.connect()
+        await transport.disconnect()
+        #expect(fcntl(input.rawValue, F_GETFL) & O_NONBLOCK == 0)
+        #expect(fcntl(output.rawValue, F_GETFL) & O_NONBLOCK != 0)
+    }
+
+    @Test("Disconnect leaves a reused output descriptor unchanged")
+    func testDisconnectDoesNotChangeReusedOutputDescriptor() async throws {
+        let (input, writer) = try FileDescriptor.pipe()
+        let (reader, output) = try FileDescriptor.pipe()
+        let (replacementReader, replacementWriter) = try FileDescriptor.pipe()
+        defer {
+            try? input.close()
+            try? writer.close()
+            try? reader.close()
+            try? replacementReader.close()
+            try? replacementWriter.close()
+        }
+
+        let transport = StdioTransport(input: input, output: output, logger: nil)
+        try await transport.connect()
+        let replacementFlags = fcntl(replacementWriter.rawValue, F_GETFL)
+        #expect(fcntl(replacementWriter.rawValue, F_SETFL, replacementFlags | O_NONBLOCK) == 0)
+
+        try output.close()
+        #expect(dup2(replacementWriter.rawValue, output.rawValue) == output.rawValue)
+        defer { _ = close(output.rawValue) }
+
+        await transport.disconnect()
+        #expect(fcntl(output.rawValue, F_GETFL) & O_NONBLOCK != 0)
+    }
+
+    @Test("Failed connect restores the input descriptor mode")
+    func testFailedConnectRestoresInputMode() async throws {
+        let (input, writer) = try FileDescriptor.pipe()
+        defer {
+            try? input.close()
+            try? writer.close()
+        }
+
+        let transport = StdioTransport(input: input, output: FileDescriptor(rawValue: -1), logger: nil)
+        do {
+            try await transport.connect()
+            Issue.record("Expected connect to reject the closed output descriptor")
+        } catch {
+            #expect(fcntl(input.rawValue, F_GETFL) & O_NONBLOCK == 0)
+        }
     }
 
     @Test("Send Message")
