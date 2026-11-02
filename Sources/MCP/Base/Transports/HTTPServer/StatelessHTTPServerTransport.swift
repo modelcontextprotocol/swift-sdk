@@ -209,17 +209,20 @@ public actor StatelessHTTPServerTransport:
             )
         }
 
-        guard let messageKind = JSONRPCMessageKind(data: body) else {
+        guard (try? JSONSerialization.jsonObject(with: body, options: .fragmentsAllowed)) != nil else {
             return .error(
                 statusCode: 400,
                 .parseError("Invalid JSON-RPC message")
             )
         }
+        guard let messageKind = JSONRPCMessageKind(data: body) else {
+            return .error(statusCode: 400, .invalidRequest("Invalid JSON-RPC message"))
+        }
         if case .notification = messageKind,
             let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
             json.keys.contains("id")
         {
-            return .error(statusCode: 400, .parseError("Invalid JSON-RPC request id"))
+            return .error(statusCode: 400, .invalidRequest("Invalid JSON-RPC request id"))
         }
 
         // Build validation context
@@ -237,12 +240,7 @@ public actor StatelessHTTPServerTransport:
 
         // Handle by message type
         switch messageKind {
-        case .notification:
-            // Yield to server and return 202 Accepted
-            incomingContinuation.yield(body)
-            return .accepted()
-
-        case .response:
+        case .notification, .response:
             // Yield to server and return 202 Accepted
             incomingContinuation.yield(body)
             return .accepted()
@@ -265,7 +263,7 @@ public actor StatelessHTTPServerTransport:
         } catch {
             return .error(
                 statusCode: 400,
-                .parseError("Invalid JSON-RPC request id")
+                .invalidRequest("Invalid JSON-RPC request id")
             )
         }
 

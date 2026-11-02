@@ -989,7 +989,19 @@ struct StatelessHTTPServerTransportTests {
             let body = Data(#"{"jsonrpc":"2.0","id":\#(id),"method":"tools/list"}"#.utf8)
             let response = await transport.handleRequest(makeStatelessPOSTRequest(body: body))
             #expect(response.statusCode == 400)
+            let json = try? JSONSerialization.jsonObject(with: response.bodyData ?? Data())
+                as? [String: Any]
+            let error = json?["error"] as? [String: Any]
+            #expect(error?["code"] as? Int == -32600)
         }
+
+        let malformed = await transport.handleRequest(
+            makeStatelessPOSTRequest(body: Data(#"{"jsonrpc": "2.0", "id": "#.utf8))
+        )
+        let json = try? JSONSerialization.jsonObject(with: malformed.bodyData ?? Data())
+            as? [String: Any]
+        let error = json?["error"] as? [String: Any]
+        #expect(error?["code"] as? Int == -32700)
     }
 
     // MARK: - Lifecycle
