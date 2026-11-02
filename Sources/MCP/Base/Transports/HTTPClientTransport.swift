@@ -744,12 +744,19 @@ public actor HTTPClientTransport: Transport {
             StatusMessage.streamingUnsupported].contains(detail)
     }
 
-    /// Whether a challenge is a resource server's `use_dpop_nonce` (RFC 9449 §9).
+    /// Whether a challenge is a resource server's `use_dpop_nonce` with the
+    /// `DPoP-Nonce` header it requires (RFC 9449 §9). Without the header the
+    /// authorizer cannot retry with a nonce, so the challenge counts as an
+    /// ordinary attempt.
     private static func isDPoPNonceChallenge(_ challenge: HTTPAuthenticationChallengeError) -> Bool {
         challenge.statusCode == 401
             && DefaultOAuthWWWAuthenticateParser()
                 .parseChallenge(scheme: OAuthTokenType.dpop, from: challenge.headers)?.error
                 == OAuthErrorCode.useDPoPNonce
+            && challenge.headers.contains {
+                $0.key.caseInsensitiveCompare(HTTPHeaderName.dpopNonce) == .orderedSame
+                    && !$0.value.trimmingCharacters(in: .whitespaces).isEmpty
+            }
     }
 
     /// Error details for HTTP status replies.

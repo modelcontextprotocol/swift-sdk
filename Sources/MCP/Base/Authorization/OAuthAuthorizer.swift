@@ -371,7 +371,7 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
             let selectedAuthorizationServer,
             !authorizationServersMatch(tokenAuthorizationServer, selectedAuthorizationServer)
         {
-            tokenStorage.clear()
+            clearStoredToken(accessToken)
             return [:]
         }
         if accessToken.isExpired() {
@@ -382,7 +382,7 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
         }
         // A DPoP-bound token is usable only with the key it is bound to.
         guard let dpopSigner, accessToken.keyThumbprint == dpopSigner.thumbprint else {
-            tokenStorage.clear()
+            clearStoredToken(accessToken)
             return [:]
         }
         return [
@@ -390,6 +390,13 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
             HTTPHeaderName.dpop: try dpopSigner.proof(
                 method: method, url: url, accessToken: accessToken.value, server: .resourceServer),
         ]
+    }
+
+    /// Clears the stored token if it is still `token`. Runs outside the gate:
+    /// a challenge may have saved a new token since `token` was loaded.
+    private func clearStoredToken(_ token: OAuthAccessToken) {
+        guard tokenStorage.load()?.value == token.value else { return }
+        tokenStorage.clear()
     }
 
     public func didReceiveResponse(headers: [String: String], for url: URL) {

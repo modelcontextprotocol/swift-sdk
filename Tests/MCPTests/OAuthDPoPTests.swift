@@ -271,6 +271,55 @@ struct DPoPAuthorizerTests {
         #expect(storage.load() == nil)
     }
 
+    /// Returns `first` from the first `load()` and `later` afterwards, as a
+    /// storage that a challenge saves `later` into meanwhile.
+    private final class ReplacedTokenStorage: TokenStorage, @unchecked Sendable {
+        private let lock = NSLock()
+        private var loads = 0
+        private var cleared = 0
+        private var token: OAuthAccessToken?
+        private let first: OAuthAccessToken
+        var clears: Int { lock.withLock { cleared } }
+
+        init(first: OAuthAccessToken, later: OAuthAccessToken) {
+            self.first = first
+            token = later
+        }
+
+        func save(_ token: OAuthAccessToken) { lock.withLock { self.token = token } }
+        func load() -> OAuthAccessToken? {
+            lock.withLock {
+                loads += 1
+                return loads == 1 ? first : token
+            }
+        }
+        func clear() {
+            lock.withLock {
+                cleared += 1
+                token = nil
+            }
+        }
+    }
+
+    @Test("A token saved after the inspected one was loaded is not discarded")
+    func otherKeyReplacedMeanwhile() throws {
+        let dpop = OAuthConfiguration.DPoP()
+        let storage = ReplacedTokenStorage(
+            first: OAuthAccessToken(
+                value: "old", tokenType: "DPoP", expiresAt: nil, scopes: [], authorizationServer: nil,
+                refreshToken: nil, keyThumbprint: "another-key"),
+            later: OAuthAccessToken(
+                value: "new", tokenType: "DPoP", expiresAt: nil, scopes: [], authorizationServer: nil,
+                refreshToken: nil, keyThumbprint: dpop.keyThumbprint))
+        let authorizer = dpopAuthorizer(dpop: dpop, tokenStorage: storage)
+        #expect(try authorizer.authorizationHeaders(for: endpoint, method: "POST").isEmpty)
+        #expect(storage.clears == 0)
+        #expect(storage.load()?.value == "new")
+        #expect(
+            try authorizer.authorizationHeaders(for: endpoint, method: "POST")[HTTPHeaderName.authorization]
+                == "DPoP new")
+    }
+
     @Test("Without DPoP configured, a DPoP-bound stored token is discarded")
     func boundTokenWithoutDPoP() throws {
         let storage = InMemoryTokenStorage()
@@ -590,6 +639,27 @@ struct DPoPAuthorizerTests {
             // The second nonce challenge fails the request without the authorizer.
             #expect(authorizer.challenges == 1)
             #expect(authorizer.responses.count == 2)
+            await transport.disconnect()
+        }
+
+        @Test("use_dpop_nonce without a DPoP-Nonce header uses up an authorization attempt")
+        func nonceChallengeWithoutNonce() async throws {
+            let (configuration, sent) = await mockSession { request, _ in
+                HTTPURLResponse(
+                    url: request.url!, statusCode: 401, httpVersion: "HTTP/1.1",
+                    headerFields: ["WWW-Authenticate": #"DPoP error="use_dpop_nonce""#])!
+            }
+            let authorizer = NonceAuthorizer(maxAuthorizationAttempts: 1)
+            let transport = HTTPClientTransport(
+                endpoint: endpoint, configuration: configuration, streaming: false,
+                authorizer: authorizer)
+            try await transport.connect()
+            await #expect(throws: (any Error).self) {
+                try await transport.send(
+                    Data(#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#.utf8))
+            }
+            #expect(await sent.values.count == 1)
+            #expect(authorizer.challenges == 1)
             await transport.disconnect()
         }
 

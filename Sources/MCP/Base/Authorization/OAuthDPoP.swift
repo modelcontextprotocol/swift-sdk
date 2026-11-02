@@ -11,11 +11,20 @@ import Crypto
 /// `P256.Signing.PrivateKey` conforms, and on Apple platforms so does
 /// `SecureEnclave.P256.Signing.PrivateKey`. Conform another type to sign with
 /// a key held elsewhere, such as a hardware security module.
+///
+/// The SDK signs synchronously, once for every MCP request and every token
+/// request. ``HTTPClientTransport`` handles no other request or response
+/// while it signs one of its requests, so a key that is slow to use, such as
+/// one behind a network call, delays every request. Use a key that signs
+/// locally, such as one in the Secure Enclave.
 public protocol DPoPSigningKey: Sendable {
     /// The public key, published in each proof's `jwk` header.
     var publicKey: P256.Signing.PublicKey { get }
 
     /// An ECDSA signature of `data` with SHA-256.
+    ///
+    /// Called synchronously for each proof; it should return in
+    /// milliseconds. See ``DPoPSigningKey``.
     func signature(for data: Data) throws -> P256.Signing.ECDSASignature
 }
 
