@@ -70,6 +70,8 @@ struct SkillPackageTests {
             ("pdf", ["SKILL.md": manifest("pdf"), "a\\b": data("x")]),
             ("pdf", ["SKILL.md": Data([0xFF, 0xFE])]),
             ("pdf", ["SKILL.md": data("---\nname: pdf\ndescription: d\nx: .inf\n---\n")]),
+            ("pdf", ["SKILL.md": manifest("pdf"), "a": data("x"), "a/b": data("y")]),
+            ("pdf", ["SKILL.md": manifest("pdf"), "SKILL.md/x": data("x")]),
         ] as [(String, [String: Data])])
     func invalid(_ path: String, _ files: [String: Data]) {
         #expect(throws: SkillPackage.ValidationError.self) { try SkillPackage(path: path, files: files) }
@@ -150,6 +152,48 @@ struct InMemorySkillCatalogTests {
         await catalog.setSkills([try package("a"), try package("d"), try package("a", ["new.md": data("n")])])
         #expect(try await catalog.listSkills(cursor: nil).skills.map(\.name) == ["d", "a"])
         #expect(await catalog.readResource(uri: "skill://a/new.md") != nil)
+    }
+
+    @Test("A cursor past the end is -32602; at the end, an empty page")
+    func cursorBounds() async throws {
+        let catalog = InMemorySkillCatalog(try ["a", "b", "c"].map { try package($0) }, pageSize: 2)
+        for cursor in ["4", "1000", String(Int.max)] {
+            await #expect(throws: MCPError.invalidParams("Invalid cursor"), "\(cursor)") {
+                try await catalog.listSkills(cursor: cursor)
+            }
+            await #expect(throws: MCPError.invalidParams("Invalid cursor"), "\(cursor)") {
+                try await catalog.readDirectory(uri: "skill://a", cursor: cursor)
+            }
+        }
+        let end = try await catalog.listSkills(cursor: "3")
+        #expect(end.skills.isEmpty)
+        #expect(end.nextCursor == nil)
+        let last = try await catalog.listSkills(cursor: "2")
+        #expect(last.skills.map(\.name) == ["c"])
+        #expect(try await catalog.readDirectory(uri: "skill://a", cursor: "1")?.resources.isEmpty == true)
+
+        let unbounded = InMemorySkillCatalog(try ["a", "b", "c"].map { try package($0) }, pageSize: .max)
+        #expect(try await unbounded.listSkills(cursor: "1").skills.map(\.name) == ["b", "c"])
+        #expect(try await unbounded.readDirectory(uri: "skill://a", cursor: "0")?.resources.count == 1)
+    }
+
+    @Test("Packages with one skill URI: the last wins, its entry, bytes and directories")
+    func duplicates() async throws {
+        let first = try package("a", ["x.md": data("one"), "old.md": data("o")])
+        let second = try package("a", ["x.md": data("two")])
+        let replaced = InMemorySkillCatalog()
+        await replaced.setSkills([first, second])
+        for catalog in [InMemorySkillCatalog([first, second]), replaced] {
+            #expect(await catalog.skills.count == 1)
+            let entry = try #require(await catalog.skill(uri: "skill://a/SKILL.md"))
+            guard case .manifest(let files) = entry.resources else { Issue.record("no manifest"); return }
+            let x = try #require(files.first { $0.uri == "skill://a/x.md" })
+            let read = try #require(await catalog.readResource(uri: "skill://a/x.md"))
+            #expect(read.contents.first?.text == "two")
+            #expect(x.digest == SkillResource.digest(of: data("two")))
+            let root = try await catalog.readDirectory(uri: "skill://a", cursor: nil)
+            #expect(root?.resources.map(\.name) == ["SKILL.md", "x.md"])
+        }
     }
 
     @Test("Files and directories, prefixes included")
@@ -242,6 +286,12 @@ struct SkillServerTests {
         #expect(got.objectValue?["nextCursor"] == nil)
         #expect(try await errorCode(wire, GetSkill.name, ["uri": "skill://nope/SKILL.md"]) == -32602)
         #expect(try await errorCode(wire, GetSkill.name, ["uri": "skill://pdf/references/FORMS.md"]) == -32602)
+        for cursor in ["1000", String(Int.max)] {
+            #expect(try await errorCode(wire, ListSkills.name, ["cursor": .string(cursor)]) == -32602)
+            #expect(
+                try await errorCode(wire, ReadResourceDirectory.name, ["uri": "skill://pdf", "cursor": .string(cursor)])
+                    == -32602)
+        }
     }
 
     @Test("resources/read: skill files first, then the application's handler")

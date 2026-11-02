@@ -861,7 +861,7 @@ The server then:
 
 - declares `extensions["io.modelcontextprotocol/skills"]`, with `directoryRead` when the catalog reads directories, and the `resources` capability;
 - answers `skills/list`, `skills/get` (-32602 for a URI that is not a skill) and `resources/directory/read` (-32602 for a URI that is not a directory);
-- answers `resources/read` of a skill file from the catalog, before your `resources/read` handler, which serves your other resources;
+- answers `resources/read` of a skill file from the catalog, before your `resources/read` handler, which serves your other resources and never sees a skill file: an access check in your handler does not cover skills. Check access in the catalog, whose methods run with `Server.currentHandlerContext` set, or refuse the client in the hooks of `start(transport:initializeHook:statelessRequestHook:)`;
 - adds the skills' `SKILL.md` to `resources/list`, with the name and description of their frontmatter: the first page is your handler's first page and the catalog's first page, so a client that reads one page sees both; later pages continue your listing, then the catalog's. The cursors are the server's; your handler sees its own. Pass `listInResources: false` to leave `resources/list` to your handler.
 
 At 2026-07-28 `skills/list` and `skills/get` carry [cache hints](#cacheable-results), and a client that calls them on a server that does not declare the extension gets -32601. At handshake revisions the same methods are served when the extension is declared.
@@ -899,11 +899,12 @@ Creating a package checks the skill and throws `SkillPackage.ValidationError` fo
 | The last segment of the path is the name | `acme/billing/refunds` for `refunds` |
 | Path segments of letters, digits, `-`, `.`, `_` and `~` | |
 | File paths relative and inside the skill | `references/FORMS.md`, not `../x` |
+| No file is also the directory of another | not both `a` and `a/b` |
 | At most 512 files and 16 MiB, unless `enforcesLimits` is `false` | Hosts need not accept more |
 
 The package computes the entry: every file with the SHA-256 and length of its bytes, `SKILL.md` first, and the frontmatter as JSON. The frontmatter is read as YAML 1.2 with the core schema, as the other implementations read it: `yes` and `2024-01-01` stay strings. Read from a directory, files whose names start with `.` and links that lead out of the directory are skipped. Files are sent as `text` when they are UTF-8 with a textual MIME type, chosen from the extension, and as `blob` otherwise.
 
-`InMemorySkillCatalog` serves packages, 100 to a page, and reads every directory of the namespace: each skill's root and subdirectories, and the prefixes of the paths, such as `skill://acme`. After `setSkills(_:)`, send a `ResourceListChangedNotification`.
+`InMemorySkillCatalog` serves packages, 100 to a page, and reads every directory of the namespace: each skill's root and subdirectories, and the prefixes of the paths, such as `skill://acme`. Of packages with the same skill URI, the last one is served. A cursor it did not issue, or past the end, is -32602. After `setSkills(_:)`, send a `ResourceListChangedNotification`.
 
 ### Custom catalogs
 

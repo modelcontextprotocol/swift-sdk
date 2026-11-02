@@ -54,11 +54,19 @@ and duplicate keys are refused. Integer, boolean and null keys are written as Ja
 `yaml` accepts only with a warning is one the SDK refuses.
 
 The block is extracted with the harness's pattern after a byte order mark. The input is
-untrusted: at most 64 KiB, at most 10,000 converted nodes with aliases expanded (a billion laughs
-stops there), and libyaml's 1000 levels of nesting. Yams recurses per level and overflows a
-512 KiB secondary-thread stack at about 800, so parsing runs on a thread of its own with a
-16 MiB stack while the caller waits; the work is bounded and happens on registration and on
-load only. `FuzzFrontmatter` parses arbitrary documents with both schemas.
+untrusted: at most 64 KiB, at most 10,000 converted nodes with aliases and YAML 1.1 `<<` merges
+expanded (a billion laughs, or a chain of merges, stops there), and libyaml's 1000 levels of
+nesting. Yams checks each mapping for duplicate keys by hashing the key nodes, and a key that is
+an alias of a collection hashes the expanded tree: a few hundred bytes run for hours before the
+converter counts a node. A pass over libyaml's events (`CYaml`, which Yams builds on) therefore
+refuses a key that is a collection, or an alias of one, before Yams composes; the converter
+refuses those keys anyway. An integer literal beyond a double is refused rather than read as
+infinity, which has no JSON form. Yams recurses per level and overflows a 512 KiB
+secondary-thread stack at about 800, so parsing runs on a thread of its own with a 16 MiB
+stack. `SkillPackage` waits for it (setup); the client's load suspends until it resumes a
+continuation, so neither the client actor nor a cooperative thread is held. The work is
+bounded and happens on registration and on load only. `FuzzFrontmatter` parses arbitrary
+documents with both schemas.
 
 Comparison is JSON equality: numbers by value (`1` equals `1.0`), key order ignored, and a
 `data:` URL string equal to the `Value.data` it decodes to. Entries decode their frontmatter
@@ -85,9 +93,12 @@ frontmatter `name` and `description`; the Agent Skills naming rule; the last pat
 to the name; unreserved characters in the path; relative file paths that stay in the skill; 512
 files and 16 MiB unless `enforcesLimits` is false. It computes the entry, `SKILL.md` first, URIs
 percent-encoded per component. From a directory it reads regular files; names starting with `.`
-and links that resolve outside the directory are skipped. `InMemorySkillCatalog` (an actor)
-serves packages, pages listings and directories, and derives directory resources from the file
-paths: each skill's root and subdirectories, and the prefixes (`skill://acme`). Text that is
+and links that resolve outside the directory are skipped; a file that is also the directory of
+another (`a` and `a/b`) is refused. `InMemorySkillCatalog` (an actor) serves packages, pages
+listings and directories, and derives directory resources from the file paths: each skill's
+root and subdirectories, and the prefixes (`skill://acme`). Of packages with the same skill URI
+the last is kept, by `init` and `setSkills(_:)` alike, so the entry, the bytes and the
+directories come from one package. Its cursors are offsets; one past the end is -32602. Text that is
 UTF-8 with a textual MIME type is sent as `text`, anything else as `blob`; the digest covers the
 bytes either way. MIME types come from an extension table (no UTType on Linux).
 
@@ -100,7 +111,8 @@ bytes either way. MIME types come from an extension table (no UTType on Linux).
   none, `resources/read` (-32602, `resourceNotFound`) and `resources/list` (empty).
 - Answers `resources/read` of a skill file from the catalog before the application's handler,
   whatever the registration order. The check is in the dispatch, not a wrapper around the
-  application's handler.
+  application's handler, which never sees a skill file: access control for skills belongs in
+  the catalog (it runs with `Server.currentHandlerContext`) or in the start hooks.
 - `resources/list`, with `listInResources`: the first page is the application's first page
   followed by the catalog's first page of `SKILL.md` resources (name, description,
   `text/markdown`, size); later pages continue the application's listing, then the catalog's.
@@ -121,15 +133,17 @@ clients declare none, and the SEP defines none.
 extension or `directoryRead`; clients MUST NOT read directories otherwise.
 
 `loadSkill(_:options:)` is the host's skill-loading path. It refuses an entry whose `uri` is not
-a `SKILL.md`, whose manifest does not list it, or whose `resources` is unrecognized; checks the
-limits from the entry alone; then reads the `SKILL.md`, and only it, and verifies size, then
+a `SKILL.md`, whose manifest does not list it, lists a file outside the skill's root (a `.` or
+`..` segment, percent-encoded or not, counts as outside) or a negative size, or whose `resources`
+is unrecognized; checks the limits from the entry alone, the count first and the sizes, which
+the server chose, without overflow; then reads the `SKILL.md`, and only it, and verifies size, then
 digest, then frontmatter (parsed only after the bytes are verified, so the parser sees no more
 than the entry admitted). `LoadedSkill` (an actor, for the dynamic budget) holds the entry and
 the content; `read(_:)` resolves a relative path against the skill's root (`.` and `..` within
 it), refuses a path that leaves it or a file the entry does not list without reading it, and
 verifies what it reads. `directory(_:)` answers from the manifest, which is authoritative for
-what the host may read. A dynamic entry needs `allowsDynamic`; its reads are not verified and
-count against 16 MiB. `acceptsYAML11Frontmatter` also accepts a frontmatter that matches when
+what the host may read. A dynamic entry needs `allowsDynamic`; its reads are not verified,
+count against 16 MiB, and are refused, without a request, for a URI outside the root. `acceptsYAML11Frontmatter` also accepts a frontmatter that matches when
 read as YAML 1.1 (a server that used PyYAML). `Skill.manifestFingerprint`, a SHA-256 over the
 sorted `uri` and `digest` pairs, binds an approval to the files approved.
 

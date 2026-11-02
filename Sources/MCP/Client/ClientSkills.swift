@@ -30,8 +30,9 @@ public struct SkillVerificationError: Swift.Error, Hashable, Sendable, CustomStr
         /// The file is not listed in the entry's `resources`, or is outside the skill.
         public static let unlistedFile = Reason("unlistedFile")
         /// The entry is not loadable: its `resources` is neither a manifest nor
-        /// `dynamic`, its manifest does not list its `SKILL.md`, or its URI is
-        /// not a `SKILL.md`.
+        /// `dynamic`, its manifest does not list its `SKILL.md`, lists a file
+        /// outside the skill's root or a negative size, or its URI is not a
+        /// `SKILL.md`.
         public static let invalidEntry = Reason("invalidEntry")
         /// The entry's `resources` is `dynamic`, which offers no integrity, and
         /// ``Client/SkillLoading/allowsDynamic`` is off.
@@ -147,7 +148,7 @@ public actor LoadedSkill {
             }
             return try await Client.fetchVerified(file, client: client)
         case .dynamic:
-            guard uri.hasPrefix(rootURI + "/") else {
+            guard Client.isInside(uri, root: rootURI) else {
                 throw SkillVerificationError(.unlistedFile, uri: uri, message: "\(uri) is outside \(rootURI)")
             }
             let data = try await Client.fetch(uri, client: client)
@@ -289,13 +290,29 @@ extension Client {
         let data: Data
         switch skill.resources {
         case .manifest(let files):
+            // The sizes are the server's: checked one by one before they are added.
+            if options.enforcesLimits, files.count > Skill.maximumResources {
+                throw SkillVerificationError(
+                    .tooLarge, uri: skill.uri,
+                    message: "\(skill.uri) has \(files.count) files; the limit is \(Skill.maximumResources)")
+            }
+            if let file = files.first(where: { $0.size < 0 || !Self.isInside($0.uri, root: rootURI) }) {
+                throw SkillVerificationError(
+                    .invalidEntry, uri: skill.uri,
+                    message: file.size < 0
+                        ? "The entry of \(skill.uri) gives \(file.uri) a negative size"
+                        : "The entry of \(skill.uri) lists \(file.uri), outside \(rootURI)")
+            }
             if options.enforcesLimits {
-                let total = files.reduce(0) { $0 + max(0, $1.size) }
-                guard files.count <= Skill.maximumResources, total <= Skill.maximumTotalSize else {
-                    throw SkillVerificationError(
-                        .tooLarge, uri: skill.uri,
-                        message: "\(skill.uri) has \(files.count) files and \(total) bytes; the limits are \(Skill.maximumResources) and \(Skill.maximumTotalSize)"
-                    )
+                var total = 0
+                for file in files {
+                    let (sum, overflow) = total.addingReportingOverflow(file.size)
+                    guard !overflow, sum <= Skill.maximumTotalSize else {
+                        throw SkillVerificationError(
+                            .tooLarge, uri: skill.uri,
+                            message: "\(skill.uri) has more than \(Skill.maximumTotalSize) bytes")
+                    }
+                    total = sum
                 }
             }
             guard let manifest = files.first(where: { $0.uri == skill.uri }) else {
@@ -319,18 +336,22 @@ extension Client {
         guard let content = String(data: data, encoding: .utf8) else {
             throw SkillVerificationError(.frontmatterMismatch, uri: skill.uri, message: "\(skill.uri) is not UTF-8")
         }
-        try Self.verifyFrontmatter(of: content, against: skill, options: options)
+        try await Self.verifyFrontmatter(of: content, against: skill, options: options)
         return LoadedSkill(
             skill: skill, content: content, rootURI: rootURI, client: self, options: options, bytesRead: data.count)
     }
 
-    private static func verifyFrontmatter(of document: String, against skill: Skill, options: SkillLoading) throws {
+    /// Parses off the client's executor: the parser's thread is waited for
+    /// without blocking it.
+    private static func verifyFrontmatter(
+        of document: String, against skill: Skill, options: SkillLoading
+    ) async throws {
         let core: [String: Value]
         do {
-            core = try SkillFrontmatter.parse(document: document)
+            core = try await SkillFrontmatter.parseInBackground(document: document)
         } catch {
             if options.acceptsYAML11Frontmatter,
-                let legacy = try? SkillFrontmatter.parse(document: document, schema: .yaml11),
+                let legacy = try? await SkillFrontmatter.parseInBackground(document: document, schema: .yaml11),
                 SkillFrontmatter.matches(legacy, skill.frontmatter)
             {
                 return
@@ -339,7 +360,7 @@ extension Client {
         }
         if SkillFrontmatter.matches(core, skill.frontmatter) { return }
         if options.acceptsYAML11Frontmatter,
-            let legacy = try? SkillFrontmatter.parse(document: document, schema: .yaml11),
+            let legacy = try? await SkillFrontmatter.parseInBackground(document: document, schema: .yaml11),
             SkillFrontmatter.matches(legacy, skill.frontmatter)
         {
             return
@@ -351,6 +372,16 @@ extension Client {
         throw SkillVerificationError(
             .frontmatterMismatch, uri: skill.uri,
             message: "The frontmatter of \(skill.uri) differs from its entry: \(fields.joined(separator: ", "))")
+    }
+
+    /// Whether `uri` names something below `root`: it starts with the root
+    /// and a `/`, and no segment after it, percent-decoded, is `.` or `..`.
+    static func isInside(_ uri: String, root: String) -> Bool {
+        guard uri.hasPrefix(root + "/") else { return false }
+        return uri.dropFirst(root.count + 1).split(separator: "/", omittingEmptySubsequences: false).allSatisfy {
+            let decoded = $0.removingPercentEncoding ?? String($0)
+            return !decoded.split(separator: "/", omittingEmptySubsequences: false).contains { $0 == "." || $0 == ".." }
+        }
     }
 
     /// The bytes of `file`, after its size, then its digest, match the entry.

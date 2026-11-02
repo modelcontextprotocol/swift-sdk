@@ -1,3 +1,4 @@
+import CYaml
 import Foundation
 import Yams
 
@@ -12,9 +13,13 @@ import Yams
 ///
 /// The input is untrusted: the block is at most ``maximumSize`` bytes,
 /// libyaml stops at 1000 levels of nesting, and the converted tree, aliases
-/// expanded, is at most ``maximumNodes`` nodes. Yams composes recursively, and
-/// 1000 levels overflow the 512 KiB stack of a secondary thread, so parsing
-/// runs on a thread of its own with a larger stack; the caller waits for it.
+/// and `<<` merges expanded, is at most ``maximumNodes`` nodes. A mapping key
+/// that is a collection, or an alias of one, is refused before Yams composes
+/// the tree: Yams hashes every key to find duplicates, aliases expanded.
+/// Yams composes recursively, and 1000 levels overflow the 512 KiB stack of a
+/// secondary thread, so parsing runs on a thread of its own with a larger
+/// stack; ``parse(document:schema:)`` blocks until it is done,
+/// ``parseInBackground(document:schema:)`` suspends.
 enum SkillFrontmatter {
     /// How plain scalars resolve.
     enum Schema: Sendable {
@@ -133,6 +138,18 @@ enum SkillFrontmatter {
         return try onParsingThread { try compose(yaml, schema: schema) }
     }
 
+    /// The frontmatter of `document` as a JSON object, parsed without
+    /// blocking the caller's thread, which is free while the parsing thread
+    /// runs. For an actor, such as the client loading a skill.
+    static func parseInBackground(document: String, schema: Schema = .core) async throws -> [String: Value] {
+        guard let block = block(in: document) else { throw Failure.missing }
+        let yaml = String(block)
+        guard yaml.utf8.count <= maximumSize else { throw Failure.tooLarge(yaml.utf8.count) }
+        return try await withCheckedThrowingContinuation { continuation in
+            startParsingThread { continuation.resume(with: Result { try compose(yaml, schema: schema) }) }
+        }
+    }
+
     /// The stack of the parsing thread: 1000 levels of Yams and of the
     /// converter, with room to spare.
     static let parsingStackSize = 16 << 20
@@ -142,14 +159,19 @@ enum SkillFrontmatter {
     private static func onParsingThread<T: Sendable>(_ body: @escaping @Sendable () throws -> T) throws -> T {
         let outcome = Outcome<T>()
         let done = DispatchSemaphore(value: 0)
-        let thread = Thread {
+        startParsingThread {
             outcome.set(Result { try body() })
             done.signal()
         }
-        thread.stackSize = parsingStackSize
-        thread.start()
         done.wait()
         return try outcome.get()
+    }
+
+    /// Runs `body` on a new thread with a ``parsingStackSize`` stack.
+    private static func startParsingThread(_ body: @escaping @Sendable () -> Void) {
+        let thread = Thread(block: body)
+        thread.stackSize = parsingStackSize
+        thread.start()
     }
 
     private final class Outcome<T: Sendable>: @unchecked Sendable {
@@ -169,6 +191,7 @@ enum SkillFrontmatter {
     }
 
     private static func compose(_ yaml: String, schema: Schema) throws -> [String: Value] {
+        try checkKeys(yaml)
         let root: Node?
         do {
             root = try Yams.compose(yaml: yaml, schema == .core ? coreResolver : .default)
@@ -186,6 +209,66 @@ enum SkillFrontmatter {
         return object
     }
 
+    /// Refuses a mapping key that is a collection or an alias of one, from
+    /// libyaml's events, before Yams composes: composing hashes each key to
+    /// find duplicates, and an alias-shared key hashes its expanded tree, of
+    /// any size. The converter refuses such keys too. A syntax error is left
+    /// to the composer to report.
+    private static func checkKeys(_ yaml: String) throws {
+        var parser = yaml_parser_t()
+        guard yaml_parser_initialize(&parser) == 1 else { throw Failure.syntax("libyaml did not start") }
+        defer { yaml_parser_delete(&parser) }
+        yaml_parser_set_encoding(&parser, YAML_UTF8_ENCODING)
+        let bytes = Array(yaml.utf8)
+        // Per open collection: nil for a sequence; for a mapping, whether
+        // its next node is a key.
+        var open: [Bool?] = []
+        // The anchors whose latest definition is a collection.
+        var collections = Set<String>()
+        func anchor(_ name: UnsafeMutablePointer<yaml_char_t>?, collection: Bool) {
+            guard let name else { return }
+            if collection {
+                collections.insert(String(cString: name))
+            } else {
+                collections.remove(String(cString: name))
+            }
+        }
+        func completed() {
+            if let last = open.last, let isKey = last { open[open.count - 1] = !isKey }
+        }
+        try bytes.withUnsafeBufferPointer { buffer in
+            yaml_parser_set_input_string(&parser, buffer.baseAddress, buffer.count)
+            while true {
+                var event = yaml_event_t()
+                guard yaml_parser_parse(&parser, &event) == 1 else { return }
+                defer { yaml_event_delete(&event) }
+                let isKey = open.last == true
+                switch event.type {
+                case YAML_STREAM_END_EVENT:
+                    return
+                case YAML_SCALAR_EVENT:
+                    anchor(event.data.scalar.anchor, collection: false)
+                    completed()
+                case YAML_ALIAS_EVENT:
+                    if isKey, let name = event.data.alias.anchor, collections.contains(String(cString: name)) {
+                        throw Failure.invalidKey("that is a collection")
+                    }
+                    completed()
+                case YAML_SEQUENCE_START_EVENT, YAML_MAPPING_START_EVENT:
+                    if isKey { throw Failure.invalidKey("that is a collection") }
+                    let isMapping = event.type == YAML_MAPPING_START_EVENT
+                    anchor(isMapping ? event.data.mapping_start.anchor : event.data.sequence_start.anchor, collection: true)
+                    open.append(isMapping ? true : nil)
+                case YAML_SEQUENCE_END_EVENT, YAML_MAPPING_END_EVENT:
+                    open.removeLast()
+                    completed()
+                default:
+                    continue
+                }
+            }
+        }
+    }
+
     /// Plain scalars without a tag resolve to `implicitTag`, so that the
     /// converter applies the core schema to them and only to them.
     private static let implicitTag = Tag.Name(rawValue: "tag:modelcontextprotocol.io,2026:implicit")
@@ -200,9 +283,14 @@ enum SkillFrontmatter {
         let schema: Schema
         var nodes = 0
 
-        mutating func value(of node: Node) throws -> Value {
+        /// Counts one more node of the expanded tree.
+        private mutating func count() throws {
             nodes += 1
             guard nodes <= SkillFrontmatter.maximumNodes else { throw Failure.tooManyNodes }
+        }
+
+        mutating func value(of node: Node) throws -> Value {
+            try count()
             let tag = node.tag.rawValue
             switch node {
             case .scalar(let scalar):
@@ -237,8 +325,10 @@ enum SkillFrontmatter {
         }
 
         /// The entries a `<<` value merges: a mapping, or a sequence of them
-        /// (the first wins).
+        /// (the first wins). Each merged mapping counts as a node, as many
+        /// times as it is merged.
         private mutating func mergedEntries(of node: Node) throws -> [(String, Value)] {
+            try count()
             switch node {
             case .mapping(let mapping):
                 return try object(of: mapping).map { ($0.key, $0.value) }
@@ -249,6 +339,7 @@ enum SkillFrontmatter {
                     guard case .mapping(let mapping) = element else {
                         throw Failure.invalidValue("a << value that is not a mapping")
                     }
+                    try count()
                     for (key, value) in try object(of: mapping) where seen.insert(key).inserted {
                         entries.append((key, value))
                     }
@@ -306,7 +397,7 @@ enum SkillFrontmatter {
                 guard let bool = bool(text) else { throw Failure.invalidValue("!!bool \(text)") }
                 return .bool(bool)
             case Tag.Name.int.rawValue:
-                guard let integer = integer(text) else { throw Failure.invalidValue("!!int \(text)") }
+                guard let integer = try integer(text) else { throw Failure.invalidValue("!!int \(text)") }
                 return integer
             case Tag.Name.float.rawValue:
                 // A float written as one: `!!float 1` is refused, as by `yaml`.
@@ -335,15 +426,16 @@ enum SkillFrontmatter {
         /// An integer or a float; `nil` when `text` is neither. Infinity and
         /// NaN have no JSON value.
         static func number(_ text: String) throws -> Value? {
-            if let integer = integer(text) { return integer }
+            if let integer = try integer(text) { return integer }
             if isNonFinite(text) { throw Failure.invalidValue(text) }
             guard isFloat(text), let double = Double(text), double.isFinite else { return nil }
             return .double(double)
         }
 
         /// `[-+]?[0-9]+`, `0o[0-7]+` or `0x[0-9a-fA-F]+`. Beyond `Int`, a
-        /// double, as JSON numbers are.
-        static func integer(_ text: String) -> Value? {
+        /// double, as JSON numbers are; beyond a double, refused: infinity has
+        /// no JSON value.
+        static func integer(_ text: String) throws -> Value? {
             let utf8 = Array(text.utf8)
             func all(_ bytes: ArraySlice<UInt8>, _ allowed: (UInt8) -> Bool) -> Bool {
                 !bytes.isEmpty && bytes.allSatisfy(allowed)
@@ -352,19 +444,21 @@ enum SkillFrontmatter {
             if utf8.count > 2, utf8[0] == UInt8(ascii: "0") {
                 let digits = utf8[2...]
                 if utf8[1] == UInt8(ascii: "o"), all(digits, { $0 >= 0x30 && $0 <= 0x37 }) {
-                    return radix(String(decoding: digits, as: UTF8.self), 8)
+                    return try radix(String(decoding: digits, as: UTF8.self), 8, text: text)
                 }
                 if utf8[1] == UInt8(ascii: "x"), all(digits, { Character(Unicode.Scalar($0)).isHexDigit }) {
-                    return radix(String(decoding: digits, as: UTF8.self), 16)
+                    return try radix(String(decoding: digits, as: UTF8.self), 16, text: text)
                 }
             }
             let signed = utf8.first == UInt8(ascii: "-") || utf8.first == UInt8(ascii: "+")
             guard all(utf8[(signed ? 1 : 0)...], isDigit) else { return nil }
             if let integer = Int(text) { return .int(integer) }
-            return Double(text).map(Value.double)
+            guard let double = Double(text) else { return nil }
+            guard double.isFinite else { throw Failure.invalidValue(text) }
+            return .double(double)
         }
 
-        static func radix(_ digits: String, _ radix: Int) -> Value? {
+        static func radix(_ digits: String, _ radix: Int, text: String) throws -> Value? {
             if let integer = Int(digits, radix: radix) { return .int(integer) }
             // Beyond Int: the nearest double, as a JavaScript number.
             var double = 0.0
@@ -372,6 +466,7 @@ enum SkillFrontmatter {
                 guard let digit = character.hexDigitValue else { return nil }
                 double = double * Double(radix) + Double(digit)
             }
+            guard double.isFinite else { throw Failure.invalidValue(text) }
             return .double(double)
         }
 

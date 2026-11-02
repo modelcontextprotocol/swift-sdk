@@ -76,8 +76,9 @@ extension Skill {
 /// Creating one checks what SEP-2640 requires of a skill: a `SKILL.md` at
 /// the root whose YAML frontmatter has a `name` and a `description`; a name
 /// of at most 64 lowercase letters, digits and single hyphens that is the
-/// last segment of the path; relative file paths that stay in the skill;
-/// and, unless `enforcesLimits` is false, at most 512 files and 16 MiB.
+/// last segment of the path; relative file paths that stay in the skill,
+/// none of them also the directory of another; and, unless
+/// `enforcesLimits` is false, at most 512 files and 16 MiB.
 public struct SkillPackage: Sendable {
     /// Where the skill is in the server's namespace, such as `git-workflow`
     /// or `acme/billing/refunds`. The last segment is the skill's name.
@@ -146,6 +147,10 @@ public struct SkillPackage: Sendable {
         var entries: [SkillResource] = []
         for relative in files.keys.sorted(by: Self.manifestFirst) {
             let components = try Self.fileComponents(relative, in: path)
+            for depth in 1..<components.count where files[components[..<depth].joined(separator: "/")] != nil {
+                throw ValidationError(
+                    "\(path): \(components[..<depth].joined(separator: "/")) is a file and the directory of \(relative)")
+            }
             let uri = root + "/" + components.map(Self.percentEncoded).joined(separator: "/")
             entries.append(SkillResource(uri: uri, data: files[relative]!))
         }
@@ -313,9 +318,11 @@ public actor InMemorySkillCatalog: SkillCatalog {
     private var bySkillURI: [String: SkillPackage] = [:]
     private var directories: [String: [Resource]] = [:]
 
-    /// A catalog of `skills`, listed `pageSize` at a time.
+    /// A catalog of `skills`, listed `pageSize` at a time. A later package
+    /// with the same skill URI as an earlier one replaces it.
     public init(_ skills: [SkillPackage] = [], pageSize: Int = 100) {
         self.pageSize = max(1, pageSize)
+        let skills = Self.deduplicated(skills)
         let (bySkillURI, directories) = Self.index(skills)
         self.skills = skills
         self.bySkillURI = bySkillURI
@@ -325,15 +332,20 @@ public actor InMemorySkillCatalog: SkillCatalog {
     /// Replaces the skills. A later package with the same skill URI as an
     /// earlier one replaces it.
     public func setSkills(_ skills: [SkillPackage]) {
-        (bySkillURI, directories) = Self.index(skills)
+        self.skills = Self.deduplicated(skills)
+        (bySkillURI, directories) = Self.index(self.skills)
+    }
+
+    /// The last package of each skill URI, in the order of the last ones.
+    private static func deduplicated(_ skills: [SkillPackage]) -> [SkillPackage] {
         var seen = Set<String>()
-        self.skills = skills.reversed().filter { seen.insert($0.skill.uri).inserted }.reversed()
+        return skills.reversed().filter { seen.insert($0.skill.uri).inserted }.reversed()
     }
 
     /// A page of the skills, in order.
     public func listSkills(cursor: String?) async throws -> ListSkills.Result {
-        let start = try offset(cursor)
-        let end = min(skills.count, start + pageSize)
+        let start = try offset(cursor, count: skills.count)
+        let end = start + min(pageSize, skills.count - start)
         return ListSkills.Result(
             skills: skills[start..<end].map(\.skill), nextCursor: end < skills.count ? String(end) : nil)
     }
@@ -356,15 +368,19 @@ public actor InMemorySkillCatalog: SkillCatalog {
     /// A page of the children of the directory at `uri`.
     public func readDirectory(uri: String, cursor: String?) async throws -> ReadResourceDirectory.Result? {
         guard let children = directories[uri] else { return nil }
-        let start = try offset(cursor)
-        let end = min(children.count, start + pageSize)
+        let start = try offset(cursor, count: children.count)
+        let end = start + min(pageSize, children.count - start)
         return ReadResourceDirectory.Result(
             resources: Array(children[start..<end]), nextCursor: end < children.count ? String(end) : nil)
     }
 
-    private func offset(_ cursor: String?) throws -> Int {
+    /// The offset a cursor names in a collection of `count` elements: at
+    /// most `count`, which is an empty page.
+    private func offset(_ cursor: String?, count: Int) throws -> Int {
         guard let cursor else { return 0 }
-        guard let offset = Int(cursor), offset >= 0 else { throw MCPError.invalidParams("Invalid cursor") }
+        guard let offset = Int(cursor), (0...count).contains(offset) else {
+            throw MCPError.invalidParams("Invalid cursor")
+        }
         return offset
     }
 
@@ -463,7 +479,11 @@ extension Server {
     /// capability; it answers `skills/list`, `skills/get` (-32602 for a URI
     /// that is not a skill) and `resources/directory/read`. A `resources/read`
     /// of a skill file is answered from the catalog, before the application's
-    /// handler. With `listInResources`, `resources/list` includes the skills'
+    /// handler, which never sees it: an access check in that handler does not
+    /// cover skill files. Check access in the catalog, whose methods run with
+    /// ``Server/currentHandlerContext`` set, or refuse the client with the
+    /// hooks of ``Server/start(transport:initializeHook:statelessRequestHook:)``.
+    /// With `listInResources`, `resources/list` includes the skills'
     /// `SKILL.md` resources: the first page is the application handler's
     /// first page and the skills' first page, so a client that reads one
     /// page sees both; the cursors are the server's own.

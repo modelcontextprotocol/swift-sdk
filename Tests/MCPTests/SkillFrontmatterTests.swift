@@ -11,6 +11,21 @@ private func json(_ text: String) throws -> Value {
     try JSONDecoder().decode(Value.self, from: Data(text.utf8))
 }
 
+/// Parses on its own executor and reports whether the parse finished, so a
+/// test can see whether the actor is free while the parser runs.
+private actor Parsing {
+    private(set) var started = false
+    private(set) var finished = false
+
+    func parse(_ document: String) async throws {
+        started = true
+        _ = try await SkillFrontmatter.parseInBackground(document: document)
+        finished = true
+    }
+
+    func state() -> (started: Bool, finished: Bool) { (started, finished) }
+}
+
 @Suite("Skill frontmatter")
 struct SkillFrontmatterTests {
     @Test("The block is the one the harness's pattern extracts", arguments: frontmatterDocuments.indices)
@@ -40,6 +55,41 @@ struct SkillFrontmatterTests {
         #expect(parsed["d"] == 1.5)
         #expect(parsed["e"] == 16)
         #expect(parsed["f"] == .string("data:text/plain;base64,aGk="))
+        #expect(try SkillFrontmatter.parse("n: 1" + String(repeating: "0", count: 30))["n"] == 1e30)
+    }
+
+    @Test("Integers beyond a double are refused, not infinite")
+    func hugeIntegers() {
+        for literal in [
+            "1" + String(repeating: "0", count: 400), "-" + String(repeating: "9", count: 400),
+            "0x" + String(repeating: "f", count: 300), "0o" + String(repeating: "7", count: 400),
+        ] {
+            #expect(throws: SkillFrontmatter.Failure.invalidValue(literal)) {
+                try SkillFrontmatter.parse("n: \(literal)")
+            }
+            #expect(throws: SkillFrontmatter.Failure.self) { try SkillFrontmatter.parse("n: !!int \(literal)") }
+        }
+    }
+
+    @Test("Parsing in the background leaves the caller's actor free")
+    func background() async throws {
+        // A large block: many nodes, well under the limits.
+        let fields = (0..<1500).map { "k\($0): [a, b, c]" }.joined(separator: "\n")
+        let document = "---\n" + fields + "\n---\n"
+        #expect(try await SkillFrontmatter.parseInBackground(document: document).count == 1500)
+        let parsing = Parsing()
+        let task = Task { try await parsing.parse(document) }
+        while true {
+            let state = await parsing.state()
+            guard state.started else {
+                await Task.yield()
+                continue
+            }
+            #expect(!state.finished)
+            break
+        }
+        try await task.value
+        #expect(await parsing.state().finished)
     }
 
     @Test("A document: missing frontmatter, a non-mapping, the body ignored")
@@ -71,6 +121,25 @@ struct SkillFrontmatterTests {
             laughs += "\(name): &\(name) [\(refs)]\n"
         }
         #expect(throws: SkillFrontmatter.Failure.tooManyNodes) { try SkillFrontmatter.parse(laughs) }
+
+        // The same tree as a key: composing would hash it expanded, so a key
+        // that is a collection, or an alias of one, is refused before.
+        let clock = ContinuousClock()
+        let start = clock.now
+        for key in ["*j : x", "? *j\n: x", "[*j]: x", "{k: *j}: x"] {
+            #expect(throws: SkillFrontmatter.Failure.self, "\(key)") { try SkillFrontmatter.parse(laughs + key) }
+            #expect(throws: SkillFrontmatter.Failure.self, "\(key)") {
+                try SkillFrontmatter.parse(laughs + key, schema: .yaml11)
+            }
+        }
+        #expect(clock.now - start < .seconds(1))
+        #expect(try SkillFrontmatter.parse("k: &k name\n*k : v") == ["k": "name", "name": "v"])
+
+        // YAML 1.1 merges count too: twenty levels of two merges each.
+        var merges = "l0: &l0 {}\n"
+        for level in 1...20 { merges += "l\(level): &l\(level) {<<: [*l\(level - 1), *l\(level - 1)]}\n" }
+        #expect(throws: SkillFrontmatter.Failure.tooManyNodes) { try SkillFrontmatter.parse(merges, schema: .yaml11) }
+        #expect(clock.now - start < .seconds(2))
 
         // libyaml stops at 1000 levels. Just below, Yams and the converter
         // recurse deeper than a task's stack allows: parsing has its own.

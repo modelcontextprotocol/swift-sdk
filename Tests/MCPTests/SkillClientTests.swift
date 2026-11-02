@@ -53,12 +53,14 @@ private struct AlteredCatalog: SkillCatalog {
     }
 }
 
-private func connect(_ catalog: some SkillCatalog, declare: Bool = true) async throws -> (Client, Server) {
+private func connect(
+    _ catalog: some SkillCatalog, declare: Bool = true, configuration: Client.Configuration = .default
+) async throws -> (Client, Server) {
     let server = Server(name: "s", version: "1", capabilities: .init(resources: .init()))
     if declare { await server.withSkills(catalog) }
     let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
     try await server.start(transport: serverTransport)
-    let client = Client(name: "c", version: "1")
+    let client = Client(name: "c", version: "1", configuration: configuration)
     try await client.connect(transport: clientTransport)
     return (client, server)
 }
@@ -186,6 +188,66 @@ struct SkillClientTests {
         large.resources = .manifest(
             (0...Skill.maximumResources).map { SkillResource(uri: "skill://pdf/f\($0)", digest: "sha256:00", size: 1) })
         #expect(await reason(large) == .tooLarge)
+
+        // Sizes come from the server: they are checked, never summed blindly.
+        func listing(_ files: [(String, Int)]) -> Skill {
+            var entry = skill
+            entry.resources = .manifest(
+                [SkillResource(uri: skill.uri, digest: "sha256:00", size: 1)]
+                    + files.map { SkillResource(uri: $0.0, digest: "sha256:00", size: $0.1) })
+            return entry
+        }
+        #expect(await reason(listing([("skill://pdf/a", 1 << 62), ("skill://pdf/b", 1 << 62)])) == .tooLarge)
+        #expect(await reason(listing([("skill://pdf/a", .max)])) == .tooLarge)
+        #expect(await reason(listing([("skill://pdf/a", -1)])) == .invalidEntry)
+        #expect(await reason(listing([("skill://pdf/a", -1)]), .init(enforcesLimits: false)) == .invalidEntry)
+        // Every file of the manifest is under the skill's root.
+        #expect(await reason(listing([("skill://other/x", 1)])) == .invalidEntry)
+        #expect(await reason(listing([("skill://pdf/../other/x", 1)])) == .invalidEntry)
+        #expect(await reason(listing([("skill://pdf/%2E%2E/other/x", 1)])) == .invalidEntry)
+        #expect(await reason(listing([("skill://pdfx/y", 1)])) == .invalidEntry)
+    }
+
+    @Test("A dynamic skill reads nothing outside its root, dot segments included")
+    func dynamicConfinement() async throws {
+        let catalog = AlteredCatalog(
+            base: InMemorySkillCatalog([try pdfPackage()]),
+            alter: { skill in
+                var skill = skill
+                skill.resources = .dynamic
+                return skill
+            })
+        let (client, server) = try await connect(catalog)
+        defer { Task { await client.disconnect(); await server.stop() } }
+        let skill = try #require(try await client.listSkills().skills.first)
+        let loaded = try await client.loadSkill(skill, options: .init(allowsDynamic: true))
+        for uri in [
+            "skill://pdf/a/../../other/SKILL.md", "skill://pdf/../other/SKILL.md", "skill://pdf/%2e%2e/other/SKILL.md",
+            "skill://pdf/%2E%2E/other/SKILL.md", "skill://pdf/./SKILL.md", "skill://pdf/a/..%2F..%2Fother",
+        ] {
+            do {
+                _ = try await loaded.read(uri: uri)
+                Issue.record("read \(uri)")
+            } catch let error as SkillVerificationError {
+                #expect(error.reason == .unlistedFile, "\(uri)")
+            }
+        }
+        #expect(await catalog.recorder.reads == ["skill://pdf/SKILL.md"])
+        #expect(try await loaded.read(uri: "skill://pdf/references/FORMS.md") == data("forms"))
+    }
+
+    @Test("A data: URL in the frontmatter is compared as written", arguments: [false, true])
+    func dataURLFrontmatter(handshake: Bool) async throws {
+        let manifest = data("---\nname: pdf\ndescription: Fill PDF forms\nicon: \"data:text/plain,hello\"\n---\n")
+        let package = try SkillPackage(path: "pdf", files: ["SKILL.md": manifest])
+        let (client, server) = try await connect(
+            InMemorySkillCatalog([package]), configuration: handshake ? .handshake : .default)
+        defer { Task { await client.disconnect(); await server.stop() } }
+        let skill = try #require(try await client.listSkills().skills.first)
+        #expect(skill.frontmatter["icon"] == .string("data:text/plain,hello"))
+        let loaded = try await client.loadSkill(skill)
+        #expect(loaded.content == String(decoding: manifest, as: UTF8.self))
+        _ = try await client.loadSkill(uri: skill.uri)
     }
 
     @Test("YAML 1.1 frontmatter matches only when accepted")
