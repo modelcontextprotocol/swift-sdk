@@ -38,7 +38,47 @@ private func eventually(_ condition: @Sendable () async -> Bool) async -> Bool {
     return await condition()
 }
 
-@Suite("Subscription Tests")
+private struct TimedOut: Error {}
+
+/// Runs `body`, throwing ``TimedOut`` when it has not finished after
+/// `limit`; a body that never returns is abandoned.
+private func within<T: Sendable>(
+    _ limit: Duration = .seconds(5), _ body: @escaping @Sendable () async throws -> T
+) async throws -> T {
+    let (outcomes, outcome) = AsyncStream<Result<T, Swift.Error>>.makeStream()
+    let work = Task {
+        do { outcome.yield(.success(try await body())) } catch { outcome.yield(.failure(error)) }
+    }
+    let timer = Task {
+        try? await Task.sleep(for: limit)
+        outcome.yield(.failure(TimedOut()))
+    }
+    defer {
+        work.cancel()
+        timer.cancel()
+    }
+    for await result in outcomes { return try result.get() }
+    throw TimedOut()
+}
+
+/// Connects a stateless client through `transport`, answering
+/// `server/discover` with `capabilities`.
+private func connect(_ transport: ListenScript, capabilities: String) async throws -> Client {
+    let client = Client(name: "probe", version: "1.0", configuration: .init(protocolMode: .automatic))
+    let connecting = Task { try await client.connect(transport: transport) }
+    let discover = try await transport.message(1)
+    try await transport.reply(
+        to: discover,
+        #""result":{"supportedVersions":["2026-07-28"],"capabilities":\#(capabilities),"resultType":"complete"}"#)
+    _ = try await within { try await connecting.value }
+    return client
+}
+
+private func resourceSubscriptions(of listen: [String: Value]) -> Value? {
+    listen["params"]?.objectValue?["notifications"]?.objectValue?["resourceSubscriptions"]
+}
+
+@Suite("Subscription Tests", .timeLimit(.minutes(1)))
 struct SubscriptionTests {
     @Test("listen is acknowledged with the subset the server supports")
     func testAcknowledgement() async throws {
@@ -306,6 +346,105 @@ struct SubscriptionTests {
         #expect(reopened["id"] != listen["id"])
     }
 
+    @Test("The reopen delay keeps growing while acknowledged streams fail at once")
+    func testReopenBackoffGrows() async throws {
+        let transport = ListenScript()
+        let client = try await connect(transport, capabilities: #"{"tools":{"listChanged":true}}"#)
+        defer { Task { await client.disconnect() } }
+
+        await client.onNotification(ToolListChangedNotification.self) { _ in }
+        for (count, failures) in [(2, 1), (3, 2), (4, 3)] {
+            let listen = try await transport.message(count, timeout: .seconds(4))
+            #expect(listen["method"] == "subscriptions/listen")
+            try await transport.acknowledge(listen)
+            try await transport.reply(to: listen, #""error":{"code":-32603,"message":"stream reset"}"#)
+            #expect(await eventually { await client.notificationStreamFailures == failures })
+        }
+        #expect(Client.notificationStreamDelay(failures: await client.notificationStreamFailures) == .seconds(4))
+    }
+
+    @Test("A failed reopen keeps the subscribed resources and retries")
+    func testFailedReopenKeepsSubscriptions() async throws {
+        let transport = ListenScript()
+        let client = try await connect(transport, capabilities: #"{"resources":{"subscribe":true}}"#)
+        defer { Task { await client.disconnect() } }
+
+        let subscribing = Task { try await client.subscribeToResource(uri: "test://a") }
+        let first = try await transport.message(2)
+        try await transport.acknowledge(first, #"{"resourceSubscriptions":["test://a"]}"#)
+        try await within { try await subscribing.value }
+
+        // The stream fails, and so does its first reopening.
+        try await transport.reply(to: first, #""error":{"code":-32603,"message":"stream reset"}"#)
+        let second = try await transport.message(3, timeout: .seconds(3))
+        #expect(resourceSubscriptions(of: second) == ["test://a"])
+        try await transport.reply(to: second, #""error":{"code":-32603,"message":"restarting"}"#)
+
+        let third = try await transport.message(4, timeout: .seconds(4))
+        #expect(third["method"] == "subscriptions/listen")
+        #expect(resourceSubscriptions(of: third) == ["test://a"])
+        try await transport.acknowledge(third, #"{"resourceSubscriptions":["test://a"]}"#)
+        #expect(await eventually { await client.subscribedResourceURIs == ["test://a"] })
+    }
+
+    @Test("A replaced stream delivers the notifications the client still wants")
+    func testReplacedStreamDelivers() async throws {
+        let transport = ListenScript()
+        let client = try await connect(transport, capabilities: #"{"resources":{"subscribe":true}}"#)
+        defer { Task { await transport.releaseCancellations(); await client.disconnect() } }
+
+        let inbox = Inbox()
+        await client.onNotification(ResourceUpdatedNotification.self) { message in
+            await inbox.add(message.params.uri, message._meta?.subscriptionID)
+        }
+        let subscribingA = Task { try await client.subscribeToResource(uri: "test://a") }
+        let first = try await transport.message(2)
+        try await transport.acknowledge(first, #"{"resourceSubscriptions":["test://a"]}"#)
+        try await within { try await subscribingA.value }
+
+        // The replaced stream stays open while its cancellation is held.
+        await transport.holdCancellations()
+        let subscribingB = Task { try await client.subscribeToResource(uri: "test://b") }
+        let second = try await transport.message(3)
+        try await transport.acknowledge(second, #"{"resourceSubscriptions":["test://a","test://b"]}"#)
+        try await within { try await subscribingB.value }
+        let cancel = try await transport.message(4)
+        #expect(cancel["method"] == "notifications/cancelled")
+
+        // Published before the server registered the successor, so only
+        // the replaced stream carries them.
+        try await transport.resourceUpdated("test://c", on: first)
+        try await transport.resourceUpdated("test://a", on: first)
+        try await transport.resourceUpdated("test://b", on: second)
+        #expect(await eventually { await inbox.methods.contains("test://b") })
+        #expect(await inbox.methods == ["test://a", "test://b"])
+    }
+
+    @Test("subscribeToResource fails during and after disconnect")
+    func testSubscribeAroundDisconnect() async throws {
+        let transport = ListenScript()
+        let client = try await connect(transport, capabilities: #"{"resources":{"subscribe":true}}"#)
+
+        let subscribing = Task { try await client.subscribeToResource(uri: "test://a") }
+        let first = try await transport.message(2)
+        try await transport.acknowledge(first, #"{"resourceSubscriptions":["test://a"]}"#)
+        try await within { try await subscribing.value }
+
+        // disconnect() waits while it closes the stream; subscribe meanwhile.
+        await transport.holdCancellations()
+        let closing = Task { await client.disconnect() }
+        _ = try await transport.message(3)
+        let during = Task { try await client.subscribeToResource(uri: "test://b") }
+        _ = try await transport.message(4)
+        await transport.releaseCancellations()
+        await #expect(throws: MCPError.self) { try await within(.seconds(2)) { try await during.value } }
+        try await within { await closing.value }
+
+        await #expect(throws: MCPError.self) {
+            try await within(.seconds(2)) { try await client.subscribeToResource(uri: "test://c") }
+        }
+    }
+
     @Test("Server caps listen streams and resource URIs, and removes duplicates")
     func testServerLimits() async throws {
         let server = Server(
@@ -378,14 +517,33 @@ private actor ListenScript: Transport {
     private(set) var sent: [[String: Value]] = []
     private let stream: AsyncThrowingStream<Data, Swift.Error>
     private let continuation: AsyncThrowingStream<Data, Swift.Error>.Continuation
+    private var holdingCancellations = false
+    private var heldCancellations: [CheckedContinuation<Void, Never>] = []
 
     init() { (stream, continuation) = AsyncThrowingStream.makeStream() }
 
     func connect() async throws {}
-    func disconnect() async { continuation.finish() }
+    func disconnect() async {
+        releaseCancellations()
+        continuation.finish()
+    }
     func receive() -> AsyncThrowingStream<Data, Swift.Error> { stream }
     func send(_ data: Data) async throws {
-        sent.append(try JSONDecoder().decode(Value.self, from: data).objectValue ?? [:])
+        let message = try JSONDecoder().decode(Value.self, from: data).objectValue ?? [:]
+        sent.append(message)
+        if holdingCancellations, message["method"] == "notifications/cancelled" {
+            await withCheckedContinuation { heldCancellations.append($0) }
+        }
+    }
+
+    /// Makes sending `notifications/cancelled` wait until
+    /// ``releaseCancellations()``.
+    func holdCancellations() { holdingCancellations = true }
+
+    func releaseCancellations() {
+        holdingCancellations = false
+        for held in heldCancellations { held.resume() }
+        heldCancellations = []
     }
 
     /// Waits until `count` messages were sent and returns the last one.
@@ -402,11 +560,20 @@ private actor ListenScript: Transport {
         continuation.yield(Data(#"{"jsonrpc":"2.0","id":\#(id),\#(body)}"#.utf8))
     }
 
-    func acknowledge(_ listen: [String: Value]) throws {
+    func acknowledge(_ listen: [String: Value], _ notifications: String = #"{"toolsListChanged":true}"#) throws {
         let id = String(decoding: try JSONEncoder().encode(try #require(listen["id"])), as: UTF8.self)
         continuation.yield(
             Data(
-                #"{"jsonrpc":"2.0","method":"notifications/subscriptions/acknowledged","params":{"notifications":{"toolsListChanged":true},"_meta":{"io.modelcontextprotocol/subscriptionId":\#(id)}}}"#
+                #"{"jsonrpc":"2.0","method":"notifications/subscriptions/acknowledged","params":{"notifications":\#(notifications),"_meta":{"io.modelcontextprotocol/subscriptionId":\#(id)}}}"#
+                    .utf8))
+    }
+
+    /// Sends `notifications/resources/updated` for `uri` on the stream of `listen`.
+    func resourceUpdated(_ uri: String, on listen: [String: Value]) throws {
+        let id = String(decoding: try JSONEncoder().encode(try #require(listen["id"])), as: UTF8.self)
+        continuation.yield(
+            Data(
+                #"{"jsonrpc":"2.0","method":"notifications/resources/updated","params":{"uri":"\#(uri)","_meta":{"io.modelcontextprotocol/subscriptionId":\#(id)}}}"#
                     .utf8))
     }
 }

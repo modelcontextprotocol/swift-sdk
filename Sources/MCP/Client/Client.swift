@@ -249,12 +249,16 @@ public actor Client {
     /// Incremented on each change, so stale openings are discarded.
     private var notificationStreamGeneration = 0
     /// Failures in a row to open or keep the stream; sets the retry delay.
-    private var notificationStreamFailures = 0
+    private(set) var notificationStreamFailures = 0
+    /// When the background stream, or the one it replaced, was opened.
+    private var notificationStreamSince: ContinuousClock.Instant?
     /// The pending reopen of a stream that failed.
     private var notificationStreamRetry: Task<Void, Never>?
     /// Replaced background streams that have not ended yet. Their
-    /// notifications repeat those of the stream that replaced them and are
-    /// dropped.
+    /// notifications are delivered while the client still wants them: one
+    /// the server sent before it registered the successor exists only on
+    /// the replaced stream, so a notification sent during the overlap may
+    /// arrive twice.
     private var retiredNotificationStreams: Set<ID> = []
     /// Resource URIs subscribed at 2026-07-28, in subscription order.
     private var subscribedResources: [String] = []
@@ -421,6 +425,7 @@ public actor Client {
         notificationStreamFilter = nil
         notificationStreamGeneration += 1
         notificationStreamFailures = 0
+        notificationStreamSince = nil
         notificationStreamRetry?.cancel()
         notificationStreamRetry = nil
         retiredNotificationStreams = []
@@ -441,6 +446,14 @@ public actor Client {
         self.connection = nil
         self.pendingRequests = [:]  // Use empty dictionary literal
         self.toolHeaderParameters = [:]
+
+        // A subscribeToResource call made while the stream was closing.
+        subscribedResources = []
+        let lateWaiters = resourceWaiters
+        resourceWaiters = []
+        for waiter in lateWaiters {
+            waiter.continuation.resume(throwing: MCPError.internalError("Client disconnected"))
+        }
 
         // Part 2: Outside actor - Resume continuations, disconnect transport, await task
 
@@ -722,8 +735,8 @@ public actor Client {
             return
         }
         if !current, notificationStreamFilter == nil { notificationStreamFilter = wanted }
-        notificationStreamFailures = 0
         let previous = notificationStream
+        if previous == nil { notificationStreamSince = .now }
         notificationStream = opened
         notificationStreamRequest = wanted
         if let previous { retire(previous) }
@@ -740,8 +753,8 @@ public actor Client {
         }
     }
 
-    /// Closes a replaced background stream and drops its notifications
-    /// until it ends.
+    /// Closes a replaced background stream. Until it ends, its
+    /// notifications the client no longer wants are dropped.
     private func retire(_ stream: Subscription) {
         retiredNotificationStreams.insert(stream.id)
         Task {
@@ -756,12 +769,17 @@ public actor Client {
 
     /// Forgets a background stream that ended. One that failed is reopened
     /// after a delay; one the server closed with its result is reopened by
-    /// the next refresh.
+    /// the next refresh. The delay keeps growing while streams fail sooner
+    /// than ``notificationStreamMaxDelay`` after opening.
     private func notificationStreamEnded(id: ID, failed: Bool) {
         guard notificationStream?.id == id else { return }
         notificationStream = nil
         notificationStreamRequest = nil
         notificationStreamFilter = nil
+        if !failed || notificationStreamSince.map({ .now - $0 >= Self.notificationStreamMaxDelay }) == true {
+            notificationStreamFailures = 0
+        }
+        notificationStreamSince = nil
         guard failed else { return }
         notificationStreamFailures += 1
         scheduleNotificationStreamRetry()
@@ -820,10 +838,13 @@ public actor Client {
     }
 
     /// Fails the `subscribeToResource` calls whose URI only `requested`, a
-    /// stream that could not be opened, named.
+    /// stream that could not be opened, named. Established subscriptions
+    /// stay, so a stream that failed keeps being reopened for them.
     private func failResourceWaiters(requested: SubscriptionFilter, error: Swift.Error) {
         let served = Set(notificationStream?.notifications.resourceSubscriptions ?? [])
-        let failed = Set(requested.resourceSubscriptions ?? []).subtracting(served)
+        let failed = Set(requested.resourceSubscriptions ?? [])
+            .intersection(resourceWaiters.map(\.uri))
+            .subtracting(served)
         guard !failed.isEmpty else { return }
         subscribedResources.removeAll { failed.contains($0) }
         var waiting: [(uri: String, continuation: CheckedContinuation<Void, Swift.Error>)] = []
@@ -1355,6 +1376,7 @@ public actor Client {
             _ = try await send(request).value
             return
         }
+        guard connection != nil else { throw MCPError.internalError("Client disconnected") }
         guard streamsResponses else {
             throw MCPError.internalError(
                 "Resource subscriptions at 2026-07-28 need streamed responses, which HTTPClientTransport does not read on Linux")
@@ -1679,8 +1701,10 @@ public actor Client {
             "Processing notification",
             metadata: ["method": "\(message.method)"])
 
-        // A replaced background stream repeats its successor.
-        if let stream = message._meta?.subscriptionID, retiredNotificationStreams.contains(stream) {
+        // A replaced background stream may carry what its successor does not.
+        if let stream = message._meta?.subscriptionID, retiredNotificationStreams.contains(stream),
+            !wantsNotification(message)
+        {
             return
         }
 
@@ -1699,6 +1723,20 @@ public actor Client {
                         "error": "\(error)",
                     ])
             }
+        }
+    }
+
+    /// Whether the background stream still asks for `message`.
+    private func wantsNotification(_ message: Message<AnyNotification>) -> Bool {
+        let wanted = wantedNotifications
+        switch message.method {
+        case ToolListChangedNotification.name: return wanted.toolsListChanged == true
+        case PromptListChangedNotification.name: return wanted.promptsListChanged == true
+        case ResourceListChangedNotification.name: return wanted.resourcesListChanged == true
+        case ResourceUpdatedNotification.name:
+            guard case .string(let uri)? = message.params.objectValue?["uri"] else { return false }
+            return subscribedResources.contains(uri)
+        default: return true
         }
     }
 
