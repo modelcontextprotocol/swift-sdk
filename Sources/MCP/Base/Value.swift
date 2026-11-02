@@ -10,7 +10,8 @@ public enum Value: Hashable, Sendable {
     case int(Int)
     case double(Double)
     case string(String)
-    /// Encodes as a data-URL string. Decode the string explicitly when binary data is expected.
+    /// Encodes as a data-URL string. Decoding that JSON produces `.string`.
+    /// Use `Data.parseDataURL(_:)` to recover the bytes when needed.
     case data(mimeType: String? = nil, Data)
     case array([Value])
     case object([String: Value])
