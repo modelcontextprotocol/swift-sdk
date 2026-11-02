@@ -959,6 +959,29 @@ struct StatelessHTTPServerTransportTests {
         await transport.disconnect()
     }
 
+    @Test("Restored string ID keeps slashes unescaped")
+    func testRestoredStringIDPreservesSlash() async throws {
+        let transport = makeStatelessTransport()
+        try await transport.connect()
+        let stream = await transport.receive()
+        var iterator = stream.makeAsyncIterator()
+        let request = Data(#"{"jsonrpc":"2.0","id":"a/b","method":"tools/list"}"#.utf8)
+        let pending = Task {
+            await transport.handleRequest(makeStatelessPOSTRequest(body: request))
+        }
+        let routed = try #require(try await iterator.next())
+        let json = try #require(JSONSerialization.jsonObject(with: routed) as? [String: Any])
+        let routedID = try #require(json["id"] as? String)
+
+        let response = Data(#"{"jsonrpc":"2.0","id":"\#(routedID)","result":{}}"#.utf8)
+        try await transport.send(response)
+        let completed = await pending.value
+        #expect(completed.statusCode == 200)
+        #expect(String(decoding: completed.bodyData ?? Data(), as: UTF8.self)
+            == #"{"jsonrpc":"2.0","id":"a/b","result":{}}"#)
+        await transport.disconnect()
+    }
+
     @Test("Boolean and fractional request IDs are rejected")
     func testInvalidRequestIDs() async {
         let transport = makeStatelessTransport()

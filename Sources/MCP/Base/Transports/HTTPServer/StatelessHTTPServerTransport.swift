@@ -423,7 +423,9 @@ public actor StatelessHTTPServerTransport:
         } else {
             throw MCPError.parseError("Invalid JSON-RPC request id")
         }
-        let replacementData = try JSONEncoder().encode(replacement)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .withoutEscapingSlashes
+        let replacementData = try encoder.encode(replacement)
         var result = Data(bytes[..<idRange.lowerBound])
         result.append(replacementData)
         result.append(contentsOf: bytes[idRange.upperBound...])
