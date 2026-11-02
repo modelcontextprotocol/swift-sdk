@@ -682,6 +682,9 @@ extension CreateSamplingMessage.Parameters {
     /// - Each tool use in a message has a tool result in the next message,
     ///   which is a user message.
     /// - Each tool result answers a tool use in the message before it.
+    ///
+    /// Blocks of an unknown type are not counted: a later revision decides
+    /// where they may appear.
     func toolMessageProblem() -> String? {
         for (index, message) in messages.enumerated() {
             let blocks = message.content.asArray
@@ -692,6 +695,7 @@ extension CreateSamplingMessage.Parameters {
                 switch block {
                 case .toolUse(let use): uses.append(use.id)
                 case .toolResult(let result): results.append(result.toolUseId)
+                case .unknown: break
                 default: others += 1
                 }
             }

@@ -178,6 +178,11 @@ struct SamplingToolMessageRuleTests {
             ]) == nil)
         // Text with a tool use in the assistant message is allowed.
         #expect(problem([.user("Hi"), .assistant(.multiple([.text("Let me check."), use("a", "Paris")])), .user(.single(result("a")))]) == nil)
+        // A block of a type from a later revision is not counted as other content.
+        let later = Sampling.Message.Content.ContentBlock.unknown(type: "later", ["type": "later"])
+        #expect(
+            problem([.user("Hi"), .assistant(.single(use("a", "Paris"))), .user(.multiple([result("a"), later]))])
+                == nil)
     }
 
     @Test("Histories that break the rules")
