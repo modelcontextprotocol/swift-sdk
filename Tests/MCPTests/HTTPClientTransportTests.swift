@@ -2445,4 +2445,183 @@ import Testing
             await transport.disconnect()
         }
     }
+
+    /// Opens once; every wait returns after that.
+    actor AuthorizerGate {
+        private var opened = false
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+
+        func wait() async {
+            guard !opened else { return }
+            await withCheckedContinuation { waiters.append($0) }
+        }
+
+        func open() {
+            opened = true
+            for waiter in waiters { waiter.resume() }
+            waiters = []
+        }
+    }
+
+    /// An authorizer that suspends in `prepareAuthorization` or in
+    /// `handleChallenge` until its gate opens, as one refreshing a token does.
+    final class SuspendingAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
+        enum Stage { case prepare, challenge }
+
+        let maxAuthorizationAttempts = 3
+        let stage: Stage
+        let gate = AuthorizerGate()
+        let (entered, enteredContinuation) = AsyncStream<Void>.makeStream()
+
+        init(suspendingIn stage: Stage) { self.stage = stage }
+
+        func validateEndpointSecurity(for endpoint: URL) throws {}
+        func authorizationHeaders(for url: URL, method: String) throws -> [String: String] {
+            ["Authorization": "Bearer t"]
+        }
+        func prepareAuthorization(for endpoint: URL, session: URLSession) async throws {
+            guard stage == .prepare else { return }
+            enteredContinuation.yield()
+            await gate.wait()
+        }
+        func handleChallenge(
+            statusCode: Int, headers: [String: String], endpoint: URL, operationKey: String?,
+            session: URLSession
+        ) async throws -> Bool {
+            guard stage == .challenge else { return false }
+            enteredContinuation.yield()
+            await gate.wait()
+            return true
+        }
+    }
+
+    /// Never answers and never calls its client.
+    private final class SilentURLProtocol: URLProtocol, @unchecked Sendable {
+        override class func canInit(with request: URLRequest) -> Bool { true }
+        override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+        override func startLoading() {}
+        override func stopLoading() {}
+    }
+
+    /// Reports two responses for one request, each with half of a JSON-RPC
+    /// response that is valid only when the halves are joined.
+    private final class TwoResponsesURLProtocol: URLProtocol, @unchecked Sendable {
+        override class func canInit(with request: URLRequest) -> Bool { true }
+        override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+        override func startLoading() {
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "application/json"])!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: Data(#"{"jsonrpc":"2.0","#.utf8))
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: Data(#""id":"r1","result":{}}"#.utf8))
+            client?.urlProtocolDidFinishLoading(self)
+        }
+        override func stopLoading() {}
+    }
+
+    @Suite("HTTP client transport sessions")
+    struct HTTPClientTransportSessionTests {
+        let endpoint = URL(string: "http://127.0.0.1:9/mcp")!
+        let request = Data(#"{"jsonrpc":"2.0","id":"r1","method":"tools/list"}"#.utf8)
+
+        func makeTransport(
+            authorizer: (any HTTPClientAuthorizer)? = nil,
+            _ handler: @escaping @Sendable (URLRequest) async throws -> (HTTPURLResponse, Data)
+        ) async -> HTTPClientTransport {
+            let key = UUID().uuidString
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [IsolatedMockURLProtocol.self]
+            configuration.httpAdditionalHeaders = [IsolatedMockURLProtocol.sessionKeyHeader: key]
+            await IsolatedMockURLProtocol.setHandler(key: key, handler)
+            return HTTPClientTransport(
+                endpoint: endpoint, configuration: configuration, streaming: false, authorizer: authorizer)
+        }
+
+        func reply(_ status: Int) -> (HTTPURLResponse, Data) {
+            (HTTPURLResponse(url: endpoint, statusCode: status, httpVersion: "HTTP/1.1", headerFields: [:])!, Data())
+        }
+
+        @Test(
+            "A request whose authorizer is awaited across disconnect() fails instead of trapping",
+            arguments: [SuspendingAuthorizer.Stage.prepare, .challenge])
+        func disconnectDuringAuthorization(stage: SuspendingAuthorizer.Stage) async throws {
+            let authorizer = SuspendingAuthorizer(suspendingIn: stage)
+            let transport = await makeTransport(authorizer: authorizer) { [self] _ in
+                reply(stage == .challenge ? 401 : 202)
+            }
+            try await transport.connect()
+            let send = Task { [request] in try await transport.send(request) }
+            for await _ in authorizer.entered { break }
+            await transport.disconnect()
+            await authorizer.gate.open()
+            let result = await outcome(within: .seconds(5)) { try await send.value }
+            #expect(result.error is MCPError)
+        }
+
+        @Test("connect() after disconnect() sends with new sessions")
+        func reconnect() async throws {
+            let transport = await makeTransport { [self] _ in reply(202) }
+            let notification = Data(#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#.utf8)
+            try await transport.connect()
+            try await transport.send(notification)
+            await transport.disconnect()
+            try await transport.connect()
+            try await transport.send(notification)
+            await transport.disconnect()
+        }
+
+        @Test("A response body requested from a cancelled task fails promptly")
+        func cancelledBeforeStart() async throws {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [SilentURLProtocol.self]
+            let session = URLSession(configuration: configuration)
+            let streaming = StreamingSession(configuration: configuration)
+            defer { streaming.invalidate(along: session) }
+            let task = Task { [endpoint] in
+                withUnsafeCurrentTask { $0?.cancel() }
+                _ = try await session.responseBody(for: URLRequest(url: endpoint), streaming: streaming)
+            }
+            let result = await outcome(within: .seconds(2)) { try await task.value }
+            #expect(result.error != nil)
+        }
+
+        #if canImport(FoundationNetworking)
+            @Test("A second response for one request fails it instead of joining the bodies")
+            func secondResponse() async throws {
+                let configuration = URLSessionConfiguration.ephemeral
+                configuration.protocolClasses = [TwoResponsesURLProtocol.self]
+                let transport = HTTPClientTransport(
+                    endpoint: endpoint, configuration: configuration, streaming: false)
+                try await transport.connect()
+                let result = await outcome(within: .seconds(5)) { [request] in try await transport.send(request) }
+                #expect(result.error != nil)
+                await transport.disconnect()
+            }
+
+            @Test("A transport dropped without disconnect() releases its streaming session")
+            func droppedTransportReleasesSession() async throws {
+                weak var delegate: StreamingSessionDelegate?
+                do {
+                    // The session ID ends the wait for it, which holds the transport.
+                    let transport = await makeTransport { [endpoint] _ in
+                        (
+                            HTTPURLResponse(
+                                url: endpoint, statusCode: 202, httpVersion: "HTTP/1.1",
+                                headerFields: ["Mcp-Session-Id": "s1"])!, Data()
+                        )
+                    }
+                    delegate = await transport.streamingSession.delegate
+                    #expect(delegate != nil)
+                    try await transport.connect()
+                    try await transport.send(Data(#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#.utf8))
+                }
+                for _ in 0..<200 where delegate != nil {
+                    try await Task.sleep(for: .milliseconds(10))
+                }
+                #expect(delegate == nil)
+            }
+        #endif
+    }
 #endif  // swift(>=6.1)

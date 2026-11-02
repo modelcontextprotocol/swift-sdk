@@ -20,8 +20,9 @@ struct ServerSentEvent: Equatable, Sendable {
 /// - A blank line ends an event. A block of comments only, or of unknown
 ///   fields only, is no event.
 /// - Unlike a browser, an event without `data` is still returned (a priming
-///   event carries only an `id`, a reconnection hint only a `retry`), and
-///   ``finish()`` returns an event the stream ended before its blank line.
+///   event carries only an `id`, a reconnection hint only a `retry`).
+/// - An event the stream ends before its blank line is incomplete and is
+///   discarded: its `id` must not become the resumption point.
 struct ServerSentEventParser {
     private var line: [UInt8] = []
     private var afterCR = false
@@ -29,7 +30,8 @@ struct ServerSentEventParser {
 
     private var id: String?
     private var event: String?
-    private var data: String?
+    /// The `data` lines so far, joined with line feeds.
+    private var data: [UInt8]?
     private var retry: Int?
     private var hasField = false
 
@@ -37,7 +39,12 @@ struct ServerSentEventParser {
     /// rather than grow without bound.
     static let maxLineLength = 16 << 20
 
+    /// The most bytes the `data` of one event may hold, its line feeds
+    /// included; a larger event fails the stream.
+    static let maxEventLength = maxLineLength
+
     struct LineTooLong: Swift.Error {}
+    struct EventTooLong: Swift.Error {}
 
     /// Consumes one byte. Returns the event a blank line completes.
     mutating func consume(_ byte: UInt8) throws -> ServerSentEvent? {
@@ -47,10 +54,10 @@ struct ServerSentEventParser {
                 afterCR = false
                 return nil
             }
-            return endLine()
+            return try endLine()
         case 0x0D:
             afterCR = true
-            return endLine()
+            return try endLine()
         default:
             afterCR = false
             guard line.count < Self.maxLineLength else { throw LineTooLong() }
@@ -59,15 +66,27 @@ struct ServerSentEventParser {
         }
     }
 
-    /// Ends the stream: returns the event it held when it ended without a
-    /// blank line.
+    /// Ends the stream. An event it ended before the event's blank line is
+    /// discarded, as the HTML standard requires at the end of the stream, so
+    /// this returns `nil`.
     mutating func finish() -> ServerSentEvent? {
-        if !line.isEmpty { _ = endLine() }
-        return dispatch()
+        line.removeAll()
+        _ = dispatch()
+        return nil
     }
 
-    private mutating func endLine() -> ServerSentEvent? {
-        defer { line.removeAll(keepingCapacity: true) }
+    /// The capacity the line buffer keeps between lines; a longer line's
+    /// buffer is released once the line ends.
+    static let retainedLineCapacity = 64 << 10
+
+    private mutating func endLine() throws -> ServerSentEvent? {
+        defer {
+            if line.capacity > Self.retainedLineCapacity {
+                line = []
+            } else {
+                line.removeAll(keepingCapacity: true)
+            }
+        }
         if firstLine {
             firstLine = false
             if line.starts(with: [0xEF, 0xBB, 0xBF]) { line.removeFirst(3) }
@@ -75,23 +94,35 @@ struct ServerSentEventParser {
         if line.isEmpty { return dispatch() }
         if line.first == UInt8(ascii: ":") { return nil }
         let name: String
-        var value: Substring
+        var bytes: ArraySlice<UInt8>
         if let colon = line.firstIndex(of: UInt8(ascii: ":")) {
             name = String(decoding: line[..<colon], as: UTF8.self)
-            value = Substring(String(decoding: line[(colon + 1)...], as: UTF8.self))
-            if value.first == " " { value = value.dropFirst() }
+            bytes = line[(colon + 1)...]
+            if bytes.first == UInt8(ascii: " ") { bytes = bytes.dropFirst() }
         } else {
             name = String(decoding: line, as: UTF8.self)
-            value = ""
+            bytes = []
         }
+        if name == "data" {
+            // Appended in place: each line costs its own length.
+            let length = (data.map { $0.count + 1 } ?? 0) + bytes.count
+            guard length <= Self.maxEventLength else { throw EventTooLong() }
+            if data == nil {
+                data = Array(bytes)
+            } else {
+                data!.append(0x0A)
+                data!.append(contentsOf: bytes)
+            }
+            hasField = true
+            return nil
+        }
+        let value = String(decoding: bytes, as: UTF8.self)
         switch name {
         case "event":
-            event = String(value)
-        case "data":
-            data = data.map { $0 + "\n" + value } ?? String(value)
+            event = value
         case "id":
             guard !value.contains("\0") else { return nil }
-            id = String(value)
+            id = value
         case "retry":
             guard !value.isEmpty, value.allSatisfy({ $0.isASCII && $0.isNumber }),
                 let milliseconds = Int(value)
@@ -113,7 +144,8 @@ struct ServerSentEventParser {
             hasField = false
         }
         guard hasField else { return nil }
-        return ServerSentEvent(id: id, event: event, data: data ?? "", retry: retry)
+        let text = data.map { String(decoding: $0, as: UTF8.self) } ?? ""
+        return ServerSentEvent(id: id, event: event, data: text, retry: retry)
     }
 }
 

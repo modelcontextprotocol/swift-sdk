@@ -5,7 +5,7 @@ import Testing
 
 @Suite("Server-sent event parser")
 struct ServerSentEventParserTests {
-    /// Parses `text` and returns the events, including the one `finish()` returns.
+    /// Parses `text` and returns the events, then checks that `finish()` returns none.
     func events(_ text: String) throws -> [ServerSentEvent] {
         try events(Array(text.utf8))
     }
@@ -16,7 +16,7 @@ struct ServerSentEventParserTests {
         for byte in bytes {
             if let event = try parser.consume(byte) { events.append(event) }
         }
-        if let event = parser.finish() { events.append(event) }
+        #expect(parser.finish() == nil)
         return events
     }
 
@@ -81,10 +81,13 @@ struct ServerSentEventParserTests {
                 == [ServerSentEvent(data: "x")])
     }
 
-    @Test("An event the stream ends before its blank line is returned")
+    @Test("An event the stream ends before its blank line is discarded")
     func unterminated() throws {
-        #expect(try events("data: a\n\ndata: b") == [ServerSentEvent(data: "a"), ServerSentEvent(data: "b")])
-        #expect(try events("data: a\n") == [ServerSentEvent(data: "a")])
+        #expect(try events("data: a\n\ndata: b") == [ServerSentEvent(data: "a")])
+        #expect(try events("data: a\n").isEmpty)
+        // Its id is not the resumption point.
+        #expect(try events("id: 1\ndata: a\n\nid: 2\ndata: {\"jsonrpc\"") == [ServerSentEvent(id: "1", data: "a")])
+        #expect(try events("id: 2\n").isEmpty)
     }
 
     @Test("Invalid UTF-8 is replaced, not fatal")
@@ -98,6 +101,56 @@ struct ServerSentEventParserTests {
         let limit = ServerSentEventParser.maxLineLength
         for _ in 0..<limit { _ = try parser.consume(UInt8(ascii: "a")) }
         #expect(throws: ServerSentEventParser.LineTooLong.self) { try parser.consume(UInt8(ascii: "a")) }
+    }
+
+    @Test("Data lines are appended in place")
+    func manyDataLines() throws {
+        let lines = 1 << 20
+        var bytes = [UInt8]()
+        bytes.reserveCapacity(lines * 7 + 1)
+        for _ in 0..<lines { bytes += Array("data:x\n".utf8) }
+        bytes.append(0x0A)
+        var parser = ServerSentEventParser()
+        let start = ContinuousClock.now
+        var event: ServerSentEvent?
+        // Copying the data per line took minutes for this event.
+        for (index, byte) in bytes.enumerated() {
+            if let completed = try parser.consume(byte) { event = completed }
+            if index % 65536 == 0, ContinuousClock.now - start > .seconds(20) {
+                Issue.record("\(index) of \(bytes.count) bytes parsed in 20 s")
+                return
+            }
+        }
+        let data = try #require(event).data
+        #expect(data.utf8.count == lines * 2 - 1)
+        #expect(data.hasPrefix("x\nx\n") && data.hasSuffix("x\nx"))
+    }
+
+    @Test("An event whose data is longer than the limit fails the stream")
+    func eventLimit() throws {
+        var parser = ServerSentEventParser()
+        let half = Array(repeating: UInt8(ascii: "a"), count: ServerSentEventParser.maxEventLength / 2)
+        let line = Array("data:".utf8) + half + [0x0A]
+        for byte in line { _ = try parser.consume(byte) }
+        // The second line's feed takes the data one byte over the limit.
+        #expect(throws: ServerSentEventParser.EventTooLong.self) {
+            for byte in line { _ = try parser.consume(byte) }
+        }
+        // Exactly at the limit is accepted.
+        var exact = ServerSentEventParser()
+        for byte in line + Array("data:".utf8) + half.dropLast() + [0x0A, 0x0A] {
+            if let event = try exact.consume(byte) {
+                #expect(event.data.utf8.count == ServerSentEventParser.maxEventLength)
+            }
+        }
+    }
+
+    @Test("Events after a long line parse as before")
+    func afterLongLine() throws {
+        let long = String(repeating: "a", count: 1 << 20)
+        #expect(
+            try events("data: \(long)\n\ndata: x\n\nid: 2\ndata: y\n\n")
+                == [ServerSentEvent(data: long), ServerSentEvent(data: "x"), ServerSentEvent(id: "2", data: "y")])
     }
 
     @Test("serverSentEvents reads an async byte sequence")

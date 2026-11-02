@@ -1066,6 +1066,49 @@ struct DPoPAuthorizerTests {
             await transport.disconnect()
         }
 
+        @Test("A GET stream's nonce retry does not use up an authorization attempt")
+        func getStreamNonceRetryIsFree() async throws {
+            let notification = #"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#
+            let key = UUID().uuidString
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [IsolatedMockURLProtocol.self]
+            configuration.httpAdditionalHeaders = [IsolatedMockURLProtocol.sessionKeyHeader: key]
+            let gets = Recorder<URLRequest>()
+            await IsolatedMockURLProtocol.setHandler(key: key) { request in
+                await gets.append(request)
+                if await gets.values.count == 1 {
+                    let response = HTTPURLResponse(
+                        url: request.url!, statusCode: 401, httpVersion: "HTTP/1.1",
+                        headerFields: ["WWW-Authenticate": #"DPoP error="use_dpop_nonce""#, "DPoP-Nonce": "n"])!
+                    return (response, Data())
+                }
+                let response = HTTPURLResponse(
+                    url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1",
+                    headerFields: ["Content-Type": "text/event-stream"])!
+                return (response, Data("data: \(notification)\n\n".utf8))
+            }
+            let authorizer = NonceAuthorizer(maxAuthorizationAttempts: 1)
+            let transport = HTTPClientTransport(
+                endpoint: endpoint, configuration: configuration, streaming: true,
+                sseInitializationTimeout: 0.01, authorizer: authorizer)
+            try await transport.connect()
+            // Without the retry the stream would open only on the next
+            // reconnection, after the default 3 s retry interval.
+            let first = await outcome(within: .seconds(2)) {
+                for try await data in await transport.receive() { return String(decoding: data, as: UTF8.self) }
+                return ""
+            }
+            guard case .returned(let message) = first else {
+                Issue.record("The GET stream did not open: \(first)")
+                await transport.disconnect()
+                return
+            }
+            #expect(message == notification)
+            #expect(authorizer.challenges == 1)
+            #expect(await gets.values.prefix(2).allSatisfy { $0.httpMethod == "GET" })
+            await transport.disconnect()
+        }
+
         @Test("Authorization headers are set after requestModifier, for the final URL and method")
         func afterRequestModifier() async throws {
             let key = UUID().uuidString

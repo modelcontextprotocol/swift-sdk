@@ -53,7 +53,8 @@ import Logging
 public actor HTTPClientTransport: Transport {
     /// The server endpoint URL to connect to
     public let endpoint: URL
-    private let session: URLSession
+    /// Built anew by ``connect()`` after ``disconnect()`` invalidated it.
+    private var session: URLSession
 
     /// The session ID assigned by the server, used for maintaining state across requests
     public private(set) var sessionID: String?
@@ -64,7 +65,7 @@ public actor HTTPClientTransport: Transport {
     private let streaming: Bool
     private var streamingTask: Task<Void, Never>?
     /// Streams response bodies on swift-corelibs-foundation.
-    private let streamingSession: StreamingSession
+    private(set) var streamingSession: StreamingSession
 
     /// Logger instance for transport-related events
     public nonisolated let logger: Logger
@@ -279,6 +280,12 @@ public actor HTTPClientTransport: Transport {
         guard !isConnected else { return }
         isConnected = true
 
+        // An invalidated session cannot create tasks.
+        if streamingSession.lifetime.isInvalidated {
+            session = URLSession(configuration: session.configuration)
+            streamingSession = StreamingSession(configuration: session.configuration)
+        }
+
         setupInitialSessionIDSignal()
 
         if streaming {
@@ -302,8 +309,9 @@ public actor HTTPClientTransport: Transport {
         inFlightPosts.removeAll()
         cancelledBeforeSend.removeAll()
 
-        session.invalidateAndCancel()
-        streamingSession.invalidate()
+        // A request that is creating its task keeps the sessions valid
+        // until it has; later ones fail instead of trapping.
+        streamingSession.invalidate(along: session)
         messageContinuation.finish()
 
         initialSessionIDSignalTask?.cancel()
@@ -515,6 +523,10 @@ public actor HTTPClientTransport: Transport {
             request = requestModifier(request)
             try applyAuthorization(to: &request)
 
+            // disconnect() may have run while the authorizer was awaited.
+            guard isConnected else {
+                throw MCPError.internalError("Transport not connected")
+            }
             do {
                 let (body, response) = try await session.responseBody(for: request, streaming: streamingSession)
                 noteResponse(response, to: request)
@@ -599,9 +611,10 @@ public actor HTTPClientTransport: Transport {
             do {
                 try await processSSE(
                     body, until: awaited,
-                    onEventID: { lastEventID = $0 }, onRetry: { retry = Self.clampedRetryInterval($0) },
+                    onEventID: { lastEventID = $0.isEmpty ? nil : $0 },
+                    onRetry: { retry = Self.clampedRetryInterval($0) },
                     onResponse: { if $0 == awaited { responded = true } })
-            } catch where awaited != nil && lastEventID != nil && !Task.isCancelled {
+            } catch where awaited != nil && lastEventID != nil && !Task.isCancelled && !Self.isOversizedEvent(error) {
                 logger.debug("POST SSE stream failed before its response", metadata: ["error": "\(error)"])
             }
             if let awaited, !responded, !Task.isCancelled {
@@ -930,7 +943,7 @@ public actor HTTPClientTransport: Transport {
         }
 
         return try await self.processSSE(
-            stream, onEventID: { self.lastEventID = $0 },
+            stream, onEventID: { self.lastEventID = $0.isEmpty ? nil : $0 },
             onRetry: { self.retryInterval = Self.clampedRetryInterval($0) })
     }
 
@@ -944,6 +957,7 @@ public actor HTTPClientTransport: Transport {
             try? await authorizer.prepareAuthorization(for: endpoint, session: session)
         }
         var attempts = 0
+        var retriedNonce = false
         while true {
             var request = URLRequest(url: endpoint)
             request.httpMethod = "GET"
@@ -961,6 +975,10 @@ public actor HTTPClientTransport: Transport {
             request = requestModifier(request)
             try applyAuthorization(to: &request)
 
+            // disconnect() may have run while the authorizer was awaited.
+            guard isConnected else {
+                throw MCPError.internalError("Transport not connected")
+            }
             let (stream, response) = try await session.responseBody(for: request, streaming: streamingSession)
             noteResponse(response, to: request)
             guard let httpResponse = response as? HTTPURLResponse else {
@@ -971,11 +989,18 @@ public actor HTTPClientTransport: Transport {
                 return (stream, httpResponse)
             }
             stream.cancel()
+            let challenge = HTTPAuthenticationChallengeError(
+                statusCode: httpResponse.statusCode, headers: responseHeaders(from: httpResponse))
+            // RFC 9449 §9: a DPoP nonce challenge is retried once per GET, as for a POST.
+            let isNonceChallenge = Self.isDPoPNonceChallenge(challenge)
+            if isNonceChallenge, retriedNonce {
+                throw mapAuthenticationChallengeError(challenge)
+            }
             let handled: Bool
             do {
                 handled = try await authorizer.handleChallenge(
                     statusCode: httpResponse.statusCode,
-                    headers: responseHeaders(from: httpResponse),
+                    headers: challenge.headers,
                     endpoint: endpoint,
                     operationKey: nil,
                     sentAuthorization: request.value(forHTTPHeaderField: HTTPHeaderName.authorization),
@@ -984,11 +1009,13 @@ public actor HTTPClientTransport: Transport {
             } catch {
                 throw MCPError.internalError("Authorization flow failed: \(error.localizedDescription)")
             }
-            attempts += 1
+            if isNonceChallenge {
+                retriedNonce = true
+            } else {
+                attempts += 1
+            }
             guard handled, attempts < authorizer.maxAuthorizationAttempts else {
-                throw mapAuthenticationChallengeError(
-                    HTTPAuthenticationChallengeError(
-                        statusCode: httpResponse.statusCode, headers: responseHeaders(from: httpResponse)))
+                throw mapAuthenticationChallengeError(challenge)
             }
         }
     }
@@ -1034,10 +1061,13 @@ public actor HTTPClientTransport: Transport {
             do {
                 try await processSSE(
                     stream, until: id,
-                    onEventID: { lastEventID = $0 }, onRetry: { retry = Self.clampedRetryInterval($0) },
+                    onEventID: { lastEventID = $0.isEmpty ? nil : $0 },
+                    onRetry: { retry = Self.clampedRetryInterval($0) },
                     onResponse: { if $0 == id { responded = true } })
             } catch {
                 if Task.isCancelled { return }
+                // The replay would fail the same way.
+                if Self.isOversizedEvent(error) { throw error }
                 logger.debug("Resumed response stream failed", metadata: ["error": "\(error)"])
             }
             if responded { return }
@@ -1066,11 +1096,24 @@ public actor HTTPClientTransport: Transport {
         messageContinuation.yield(data)
     }
 
+    /// The errors of an SSE line or event over the parser's limits.
+    static let sseLineTooLong = "SSE line longer than 16 MiB"
+    static let sseEventTooLong = "SSE event data longer than 16 MiB"
+
+    /// Whether `error` is an SSE line or event over the parser's limits: a
+    /// resumed stream would replay it and fail the same way.
+    static func isOversizedEvent(_ error: Swift.Error) -> Bool {
+        guard case .internalError(let detail?) = error as? MCPError else { return false }
+        return detail == sseLineTooLong || detail == sseEventTooLong
+    }
+
     /// Reads SSE events and yields their messages. `onEventID` and
-    /// `onRetry` see each event's `id` and `retry`, `onResponse` the ID of
-    /// each response. With `until`, reading stops once that response is
-    /// delivered. Messages are only parsed for their ID when `until` or
-    /// `onResponse` needs it. Returns whether any event arrived.
+    /// `onRetry` see each event's `id` (empty when the event resets it) and
+    /// `retry`, `onResponse` the ID of each response. With `until`, reading
+    /// stops once that response is delivered. Messages are only parsed for
+    /// their ID when `until` or `onResponse` needs it. Returns whether any
+    /// event arrived. A line or event over the parser's limits throws
+    /// ``sseLineTooLong`` or ``sseEventTooLong``.
     @discardableResult
     private func processSSE(
         _ stream: ResponseBody,
@@ -1083,47 +1126,54 @@ public actor HTTPClientTransport: Transport {
         var eventCount = 0
         var hadDataEvent = false
 
-        for try await event in stream.serverSentEvents {
-            eventCount += 1
+        do {
+            for try await event in stream.serverSentEvents {
+                eventCount += 1
 
-            if Task.isCancelled {
-                logger.debug("⏹️ SSE processing cancelled", metadata: ["eventsProcessed": "\(eventCount)"])
-                break
-            }
-
-            logger.trace(
-                "SSE event received",
-                metadata: [
-                    "type": "\(event.event ?? "message")",
-                    "id": "\(event.id ?? "none")",
-                ]
-            )
-
-            if let eventID = event.id, !eventID.isEmpty {
-                onEventID(eventID)
-                logger.debug("Stored event ID for resumability", metadata: ["eventID": "\(eventID)"])
-            }
-
-            if let retry = event.retry {
-                onRetry(retry)
-                logger.debug("SSE retry interval updated", metadata: ["retryMs": "\(retry)"])
-            }
-
-            if !event.data.isEmpty, let data = event.data.data(using: .utf8) {
-                hadDataEvent = true
-                var delivered: String?
-                if responseID != nil || onResponse != nil,
-                    case .response(let id) = JSONRPCMessageKind(data: data)
-                {
-                    onResponse?(id)
-                    delivered = id
-                }
-                messageContinuation.yield(data)
-                if let responseID, delivered == responseID {
-                    stream.cancel()
+                if Task.isCancelled {
+                    logger.debug("⏹️ SSE processing cancelled", metadata: ["eventsProcessed": "\(eventCount)"])
                     break
                 }
+
+                logger.trace(
+                    "SSE event received",
+                    metadata: [
+                        "type": "\(event.event ?? "message")",
+                        "id": "\(event.id ?? "none")",
+                    ]
+                )
+
+                // An empty `id` resets the last event ID.
+                if let eventID = event.id {
+                    onEventID(eventID)
+                    logger.debug("Stored event ID for resumability", metadata: ["eventID": "\(eventID)"])
+                }
+
+                if let retry = event.retry {
+                    onRetry(retry)
+                    logger.debug("SSE retry interval updated", metadata: ["retryMs": "\(retry)"])
+                }
+
+                if !event.data.isEmpty, let data = event.data.data(using: .utf8) {
+                    hadDataEvent = true
+                    var delivered: String?
+                    if responseID != nil || onResponse != nil,
+                        case .response(let id) = JSONRPCMessageKind(data: data)
+                    {
+                        onResponse?(id)
+                        delivered = id
+                    }
+                    messageContinuation.yield(data)
+                    if let responseID, delivered == responseID {
+                        stream.cancel()
+                        break
+                    }
+                }
             }
+        } catch is ServerSentEventParser.LineTooLong {
+            throw MCPError.internalError(Self.sseLineTooLong)
+        } catch is ServerSentEventParser.EventTooLong {
+            throw MCPError.internalError(Self.sseEventTooLong)
         }
 
         logger.debug("✓ SSE event stream completed", metadata: ["eventsProcessed": "\(eventCount)", "hadData": "\(hadDataEvent)"])

@@ -68,19 +68,33 @@ struct ResponseBody: AsyncSequence, Sendable {
         private struct Pending {
             var response: CheckedContinuation<URLResponse, Swift.Error>?
             let body: AsyncThrowingStream<Data, Swift.Error>.Continuation
+            var responded = false
         }
 
         private let lock = NSLock()
         private var pending: [Int: Pending] = [:]
+        /// Tasks that completed before ``start(_:body:)`` registered them, as
+        /// one cancelled first does: their error, `nil` for success.
+        private var completedEarly: [Int: Swift.Error?] = [:]
 
-        /// Starts `task` and waits for its response.
+        /// Starts `task` and waits for its response. `resumed` runs once the
+        /// task is resumed, or has failed.
         func start(
-            _ task: URLSessionDataTask, body: AsyncThrowingStream<Data, Swift.Error>.Continuation
+            _ task: URLSessionDataTask, body: AsyncThrowingStream<Data, Swift.Error>.Continuation,
+            resumed: () -> Void = {}
         ) async throws -> URLResponse {
             try await withTaskCancellationHandler {
                 try await withCheckedThrowingContinuation { continuation in
-                    lock.withLock {
+                    let early = lock.withLock { () -> Swift.Error?? in
+                        if let error = completedEarly.removeValue(forKey: task.taskIdentifier) { return error }
                         pending[task.taskIdentifier] = Pending(response: continuation, body: body)
+                        return nil
+                    }
+                    defer { resumed() }
+                    if let error = early {
+                        continuation.resume(throwing: error ?? URLError(.badServerResponse))
+                        body.finish(throwing: error ?? URLError(.badServerResponse))
+                        return
                     }
                     task.resume()
                 }
@@ -93,9 +107,21 @@ struct ResponseBody: AsyncSequence, Sendable {
             _ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
             completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
         ) {
-            let waiter = lock.withLock { () -> CheckedContinuation<URLResponse, Swift.Error>? in
-                defer { pending[dataTask.taskIdentifier]?.response = nil }
-                return pending[dataTask.taskIdentifier]?.response
+            let entry = lock.withLock { () -> Pending? in
+                guard var entry = pending[dataTask.taskIdentifier] else { return nil }
+                defer {
+                    entry.response = nil
+                    entry.responded = true
+                    pending[dataTask.taskIdentifier] = entry
+                }
+                return entry
+            }
+            let waiter = entry?.response
+            // A second response would append its body to the first one's.
+            if let entry, entry.responded {
+                completionHandler(.cancel)
+                entry.body.finish(throwing: URLError(.badServerResponse))
+                return
             }
             completionHandler(.allow)
             waiter?.resume(returning: response)
@@ -107,7 +133,14 @@ struct ResponseBody: AsyncSequence, Sendable {
         }
 
         func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Swift.Error?) {
-            guard let finished = lock.withLock({ pending.removeValue(forKey: task.taskIdentifier) }) else { return }
+            let finished = lock.withLock { () -> Pending? in
+                guard let finished = pending.removeValue(forKey: task.taskIdentifier) else {
+                    completedEarly[task.taskIdentifier] = .some(error)
+                    return nil
+                }
+                return finished
+            }
+            guard let finished else { return }
             finished.response?.resume(throwing: error ?? URLError(.badServerResponse))
             if let error {
                 finished.body.finish(throwing: error)
@@ -145,15 +178,20 @@ extension URLSession {
     func responseBody(
         for request: URLRequest, streaming: StreamingSession
     ) async throws -> (ResponseBody, URLResponse) {
+        guard streaming.lifetime.begin() else { throw MCPError.internalError("Transport not connected") }
         #if canImport(FoundationNetworking)
             let task = streaming.session.dataTask(
                 with: request.addingAdditionalHeaders(of: streaming.session.configuration))
             let (chunks, continuation) = AsyncThrowingStream<Data, Swift.Error>.makeStream()
             // A body nobody reads any more stops its task.
             continuation.onTermination = { _ in task.cancel() }
-            let response = try await streaming.delegate.start(task, body: continuation)
+            let response = try await streaming.delegate.start(
+                task, body: continuation, resumed: streaming.lifetime.end)
             return (ResponseBody(chunks: chunks, task: task), response)
         #else
+            // `bytes(for:)` creates its task after a suspension, so the
+            // session stays valid until it returns.
+            defer { streaming.lifetime.end() }
             let (bytes, response) = try await self.bytes(for: request)
             return (ResponseBody(bytes: bytes), response)
         #endif
@@ -167,6 +205,50 @@ struct StreamingSession: Sendable {
         let session: URLSession
         let delegate: StreamingSessionDelegate
     #endif
+    let lifetime = Lifetime()
+
+    /// Orders the creation of tasks against invalidation: a session
+    /// traps (swift-corelibs-foundation) or raises (Apple platforms) when a
+    /// task is created after it was invalidated.
+    final class Lifetime: @unchecked Sendable {
+        private let lock = NSLock()
+        private var invalidated = false
+        private var starting = 0
+        private var deferred: [URLSession] = []
+
+        var isInvalidated: Bool { lock.withLock { invalidated } }
+
+        /// Whether a task may be created; when it may, ``end()`` follows
+        /// once it exists and is resumed.
+        func begin() -> Bool {
+            lock.withLock {
+                guard !invalidated else { return false }
+                starting += 1
+                return true
+            }
+        }
+
+        func end() {
+            let sessions = lock.withLock { () -> [URLSession] in
+                starting -= 1
+                guard starting == 0, invalidated else { return [] }
+                defer { deferred = [] }
+                return deferred
+            }
+            for session in sessions { session.invalidateAndCancel() }
+        }
+
+        /// Invalidates `sessions` now, or once the tasks being created exist.
+        func invalidate(_ sessions: [URLSession]) {
+            let now = lock.withLock { () -> [URLSession] in
+                invalidated = true
+                guard starting > 0 else { return sessions }
+                deferred += sessions
+                return []
+            }
+            for session in now { session.invalidateAndCancel() }
+        }
+    }
 
     init(configuration: URLSessionConfiguration) {
         #if canImport(FoundationNetworking)
@@ -176,10 +258,14 @@ struct StreamingSession: Sendable {
         #endif
     }
 
-    /// Cancels the session's tasks and releases its delegate.
-    func invalidate() {
+    /// Cancels the session's tasks, and those of `others`, and releases its
+    /// delegate. Later ``URLSession/responseBody(for:streaming:)`` calls
+    /// throw.
+    func invalidate(along others: URLSession...) {
         #if canImport(FoundationNetworking)
-            session.invalidateAndCancel()
+            lifetime.invalidate(others + [session])
+        #else
+            lifetime.invalidate(others)
         #endif
     }
 }
