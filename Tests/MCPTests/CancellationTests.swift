@@ -285,6 +285,50 @@ struct CancellationTests {
         #expect(outcome == "log Request cancelled")
         await server.stop()
     }
+
+    @Test(
+        "A cancellation for a batched request that has not started yet is kept",
+        .timeLimit(.minutes(1)))
+    func testCancellationOfQueuedBatchRequest() async throws {
+        let server = Server(name: "TestServer", version: "1.0", capabilities: .init(tools: .init()))
+        let gate = BatchGate()
+        await server.withMethodHandler(CallTool.self) { params in
+            await gate.ran(params.name)
+            if params.name == "first" {
+                // The batch runs its items one after another: "second" waits for this.
+                for _ in 0..<1000 where await !gate.isOpen { try await Task.sleep(for: .milliseconds(5)) }
+            }
+            return CallTool.Result(content: [.text(text: params.name, annotations: nil, _meta: nil)])
+        }
+        let (clientEnd, serverEnd) = await InMemoryTransport.createConnectedPair()
+        try await server.start(transport: serverEnd)
+        let peer = RawPeer(clientEnd)
+        try await peer.start()
+        try await peer.initialize()
+
+        try await peer.send(
+            #"[{"jsonrpc":"2.0","id":"a","method":"tools/call","params":{"name":"first"}},{"jsonrpc":"2.0","id":"b","method":"tools/call","params":{"name":"second"}}]"#
+        )
+        for _ in 0..<1000 where await gate.names.isEmpty { try await Task.sleep(for: .milliseconds(5)) }
+        try await peer.send(
+            #"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"b"}}"#)
+        try await peer.sync("after-cancel")
+        await gate.open()
+
+        let batch = await peer.first { $0.arrayValue != nil }
+        let ids = batch?.arrayValue?.compactMap { $0.objectValue?["id"]?.stringValue }
+        #expect(ids == ["a"])
+        #expect(await gate.names == ["first"])
+        await peer.stop()
+        await server.stop()
+    }
+}
+
+private actor BatchGate {
+    private(set) var isOpen = false
+    private(set) var names: [String] = []
+    func open() { isOpen = true }
+    func ran(_ name: String) { names.append(name) }
 }
 
 /// A transport whose HTTP context lookup for one request waits until the

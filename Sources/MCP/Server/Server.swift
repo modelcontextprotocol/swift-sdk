@@ -273,6 +273,10 @@ public actor Server {
 
     /// Pending requests sent to the client, awaiting responses
     private var pendingRequests: [ID: AnyPendingRequest] = [:]
+    /// Requests to the client that `send` created but has not registered in
+    /// `pendingRequests` yet. Removing an id withdraws the request before it
+    /// is sent.
+    private var unsentRequests: Set<ID> = []
 
     /// Whether the server is initialized
     private var isInitialized = false
@@ -315,6 +319,9 @@ public actor Server {
     ///   - name: The server name.
     ///   - version: The server version.
     ///   - title: A human-readable title for display.
+    ///   - description: What the server does, for display.
+    ///   - websiteUrl: The URL of the server's website.
+    ///   - icons: Icons for display in a user interface.
     ///   - instructions: How to use the server, for the client's model.
     ///   - capabilities: The features the server provides.
     ///   - configuration: Protocol and validation settings.
@@ -389,6 +396,13 @@ public actor Server {
                     do {
                         // Attempt to decode as batch first, then as individual response, request, or notification
                         if let batch = try? decoder.decode(Server.Batch.self, from: data) {
+                            // Recorded before the task, as for a single request,
+                            // so that a cancellation arriving first is kept.
+                            // Placeholders for invalid items (no method) never
+                            // reach the cleanup in `handleRequest`.
+                            for case .request(let request) in batch.items where !request.method.isEmpty {
+                                startingRequests[request.id] = false
+                            }
                             // Off the receive loop: a batched request may wait
                             // for the client's answer to a bridged input request.
                             Task {
@@ -723,6 +737,7 @@ public actor Server {
     /// Sends one bridged request to the client. A client error fails the
     /// carrier with -32603; cancellation withdraws the request.
     private func ask<M: Method>(_ request: Request<M>) async throws -> M.Result {
+        try Task.checkCancellation()
         let task = try send(request)
         do {
             return try await withTaskCancellationHandler {
@@ -736,9 +751,12 @@ public actor Server {
     }
 
     /// Ends a bridged request whose carrier was cancelled, and tells the
-    /// client.
+    /// client. A request not sent yet is not sent at all.
     private func withdraw(_ id: ID) async {
-        guard let pending = removePendingResponse(id: id) else { return }
+        guard let pending = removePendingResponse(id: id) else {
+            unsentRequests.remove(id)
+            return
+        }
         pending.resume(throwing: CancellationError())
         try? await notify(
             CancelledNotification.message(
@@ -967,9 +985,15 @@ public actor Server {
         let requestData = try encoder.encode(request)
         let relatedRequestID = Server.currentHandlerContext?.id
 
+        unsentRequests.insert(request.id)
         let requestTask = Task<M.Result, Error> {
             try await withCheckedThrowingContinuation { continuation in
                 Task {
+                    guard self.unsentRequests.remove(request.id) != nil else {
+                        // Withdrawn before it was registered.
+                        continuation.resume(throwing: CancellationError())
+                        return
+                    }
                     // Add pending response before sending
                     self.addPendingResponse(
                         id: request.id,

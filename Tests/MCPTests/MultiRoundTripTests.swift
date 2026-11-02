@@ -640,6 +640,82 @@ struct MultiRoundTripTests {
         #expect(await calls.value == 1)
     }
 
+    @Test(
+        "A bridged call cancelled before it asks for input sends no input request",
+        .timeLimit(.minutes(1)))
+    func testBridgeCancelledBeforeAsking() async throws {
+        let (server, progress) = await makeLateAskingServer()
+        let (clientEnd, serverEnd) = await InMemoryTransport.createConnectedPair()
+        try await server.start(transport: serverEnd)
+        let peer = RawPeer(clientEnd)
+        try await peer.start()
+        try await peer.initialize(capabilities: #"{"elicitation":{}}"#)
+
+        try await peer.send(#"{"jsonrpc":"2.0","id":"call","method":"tools/call","params":{"name":"late"}}"#)
+        for _ in 0..<1000 where await progress.started == 0 { try await Task.sleep(for: .milliseconds(5)) }
+        try await peer.send(
+            #"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"call"}}"#)
+        for _ in 0..<1000 where await progress.returned == 0 { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(await progress.returned == 1)
+        try await Task.sleep(for: .milliseconds(100))
+        try await peer.sync("after-return")
+
+        let elicitation = await peer.first(within: .milliseconds(100)) {
+            $0.objectValue?["method"]?.stringValue == CreateElicitation.name
+        }
+        #expect(elicitation == nil)
+        await peer.stop()
+        await server.stop()
+    }
+
+    @Test(
+        "A bridged input request withdrawn while it is being sent is followed by notifications/cancelled",
+        .timeLimit(.minutes(1)))
+    func testBridgeWithdrawWhileSending() async throws {
+        let (server, progress) = await makeLateAskingServer()
+        let (clientEnd, serverEnd) = await InMemoryTransport.createConnectedPair()
+        try await server.start(transport: serverEnd)
+        let peer = RawPeer(clientEnd)
+        try await peer.start()
+        try await peer.initialize(capabilities: #"{"elicitation":{}}"#)
+
+        // The handler returns as the cancellation arrives, so the withdraw
+        // lands before, during or after the registration of the request.
+        let trials = 30
+        for trial in 1...trials {
+            try await peer.send(
+                #"{"jsonrpc":"2.0","id":"call-\#(trial)","method":"tools/call","params":{"name":"gated"}}"#)
+            for _ in 0..<1000 where await progress.started < trial { try await Task.sleep(for: .milliseconds(5)) }
+            async let cancel: Void = peer.send(
+                #"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"call-\#(trial)"}}"#)
+            await progress.release()
+            try await cancel
+            for _ in 0..<1000 where await progress.returned < trial { try await Task.sleep(for: .milliseconds(5)) }
+        }
+        try await Task.sleep(for: .milliseconds(100))
+        try await peer.sync("after-trials")
+
+        func unanswered() async -> [Value] {
+            let received = await peer.received
+            let withdrawn = Set(
+                received.compactMap { message -> Value? in
+                    guard message.objectValue?["method"]?.stringValue == CancelledNotification.name else { return nil }
+                    return message.objectValue?["params"]?.objectValue?["requestId"]
+                })
+            return received.compactMap { message -> Value? in
+                guard message.objectValue?["method"]?.stringValue == CreateElicitation.name,
+                    let id = message.objectValue?["id"], !withdrawn.contains(id)
+                else { return nil }
+                return id
+            }
+        }
+        for _ in 0..<400 where await !unanswered().isEmpty { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(await unanswered() == [], "input requests sent and never withdrawn")
+        #expect(await progress.returned == trials)
+        await peer.stop()
+        await server.stop()
+    }
+
     @Test("A batched call that needs bridged input does not block the connection")
     func testBatchedBridge() async throws {
         let server = await makeRoundTripServer()
@@ -676,4 +752,38 @@ private actor TokenLedger {
 private actor CancelLog {
     private(set) var ids: [ID?] = []
     func add(_ id: ID?) { ids.append(id) }
+}
+
+private actor AskProgress {
+    private(set) var started = 0
+    private(set) var returned = 0
+    private var released = 0
+    func start() { started += 1 }
+    func finish() { returned += 1 }
+    func release() { released += 1 }
+    func isReleased(_ round: Int) -> Bool { released >= round }
+}
+
+/// A server whose tools ignore cancellation and then ask for an
+/// elicitation: `late` once its call is cancelled, `gated` once the test
+/// calls `release()`.
+private func makeLateAskingServer() async -> (Server, AskProgress) {
+    let progress = AskProgress()
+    let server = Server(name: "late", version: "1.0", capabilities: .init(tools: .init()))
+    await server.withMethodHandler(CallTool.self) { params in
+        if params.inputResponses != nil {
+            return .init(content: [.text(text: "answered", annotations: nil, _meta: nil)])
+        }
+        await progress.start()
+        let round = await progress.started
+        switch params.name {
+        case "late":
+            for _ in 0..<1000 where !Task.isCancelled { try? await Task.sleep(for: .milliseconds(5)) }
+        default:
+            for _ in 0..<1000 where await !progress.isReleased(round) { try? await Task.sleep(for: .microseconds(100)) }
+        }
+        await progress.finish()
+        return .inputRequired(["confirm": .elicitation(message: "Proceed?")])
+    }
+    return (server, progress)
 }
