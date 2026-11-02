@@ -42,7 +42,7 @@ jobs:
         if: matrix.xcode
         run: sudo xcode-select -s /Applications/Xcode_${{ matrix.xcode }}.app
       - name: Build, test, and run the hello example
-        run: scripts/ci/build-test.sh
+        run: scripts/ci/run-jobs.sh build-test
 
   documentation:
     name: Documentation

@@ -127,12 +127,28 @@ scripts/ci-linux.sh conformance-2026-07-28-client
 scripts/ci-linux.sh conformance --spec-version 2025-11-25 --mode client   # any script and flags
 scripts/ci-linux.sh --shell                   # a shell in the container, at /w
 scripts/ci-linux.sh --image swift:6.1-noble all       # Ubuntu 24.04
+scripts/ci-linux.sh -- swift test --filter StatelessHTTPTests   # any command, at /w
 ```
 
-The container gets a copy of the working tree, including uncommitted changes. Builds and
-package caches persist in named volumes, so reruns are incremental; results land in
-`.build/linux/<image>-<arch>/`. `--platform linux/amd64` runs x86_64 under
-emulation. `--update-baseline` and `--update-results` copy their output back into the tree.
+The container gets a copy of the working tree, including uncommitted changes. Builds persist
+in a named volume and package caches in `~/Library/Caches/mcp-swift-sdk-ci`, so reruns are
+incremental; results land in `.build/linux/<image>-<arch>/`. `--platform linux/amd64` runs
+x86_64 under emulation. `--update-baseline` and `--update-results` copy their output back into
+the tree.
+
+A fast loop for one branch at a time, for example a worktree of a stacked branch: build a
+reference volume once, then give each worktree a session of its own, seeded from it. The
+session's container stays up, so a rerun only re-syncs the tree and builds what changed:
+
+```sh
+scripts/ci-linux.sh --build-volume mcp-ci-ref-arm64 -- swift build --build-tests   # once
+scripts/ci-linux.sh --source ../wt-p5 --build-volume mcp-ci-wt-p5 --seed-from mcp-ci-ref-arm64 \
+    --session wt-p5 -- bash -c 'swift build --build-tests && swift test --skip-build --filter X'
+scripts/ci-linux.sh --stop-session wt-p5   # the volume stays, warm, for the next session
+```
+
+A volume can be attached to one running container at a time, so sessions that run in parallel
+need their own `--build-volume` (and a reference volume cannot seed while a session holds it).
 
 Conformance baselines and `interop/RESULTS.md` are shared by macOS and Linux. Jobs that the
 Linux HTTP client fails today are marked `advisory` in `scripts/ci/jobs`: on Linux they run and

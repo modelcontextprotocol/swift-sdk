@@ -245,8 +245,10 @@ summary. Add or change a job there, not in a runner.
   `swift:6.1-rhel-ubi9`, not Ubuntu (see below).
 - **Desk**: `scripts/ci/run-jobs.sh` on macOS; `scripts/ci-linux.sh <job>|all|--shell` on Linux
   through Apple's `container` (`brew install container && container system start`).
-  `scripts/ci/deps-linux.sh` installs Node, Go and uv (dnf or apt) into a derived image;
-  `/w/.build` and caches are named volumes; results go to `.build/linux/<image>-<arch>/`;
+  `scripts/ci/deps-linux.sh` installs Node, Go, uv and ps (dnf or apt) into a derived image;
+  `/w/.build` is a named volume (`--build-volume`, `--seed-from`), the package caches a
+  directory on the Mac; `--session` keeps a container up between runs, `--source` runs another
+  worktree, `-- <command>` any command; results go to `.build/linux/<image>-<arch>/`;
   `--job-timeout` (default 30 min) stops a hung job.
 
 Linux is not conformant yet, and fixing it is deferred. Baselines and `interop/RESULTS.md`

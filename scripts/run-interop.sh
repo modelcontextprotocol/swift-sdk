@@ -97,7 +97,8 @@ if ! (cd "$EXAMPLES" && verify_sha256 "$PY_CLIENT/examples.sha256" 2>/dev/null);
     while read -r _ example; do
         if ! curl -fsSL -o "$EXAMPLES/$example" "$PY_SDK_RAW/examples/snippets/servers/$example"; then
             clone="$WORK/python-sdk-$PY_SDK_COMMIT"
-            if [[ ! -d "$clone/.git" ]]; then
+            # A fetch that failed leaves a repository without a commit.
+            if ! git -C "$clone" rev-parse -q --verify HEAD >/dev/null 2>&1; then
                 rm -rf "$clone"
                 git init --quiet "$clone"
                 git -C "$clone" fetch --quiet --depth 1 \

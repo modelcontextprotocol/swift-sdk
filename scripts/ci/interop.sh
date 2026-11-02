@@ -4,6 +4,6 @@
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 
-require_tools go uv
+require_tools go uv ps
 ci_step "$(go version), $(uv --version), interop $*"
 exec "$ROOT/scripts/run-interop.sh" "$@"

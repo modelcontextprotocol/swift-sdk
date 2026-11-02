@@ -72,8 +72,9 @@ while read -r id gate script args; do
     printf '\n\033[1;35m::: %s\033[0m (scripts/ci/%s.sh %s)\n' "$id" "$script" "$args"
     start=$SECONDS
     rc=0
+    # stdin is the job list: a job reading it would end this loop.
     # shellcheck disable=SC2086 # the job file's arguments are plain words
-    ${TIMEOUT_CMD[@]+"${TIMEOUT_CMD[@]}"} "$ROOT/scripts/ci/$script.sh" $args || rc=$?
+    ${TIMEOUT_CMD[@]+"${TIMEOUT_CMD[@]}"} "$ROOT/scripts/ci/$script.sh" $args </dev/null || rc=$?
     case $rc in
         0) result=PASS ;;
         124 | 137) result=TIMEOUT ;;

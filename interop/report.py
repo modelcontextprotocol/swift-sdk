@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import json
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 SDKS = {"swift": "Swift", "go": "Go", "python": "Python"}
@@ -167,9 +167,10 @@ def table_rows(lines: list[str]) -> list[str]:
 
 
 def matches(report: list[str], expected: list[str], path: Path) -> bool:
-    got, want = table_rows(report), table_rows(expected)
-    missing = [row for row in want if row not in got]
-    unexpected = [row for row in got if row not in want]
+    # Counted, not just looked up, so a row present twice on one side differs.
+    got, want = Counter(table_rows(report)), Counter(table_rows(expected))
+    missing = list((want - got).elements())
+    unexpected = list((got - want).elements())
     if not missing and not unexpected:
         print(f"interop: matches {path}", file=sys.stderr)
         return True

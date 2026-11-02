@@ -3,7 +3,7 @@
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
-# Makes sure each named tool (node, go, uv) is available. On Linux a missing
+# Makes sure each named tool (node, go, uv, ps) is available. On Linux a missing
 # tool is installed with deps-linux.sh; elsewhere the job stops with a hint.
 require_tools() {
     local missing=() tool
@@ -12,6 +12,7 @@ require_tools() {
             node) command -v npx >/dev/null || missing+=(node) ;;
             go) command -v go >/dev/null || missing+=(go) ;;
             uv) command -v uv >/dev/null || missing+=(uv) ;;
+            ps) command -v ps >/dev/null || missing+=(ps) ;;
         esac
     done
     [[ ${#missing[@]} -eq 0 ]] && return 0
