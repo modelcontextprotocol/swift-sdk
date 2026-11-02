@@ -189,7 +189,13 @@ public actor Client {
     private var pendingRequests: [ID: AnyPendingRequest] = [:]
     // Add reusable JSON encoder/decoder
     private let encoder = JSONEncoder()
-    private let decoder = JSONDecoder()
+    /// Decodes incoming messages with `data:` URL strings kept as strings;
+    /// handlers get `.data` from their own typed decode.
+    private let decoder: JSONDecoder = {
+        let decoder = JSONDecoder()
+        decoder.userInfo[.valuePreservesStrings] = true
+        return decoder
+    }()
 
     public init(
         name: String,

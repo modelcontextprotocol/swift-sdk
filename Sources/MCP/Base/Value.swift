@@ -34,6 +34,12 @@ public enum Value: Hashable, Sendable {
         return try decoder.decode(Value.self, from: JSONEncoder().encode(value))
     }
 
+    /// The value a plain `JSONDecoder` gives for the JSON this value encodes
+    /// to: `data:` URL strings become `.data`.
+    var decodingDataURLs: Value {
+        (try? JSONDecoder().decode(Value.self, from: JSONEncoder().encode(self))) ?? self
+    }
+
     /// Returns whether the value is `null`.
     public var isNull: Bool {
         return self == .null

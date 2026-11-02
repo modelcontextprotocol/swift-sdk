@@ -56,6 +56,6 @@ extension Metadata {
     }
 
     private mutating func encodeField<T: Codable>(_ value: T?, _ key: String) {
-        fields[key] = value.flatMap { try? Value($0) }
+        fields[key] = value.flatMap { try? Value.preservingStrings($0) }
     }
 }

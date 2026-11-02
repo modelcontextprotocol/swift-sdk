@@ -88,13 +88,14 @@ public enum MCPError: Swift.Error, Sendable {
         case .resourceNotFound(let uri, _):
             return ["uri": .string(uri)]
         case .missingRequiredClientCapabilities(let capabilities, _):
-            return ["requiredCapabilities": (try? Value(capabilities)) ?? [:]]
+            return ["requiredCapabilities": (try? Value.preservingStrings(capabilities)) ?? [:]]
         case .unsupportedProtocolVersion(let supported, let requested):
             var data: [String: Value] = ["supported": .array(supported.map { .string($0) })]
             if let requested { data["requested"] = .string(requested) }
             return .object(data)
         case .urlElicitationRequired(_, let elicitations):
-            return ["elicitations": .array(elicitations.map { (try? Value($0)) ?? .null })]
+            let items = elicitations.map { (try? Value.preservingStrings($0)) ?? .null }
+            return ["elicitations": .array(items)]
         case .connectionClosed:
             return nil
         case .transportError(let error):
@@ -259,31 +260,48 @@ extension MCPError: Codable {
         let detail: (String?) -> String? = { fallback in
             fields?["detail"]?.stringValue ?? fallback
         }
+        // Without `data.detail`, the message less the text the case adds
+        // itself, so a decoded error encodes the message it was sent with.
+        let detailOrMessage: (String) -> String? = { text in
+            if message == text { return detail(nil) }
+            if message.hasPrefix(text + ": ") {
+                return detail(String(message.dropFirst(text.count + 2)))
+            }
+            return detail(message)
+        }
+        // A message equal to the case's own text for `message: nil` is `nil`.
+        let customMessage: (String) -> String? = { text in message == text ? nil : message }
+        // An application sees `.data` for a `data:` URL in `data`, as in any
+        // other decoded `Value`.
+        let serverData = data?.decodingDataURLs
 
         switch code {
         case -32700:
-            self = .parseError(detail(message))
+            self = .parseError(detailOrMessage("Parse error: Invalid JSON"))
         case -32600:
-            self = .invalidRequest(detail(message))
+            self = .invalidRequest(detailOrMessage("Invalid Request"))
         case -32601:
-            self = .methodNotFound(detail(message))
+            self = .methodNotFound(detailOrMessage("Method not found"))
         case -32602, -32002:
             if fields?["detail"] == nil, let uri = fields?["uri"]?.stringValue {
-                self = .resourceNotFound(uri: uri, message: message)
+                self = .resourceNotFound(
+                    uri: uri, message: customMessage("Resource not found: \(uri)"))
             } else if code == -32602 {
-                self = .invalidParams(detail(message))
+                self = .invalidParams(detailOrMessage("Invalid params"))
             } else {
-                self = .serverError(code: code, message: message, data: data)
+                self = .serverError(code: code, message: message, data: serverData)
             }
         case -32603:
             self = .internalError(detail(nil))
         case -32020:
-            self = .headerMismatch(detail(message))
+            self = .headerMismatch(detailOrMessage("Header mismatch"))
         case -32021:
             let required = fields?["requiredCapabilities"].flatMap {
                 try? JSONDecoder().decode(Client.Capabilities.self, from: JSONEncoder().encode($0))
             }
-            self = .missingRequiredClientCapabilities(required ?? .init(), message: message)
+            self = .missingRequiredClientCapabilities(
+                required ?? .init(),
+                message: customMessage("Missing required client capabilities"))
         case -32022:
             let supported = fields?["supported"]?.arrayValue?.compactMap(\.stringValue) ?? []
             self = .unsupportedProtocolVersion(
@@ -301,7 +319,7 @@ extension MCPError: Codable {
         default:
             // -32000 and -32001 are used by the SDK for local transport errors
             // only; on the wire they are implementation-defined server errors.
-            self = .serverError(code: code, message: message, data: data)
+            self = .serverError(code: code, message: message, data: serverData)
         }
     }
 }

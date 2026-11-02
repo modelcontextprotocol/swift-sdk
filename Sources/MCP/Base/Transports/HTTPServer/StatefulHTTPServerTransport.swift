@@ -601,7 +601,9 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
            let params = json["params"] as? [String: Any],
            let version = params["protocolVersion"] as? String
         {
-            return version
+            // The revision the session is negotiated to, but a client asking
+            // for an older one than any served keeps its own.
+            return min(version, Version.negotiate(clientRequestedVersion: version))
         }
         // For other requests, use the header
         return request.header(HTTPHeaderName.protocolVersion) ?? Version.latest

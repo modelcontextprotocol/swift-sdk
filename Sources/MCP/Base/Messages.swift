@@ -20,6 +20,10 @@ extension Value: NotRequired {
 // MARK: -
 
 /// A method that can be used to send requests and receive responses.
+///
+/// `Parameters` must encode as a JSON object. When the request carries
+/// `_meta`, the parameters are re-encoded through ``Value`` to merge it, so
+/// their numbers must fit `Int` or `Double`.
 public protocol Method: Sendable {
     /// The parameters of the method.
     associatedtype Parameters: Codable, Hashable, Sendable = Empty
@@ -91,7 +95,13 @@ public struct Request<M: Method>: Hashable, Identifiable, Codable, Sendable {
     /// Request-level metadata, sent as `params._meta`.
     ///
     /// Merged with any `_meta` the parameters encode themselves; on a key
-    /// conflict the parameters win. Decoding fills it from `params._meta`.
+    /// conflict the parameters win. Decoding fills it from `params._meta`,
+    /// so a decoded request whose parameters model `_meta` holds the same
+    /// keys twice: equality with a request built without `_meta` fails, and
+    /// a key is removed from the wire only by clearing it in both.
+    ///
+    /// When it is set, the parameters are re-encoded through ``Value``, so
+    /// an integer beyond `Int` or a decimal beyond `Double` loses precision.
     public var _meta: Metadata?
 
     init(
@@ -200,6 +210,7 @@ extension AnyRequest {
     init<T: Method>(_ request: Request<T>) throws {
         let encoder = JSONEncoder()
         let decoder = JSONDecoder()
+        decoder.userInfo[.valuePreservesStrings] = true
 
         let data = try encoder.encode(request)
         self = try decoder.decode(AnyRequest.self, from: data)
@@ -226,7 +237,8 @@ final class TypedRequestHandler<M: Method>: RequestHandlerBox, @unchecked Sendab
         let encoder = JSONEncoder()
         let decoder = JSONDecoder()
 
-        // Create a concrete request from the type-erased one
+        // Create a concrete request from the type-erased one; here `data:`
+        // URL strings in `Value` fields become `.data`.
         let data = try encoder.encode(request)
         let request = try decoder.decode(Request<M>.self, from: data)
 
@@ -236,9 +248,7 @@ final class TypedRequestHandler<M: Method>: RequestHandlerBox, @unchecked Sendab
         // Convert result to AnyMethod response
         switch response.result {
         case .success(let result):
-            let resultData = try encoder.encode(result)
-            let resultValue = try decoder.decode(Value.self, from: resultData)
-            return Response(id: response.id, result: resultValue)
+            return Response(id: response.id, result: try Value.preservingStrings(result))
         case .failure(let error):
             return Response(id: response.id, error: error)
         }
@@ -321,11 +331,9 @@ extension AnyResponse {
     init<T: Method>(_ response: Response<T>) throws {
         switch response.result {
         case .success(let result):
-            let data = try JSONEncoder().encode(result)
-            let resultValue = try JSONDecoder().decode(Value.self, from: data)
             self = Response<AnyMethod>(
                 id: response.id,
-                result: .success(resultValue)
+                result: .success(try Value.preservingStrings(result))
             )
         case .failure(let error):
             self = Response<AnyMethod>(
@@ -371,7 +379,13 @@ public struct Message<N: Notification>: Hashable, Codable, Sendable {
     /// Notification-level metadata, sent as `params._meta`.
     ///
     /// Merged with any `_meta` the parameters encode themselves; on a key
-    /// conflict the parameters win. Decoding fills it from `params._meta`.
+    /// conflict the parameters win. Decoding fills it from `params._meta`,
+    /// so a decoded notification whose parameters model `_meta` holds the
+    /// same keys twice: equality with a message built without `_meta` fails,
+    /// and a key is removed from the wire only by clearing it in both.
+    ///
+    /// When it is set, the parameters are re-encoded through ``Value``, so
+    /// an integer beyond `Int` or a decimal beyond `Double` loses precision.
     public var _meta: Metadata?
 
     public init(method: String, params: N.Parameters, _meta: Metadata? = nil) {

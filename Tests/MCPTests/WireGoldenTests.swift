@@ -81,6 +81,94 @@ struct WireGoldenTests {
     }
 }
 
+@Suite("Data URL String Tests")
+struct DataURLStringTests {
+    /// The last message the server sent, parsed without turning `data:` URLs into data.
+    private func lastSent(_ wire: WireExchange) async throws -> Any {
+        let data = try #require(await wire.transport.sentData.last)
+        return try JSONSerialization.jsonObject(with: data)
+    }
+
+    @Test("A typed string that is a data: URL reaches the handler and the peer as written")
+    func testServerKeepsDataURLStrings() async throws {
+        let server = Server(
+            name: "s", version: "1", capabilities: .init(resources: .init(), tools: .init()))
+        let seen = StringRecorder()
+        await server.withMethodHandler(ReadResource.self) { params in
+            await seen.record(params.uri)
+            return .init(contents: [.text("x", uri: params.uri)])
+        }
+        await server.withMethodHandler(CallTool.self) { _ in
+            .init(content: [.text("data:,hello")])
+        }
+        let wire = WireExchange(server: server)
+        try await wire.start()
+        defer { Task { await wire.stop() } }
+
+        try await wire.send(
+            #"{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"data:,abc"}}"#)
+        #expect(await seen.values == ["data:,abc"])
+
+        try await wire.send(#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"t"}}"#)
+        let reply = try #require(try await lastSent(wire) as? [String: Any])
+        let content = (reply["result"] as? [String: Any])?["content"] as? [[String: Any]]
+        #expect(content?.first?["text"] as? String == "data:,hello")
+
+        try await wire.send(
+            #"[{"jsonrpc":"2.0","id":3,"method":"resources/read","params":{"uri":"data:,batch"}}]"#)
+        #expect(await seen.values == ["data:,abc", "data:,batch"])
+    }
+
+    @Test("Value parameters still decode data: URLs as data for the handler")
+    func testHandlerValueSemantics() async throws {
+        let server = Server(name: "s", version: "1", capabilities: .init(tools: .init()))
+        let seen = ValueRecorder()
+        await server.withMethodHandler(CallTool.self) { params in
+            await seen.record(params.arguments?["blob"])
+            return .init(content: [])
+        }
+        let wire = WireExchange(server: server)
+        try await wire.start()
+        defer { Task { await wire.stop() } }
+
+        try await wire.send(
+            #"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"t","arguments":{"blob":"data:,x"}}}"#
+        )
+        #expect(await seen.value == .data(mimeType: "text/plain", Data("x".utf8)))
+    }
+
+    @Test("The client reads a data: URL text block as sent")
+    func testClientKeepsDataURLStrings() async throws {
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+        let server = Server(name: "s", version: "1", capabilities: .init(tools: .init()))
+        await server.withMethodHandler(CallTool.self) { _ in
+            .init(content: [.text("data:,hello")], structuredContent: .string("data:,hi"))
+        }
+        try await server.start(transport: serverTransport)
+        let client = Client(name: "c", version: "1")
+        defer { Task { await client.disconnect(); await server.stop() } }
+        _ = try await client.connect(transport: clientTransport)
+
+        let result = try await client.send(CallTool.request(.init(name: "t"))).value
+        guard case .text(let text, _, _) = result.content.first else {
+            Issue.record("Expected a text block, got \(result.content)")
+            return
+        }
+        #expect(text == "data:,hello")
+        #expect(result.structuredContent == .data(mimeType: "text/plain", Data("hi".utf8)))
+    }
+}
+
+private actor StringRecorder {
+    var values: [String] = []
+    func record(_ value: String) { values.append(value) }
+}
+
+private actor ValueRecorder {
+    var value: Value?
+    func record(_ value: Value?) { self.value = value }
+}
+
 private actor MetaRecorder {
     var meta: Metadata?
     func record(_ meta: Metadata?) { self.meta = meta }

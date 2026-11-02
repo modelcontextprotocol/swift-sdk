@@ -157,7 +157,13 @@ public actor Server {
         e.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         return e
     }()
-    private let decoder = JSONDecoder()
+    /// Decodes incoming messages with `data:` URL strings kept as strings;
+    /// handlers get `.data` from their own typed decode.
+    private let decoder: JSONDecoder = {
+        let decoder = JSONDecoder()
+        decoder.userInfo[.valuePreservesStrings] = true
+        return decoder
+    }()
 
     /// The server name
     public nonisolated var name: String { serverInfo.name }
@@ -1080,6 +1086,7 @@ extension Server.Batch: Codable {
 
         let encoder = JSONEncoder()
         let decoder = JSONDecoder()
+        decoder.userInfo[.valuePreservesStrings] = true
 
         var items: [Item] = []
         for item in try container.decode([Value].self) {

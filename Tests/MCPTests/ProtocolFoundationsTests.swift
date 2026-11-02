@@ -29,7 +29,7 @@ struct MCPErrorWireTests {
         #expect((object["data"] as? [String: Any])?["uri"] as? String == "test://missing")
 
         let decoded = try decode(MCPError.self, object)
-        #expect(decoded == .resourceNotFound(uri: "test://missing", message: object["message"] as? String))
+        #expect(decoded == .resourceNotFound(uri: "test://missing"))
     }
 
     @Test("Legacy -32002 with data.uri decodes as resource not found")
@@ -105,6 +105,63 @@ struct MCPErrorWireTests {
             message: "Sign in",
             elicitations: [.init(elicitationId: "e1", url: "https://example.com", message: "m")])
         #expect(try decode(MCPError.self, json(error)) == error)
+    }
+
+    @Test(
+        "Errors round-trip with and without a detail",
+        arguments: [
+            MCPError.parseError(nil), .parseError("x"), .invalidRequest(nil), .invalidRequest("x"),
+            .methodNotFound(nil), .methodNotFound("x"), .invalidParams(nil), .invalidParams("x"),
+            .headerMismatch(nil), .headerMismatch("x"), .resourceNotFound(uri: "a://b"),
+            .resourceNotFound(uri: "a://b", message: "Gone"),
+            .missingRequiredClientCapabilities(.init(sampling: .init())),
+            .missingRequiredClientCapabilities(.init(), message: "Needs sampling"),
+        ])
+    func testRoundTrip(error: MCPError) throws {
+        let decoded = try decode(MCPError.self, json(error))
+        #expect(decoded == error)
+        #expect(decoded.errorDescription == error.errorDescription)
+    }
+
+    @Test("A peer message without data.detail is not repeated in the description")
+    func testPeerMessageWithoutDetail() throws {
+        let bare = try decode(MCPError.self, ["code": -32601, "message": "Method not found"])
+        #expect(bare == .methodNotFound(nil))
+
+        let prefixed = try decode(MCPError.self, ["code": -32601, "message": "Method not found: x/y"])
+        #expect(prefixed == .methodNotFound("x/y"))
+        #expect(prefixed.errorDescription == "Method not found: x/y")
+
+        let custom = try decode(MCPError.self, ["code": -32601, "message": "Unknown method x/y"])
+        #expect(custom == .methodNotFound("Unknown method x/y"))
+    }
+
+    @Test("Error data sends data: URL strings as given")
+    func testErrorDataKeepsDataURLStrings() throws {
+        let uri = "data:,abc"
+        let missing = MCPError.missingRequiredClientCapabilities(
+            .init(experimental: ["x": .string(uri)]))
+        let required = try #require(
+            (json(missing)["data"] as? [String: Any])?["requiredCapabilities"] as? [String: Any])
+        #expect((required["experimental"] as? [String: Any])?["x"] as? String == uri)
+
+        let elicitation = MCPError.urlElicitationRequired(
+            message: "m", elicitations: [.init(elicitationId: "e", url: uri, message: "m")])
+        let items = try #require(
+            (json(elicitation)["data"] as? [String: Any])?["elicitations"] as? [[String: Any]])
+        #expect(items.first?["url"] as? String == uri)
+    }
+
+    @Test("Server error data from a message decoder still holds data: URLs as data")
+    func testServerErrorDataURL() throws {
+        let decoder = JSONDecoder()
+        decoder.userInfo[.valuePreservesStrings] = true
+        let error = try decoder.decode(
+            MCPError.self,
+            from: Data(#"{"code":-32010,"message":"m","data":{"u":"data:,hi"}}"#.utf8))
+        #expect(
+            error == .serverError(
+                code: -32010, message: "m", data: ["u": .data(mimeType: "text/plain", Data("hi".utf8))]))
     }
 }
 
@@ -186,6 +243,27 @@ struct EnvelopeMetaTests {
         #expect((callParams["arguments"] as? [String: Any])?["image"] as? String == base64)
     }
 
+    @Test("Type-erased requests and responses keep data: URL strings")
+    func testTypeErasedHopsKeepDataURLStrings() throws {
+        let uri = "data:,abc"
+        let request = try AnyRequest(ReadResource.request(.init(uri: uri)))
+        #expect((try json(request)["params"] as? [String: Any])?["uri"] as? String == uri)
+
+        let response = try AnyResponse(
+            CallTool.response(id: 1, result: .init(content: [.text("data:,hello")])))
+        let content = (try json(response)["result"] as? [String: Any])?["content"] as? [[String: Any]]
+        #expect(content?.first?["text"] as? String == "data:,hello")
+    }
+
+    @Test("A Value result still decodes data: URLs as data for the caller")
+    func testPendingValueResult() async throws {
+        let result: Value = try await withCheckedThrowingContinuation { continuation in
+            AnyPendingRequest(PendingRequest<Value>(continuation: continuation))
+                .resume(returning: Value.object(["u": .string("data:,hi")]))
+        }
+        #expect(result == ["u": .data(mimeType: "text/plain", Data("hi".utf8))])
+    }
+
     @Test("Typed _meta accessors")
     func testMetaAccessors() throws {
         var meta = Metadata()
@@ -199,6 +277,10 @@ struct EnvelopeMetaTests {
         #expect(decoded.clientInfo?.name == "c")
         #expect(decoded.serverInfo?.version == "2")
         #expect(decoded.logLevel == .error)
+
+        meta.clientInfo = Client.Info(name: "c", version: "1", icons: [Icon(src: "data:,abc")])
+        let info = try #require(json(meta)[MetaKey.clientInfo] as? [String: Any])
+        #expect((info["icons"] as? [[String: Any]])?.first?["src"] as? String == "data:,abc")
 
         meta.clientInfo = nil
         #expect(meta[MetaKey.clientInfo] == nil)
