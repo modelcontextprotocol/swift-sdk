@@ -159,11 +159,12 @@ public enum OAuthAuthorizationError: LocalizedError {
     case authorizationServerNotConfigured
 
     /// The assertion of a ``OAuthConfiguration/GrantType/jwtBearer`` request is
-    /// for another audience than the discovered authorization server.
+    /// for another audience than the discovered authorization server, or is
+    /// not a JWT with an `aud` claim.
     ///
     /// - Parameters:
     ///   - expected: The issuer and the token endpoint of the authorization server.
-    ///   - actual: The `aud` claim of the assertion.
+    ///   - actual: The `aud` claim of the assertion; empty when it has none.
     case assertionAudienceMismatch(expected: [String], actual: [String])
 
     public var errorDescription: String? {

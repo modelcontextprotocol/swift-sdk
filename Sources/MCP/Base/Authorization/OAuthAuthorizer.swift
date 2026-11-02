@@ -174,6 +174,8 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
     private var _refreshedTokenValue: String?
     private var _completedChallenges = 0
     private var _lastChallengeError: (any Error)?
+    private var _storedTokenLifetime: (value: String, seconds: TimeInterval)?
+    private var _proactivelyRenewedToken: String?
 
     private var configuration: OAuthConfiguration {
         get { stateLock.withLock { _configuration } }
@@ -235,6 +237,17 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
             _completedChallenges += 1
             _lastChallengeError = error
         }
+    }
+    /// The `expires_in` of the token this authorizer stored last.
+    private var storedTokenLifetime: (value: String, seconds: TimeInterval)? {
+        get { stateLock.withLock { _storedTokenLifetime } }
+        set { stateLock.withLock { _storedTokenLifetime = newValue } }
+    }
+    /// The access token `prepareAuthorization` last tried to replace. It is
+    /// tried once: a failed renewal is left to the 401 path.
+    private var proactivelyRenewedToken: String? {
+        get { stateLock.withLock { _proactivelyRenewedToken } }
+        set { stateLock.withLock { _proactivelyRenewedToken = newValue } }
     }
 
     private let tokenStorage: TokenStorage
@@ -591,14 +604,10 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
 
     public func prepareAuthorization(for endpoint: URL, session: URLSession) async throws {
         guard configuration.proactiveRefreshWindowSeconds > 0 else { return }
-        guard let token = tokenStorage.load(),
-            token.isExpired(skewSeconds: configuration.proactiveRefreshWindowSeconds)
-        else { return }
+        guard let token = tokenStorage.load(), isDueForRenewal(token) else { return }
         try await gate.run {
             // Read again: a refresh may have run while this one waited.
-            guard let token = tokenStorage.load(),
-                token.isExpired(skewSeconds: configuration.proactiveRefreshWindowSeconds)
-            else { return }
+            guard let token = tokenStorage.load(), isDueForRenewal(token) else { return }
             guard let asMeta = authorizationServerMetadata, asMeta.tokenEndpoint != nil else { return }
             guard let refreshToken = token.refreshToken else {
                 // Grants without user interaction get a new token before
@@ -606,6 +615,7 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
                 guard configuration.grantType == .jwtBearer || configuration.grantType == .clientCredentials,
                     let metadata = protectedResourceMetadata
                 else { return }
+                proactivelyRenewedToken = token.value
                 try? await acquireToken(
                     endpoint: endpoint, metadata: metadata,
                     requestedScopes: token.scopes.isEmpty ? nil : token.scopes, session: session)
@@ -620,6 +630,7 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
             }
 
             let requestedScopes = token.scopes.isEmpty ? nil : token.scopes
+            proactivelyRenewedToken = token.value
             _ = try? await refreshAccessToken(
                 token,
                 refreshToken: refreshToken,
@@ -629,6 +640,24 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
                 session: session
             )
         }
+    }
+
+    /// Whether `prepareAuthorization` replaces `token`: it expires within
+    /// `proactiveRefreshWindowSeconds`, and it was not tried already. For a
+    /// token this authorizer stored with a lifetime shorter than the window,
+    /// the window shrinks to half the time the token is sent (until
+    /// ``OAuthTokenExpirySkew/defaultSeconds`` before it expires), so it is
+    /// not replaced on every request; a token that is never sent is left to
+    /// the 401 path.
+    private func isDueForRenewal(_ token: OAuthAccessToken) -> Bool {
+        guard token.value != proactivelyRenewedToken else { return false }
+        var window = configuration.proactiveRefreshWindowSeconds
+        if let stored = storedTokenLifetime, stored.value == token.value, stored.seconds < window {
+            let skew = OAuthTokenExpirySkew.defaultSeconds
+            guard stored.seconds > skew else { return false }
+            window = (stored.seconds + skew) / 2
+        }
+        return token.isExpired(skewSeconds: window)
     }
 
     // MARK: - Discovery
@@ -846,8 +875,10 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
                 audience: audience, resource: resource, tokenEndpoint: tokenEndpoint,
                 requestedScopes: requestedScopes),
             session)
-        // A server the MCP server chose gets only an assertion meant for it.
-        if !pinned, let claimed = Self.audiences(of: assertion) {
+        // A server the MCP server chose gets only an assertion meant for it,
+        // which it can tell only from a readable `aud`.
+        if !pinned {
+            let claimed = Self.audiences(of: assertion) ?? []
             let expected = [audience.absoluteString, tokenEndpoint.absoluteString]
             guard claimed.contains(where: { claim in expected.contains { OAuthIssuer.matches(claim, $0) } }) else {
                 throw OAuthAuthorizationError.assertionAudienceMismatch(expected: expected, actual: claimed)
@@ -870,14 +901,19 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
         storeTokenResponse(decoded, requestedScopes: requestedScopes)
     }
 
-    /// The `aud` claim of a JWT, or `nil` when `token` is not a JWT with one.
+    /// The `aud` claim of a JWT (the strings of an array), or `nil` when
+    /// `token` is not a JWT with one. A padded payload is read too.
     static func audiences(of token: String) -> [String]? {
         let parts = token.split(separator: ".", omittingEmptySubsequences: false)
-        guard parts.count == 3, let payload = Data(base64URLEncoded: String(parts[1])),
+        guard parts.count == 3 else { return nil }
+        var encoded = String(parts[1])
+        while encoded.hasSuffix("=") { encoded.removeLast() }
+        guard let payload = Data(base64URLEncoded: encoded),
             let claims = try? JSONSerialization.jsonObject(with: payload) as? [String: Any]
         else { return nil }
         if let single = claims["aud"] as? String { return [single] }
-        return claims["aud"] as? [String]
+        let strings = (claims["aud"] as? [Any])?.compactMap { $0 as? String } ?? []
+        return strings.isEmpty ? nil : strings
     }
 
     private func acquireTokenViaClientCredentials(
@@ -1101,6 +1137,7 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
             scopeSet = requestedScopes ?? []
         }
         let expiresAt = decoded.expiresIn.map { Date().addingTimeInterval(TimeInterval($0)) }
+        storedTokenLifetime = decoded.expiresIn.map { (decoded.accessToken, TimeInterval($0)) }
         tokenStorage.save(OAuthAccessToken(
             value: decoded.accessToken,
             tokenType: OAuthTokenType.bearer,

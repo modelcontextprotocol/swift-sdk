@@ -55,12 +55,22 @@ private func json(_ url: URL, _ status: Int, _ object: [String: Any], headers: [
 private func jwtBearerAuthorizer(
     _ configuration: OAuthConfiguration,
     discovery: MockDiscoveryClient = MockDiscoveryClient(),
-    tokenClient: MockTokenClient = MockTokenClient(),
-    registrar: MockClientRegistrar = MockClientRegistrar()
+    tokenClient: any OAuthTokenRequesting = MockTokenClient(),
+    registrar: MockClientRegistrar = MockClientRegistrar(),
+    storage: TokenStorage = InMemoryTokenStorage()
 ) -> OAuthAuthorizer {
     OAuthAuthorizer(
-        configuration: configuration, urlValidator: MockURLValidator(), discoveryClient: discovery,
-        tokenEndpointClient: tokenClient, clientRegistrar: registrar, authCodeFlow: MockAuthCodeFlow())
+        configuration: configuration, tokenStorage: storage, urlValidator: MockURLValidator(),
+        discoveryClient: discovery, tokenEndpointClient: tokenClient, clientRegistrar: registrar,
+        authCodeFlow: MockAuthCodeFlow())
+}
+
+/// `token` as if it had been stored earlier: it expires in `seconds`.
+private func aged(_ token: OAuthAccessToken, expiringIn seconds: TimeInterval) -> OAuthAccessToken {
+    OAuthAccessToken(
+        value: token.value, tokenType: token.tokenType, expiresAt: Date().addingTimeInterval(seconds),
+        scopes: token.scopes, authorizationServer: token.authorizationServer, refreshToken: token.refreshToken,
+        clientID: token.clientID)
 }
 
 @Suite("OAuth jwt-bearer grant")
@@ -70,12 +80,13 @@ struct OAuthJWTBearerGrantTests {
         let contexts = Recorder<OAuthConfiguration.AssertionContext>()
         let tokenClient = MockTokenClient()
         let registrar = MockClientRegistrar()
+        let assertion = jwt(audience: "https://auth.example.com")
         let authorizer = jwtBearerAuthorizer(
             .init(
                 grantType: .jwtBearer, authentication: .none(clientID: ""),
                 assertionProvider: { context, _ in
                     await contexts.append(context)
-                    return "workload-jwt"
+                    return assertion
                 }, allowsDiscoveredAuthorizationServer: true),
             tokenClient: tokenClient, registrar: registrar)
         let headers = [
@@ -87,7 +98,7 @@ struct OAuthJWTBearerGrantTests {
 
         let parameters = try #require(tokenClient.capturedParameters)
         #expect(parameters["grant_type"] == "urn:ietf:params:oauth:grant-type:jwt-bearer")
-        #expect(parameters["assertion"] == "workload-jwt")
+        #expect(parameters["assertion"] == assertion)
         #expect(parameters["resource"] == "https://mcp.example.com/mcp")
         #expect(parameters["scope"] == "read write")
         #expect(parameters["client_assertion"] == nil)
@@ -108,10 +119,11 @@ struct OAuthJWTBearerGrantTests {
         let authorizer = jwtBearerAuthorizer(
             .init(
                 grantType: .jwtBearer, authentication: .none(clientID: ""),
+                endpointOverrides: .init(authorizationServerURL: URL(string: "https://auth.example.com")!),
                 assertionProvider: { _, _ in
                     await calls.append(1)
                     return "jwt-\(await calls.values.count)"
-                }, allowsDiscoveredAuthorizationServer: true),
+                }),
             tokenClient: tokenClient)
         for _ in 0..<2 {
             _ = try await authorizer.handleChallenge(
@@ -199,7 +211,8 @@ struct OAuthJWTBearerGrantTests {
             let authorizer = OAuthAuthorizer(
                 configuration: .init(
                     grantType: .jwtBearer, authentication: .none(clientID: ""),
-                    assertionProvider: { _, _ in "expired-jwt" }, allowsDiscoveredAuthorizationServer: true))
+                    assertionProvider: { _, _ in jwt(audience: "https://auth.example.com") },
+                    allowsDiscoveredAuthorizationServer: true))
             do {
                 _ = try await authorizer.handleChallenge(
                     statusCode: 401, headers: headers401, endpoint: endpoint, session: session)
@@ -480,10 +493,21 @@ struct OAuthJWTBearerGrantTests {
 
 /// A JWT with the given `aud`, unsigned: only the payload is read.
 private func jwt(audience: Any) -> String {
+    jwt(claims: ["aud": audience, "sub": "workload"])
+}
+
+private func jwt(claims: [String: Any]) -> String {
     func part(_ object: [String: Any]) -> String {
         (try! JSONSerialization.data(withJSONObject: object)).base64URLEncodedString()
     }
-    return "\(part(["alg": "none"])).\(part(["aud": audience, "sub": "workload"])).sig"
+    return "\(part(["alg": "none"])).\(part(claims)).sig"
+}
+
+/// `token` with its payload base64-padded, as some issuers write it.
+private func padded(_ token: String) -> String {
+    var parts = token.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
+    parts[1] += String(repeating: "=", count: (4 - parts[1].count % 4) % 4)
+    return parts.joined(separator: ".")
 }
 
 @Suite("OAuth jwt-bearer destination")
@@ -516,6 +540,13 @@ struct OAuthJWTBearerDestinationTests {
             (jwt(audience: "https://auth.example.com"), true),
             (jwt(audience: ["https://auth.example.com/token", "x"]), true),
             (jwt(audience: "https://real-as.example.com"), false),
+            (padded(jwt(audience: "https://auth.example.com")), true),
+            (padded(jwt(audience: "https://real-as.example.com")), false),
+            (jwt(audience: ["https://auth.example.com", 7]), true),
+            (jwt(audience: [7]), false),
+            (jwt(claims: ["sub": "workload"]), false),
+            ("not-a-jwt", false),
+            ("a.b.c", false),
         ] {
             let tokenClient = MockTokenClient()
             let authorizer = jwtBearerAuthorizer(
@@ -572,8 +603,29 @@ struct OAuthJWTBearerDestinationTests {
     func proactiveReacquisition() async throws {
         let calls = Recorder<Int>()
         let tokenClient = MockTokenClient()
+        let storage = InMemoryTokenStorage()
+        let authorizer = jwtBearerAuthorizer(
+            .init(
+                grantType: .jwtBearer, authentication: .none(clientID: ""),
+                endpointOverrides: .init(authorizationServerURL: URL(string: "https://auth.example.com")!),
+                assertionProvider: { _, _ in
+                    await calls.append(1)
+                    return "jwt"
+                }),
+            tokenClient: tokenClient, storage: storage)
+        #expect(try await authorizer.handleChallenge(statusCode: 401, headers: headers401, endpoint: endpoint, session: .shared))
+        storage.save(aged(try #require(storage.load()), expiringIn: 40))
+        try await authorizer.prepareAuthorization(for: endpoint, session: .shared)
+        #expect(await calls.values.count == 2)
+        #expect(tokenClient.requestCallCount == 2)
+    }
+
+    @Test("A token issued for less than the window is not replaced on every request", arguments: [30, 50])
+    func shortLivedToken(expiresIn: Int) async throws {
+        let calls = Recorder<Int>()
+        let tokenClient = MockTokenClient()
         tokenClient.tokenResponse = OAuthTokenResponse(
-            accessToken: "short", tokenType: "Bearer", expiresIn: 40, scope: nil, refreshToken: nil)
+            accessToken: "short", tokenType: "Bearer", expiresIn: expiresIn, scope: nil, refreshToken: nil)
         let authorizer = jwtBearerAuthorizer(
             .init(
                 grantType: .jwtBearer, authentication: .none(clientID: ""),
@@ -584,9 +636,36 @@ struct OAuthJWTBearerDestinationTests {
                 }),
             tokenClient: tokenClient)
         #expect(try await authorizer.handleChallenge(statusCode: 401, headers: headers401, endpoint: endpoint, session: .shared))
-        try await authorizer.prepareAuthorization(for: endpoint, session: .shared)
-        #expect(await calls.values.count == 2)
-        #expect(tokenClient.requestCallCount == 2)
+        for _ in 0..<5 {
+            try await authorizer.prepareAuthorization(for: endpoint, session: .shared)
+        }
+        #expect(await calls.values.count == 1)
+        #expect(tokenClient.requestCallCount == 1)
+    }
+
+    @Test("A failed replacement is tried once per token")
+    func failedReacquisitionTriedOnce() async throws {
+        let grant = "urn:ietf:params:oauth:grant-type:jwt-bearer"
+        let tokens = RecordingTokenClient()
+        let storage = InMemoryTokenStorage()
+        let authorizer = jwtBearerAuthorizer(
+            .init(
+                grantType: .jwtBearer, authentication: .none(clientID: ""),
+                endpointOverrides: .init(authorizationServerURL: URL(string: "https://auth.example.com")!),
+                assertionProvider: { _, _ in "jwt" }),
+            tokenClient: tokens, storage: storage)
+        #expect(try await authorizer.handleChallenge(statusCode: 401, headers: headers401, endpoint: endpoint, session: .shared))
+        let token = try #require(storage.load())
+        storage.save(
+            OAuthAccessToken(
+                value: token.value, tokenType: token.tokenType, expiresAt: Date().addingTimeInterval(40),
+                scopes: token.scopes, authorizationServer: token.authorizationServer, refreshToken: nil))
+        tokens.refusedGrants = [grant]
+        for _ in 0..<5 {
+            try await authorizer.prepareAuthorization(for: endpoint, session: .shared)
+        }
+        #expect(tokens.calls.map(\.grantType) == [grant, grant])
+        #expect(storage.load()?.value == token.value)
     }
 
     // IsolatedMockURLProtocol needs the session headers, which Linux does not pass to it.

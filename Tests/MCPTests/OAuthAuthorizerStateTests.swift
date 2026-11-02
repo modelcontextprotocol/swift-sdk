@@ -568,11 +568,11 @@ struct OAuthAuthorizerStateTests {
 
     @Test("Concurrent proactive refreshes run one refresh")
     func concurrentRefreshes() async throws {
+        let storage = InMemoryTokenStorage()
         let tokens = RecordingTokenClient()
-        tokens.expiresIn = 30
-        let authorizer = makeAuthorizer(discovery: discovery(listing: serverA), tokens: tokens)
+        let authorizer = makeAuthorizer(discovery: discovery(listing: serverA), tokens: tokens, storage: storage)
         #expect(try await challenge(authorizer))
-        tokens.expiresIn = 3600
+        storage.save(aged(try #require(storage.load()), expiringIn: 40))
         tokens.delay = .milliseconds(50)
         try await withThrowingTaskGroup(of: Void.self) { group in
             for _ in 0..<10 {
@@ -581,6 +581,61 @@ struct OAuthAuthorizerStateTests {
             try await group.waitForAll()
         }
         #expect(tokens.calls.map(\.grantType) == ["client_credentials", "refresh_token"])
+    }
+
+    @Test("A token issued for less than the window is refreshed halfway, not on every request")
+    func shortLivedTokenRefresh() async throws {
+        let storage = InMemoryTokenStorage()
+        let tokens = RecordingTokenClient()
+        tokens.expiresIn = 50
+        let authorizer = makeAuthorizer(discovery: discovery(listing: serverA), tokens: tokens, storage: storage)
+        #expect(try await challenge(authorizer))
+        for _ in 0..<5 {
+            try await authorizer.prepareAuthorization(for: endpoint, session: .shared)
+        }
+        #expect(tokens.calls.map(\.grantType) == ["client_credentials"])
+
+        // Sent until 30 s before it expires: renewed when 40 s are left.
+        storage.save(aged(try #require(storage.load()), expiringIn: 39))
+        for _ in 0..<5 {
+            try await authorizer.prepareAuthorization(for: endpoint, session: .shared)
+        }
+        #expect(tokens.calls.map(\.grantType) == ["client_credentials", "refresh_token"])
+        #expect(storage.load()?.value == "token-2")
+
+        // A token that is never sent is left to the 401 path.
+        tokens.expiresIn = 30
+        storage.save(aged(try #require(storage.load()), expiringIn: 39))
+        try await authorizer.prepareAuthorization(for: endpoint, session: .shared)
+        #expect(storage.load()?.value == "token-3")
+        for _ in 0..<5 {
+            try await authorizer.prepareAuthorization(for: endpoint, session: .shared)
+        }
+        #expect(tokens.calls.count == 3)
+    }
+
+    @Test("A failed proactive refresh is tried once per token")
+    func failedRefreshTriedOnce() async throws {
+        let storage = InMemoryTokenStorage()
+        let tokens = RecordingTokenClient()
+        let authorizer = makeAuthorizer(discovery: discovery(listing: serverA), tokens: tokens, storage: storage)
+        #expect(try await challenge(authorizer))
+        storage.save(aged(try #require(storage.load()), expiringIn: 40))
+        tokens.refusedGrants = ["refresh_token"]
+        for _ in 0..<5 {
+            try await authorizer.prepareAuthorization(for: endpoint, session: .shared)
+        }
+        #expect(tokens.calls.map(\.grantType) == ["client_credentials", "refresh_token"])
+        #expect(storage.load()?.value == "token-1")
+
+        // A new token is tried again.
+        tokens.refusedGrants = []
+        #expect(try await challenge(authorizer, sent: "Bearer token-1"))
+        let renewed = try #require(storage.load())
+        storage.save(aged(renewed, expiringIn: 40))
+        try await authorizer.prepareAuthorization(for: endpoint, session: .shared)
+        #expect(tokens.calls.last?.grantType == "refresh_token")
+        #expect(storage.load()?.value != renewed.value)
     }
 
     @Test("In-memory token storage is safe from several tasks")
@@ -602,4 +657,12 @@ struct OAuthAuthorizerStateTests {
             }
         }
     }
+}
+
+/// `token` as if it had been stored earlier: it expires in `seconds`.
+private func aged(_ token: OAuthAccessToken, expiringIn seconds: TimeInterval) -> OAuthAccessToken {
+    OAuthAccessToken(
+        value: token.value, tokenType: token.tokenType, expiresAt: Date().addingTimeInterval(seconds),
+        scopes: token.scopes, authorizationServer: token.authorizationServer, refreshToken: token.refreshToken,
+        clientID: token.clientID)
 }

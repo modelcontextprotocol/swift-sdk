@@ -245,6 +245,14 @@ public struct OAuthConfiguration: Sendable {
         public let authorizationServerURL: URL?
 
         /// Optional override for the token endpoint.
+        ///
+        /// Token requests, and with them the assertion of the
+        /// ``GrantType/jwtBearer`` grant and the client credentials, go only
+        /// here. The authorization server is still discovered from the
+        /// protected resource metadata unless ``authorizationServerURL`` is
+        /// set, and its issuer is the
+        /// ``AssertionContext/audience`` the assertion provider is asked for;
+        /// set ``authorizationServerURL`` too to fix both.
         public let tokenEndpoint: URL?
 
         /// Optional override for the resource indicator used in token requests.
@@ -424,7 +432,8 @@ public struct OAuthConfiguration: Sendable {
     /// ``OAuthAuthorizationError/authorizationServerNotConfigured`` without
     /// them. When on, the MCP server chooses where the assertion goes; an
     /// assertion whose `aud` is neither that server's issuer nor its token
-    /// endpoint is not sent.
+    /// endpoint is not sent, and neither is one that is not a JWT with an
+    /// `aud` claim.
     public let allowsDiscoveredAuthorizationServer: Bool
 
     /// Optional delegate for browser-based authorization code flows.
@@ -433,7 +442,11 @@ public struct OAuthConfiguration: Sendable {
     /// How many seconds before token expiry ``OAuthAuthorizer`` proactively refreshes a token
     /// when `prepareAuthorization(for:session:)` is called.
     ///
-    /// Set to `0` to disable proactive refresh. Defaults to 60 seconds.
+    /// Set to `0` to disable proactive refresh. Defaults to 60 seconds. A token
+    /// issued with a shorter lifetime is refreshed halfway between its issue
+    /// and ``OAuthTokenExpirySkew/defaultSeconds`` before its expiry, and one
+    /// that lives no longer than that skew is not refreshed proactively. Each
+    /// token is tried once: when the refresh fails, the next 401 recovers.
     /// Must be greater than ``OAuthTokenExpirySkew/defaultSeconds`` (30 s) to have any effect,
     /// since tokens within the default skew window are already treated as expired.
     public let proactiveRefreshWindowSeconds: TimeInterval

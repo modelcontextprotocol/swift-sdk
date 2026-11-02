@@ -2331,7 +2331,7 @@ import Testing
                         let body =
                             String(data: readRequestBody(request) ?? Data(), encoding: .utf8) ?? ""
                         if body.contains("grant_type=client_credentials") {
-                            // Initial token: expires in 300s (within 400s proactive window)
+                            // Initial token: expires in 300s; the test ages it into the window.
                             return try await MockResponses.tokenSuccess(
                                 accessToken: "initial-token",
                                 expiresIn: 300,
@@ -2351,7 +2351,6 @@ import Testing
 
                 return OAuthScenarioContext(
                     testEndpoint: testEndpoint,
-                    // proactiveRefreshWindowSeconds = 400 > expires_in = 300
                     oauthConfiguration: .init(
                         authentication: .none(clientID: "test-client"),
                         proactiveRefreshWindowSeconds: 400
