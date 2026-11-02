@@ -133,6 +133,35 @@ struct AutomaticConnectionFailureTests {
         await client.disconnect()
     }
 
+    @Test("A failing initialize after discovery is not sent again")
+    func failingInitializeIsNotRepeated() async throws {
+        let transport = ScriptedTransport()
+        let client = client()
+        let connecting = Task { try await client.connect(transport: transport) }
+        // Ends a connect that would wait for a second initialize answer.
+        let watchdog = Task {
+            try await Task.sleep(for: .seconds(2))
+            await client.disconnect()
+        }
+        defer { watchdog.cancel() }
+
+        let discover = try await transport.message(1)
+        try await transport.reply(
+            to: discover,
+            #""result":{"supportedVersions":["2025-11-25"],"capabilities":{},"resultType":"complete"}"#)
+        let initialize = try await transport.message(2)
+        #expect(initialize["method"] == "initialize")
+        try await transport.reply(to: initialize, #""error":{"code":-32000,"message":"Refused"}"#)
+
+        await #expect {
+            _ = try await connecting.value
+        } throws: { error in
+            (error as? MCPError)?.code == -32000
+        }
+        #expect(await transport.methods == ["server/discover", "initialize"])
+        await client.disconnect()
+    }
+
     @Test("A pinned revision is not retried with another on -32022")
     func pinnedRevisionIsNotRetried() async throws {
         let transport = ScriptedTransport()
@@ -313,6 +342,87 @@ struct OutgoingMessageTests {
                 #expect(await transport.sessionID == nil)
                 await transport.disconnect()
             }
+        }
+    }
+#endif
+
+#if swift(>=6.1) && !os(Linux)
+    /// Never answers `server/discover`, answers `initialize`, and records
+    /// when the `server/discover` request is stopped.
+    private final class UnansweredDiscoverProtocol: URLProtocol, @unchecked Sendable {
+        actor State {
+            private(set) var discoverStopped = false
+            func stopped() { discoverStopped = true }
+        }
+        static let state = State()
+
+        private var isDiscover = false
+
+        override class func canInit(with request: URLRequest) -> Bool { true }
+        override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+        override func startLoading() {
+            let message = (try? JSONSerialization.jsonObject(with: body())) as? [String: Any] ?? [:]
+            let method = message["method"] as? String
+            isDiscover = method == ServerDiscover.name
+            guard !isDiscover else { return }
+            var status = 202
+            var data = Data()
+            if method == Initialize.name, let id = message["id"] as? String {
+                status = 200
+                data = Data(
+                    #"{"jsonrpc":"2.0","id":"\#(id)","result":{"protocolVersion":"2025-11-25","capabilities":{},"serverInfo":{"name":"old","version":"0"}}}"#
+                        .utf8)
+            }
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: status, httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "application/json"])!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        }
+
+        override func stopLoading() {
+            guard isDiscover else { return }
+            Task { await Self.state.stopped() }
+        }
+
+        private func body() -> Data {
+            if let body = request.httpBody { return body }
+            guard let stream = request.httpBodyStream else { return Data() }
+            stream.open()
+            defer { stream.close() }
+            var data = Data()
+            var buffer = [UInt8](repeating: 0, count: 4096)
+            while stream.hasBytesAvailable {
+                let count = stream.read(&buffer, maxLength: buffer.count)
+                guard count > 0 else { break }
+                data.append(buffer, count: count)
+            }
+            return data
+        }
+    }
+
+    @Suite("Discovery timeout over HTTP")
+    struct DiscoveryTimeoutHTTPTests {
+        @Test("A timed-out server/discover closes its POST")
+        func closesTimedOutDiscover() async throws {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [UnansweredDiscoverProtocol.self]
+            let transport = HTTPClientTransport(
+                endpoint: URL(string: "http://127.0.0.1:9/mcp")!, configuration: configuration,
+                streaming: false)
+            let client = Client(
+                name: "probe", version: "1.0",
+                configuration: .init(protocolMode: .automatic, discoveryTimeout: .milliseconds(100)))
+
+            let result = try await client.connect(transport: transport)
+            #expect(result.protocolVersion == Version.v2025_11_25)
+            for _ in 0..<200 where await !UnansweredDiscoverProtocol.state.discoverStopped {
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            #expect(await UnansweredDiscoverProtocol.state.discoverStopped)
+            await client.disconnect()
         }
     }
 #endif

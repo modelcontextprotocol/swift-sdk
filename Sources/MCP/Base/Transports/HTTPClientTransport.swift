@@ -332,6 +332,14 @@ public actor HTTPClientTransport: Transport {
         try await post(message)
     }
 
+    /// Aborts the POST that carries request `id`, closing its response stream.
+    ///
+    /// At protocol 2026-07-28 this is how a request is cancelled: the server
+    /// sees the client disconnect.
+    public func cancelRequest(_ id: ID) {
+        inFlightPosts[id.description]?.cancel()
+    }
+
     private func post(_ message: OutgoingMessage) async throws {
         guard isConnected else {
             throw MCPError.internalError("Transport not connected")

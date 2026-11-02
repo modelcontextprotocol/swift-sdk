@@ -284,6 +284,12 @@ public actor Client {
     /// Connect to the server using the given transport
     @discardableResult
     public func connect(transport: any Transport) async throws -> Initialize.Result {
+        // A reconnect negotiates afresh; requests must not carry the
+        // previous connection's stateless `_meta`.
+        serverCapabilities = nil
+        negotiatedProtocolVersion = nil
+        serverInfo = nil
+        instructions = nil
         self.connection = transport
         try await self.connection?.connect()
 
@@ -784,20 +790,13 @@ public actor Client {
         while true {
             let request = ServerDiscover.request(
                 .init(), _meta: requestMeta(version: version, merging: nil))
+            // Only discovery runs inside the do: an error from the
+            // `initialize` fallback must not be handled as a discovery error.
+            let result: ServerDiscover.Result
             do {
                 let context = try send(request, markingSendFailures: true)
-                let result = try await discoverResult(
+                result = try await discoverResult(
                     context, timeout: fallback ? configuration.discoveryTimeout : nil)
-                let served =
-                    result.supportedVersions.contains(version)
-                    ? version
-                    : fallback ? result.supportedVersions.first(where: Version.stateless.contains) : nil
-                guard let served else {
-                    if fallback { return try await _initialize() }
-                    throw MCPError.unsupportedProtocolVersion(
-                        supported: result.supportedVersions, requested: version)
-                }
-                return await adopt(result, version: served)
             } catch MCPError.unsupportedProtocolVersion(let supported, let requested) {
                 if fallback, !retried, let mutual = supported.first(where: Version.stateless.contains) {
                     retried = true
@@ -826,6 +825,16 @@ public actor Client {
                     metadata: ["error": "\(error)"])
                 return try await _initialize()
             }
+            let served =
+                result.supportedVersions.contains(version)
+                ? version
+                : fallback ? result.supportedVersions.first(where: Version.stateless.contains) : nil
+            guard let served else {
+                if fallback { return try await _initialize() }
+                throw MCPError.unsupportedProtocolVersion(
+                    supported: result.supportedVersions, requested: version)
+            }
+            return await adopt(result, version: served)
         }
     }
 
@@ -833,14 +842,18 @@ public actor Client {
     private struct DiscoverTimeout: Swift.Error {}
 
     /// Awaits a `server/discover` result. After `timeout`, the request is
-    /// abandoned and ``DiscoverTimeout`` thrown.
+    /// abandoned, its HTTP POST closed, and ``DiscoverTimeout`` thrown.
     private func discoverResult(
         _ context: RequestContext<ServerDiscover.Result>, timeout: Duration?
     ) async throws -> ServerDiscover.Result {
         guard let timeout else { return try await context.value }
         let timer = Task {
-            guard (try? await Task.sleep(for: timeout)) != nil else { return }
-            removePendingRequest(id: context.requestID)?.resume(throwing: DiscoverTimeout())
+            guard (try? await Task.sleep(for: timeout)) != nil,
+                let pending = removePendingRequest(id: context.requestID)
+            else { return }
+            // No notifications/cancelled: the server may not know the request.
+            await (connection as? HTTPClientTransport)?.cancelRequest(context.requestID)
+            pending.resume(throwing: DiscoverTimeout())
         }
         defer { timer.cancel() }
         return try await context.value

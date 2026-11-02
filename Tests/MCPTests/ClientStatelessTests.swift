@@ -68,6 +68,27 @@ struct ClientStatelessTests {
         #expect(tools.first?.name == "false|probe|-")
     }
 
+    @Test("Reconnecting after a stateless connection negotiates afresh")
+    func testReconnectAfterStateless() async throws {
+        let stateless = await makeStatelessServer()
+        let (client, first) = try await connectClient(stateless, mode: .automatic)
+        #expect(first.protocolVersion == Version.v2026_07_28)
+        await client.disconnect()
+        await stateless.stop()
+
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+        let handshake = await makeStatelessServer(versions: Version.handshake)
+        try await handshake.start(transport: serverTransport)
+        defer { Task { await client.disconnect(); await handshake.stop() } }
+        let result = try await client.connect(transport: clientTransport)
+
+        #expect(result.protocolVersion == Version.v2025_11_25)
+        #expect(await !client.isStateless)
+        // Requests no longer carry the stateless _meta envelope.
+        let (tools, _) = try await client.listTools()
+        #expect(tools.first?.name == "false|probe|-")
+    }
+
     @Test("Handshake mode never sends server/discover")
     func testHandshakeMode() async throws {
         let server = await makeStatelessServer()
