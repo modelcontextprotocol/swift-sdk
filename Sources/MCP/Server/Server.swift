@@ -307,6 +307,11 @@ public actor Server {
     /// ``Server/currentHandlerContext`` is set, so the hook can read the
     /// originating HTTP request. Throwing refuses the request: an
     /// ``MCPError`` is sent as is, any other error as -32600.
+    ///
+    /// Behind ``StatelessHTTPServerTransport`` it also runs before every
+    /// handshake request other than `initialize`, with `nil` client info and
+    /// empty capabilities: such a request has no session, so the
+    /// `initialize` that passed the initialize hook does not cover it.
     public typealias StatelessRequestHook =
         @Sendable (_ clientInfo: Client.Info?, _ capabilities: Client.Capabilities) async throws -> Void
 
@@ -365,10 +370,13 @@ public actor Server {
     ///   - initializeHook: An optional hook that runs when the client sends an initialize request
     ///   - statelessRequestHook: An optional hook that runs before every
     ///     stateless request (2026-07-28 and later), which never sends
-    ///     `initialize`. When `initializeHook` is set and this hook is not,
+    ///     `initialize`, and behind ``StatelessHTTPServerTransport`` before
+    ///     every handshake request other than `initialize`, which has no
+    ///     session. When `initializeHook` is set and this hook is not,
     ///     stateless requests are refused with -32022, so a gate in
     ///     `initializeHook` cannot be bypassed; clients then fall back to
-    ///     `initialize`.
+    ///     `initialize`. Behind ``StatelessHTTPServerTransport`` handshake
+    ///     requests other than `initialize` are then refused with -32600.
     public func start(
         transport: any Transport,
         initializeHook: (@Sendable (Client.Info, Client.Capabilities) async throws -> Void)? = nil,
@@ -700,8 +708,12 @@ public actor Server {
                 stateOnlyDelay = min(stateOnlyDelay * 2, MRTR.stateOnlyMaximumDelay)
             } else {
                 stateOnlyDelay = MRTR.stateOnlyInitialDelay
-                // As at 2026-07-28, whatever `strict` says.
-                try Self.checkCapabilities(requests, method: M.name, declared: context.clientCapabilities)
+                // As at 2026-07-28, whatever `strict` says. A sessionless
+                // request carries no capabilities: the client answers.
+                let sessionless = await isSessionless
+                if context.clientCapabilities != nil || !sessionless {
+                    try Self.checkCapabilities(requests, method: M.name, declared: context.clientCapabilities)
+                }
             }
             let responses = try await fulfill(requests)
             params = params.retrying(
@@ -811,8 +823,10 @@ public actor Server {
     /// List-changed and resource-updated notifications are also delivered to
     /// the matching `subscriptions/listen` streams. At 2026-07-28 they are
     /// sent only there: without an `initialize` session they are not sent on
-    /// the connection. Every caller's matching stream receives them; use
-    /// ``notify(_:to:)`` to reach only some callers.
+    /// the connection. Behind ``StatelessHTTPServerTransport`` a handler of a
+    /// handshake request sends them on its request's stream. Every caller's
+    /// matching stream receives them; use ``notify(_:to:)`` to reach only
+    /// some callers.
     public func notify<N: Notification>(_ notification: Message<N>) async throws {
         try await notify(notification, matching: nil)
     }
@@ -840,7 +854,11 @@ public actor Server {
         let notificationData = try encoder.encode(notification)
         if let event = SubscriptionEvent(notification) {
             publish(event, to: recipients)
-            guard isInitialized else { return }
+            // A handshake handler behind a sessionless transport sends it
+            // on its own request's stream.
+            let sessionlessHandshake =
+                isSessionless && Server.currentHandlerContext.map { !$0.isStateless } == true
+            guard isInitialized || sessionlessHandshake else { return }
         }
         try await connection.send(
             notificationData, relatedRequestID: Server.currentHandlerContext?.id)
@@ -1412,6 +1430,16 @@ public actor Server {
             {
                 return try await reject(.invalidRequest("Server is not initialized"))
             }
+            // Without a session, a request is not tied to the `initialize`
+            // that passed the initialize hook: the stateless hook gates it,
+            // and without one it is refused.
+            if isSessionless, request.method != Initialize.name, hasInitializeHook,
+                statelessRequestHook == nil
+            {
+                return try await reject(
+                    .invalidRequest(
+                        "Request refused: without a session the initialize hook cannot gate \(request.method)"))
+            }
         case .stateless(let info):
             // An initialize hook gates handshake clients; without a stateless
             // hook, stateless requests would bypass it.
@@ -1485,7 +1513,11 @@ public actor Server {
                     value, method: request.method, serverInfo: serverInfo, cacheHint: hint))
         }
 
-        let statelessHook = handlerContext.isStateless ? statelessRequestHook : nil
+        // Sessionless handshake requests, other than `initialize`, pass the
+        // same hook with no client info or capabilities.
+        let gatesRequest =
+            handlerContext.isStateless || (isSessionless && request.method != Initialize.name)
+        let statelessHook = gatesRequest ? statelessRequestHook : nil
 
         // Create a task to handle the request with cancellation support.
         // Set currentHandlerContext as a task local so handlers see it.

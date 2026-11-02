@@ -31,9 +31,9 @@ After `connect` returns, `client.negotiatedProtocolVersion`, `client.serverInfo`
 
 %include Examples/Snippets/Protocol/Lifecycle.swift lifecycle-initialize-hook
 
-The hook runs only for `initialize`. Stateless requests do not reach it; check `Server.currentHandlerContext?.clientInfo` in handlers instead.
+The hook runs only for `initialize`. Stateless requests do not reach it; pass a `statelessRequestHook` too, which runs before each of them with the client info and capabilities from its `_meta`, or check `Server.currentHandlerContext?.clientInfo` in handlers. With an initialize hook and no stateless hook, stateless requests are refused with -32022, so clients fall back to `initialize`.
 
-With `Server.Configuration.strict` set (`.strict`), the server rejects requests other than `initialize` and `ping` that arrive before `initialize`, with -32600 "Server is not initialized", and ignores notifications other than `notifications/initialized`. The default is lenient. A second `initialize` on one connection fails with -32600 "Server is already initialized". Behind a `StatelessHTTPServerTransport`, which has no connection or session, every `initialize` is answered, the server keeps no client state, and `strict` does not apply to handshake requests.
+With `Server.Configuration.strict` set (`.strict`), the server rejects requests other than `initialize` and `ping` that arrive before `initialize`, with -32600 "Server is not initialized", and ignores notifications other than `notifications/initialized`. The default is lenient. A second `initialize` on one connection fails with -32600 "Server is already initialized". Behind a `StatelessHTTPServerTransport`, which has no connection or session, every `initialize` is answered, the server keeps no client state, and `strict` does not apply to handshake requests. No session ties a later request to the `initialize` that passed the hook, so there the `statelessRequestHook` runs before every other handshake request, with no client info and empty capabilities; with an initialize hook and no stateless hook, those requests are refused with -32600.
 
 A server never answers a notification. A message it cannot read gets a parse error (-32700) with `"id": null`, and an empty batch gets -32600 with `"id": null`.
 

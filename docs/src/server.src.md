@@ -444,7 +444,7 @@ At 2026-07-28 the SDK answers -32601 for the methods of an undeclared capability
 
 ### The initialize hook
 
-The hook runs when a handshake client sends `initialize`, with its `Client.Info` and `Client.Capabilities`, before the server answers. Throw from it to refuse the client: the error goes back as the `initialize` error. Stateless clients never send `initialize`, so the hook never runs for them; check stateless clients in the handlers, from the handler context, or in the HTTP layer.
+The hook runs when a handshake client sends `initialize`, with its `Client.Info` and `Client.Capabilities`, before the server answers. Throw from it to refuse the client: the error goes back as the `initialize` error. Stateless clients never send `initialize`, so the hook never runs for them; check stateless clients with the `statelessRequestHook` of `start(transport:initializeHook:statelessRequestHook:)`, in the handlers, from the handler context, or in the HTTP layer. Without a stateless hook, a server with an initialize hook refuses stateless requests with -32022, and behind a `StatelessHTTPServerTransport`, where no session ties a request to its `initialize`, handshake requests other than `initialize` with -32600.
 
 The `statelessRequestHook` of `start` runs before each stateless request, with `Server.currentHandlerContext` set, so it can read the HTTP request, and gets `nil` client info when the request carries none. Throw from it to refuse the request: an `MCPError` goes back as is, any other error as -32600.
 

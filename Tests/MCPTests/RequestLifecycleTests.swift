@@ -355,6 +355,57 @@ struct ServerToClientLimitTests {
         await client.disconnect()
     }
 
+    @Test("A cancelled handler keeps its slot until it returns")
+    func cancelledHandlerKeepsSlot() async throws {
+        var configuration = Client.Configuration.handshake
+        configuration.maxConcurrentServerRequests = 1
+        let (client, serverEnd, incoming) = try await connected(configuration: configuration)
+        var replies = incoming
+        let running = Counter()
+        let (release, open) = AsyncStream<Void>.makeStream()
+        await client.withRootsHandler {
+            await running.increment()
+            // Ignores cancellation until released.
+            await Task { for await _ in release { break } }.value
+            return []
+        }
+        try await serverEnd.send(Data(#"{"jsonrpc":"2.0","id":"a","method":"roots/list"}"#.utf8))
+        #expect(await eventually { await running.value == 1 })
+        try await serverEnd.send(
+            Data(#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"a"}}"#.utf8))
+        try await serverEnd.send(Data(#"{"jsonrpc":"2.0","id":"b","method":"roots/list"}"#.utf8))
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(await running.value == 1)
+        open.yield()
+        open.yield()
+        let answered = try JSONDecoder().decode(Value.self, from: try #require(await replies.next()))
+        #expect(answered.objectValue?["id"] == "b")
+        #expect(await running.value == 2)
+        await client.disconnect()
+    }
+
+    @Test("A ping is answered while every handler slot is busy")
+    func pingWhileBusy() async throws {
+        var configuration = Client.Configuration.handshake
+        configuration.maxConcurrentServerRequests = 1
+        let (client, serverEnd, incoming) = try await connected(configuration: configuration)
+        var replies = incoming
+        let (release, open) = AsyncStream<Void>.makeStream()
+        await client.withRootsHandler {
+            for await _ in release { break }
+            return []
+        }
+        try await serverEnd.send(Data(#"{"jsonrpc":"2.0","id":"busy","method":"roots/list"}"#.utf8))
+        try await serverEnd.send(Data(#"{"jsonrpc":"2.0","id":"p","method":"ping"}"#.utf8))
+        let pong = try JSONDecoder().decode(Value.self, from: try #require(await replies.next()))
+        #expect(pong.objectValue?["id"] == "p")
+        #expect(pong.objectValue?["result"] == [:])
+        open.yield()
+        let answered = try JSONDecoder().decode(Value.self, from: try #require(await replies.next()))
+        #expect(answered.objectValue?["id"] == "busy")
+        await client.disconnect()
+    }
+
     @Test("A request whose id is already running is refused")
     func duplicateID() async throws {
         let (client, serverEnd, incoming) = try await connected()
@@ -578,5 +629,89 @@ struct ServerReplyTests {
             break
         }
         await server.stop()
+    }
+
+    /// A POST to a sessionless transport at a handshake revision, without
+    /// `_meta` version.
+    private func sessionlessPost(
+        _ transport: StatelessHTTPServerTransport, _ body: String, version: String? = "2025-11-25",
+        accept: String = "application/json", headers extra: [String: String] = [:]
+    ) async -> HTTPResponse {
+        var headers = ["Content-Type": "application/json", "Accept": accept]
+        if let version { headers[HTTPHeaderName.protocolVersion] = version }
+        headers.merge(extra) { $1 }
+        return await transport.handleRequest(HTTPRequest(method: "POST", headers: headers, body: Data(body.utf8)))
+    }
+
+    /// The JSON-RPC message of an SSE event.
+    private func message(_ event: Data) throws -> Value {
+        let text = String(decoding: event, as: UTF8.self)
+        let data = text.split(separator: "\n").filter { $0.hasPrefix("data:") }
+            .map { $0.dropFirst(5).drop(while: { $0 == " " }) }.joined(separator: "\n")
+        return try JSONDecoder().decode(Value.self, from: Data(data.utf8))
+    }
+
+    @Test("Behind the stateless HTTP transport the round-trip bridge sends input requests")
+    func sessionlessBridge() async throws {
+        let server = await makeServer()
+        let transport = StatelessHTTPServerTransport()
+        try await server.start(transport: transport)
+        defer { Task { await server.stop() } }
+
+        let response = await sessionlessPost(
+            transport, #"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"confirm"}}"#,
+            accept: "application/json, text/event-stream")
+        guard case .stream(let events, _) = response else {
+            Issue.record("expected an SSE stream, got \(response.statusCode): \(response.bodyData.map { String(decoding: $0, as: UTF8.self) } ?? "")")
+            return
+        }
+        var iterator = events.makeAsyncIterator()
+        let elicitation = try message(try #require(await iterator.next()))
+        #expect(elicitation.objectValue?["method"] == "elicitation/create")
+        let id = try #require(elicitation.objectValue?["id"])
+        let answer: Value = ["jsonrpc": "2.0", "id": id, "result": ["action": "accept", "content": [:]]]
+        let accepted = await sessionlessPost(
+            transport, String(decoding: try JSONEncoder().encode(answer), as: UTF8.self))
+        #expect(accepted.statusCode == 202)
+        let result = try message(try #require(await iterator.next()))
+        #expect(result.objectValue?["id"] == 1)
+        let content = result.objectValue?["result"]?.objectValue?["content"]?.arrayValue
+        #expect(content?.first?.objectValue?["text"] == "confirmed")
+    }
+
+    @Test("Behind the stateless HTTP transport the hooks gate handshake requests")
+    func sessionlessHooks() async throws {
+        let call = #"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"era"}}"#
+        let initialize =
+            #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"c","version":"1"}}}"#
+        func error(_ response: HTTPResponse) throws -> Int? {
+            let body = try JSONDecoder().decode(Value.self, from: try #require(response.bodyData))
+            return body.objectValue?["error"]?.objectValue?["code"]?.intValue
+        }
+
+        // An initialize hook alone cannot gate requests without a session.
+        let gated = await makeServer()
+        let gatedTransport = StatelessHTTPServerTransport()
+        try await gated.start(transport: gatedTransport, initializeHook: { _, _ in })
+        #expect(try error(await sessionlessPost(gatedTransport, initialize, version: nil)) == nil)
+        #expect(try error(await sessionlessPost(gatedTransport, call)) == -32600)
+        await gated.stop()
+
+        // The stateless hook runs before each of them, with the HTTP request.
+        let hooked = await makeServer()
+        let hookedTransport = StatelessHTTPServerTransport()
+        try await hooked.start(
+            transport: hookedTransport, initializeHook: { _, _ in },
+            statelessRequestHook: { clientInfo, _ in
+                #expect(clientInfo == nil)
+                guard Server.currentHandlerContext?.httpContext?.header("Authorization") == "Bearer ok" else {
+                    throw MCPError.invalidRequest("Not authorized")
+                }
+            })
+        #expect(try error(await sessionlessPost(hookedTransport, initialize, version: nil)) == nil)
+        #expect(try error(await sessionlessPost(hookedTransport, call)) == -32600)
+        #expect(
+            try error(await sessionlessPost(hookedTransport, call, headers: ["Authorization": "Bearer ok"])) == nil)
+        await hooked.stop()
     }
 }

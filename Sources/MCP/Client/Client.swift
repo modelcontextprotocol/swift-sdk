@@ -365,6 +365,8 @@ public actor Client {
 
     /// Handlers of server-to-client requests that are still running.
     private var incomingRequests: [ID: IncomingHandler] = [:]
+    /// Cancelled handlers that have not returned yet. They keep their slot.
+    private var drainingIncomingRequests: Set<UUID> = []
     /// Server-to-client requests waiting for a free handler slot.
     private var queuedIncomingRequests: [Request<AnyMethod>] = []
     /// The most server-to-client requests that wait for a slot.
@@ -566,6 +568,7 @@ public actor Client {
             handler.task.cancel()
         }
         incomingRequests = [:]
+        drainingIncomingRequests = []
         queuedIncomingRequests = []
         immediateResponses = []
         progressTokens = [:]
@@ -616,6 +619,14 @@ public actor Client {
     // MARK: - Registration
 
     /// Register a handler for a notification
+    ///
+    /// Notification handlers run one at a time, in arrival order. A request
+    /// with a progress token is answered only after its progress
+    /// notifications that arrived first were handled, so a handler must not
+    /// await a request with a progress token sent outside a notification
+    /// handler: when its progress is queued behind the handler, its response
+    /// waits for it and the handler waits forever. Start a `Task` for that
+    /// wait instead.
     @discardableResult
     public func onNotification<N: Notification>(
         _ type: N.Type,
@@ -832,13 +843,21 @@ public actor Client {
         }
 
         let id = request.id
+        let isInitialize = M.name == Initialize.name
         let task = Task<M.Result, Error> {
-            // Cancelling the task cancels the request.
+            // Cancelling the task cancels the request. `initialize` must not
+            // be cancelled on the wire: it is only forgotten.
             let value = try await withTaskCancellationHandler {
                 try await slot.value()
             } onCancel: {
                 slot.resolve(.failure(CancellationError()))
-                Task { try? await self.cancelRequest(id, reason: "Cancelled") }
+                Task {
+                    if isInitialize {
+                        await self.forgetRequest(id)
+                    } else {
+                        try? await self.cancelRequest(id, reason: "Cancelled")
+                    }
+                }
             }
             if let listed = value as? ListTools.Result,
                 let filtered = await self.recordTools(listed, firstPage: firstToolPage)
@@ -1235,6 +1254,12 @@ public actor Client {
         try await notify(notification)
     }
 
+
+    /// Stops tracking a request without telling the server.
+    private func forgetRequest(_ id: ID) {
+        removePendingRequest(id: id)?.resume(throwing: CancellationError())
+        unsentRequests.remove(id)
+    }
 
     private func removePendingRequest(id: ID) -> AnyPendingRequest? {
         immediateResponses.remove(id)
@@ -2186,11 +2211,22 @@ public actor Client {
             refuse(.methodNotFound("\(request.method) cannot be sent at protocol version \(negotiatedProtocolVersion ?? "")"))
             return
         }
+        // Answered at once, outside the handler slots: it checks liveness.
+        if request.method == Ping.name {
+            Task {
+                if self.methodHandlers[Ping.name] != nil {
+                    await self.handleIncomingRequest(request)
+                } else {
+                    try? await self.send(Response<AnyMethod>(id: request.id, result: .object([:])))
+                }
+            }
+            return
+        }
         if incomingRequests[request.id] != nil || queuedIncomingRequests.contains(where: { $0.id == request.id }) {
             refuse(.invalidRequest("A request with id \(request.id) is already in progress"))
             return
         }
-        guard incomingRequests.count >= max(configuration.maxConcurrentServerRequests, 1) else {
+        if hasFreeIncomingSlot {
             runIncomingRequest(request)
             return
         }
@@ -2215,13 +2251,19 @@ public actor Client {
         if incomingRequests[id]?.token == token {
             incomingRequests[id] = nil
         }
+        drainingIncomingRequests.remove(token)
         startQueuedIncomingRequests()
     }
 
+    /// Whether a handler may start: running and cancelled-but-running
+    /// handlers count against ``Configuration/maxConcurrentServerRequests``.
+    private var hasFreeIncomingSlot: Bool {
+        incomingRequests.count + drainingIncomingRequests.count
+            < max(configuration.maxConcurrentServerRequests, 1)
+    }
+
     private func startQueuedIncomingRequests() {
-        while incomingRequests.count < max(configuration.maxConcurrentServerRequests, 1),
-            !queuedIncomingRequests.isEmpty
-        {
+        while hasFreeIncomingSlot, !queuedIncomingRequests.isEmpty {
             runIncomingRequest(queuedIncomingRequests.removeFirst())
         }
     }
@@ -2234,8 +2276,8 @@ public actor Client {
             return true
         }
         guard let handler = incomingRequests.removeValue(forKey: id) else { return false }
+        drainingIncomingRequests.insert(handler.token)
         handler.task.cancel()
-        startQueuedIncomingRequests()
         return true
     }
 
