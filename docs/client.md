@@ -696,10 +696,10 @@ func checkCard(_ card: ServerCard, with client: Client) async throws -> [ServerC
 }
 ```
 
-- The request asks for `application/mcp-server-card+json`. The URL, and the URL after redirects, must be `https`, or `http` on a loopback host. A card larger than 1 MiB, an answer other than 200, a body that is not a card, and a card that breaks a rule of the format throw `ServerCardError`.
+- The request asks for `application/mcp-server-card+json`. The URL must be `https`, or `http` on a loopback host. A redirect is followed only to `https`, or from loopback `http` to loopback `http`, and never to a private IP address; any other throws before it is requested. The body is read up to 1 MiB. A larger card, an answer other than 200, a body that is not a card, and a card that breaks a rule of the format throw `ServerCardError`.
 - `fetch(from:ifNoneMatch:session:)` sends the `ETag` of an earlier fetch, and returns `.notModified` when the card did not change. Keep a card for its `Cache-Control` time.
 - `ServerCard.cardURL(forEndpoint:)` gives the recommended location, `<endpoint>/server-card`. The SDK does not read AI Catalogs: get the card's URL from the catalog yourself.
-- `Remote.url(resolving:)` fills in the `{variable}` placeholders of a remote's URL: from the values you pass, then the variable's `value`, then its `default`. A required variable, or a variable the remote does not declare, without a value throws.
+- `Remote.url(resolving:)` fills in the `{variable}` placeholders of a remote's URL: from the values you pass, then the variable's `value`, then its `default`. A required variable, or a variable the remote does not declare, without a value throws. Values are percent-encoded except for letters, digits and `-._~`, so a value cannot change the host or add a path or query; a placeholder at the start of the URL, as in `{base}/mcp`, is inserted as given.
 - A card is advisory: do not use it for security decisions. After connecting, `mismatches(with:)` lists what `server/discover` contradicts: the name, the version, the title, and protocol versions the server does not serve. Prefer the live values.
 
 ## Notifications and subscriptions

@@ -1004,7 +1004,7 @@ func route(_ request: HTTPRequest, card: ServerCardValidator, mcp: StatelessHTTP
 ```
 
 - `ServerCard(info:endpoint:protocolVersions:name:description:)` takes the identity from `Server.Info` and adds one Streamable HTTP remote. A card needs a name in reverse-DNS format with one `/`, such as `com.example/weather`, and a description of 1 to 100 characters. Give the server the same name: a client compares the card with the `serverInfo` it gets when it connects.
-- `ServerCardValidator` checks the card when you create it. It answers GET `<endpointPath>/server-card` with `application/mcp-server-card+json`, an `ETag`, `Cache-Control: public, max-age=3600` (`maxAge:`) and `Access-Control-Allow-Origin: *`. A GET with an `If-None-Match` that matches the `ETag` gets 304 and no body, `HEAD` gets the headers, `OPTIONS` gets 204 for a CORS preflight, and other methods get 405.
+- `ServerCardValidator` checks the card when you create it. It answers GET `<endpointPath>/server-card` with `application/mcp-server-card+json`, an `ETag`, `Cache-Control: public, max-age=3600` (`maxAge:`) and `Access-Control-Allow-Origin: *`. A GET with an `If-None-Match` that matches the `ETag` gets 304 and no body, `HEAD` gets the headers (with `Content-Length`), `OPTIONS` gets 204 for a CORS preflight, and other methods get 405.
 - Call `response(to:)` before the MCP endpoint, as the snippet does. When the card's path reaches a transport, put the validator first in its pipeline instead.
 - A card is public: put no credentials, internal hosts or user data in it, and serve it over https.
 - To publish a changed card, create a new validator.

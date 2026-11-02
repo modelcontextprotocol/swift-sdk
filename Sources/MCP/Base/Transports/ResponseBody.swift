@@ -92,10 +92,18 @@ struct ResponseBody: AsyncSequence, Sendable {
         }
 
         private let lock = NSLock()
+        private let redirects: OAuthRedirectGuard?
         private var pending: [Int: Pending] = [:]
         /// Tasks that completed before ``start(_:body:)`` registered them, as
         /// one cancelled first does: their error, `nil` for success.
         private var completedEarly: [Int: Swift.Error?] = [:]
+
+        /// A delegate that follows the redirects `redirects` allows, or every
+        /// redirect.
+        init(redirects: OAuthRedirectGuard? = nil) {
+            self.redirects = redirects
+            super.init()
+        }
 
         /// Starts `task` and waits for its response. `resumed` runs once the
         /// task is resumed, or has failed.
@@ -145,6 +153,16 @@ struct ResponseBody: AsyncSequence, Sendable {
             }
             completionHandler(.allow)
             waiter?.resume(returning: response)
+        }
+
+        func urlSession(
+            _ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+            newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void
+        ) {
+            guard let redirects else { return completionHandler(request) }
+            redirects.urlSession(
+                session, task: task, willPerformHTTPRedirection: response, newRequest: request,
+                completionHandler: completionHandler)
         }
 
         func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
@@ -217,7 +235,7 @@ extension URLSession {
             // `bytes(for:)` creates its task after a suspension, so the
             // session stays valid until it returns.
             defer { streaming.lifetime.end() }
-            let (bytes, response) = try await self.bytes(for: request)
+            let (bytes, response) = try await self.bytes(for: request, delegate: streaming.redirects)
             return (ResponseBody(bytes: bytes), response)
         #endif
     }
@@ -229,6 +247,9 @@ struct StreamingSession: Sendable {
     #if canImport(FoundationNetworking)
         let session: URLSession
         let delegate: StreamingSessionDelegate
+    #else
+        /// The task delegate that checks the redirects, if any.
+        let redirects: OAuthRedirectGuard?
     #endif
     let lifetime = Lifetime()
 
@@ -275,11 +296,15 @@ struct StreamingSession: Sendable {
         }
     }
 
-    init(configuration: URLSessionConfiguration) {
+    /// A session with `configuration` that follows the redirects
+    /// `redirects` allows, or every redirect.
+    init(configuration: URLSessionConfiguration, redirects: OAuthRedirectGuard? = nil) {
         #if canImport(FoundationNetworking)
-            let delegate = StreamingSessionDelegate()
+            let delegate = StreamingSessionDelegate(redirects: redirects)
             self.delegate = delegate
             self.session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
+        #else
+            self.redirects = redirects
         #endif
     }
 

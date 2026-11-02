@@ -174,6 +174,12 @@ extension ServerCard {
         /// `default`. A variable without a value is an error when it is
         /// required or not in ``variables``; an optional one becomes empty.
         ///
+        /// A value is percent-encoded except for the unreserved characters, as
+        /// in an RFC 6570 simple expansion, so it cannot add a path, query or
+        /// user to the URL or change its host. A placeholder that starts the
+        /// URL, such as `{base}/mcp`, is the scheme and host and is inserted
+        /// as given.
+        ///
         /// - Throws: ``ServerCardError`` with ``ServerCardError/Reason/missingVariable``
         ///   or ``ServerCardError/Reason/invalidCard`` when the result is not an
         ///   `http` or `https` URL.
@@ -188,7 +194,7 @@ extension ServerCard {
                 let name = String(rest[rest.index(after: open)..<close])
                 let input = variables?[name]
                 if let value = values[name] ?? input?.value ?? input?.default {
-                    result += value
+                    result += result.isEmpty ? value : Self.percentEncoded(value)
                 } else if input == nil || input?.isRequired == true {
                     throw ServerCardError(.missingVariable, "The remote URL needs a value for {\(name)}")
                 }
@@ -202,6 +208,15 @@ extension ServerCard {
                 throw ServerCardError(.invalidCard, "The remote URL is not an http or https URL: \(result)")
             }
             return resolved
+        }
+
+        /// `value` with every character but `A-Z a-z 0-9 - . _ ~` percent-encoded.
+        private static func percentEncoded(_ value: String) -> String {
+            var unreserved = CharacterSet(charactersIn: "-._~")
+            unreserved.formUnion(CharacterSet(charactersIn: "a"..."z"))
+            unreserved.formUnion(CharacterSet(charactersIn: "A"..."Z"))
+            unreserved.formUnion(CharacterSet(charactersIn: "0"..."9"))
+            return value.addingPercentEncoding(withAllowedCharacters: unreserved) ?? ""
         }
     }
 
@@ -446,9 +461,9 @@ extension ServerCard {
         guard var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: true) else {
             return endpoint.appendingPathComponent("server-card")
         }
-        var path = components.path
+        var path = components.percentEncodedPath
         while path.hasSuffix("/") { path.removeLast() }
-        components.path = path + "/server-card"
+        components.percentEncodedPath = path + "/server-card"
         components.query = nil
         components.fragment = nil
         return components.url ?? endpoint.appendingPathComponent("server-card")
@@ -466,8 +481,10 @@ extension ServerCard {
 
     /// Fetches the card at `url`, decodes it and checks it.
     ///
-    /// The request asks for ``mediaType``. `url`, and the URL after redirects,
-    /// must be `https`, or `http` on a loopback host for local development.
+    /// The request asks for ``mediaType``. `url` must be `https`, or `http` on
+    /// a loopback host for local development. A redirect is followed only to
+    /// an `https` URL, or from loopback `http` to loopback `http`, and never
+    /// to a private IP address. The body is read up to ``maximumSize``.
     ///
     /// - Throws: ``ServerCardError``, or the error of the session.
     public static func fetch(from url: URL, session: URLSession = .shared) async throws -> ServerCard {
@@ -495,20 +512,38 @@ extension ServerCard {
         if let etag {
             request.setValue(etag, forHTTPHeaderField: HTTPHeaderName.ifNoneMatch)
         }
-        #if canImport(FoundationNetworking)
-            request = request.addingAdditionalHeaders(of: session.configuration)
-        #endif
-        let (data, response) = try await session.data(for: request)
+        // Each hop is checked before it is requested, as for OAuth discovery.
+        let redirects = OAuthRedirectGuard(policy: .validated, validator: OAuthURLValidator())
+        let streaming = StreamingSession(configuration: session.configuration, redirects: redirects)
+        defer { streaming.invalidate() }
+        let (body, response) = try await session.responseBody(for: request, streaming: streaming)
+        defer { body.cancel() }
         guard let http = response as? HTTPURLResponse else {
             throw ServerCardError(.httpStatus, "The response is not an HTTP response")
+        }
+        // A refused redirect is the response.
+        if (300..<400).contains(http.statusCode), http.statusCode != 304,
+            let location = http.value(forHTTPHeaderField: "Location"),
+            let target = URL(string: location, relativeTo: http.url ?? url)?.absoluteURL,
+            !redirects.allows(from: url, to: target)
+        {
+            throw ServerCardError(
+                .insecureURL,
+                "A Server Card redirect needs https, or loopback http from loopback http, and no private address: \(target.absoluteString)"
+            )
         }
         if let final = http.url { try checkSecure(final) }
         if http.statusCode == 304, etag != nil { return .notModified }
         guard http.statusCode == 200 else {
             throw ServerCardError(.httpStatus, "The server answered \(http.statusCode) for \(url.absoluteString)")
         }
+        guard http.expectedContentLength <= Int64(maximumSize) else {
+            throw ServerCardError(
+                .tooLarge, "The card has \(http.expectedContentLength) bytes, more than \(maximumSize)")
+        }
+        let data = try await body.collect(limit: maximumSize + 1)
         guard data.count <= maximumSize else {
-            throw ServerCardError(.tooLarge, "The card has \(data.count) bytes, more than \(maximumSize)")
+            throw ServerCardError(.tooLarge, "The card has more than \(maximumSize) bytes")
         }
         let card: ServerCard
         do {

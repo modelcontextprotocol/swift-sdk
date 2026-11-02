@@ -32,7 +32,7 @@ created and answers `<endpointPath>/server-card`:
 |---|---|
 | GET | 200, the card, `Content-Type: application/mcp-server-card+json`, `ETag`, `Cache-Control: public, max-age=<maxAge>` |
 | GET with a matching `If-None-Match` | 304, no body |
-| HEAD | The headers of the GET |
+| HEAD | The headers of the GET, with `Content-Length` (the body is empty) |
 | OPTIONS | 204 (CORS preflight; `If-None-Match` is not a CORS-safelisted header) |
 | Other methods | 405, `Allow: GET, HEAD, OPTIONS` |
 
@@ -48,7 +48,10 @@ An application calls `response(to:)` before its MCP endpoint. As an `HTTPRequest
 also works first in a transport's pipeline, like `ProtectedResourceMetadataValidator`; for that,
 `StatelessHTTPServerTransport` passes a validator's 304 for methods other than POST, and
 `StatefulHTTPServerTransport` runs the validators for methods other than GET, POST and DELETE
-(the preflight), and returns their 2xx answers.
+(the preflight, HEAD), and returns their 2xx and 304 answers.
+
+A card that does not encode as JSON (a non-finite number in `_meta`) is refused when the
+validator is created, like one that breaks the format.
 
 `ServerCard(info:endpoint:protocolVersions:name:description:)` builds a card from
 `Server.Info`. `Server.Info.name` is often not reverse-DNS, and `Server.init` sets no
@@ -57,14 +60,27 @@ description, so both can be passed.
 ## Fetching
 
 `ServerCard.fetch(from:ifNoneMatch:session:)` sends `Accept: application/mcp-server-card+json`
-and `If-None-Match` when given; requires `https`, or `http` on a loopback host, for the URL and the
-final URL after redirects; refuses bodies over 1 MiB; decodes and validates. Errors are
-`ServerCardError` with an open-struct `Reason`. On swift-corelibs-foundation the request gets the
-session's `httpAdditionalHeaders`, so `URLProtocol` mocks see them.
+and `If-None-Match` when given; requires `https`, or `http` on a loopback host, for the URL;
+decodes and validates. Errors are `ServerCardError` with an open-struct `Reason`.
 
-`cardURL(forEndpoint:)` appends `/server-card` to the endpoint path, without query or fragment.
+- Redirects: each hop is checked before it is requested, with the rule of OAuth discovery
+  (`OAuthRedirectGuard`): the target must be `https`, or loopback `http` when the card URL is
+  loopback `http`, and its host must not be a private IP literal. A refused redirect throws
+  `insecureURL`; the final URL is checked again.
+- Size: the body is streamed (`URLSession.responseBody`, `ResponseBody.collect(limit:)`) and the
+  read stops after 1 MiB + 1 byte; a larger `Content-Length` is refused before the body is read.
+  Both throw `tooLarge`.
+- On swift-corelibs-foundation the request runs in a session with the given session's
+  configuration and a `StreamingSessionDelegate` that applies the redirect check; it gets the
+  session's `httpAdditionalHeaders`, so `URLProtocol` mocks see them.
+
+`cardURL(forEndpoint:)` appends `/server-card` to the endpoint path (kept percent-encoded),
+without query or fragment.
 `Remote.url(resolving:)` fills `{variable}` placeholders: the given value, then the variable's
-`value`, then its `default`; a required or undeclared variable without a value throws.
+`value`, then its `default`; a required or undeclared variable without a value throws. Values
+are percent-encoded except for unreserved characters (RFC 6570 simple expansion), so a value
+cannot add a path, query, fragment or user, or move the host; a placeholder that starts the URL
+(`{base}/mcp`) stands for the scheme and host and is inserted as given.
 
 A card is advisory. `mismatches(with:)` compares it with a `server/discover` result: `name`,
 `version` and `title` against `serverInfo` (when the server sends it), and each remote's

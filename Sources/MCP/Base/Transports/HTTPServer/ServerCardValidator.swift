@@ -7,7 +7,8 @@ import Foundation
 /// - A `GET` gets the card as ``ServerCard/mediaType``, with an `ETag`,
 ///   `Cache-Control: public, max-age=<maxAge>` and
 ///   `Access-Control-Allow-Origin: *`. With an `If-None-Match` that matches
-///   the `ETag`, it gets 304 and no body. A `HEAD` gets the headers of a `GET`.
+///   the `ETag`, it gets 304 and no body. A `HEAD` gets the headers of a `GET`,
+///   with the card's length in `Content-Length`, and no body.
 /// - An `OPTIONS` (a CORS preflight) gets 204 with the CORS headers.
 /// - Another method gets 405. The `Accept` header is not checked: every
 ///   `GET` gets the card.
@@ -37,7 +38,8 @@ public struct ServerCardValidator: HTTPRequestValidator {
     ///   - card: The card. It must follow the format.
     ///   - endpointPath: The path of the MCP endpoint, such as `/mcp`.
     ///   - maxAge: How long clients and caches may keep the card, in seconds.
-    /// - Throws: ``ServerCardError`` when the card does not follow the format.
+    /// - Throws: ``ServerCardError`` when the card does not follow the format,
+    ///   or does not encode as JSON (a non-finite number in `_meta`).
     public init(card: ServerCard, endpointPath: String = "/mcp", maxAge: Int = 3600) throws(ServerCardError) {
         try card.validate()
         var base = endpointPath
@@ -45,7 +47,11 @@ public struct ServerCardValidator: HTTPRequestValidator {
         path = base + "/server-card"
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        body = (try? encoder.encode(card)) ?? Data()
+        do {
+            body = try encoder.encode(card)
+        } catch {
+            throw ServerCardError(.invalidCard, "The card does not encode as JSON: \(error)")
+        }
         let digest = SHA256.hash(data: body).prefix(16).map { String(format: "%02x", $0) }.joined()
         etag = "\"\(digest)\""
         cacheControl = "public, max-age=\(max(maxAge, 0))"
@@ -69,7 +75,10 @@ public struct ServerCardValidator: HTTPRequestValidator {
                 return .data(Data(), statusCode: 304, headers: headers)
             }
             headers[HTTPHeaderName.contentType] = ServerCard.mediaType
-            return .data(request.method.uppercased() == "HEAD" ? Data() : body, headers: headers)
+            guard request.method.uppercased() == "HEAD" else { return .data(body, headers: headers) }
+            // The body is empty: an adapter must not derive the length from it.
+            headers["Content-Length"] = String(body.count)
+            return .data(Data(), headers: headers)
         case "OPTIONS":
             return .data(Data(), statusCode: 204, headers: cors)
         default:

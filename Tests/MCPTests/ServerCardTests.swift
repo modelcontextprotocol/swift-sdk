@@ -5,6 +5,9 @@ import Testing
 #if canImport(FoundationNetworking)
     import FoundationNetworking
 #endif
+#if canImport(Glibc)
+    import Glibc
+#endif
 
 @testable import MCP
 
@@ -129,6 +132,9 @@ struct ServerCardFormatTests {
         #expect(url("https://host/mcp/") == "https://host/mcp/server-card")
         #expect(url("https://host/server/mcp?x=1#f") == "https://host/server/mcp/server-card")
         #expect(url("http://127.0.0.1:3000") == "http://127.0.0.1:3000/server-card")
+        // The path keeps its encoding.
+        #expect(url("https://h/a%2Fb/mcp") == "https://h/a%2Fb/mcp/server-card")
+        #expect(url("https://h/a%20b/mcp/") == "https://h/a%20b/mcp/server-card")
     }
 
     @Test("URL templates take values, then the variable's value, then its default")
@@ -150,6 +156,23 @@ struct ServerCardFormatTests {
         #expect { _ = try undeclared.url(resolving: ["base": "javascript:"]) } throws: {
             ($0 as? ServerCardError)?.reason == .invalidCard
         }
+    }
+
+    @Test("A value cannot change the host, path or query of the URL")
+    func templateValuesAreEncoded() throws {
+        let remote = ServerCard.Remote(type: .streamableHTTP, url: "https://{tenant}.example.com/mcp/{path}")
+        for tenant in ["evil.com/x?", "evil.com#", "user@evil.com", "evil.com:443/"] {
+            do {
+                let resolved = try remote.url(resolving: ["tenant": tenant, "path": "a"])
+                #expect(resolved.host?.hasSuffix(".example.com") == true, "\(tenant): \(resolved)")
+                #expect(resolved.path == "/mcp/a" && resolved.query == nil && resolved.user == nil, "\(resolved)")
+            } catch {
+                #expect(error.reason == .invalidCard)
+            }
+        }
+        let resolved = try remote.url(resolving: ["tenant": "acme", "path": "a/b?c=d#e"])
+        #expect(resolved.absoluteString == "https://acme.example.com/mcp/a%2Fb%3Fc%3Dd%23e")
+        #expect(try remote.url(resolving: ["tenant": "a-b_c.d~e", "path": "x"]).host == "a-b_c.d~e.example.com")
     }
 
     @Test("Mismatches with server/discover")
@@ -211,6 +234,7 @@ struct ServerCardValidatorTests {
         #expect(preflight?.headers["Access-Control-Allow-Headers"] == "Content-Type, If-None-Match")
         let head = validator.response(to: request("HEAD"))
         #expect(head?.statusCode == 200 && head?.bodyData?.isEmpty != false)
+        #expect(head?.headers["Content-Length"] == validator.response(to: request())?.bodyData.map { String($0.count) })
         #expect(head?.headers[HTTPHeaderName.etag] == validator.response(to: request())?.headers[HTTPHeaderName.etag])
         #expect(validator.response(to: request("POST"))?.statusCode == 405)
         #expect(validator.response(to: request(path: "/mcp")) == nil)
@@ -222,6 +246,17 @@ struct ServerCardValidatorTests {
         var card = validCard
         card.name = "weather"
         #expect(throws: ServerCardError.self) { _ = try ServerCardValidator(card: card) }
+    }
+
+    @Test("A card that does not encode is refused instead of served empty")
+    func unencodableCard() {
+        var card = validCard
+        var meta = Metadata()
+        meta.fields["ratio"] = .double(.infinity)
+        card._meta = meta
+        #expect { _ = try ServerCardValidator(card: card) } throws: {
+            ($0 as? ServerCardError)?.reason == .invalidCard
+        }
     }
 
     @Test("Both HTTP server transports pass the validator's answers")
@@ -237,6 +272,8 @@ struct ServerCardValidatorTests {
         #expect(await stateful.handleRequest(request()).statusCode == 200)
         #expect(await stateful.handleRequest(request(headers: ["If-None-Match": etag])).statusCode == 304)
         #expect(await stateful.handleRequest(request("OPTIONS")).statusCode == 204)
+        #expect(await stateful.handleRequest(request("HEAD")).statusCode == 200)
+        #expect(await stateful.handleRequest(request("HEAD", headers: ["If-None-Match": etag])).statusCode == 304)
         // Without a validator that answers, OPTIONS stays 405.
         #expect(await StatefulHTTPServerTransport().handleRequest(request("OPTIONS")).statusCode == 405)
     }
@@ -305,6 +342,86 @@ struct ServerCardValidatorTests {
             }
         }
 
+        @Test("A body larger than the limit is not read to its end")
+        func streamedBodyIsCutOff() async throws {
+            // 40 MiB in 64 KiB chunks, about 1.3 s: a loaded machine may let a few
+            // MiB through before the cancellation reaches the mock.
+            let (session, log) = CardURLProtocol.session([url.absoluteString: .stream(chunk: 64 << 10, count: 640)])
+            await #expect { _ = try await ServerCard.fetch(from: url, session: session) } throws: {
+                ($0 as? ServerCardError)?.reason == .tooLarge
+            }
+            let delivered = await log.deliveredWhenStopped()
+            #expect(delivered > ServerCard.maximumSize)
+            #expect(delivered < 20 << 20, "\(delivered) bytes were delivered")
+        }
+
+        @Test("A Content-Length over the limit is refused before the body is read")
+        func contentLength() async throws {
+            let (session, log) = CardURLProtocol.session([
+                url.absoluteString: .stream(chunk: 64 << 10, count: 160, contentLength: 10 << 20, delay: 0.2)
+            ])
+            await #expect { _ = try await ServerCard.fetch(from: url, session: session) } throws: {
+                ($0 as? ServerCardError)?.reason == .tooLarge
+            }
+            // The body starts 0.2 s after the headers; the fetch refuses on the headers.
+            #expect(await log.deliveredWhenStopped() < ServerCard.maximumSize)
+        }
+
+        // swift-corelibs-foundation cannot redirect a URLProtocol's request
+        // (it traps); there a loopback server tests them instead.
+        #if !canImport(FoundationNetworking)
+            @Test("Redirects are checked before they are followed", arguments: [
+                ["https://example.com/card", "http://127.0.0.1/x"],
+                ["https://example.com/card", "http://10.0.0.5/"],
+                ["https://example.com/card", "https://10.0.0.5/card"],
+                ["https://example.com/card", "https://[fd00::1]/card"],
+                ["https://example.com/card", "http://example.com/card", "https://other.example/card"],
+                ["http://127.0.0.1:3000/card", "http://example.com/card"],
+                ["http://127.0.0.1:3000/card", "http://192.168.1.1/card"],
+            ])
+            func redirects(chain: [String]) async throws {
+                var steps: [String: CardURLProtocol.Step] = [:]
+                for (from, to) in zip(chain, chain.dropFirst()) { steps[from] = .redirect(to) }
+                steps[chain.last!] = .card
+                let (session, log) = CardURLProtocol.session(steps)
+                await #expect { _ = try await ServerCard.fetch(from: URL(string: chain[0])!, session: session) } throws: {
+                    ($0 as? ServerCardError)?.reason == .insecureURL
+                }
+                #expect(log.requested == [chain[0]])
+            }
+
+            @Test("Redirects to https, and from loopback http to loopback http, are followed")
+            func allowedRedirects() async throws {
+                for chain in [
+                    ["https://example.com/card", "https://cards.example/card"],
+                    ["http://127.0.0.1:3000/card", "http://localhost:3000/server-card"],
+                ] {
+                    let (session, log) = CardURLProtocol.session([chain[0]: .redirect(chain[1]), chain[1]: .card])
+                    #expect(try await ServerCard.fetch(from: URL(string: chain[0])!, session: session) == validCard)
+                    #expect(log.requested == chain)
+                }
+            }
+        #else
+            @Test("Redirects of a real session are checked before they are followed")
+            func loopbackRedirects() async throws {
+                let card = try JSONEncoder().encode(validCard)
+                let server = try LoopbackHTTPServer()
+                defer { server.stop() }
+                let base = "http://127.0.0.1:\(server.port)"
+                server.routes = [
+                    "/private": (302, ["Location": "http://0.0.0.0:\(server.port)/card"], Data()),
+                    "/loopback": (302, ["Location": "\(base)/card"], Data()),
+                    "/card": (200, [:], card),
+                ]
+                await #expect { _ = try await ServerCard.fetch(from: URL(string: "\(base)/private")!) } throws: {
+                    ($0 as? ServerCardError)?.reason == .insecureURL
+                }
+                #expect(server.requested == ["/private"])
+                #expect(try await ServerCard.fetch(from: URL(string: "\(base)/loopback")!) == validCard)
+                #expect(server.requested == ["/private", "/loopback", "/card"])
+            }
+        #endif
+
         @Test("http is allowed on a loopback host")
         func loopback() async throws {
             let session = await serve(body: try JSONEncoder().encode(validCard))
@@ -313,4 +430,208 @@ struct ServerCardValidatorTests {
             }
         }
     }
+
+    /// Serves cards, redirects and long bodies by URL, and records the
+    /// requests and the bytes delivered.
+    private final class CardURLProtocol: URLProtocol, @unchecked Sendable {
+        enum Step: Sendable {
+            case card
+            case redirect(String)
+            case stream(chunk: Int, count: Int, contentLength: Int? = nil, delay: TimeInterval = 0)
+        }
+
+        final class Log: @unchecked Sendable {
+            private let lock = NSLock()
+            private var urls: [String] = []
+            private var bytes = 0
+            private var stopped = false
+
+            var requested: [String] { lock.withLock { urls } }
+            func request(_ url: String) { lock.withLock { urls.append(url) } }
+            func delivered(_ count: Int) { lock.withLock { bytes += count } }
+            func stop() { lock.withLock { stopped = true } }
+
+            /// The bytes delivered, once the loading stopped or all chunks went out.
+            func deliveredWhenStopped() async -> Int {
+                for _ in 0..<200 {
+                    if lock.withLock({ stopped }) { break }
+                    try? await Task.sleep(for: .milliseconds(10))
+                }
+                return lock.withLock { bytes }
+            }
+        }
+
+        private static let keyHeader = "X-Card-Key"
+        private static let lock = NSLock()
+        nonisolated(unsafe) private static var scripts: [String: ([String: Step], Log)] = [:]
+
+        static func session(_ steps: [String: Step]) -> (URLSession, Log) {
+            let key = UUID().uuidString
+            let log = Log()
+            lock.withLock { scripts[key] = (steps, log) }
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [CardURLProtocol.self]
+            configuration.httpAdditionalHeaders = [keyHeader: key]
+            return (URLSession(configuration: configuration), log)
+        }
+
+        override class func canInit(with request: URLRequest) -> Bool { true }
+        override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+        /// swift-corelibs-foundation traps on a callback after `stopLoading()`.
+        private let stateLock = NSLock()
+        private var stopped = false
+        private var log: Log?
+        private var isStopped: Bool { stateLock.withLock { stopped } }
+
+        override func startLoading() {
+            let key = request.value(forHTTPHeaderField: Self.keyHeader) ?? ""
+            guard let url = request.url, let (steps, log) = Self.lock.withLock({ Self.scripts[key] }),
+                let step = steps[url.absoluteString]
+            else {
+                client?.urlProtocol(self, didFailWithError: URLError(.unsupportedURL))
+                return
+            }
+            stateLock.withLock { self.log = log }
+            log.request(url.absoluteString)
+            switch step {
+            case .card:
+                let body = try! JSONEncoder().encode(validCard)
+                respond(url, status: 200, headers: [:])
+                client?.urlProtocol(self, didLoad: body)
+                client?.urlProtocolDidFinishLoading(self)
+            case .redirect(let target):
+                let response = HTTPURLResponse(
+                    url: url, statusCode: 302, httpVersion: "HTTP/1.1", headerFields: ["Location": target])!
+                var next = URLRequest(url: URL(string: target)!)
+                next.setValue(key, forHTTPHeaderField: Self.keyHeader)
+                client?.urlProtocol(self, wasRedirectedTo: next, redirectResponse: response)
+                // A followed redirect stops this loading; a refused one gets
+                // the 3xx as the response.
+                DispatchQueue.global().asyncAfter(deadline: .now() + 0.05) {
+                    guard !self.isStopped else { return }
+                    self.client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+                    guard !self.isStopped else { return }
+                    self.client?.urlProtocolDidFinishLoading(self)
+                }
+            case .stream(let chunk, let count, let contentLength, let delay):
+                respond(url, status: 200, headers: contentLength.map { ["Content-Length": String($0)] } ?? [:])
+                DispatchQueue.global().asyncAfter(deadline: .now() + delay) { self.stream(chunk: chunk, count: count) }
+            }
+        }
+
+        private func stream(chunk: Int, count: Int) {
+            for _ in 0..<count {
+                guard !isStopped else { return }
+                client?.urlProtocol(self, didLoad: Data(repeating: 0x20, count: chunk))
+                stateLock.withLock { log }?.delivered(chunk)
+                Thread.sleep(forTimeInterval: 0.002)
+            }
+            guard !isStopped else { return }
+            stateLock.withLock { log }?.stop()
+            client?.urlProtocolDidFinishLoading(self)
+        }
+
+        private func respond(_ url: URL, status: Int, headers: [String: String]) {
+            let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: headers)!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        }
+
+        override func stopLoading() {
+            let log = stateLock.withLock { () -> Log? in
+                stopped = true
+                return self.log
+            }
+            log?.stop()
+        }
+    }
+
+    #if canImport(FoundationNetworking)
+        /// An HTTP/1.1 server on every IPv4 address of the host, answering each
+        /// path with a fixed response, one request per connection.
+        private final class LoopbackHTTPServer: @unchecked Sendable {
+            typealias Route = (status: Int, headers: [String: String], body: Data)
+
+            let port: Int
+            private let socket: Int32
+            private let lock = NSLock()
+            private var paths: [String] = []
+            private var table: [String: Route] = [:]
+            private var stopped = false
+
+            var requested: [String] { lock.withLock { paths } }
+            var routes: [String: Route] {
+                get { lock.withLock { table } }
+                set { lock.withLock { table = newValue } }
+            }
+
+            init() throws {
+                let socket = Glibc.socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
+                self.socket = socket
+                var address = sockaddr_in()
+                address.sin_family = sa_family_t(AF_INET)
+                address.sin_addr = in_addr(s_addr: INADDR_ANY)
+                var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+                let bound = withUnsafeMutablePointer(to: &address) { pointer in
+                    pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { address in
+                        bind(socket, address, length) == 0 && listen(socket, 16) == 0
+                            && getsockname(socket, address, &length) == 0
+                    }
+                }
+                guard bound else { throw URLError(.cannotConnectToHost) }
+                port = Int(UInt16(bigEndian: address.sin_port))
+                let thread = Thread { [self] in serve() }
+                thread.start()
+            }
+
+            /// Stops accepting: a connection wakes the blocked `accept`.
+            func stop() {
+                lock.withLock { stopped = true }
+                let wake = Glibc.socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
+                var address = sockaddr_in()
+                address.sin_family = sa_family_t(AF_INET)
+                address.sin_port = UInt16(port).bigEndian
+                address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+                _ = withUnsafePointer(to: &address) {
+                    $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                        connect(wake, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                    }
+                }
+                close(wake)
+            }
+
+            private func serve() {
+                defer { close(socket) }
+                while true {
+                    let connection = accept(socket, nil, nil)
+                    guard connection >= 0, !lock.withLock({ stopped }) else {
+                        if connection >= 0 { close(connection) }
+                        return
+                    }
+                    answer(connection)
+                    close(connection)
+                }
+            }
+
+            private func answer(_ connection: Int32) {
+                var request = Data()
+                var buffer = [UInt8](repeating: 0, count: 4096)
+                while request.range(of: Data("\r\n\r\n".utf8)) == nil {
+                    let count = read(connection, &buffer, buffer.count)
+                    guard count > 0 else { return }
+                    request.append(contentsOf: buffer[..<count])
+                }
+                let line = String(decoding: request, as: UTF8.self).split(separator: "\r\n").first ?? ""
+                let path = line.split(separator: " ").dropFirst().first.map(String.init) ?? ""
+                let route = lock.withLock { () -> Route? in
+                    paths.append(path)
+                    return table[path]
+                } ?? (404, [:], Data())
+                var head = "HTTP/1.1 \(route.status) Status\r\nContent-Length: \(route.body.count)\r\nConnection: close\r\n"
+                for (name, value) in route.headers { head += "\(name): \(value)\r\n" }
+                let response = Data((head + "\r\n").utf8) + route.body
+                _ = response.withUnsafeBytes { write(connection, $0.baseAddress, response.count) }
+            }
+        }
+    #endif
 #endif
