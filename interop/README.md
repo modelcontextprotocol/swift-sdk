@@ -27,7 +27,7 @@ failed check.
 | SDK | Version | Pinned in |
 |---|---|---|
 | Go | `v1.8.0` | [go-client/go.mod](go-client/go.mod), from the Go module proxy. The conformance server and two examples are `tool` dependencies, built at the same version. |
-| Python | `v2.3.0` | [python-client/requirements.in](python-client/requirements.in): `mcp` from PyPI, the conformance server from the tag's commit on GitHub. Installed from [requirements.txt](python-client/requirements.txt), a lock with hashes for every dependency. The example servers are downloaded once from the same commit and checked against [examples.sha256](python-client/examples.sha256). |
+| Python | `v2.3.0` | [python-client/requirements.in](python-client/requirements.in): `mcp` from PyPI, the conformance server from the tag's commit on GitHub. Installed from [requirements.txt](python-client/requirements.txt), a lock with hashes for every dependency and for the conformance server's build backend (built without build isolation or the index). The example servers are downloaded once from the same commit and checked against [examples.sha256](python-client/examples.sha256). |
 
 To test another release, change the version in the pin files: `go get
 github.com/modelcontextprotocol/go-sdk@vX` and `go mod tidy` for Go; for

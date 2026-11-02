@@ -465,6 +465,8 @@ class Battery:
             await asyncio.sleep(0.3)
             silent = [t for t in names if tokens[t] == before[t]]
             require(not silent, f"no progress for {silent}")
+            # No check for progress on unknown tokens (the Swift and Go drivers have one):
+            # the SDK routes progress to the callback of its request, so the token is never seen.
             return f"16 calls, progress kept apart for {len(names)} tokens"
 
         await self.check("concurrent-calls", concurrent_calls)
@@ -673,6 +675,7 @@ async def main() -> int:
     mode = {"handshake": "legacy", "stateless": "2026-07-28"}.get(options.era, "auto")
     client = make_client(target, mode)
     connected = False
+    finished = False  # the profile's checks ran to the end
     try:
         async with client:
             connected = True
@@ -693,6 +696,7 @@ async def main() -> int:
                 # connect (below), a fallback to the handshake, or a rejected first request.
                 if era == "handshake":
                     emit({"check": "connect", "status": "pass", "detail": f"fell back to {version} (handshake)"})
+                    finished = True
                     return 0
                 try:
                     with anyio.fail_after(options.timeout):
@@ -703,6 +707,7 @@ async def main() -> int:
                     ok = "-32022" in text or "not supported" in text.lower() or "unsupported" in text.lower()
                     emit({"check": "connect", "status": "pass" if ok else "fail",
                           "detail": f"first request rejected: {text}"})
+                finished = True
                 return 0
             expected = options.expect_era or ("" if options.era == "auto" else options.era)
             detail = f"{version} ({era})" + (f", expected {expected}" if expected else "")
@@ -723,9 +728,16 @@ async def main() -> int:
                 await battery.run_tool(options.tool, json.loads(options.args), options.expect)
             else:
                 await battery.run_everything()
+            finished = True
     except Exception as error:  # noqa: BLE001
-        if connected:  # shutdown noise is not a result
+        if finished:  # shutdown noise is not a result
             print(f"shutdown: {type(error).__name__}: {error}", file=sys.stderr)
+        elif connected:  # the checks stopped early: a result
+            cause: BaseException = error
+            while isinstance(cause, BaseExceptionGroup) and cause.exceptions:
+                cause = cause.exceptions[0]  # a task group's error, not the group
+            emit({"check": "battery", "status": "fail", "detail": f"{type(cause).__name__}: {cause}"})
+            return 1
         else:
             emit({"meta": {"client": "python", "era": options.era}})
             detail = f"{type(error).__name__}: {error}"

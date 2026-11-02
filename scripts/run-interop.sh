@@ -74,8 +74,9 @@ if ! cat "$PY_CLIENT/requirements.in" "$PY_CLIENT/requirements.txt" | cmp -s - "
     rm -rf "$VENV"
     uv venv --quiet --python 3.12 "$VENV"
     uv pip sync --quiet --require-hashes --python "$VENV" "$PY_CLIENT/requirements.txt"
-    # A git dependency has no hash; its commit pins it, and the lock has its dependencies.
-    uv pip install --quiet --no-deps --python "$VENV" "$PY_SERVER_REQUIREMENT"
+    # A git dependency has no hash; its commit pins it, and the lock has its dependencies
+    # and its build backend. Nothing comes from the index: no build isolation, no index.
+    uv pip install --quiet --no-deps --no-build-isolation --no-index --python "$VENV" "$PY_SERVER_REQUIREMENT"
     cat "$PY_CLIENT/requirements.in" "$PY_CLIENT/requirements.txt" >"$STAMP"
 fi
 PY="$VENV/bin/python"
@@ -156,7 +157,41 @@ wait_for http://127.0.0.1:8000/mcp "$LAST_PID"
 # MARK: Cells
 
 # Runs a command with a wall-clock limit (exit status 142 when it expires).
-limit() { perl -e 'alarm shift; exec @ARGV or die "cannot run $ARGV[0]: $!\n"' "$@"; }
+# The command runs in its own process group, and on expiry the limit signals
+# the group and every descendant, not just the command: the Go runtime ignores
+# SIGALRM, and a stdio client's server must go too (Foundation's Process puts
+# it in a group of its own). Group members left when the command exits are
+# killed as well.
+limit() {
+    perl -MPOSIX=WNOHANG -e '
+        my $seconds = shift;
+        my $pid = fork() // die "cannot fork: $!\n";
+        if ($pid == 0) {
+            setpgrp(0, 0);
+            exec @ARGV or die "cannot run $ARGV[0]: $!\n";
+        }
+        setpgrp($pid, $pid); # in both, so the group exists before any signal
+        my $stop = sub { # TERM the group and the tree, KILL them after 5 s, and exit
+            my %children;
+            for (`ps -A -o pid= -o ppid=`) { my ($p, $pp) = split; push @{$children{$pp}}, $p; }
+            my @tree = ($pid);
+            for (my $i = 0; $i < @tree; $i++) { push @tree, @{$children{$tree[$i]} || []}; }
+            kill "TERM", -$pid, @tree;
+            for (1 .. 50) { last if waitpid($pid, WNOHANG) == $pid; select(undef, undef, undef, 0.1); }
+            kill "KILL", -$pid, @tree;
+            waitpid($pid, 0);
+            exit shift;
+        };
+        $SIG{ALRM} = sub { $stop->(142) };
+        for my $name (qw(HUP INT TERM)) { $SIG{$name} = sub { $stop->(128 + POSIX->can("SIG$name")->()) }; }
+        alarm $seconds;
+        waitpid($pid, 0);
+        my $status = $?;
+        alarm 0;
+        kill "KILL", -$pid;
+        exit($status & 127 ? 128 + ($status & 127) : $status >> 8);
+    ' "$@" </dev/null
+}
 
 # client, server, transport, era, then the server address: a URL or a command.
 # PROFILE names the cell's profile (default: basic); PROFILE_ARGS go to the client.

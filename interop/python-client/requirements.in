@@ -5,9 +5,12 @@
 # that scripts/run-interop.sh downloads from that commit.
 #
 # requirements.txt is the hashed lock of everything but the git dependency,
-# which the commit pins. Regenerate it after a change here:
+# which the commit pins. hatchling is the conformance server's build backend:
+# the script builds it without build isolation, so the backend and its
+# dependencies come from the lock too. Regenerate it after a change here:
 #
 #   uv pip compile --generate-hashes --universal --python-version 3.12 \
 #       --no-emit-package mcp-everything-server requirements.in -o requirements.txt
 mcp==2.3.0
+hatchling==1.33.0
 mcp-everything-server @ git+https://github.com/modelcontextprotocol/python-sdk@2118f14f8a19bc158d8a1cf90af58d85d187f849#subdirectory=examples/servers/everything-server

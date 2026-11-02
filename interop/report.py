@@ -9,7 +9,8 @@ example client to <name>.status.
 
 A cell fails when a check fails, and also when it has no meta line or no
 checks, or when the client exited with an error without reporting a failed
-check (a crash, or the time limit).
+check (a crash, or the time limit). An example client fails when its exit
+status is not 0.
 """
 
 from __future__ import annotations
@@ -112,6 +113,11 @@ def main() -> None:
         for c in checks
         if c.get("status") == "fail"
     ]
+    for path in statuses:
+        status = path.read_text().strip()
+        if status != "0":
+            client, _, server = path.stem.partition("__")
+            failures.append(("example", client, server, "-", "-", {"check": "exit", "detail": f"exit status {status}"}))
     w("")
     if not failures:
         w("No failures.")

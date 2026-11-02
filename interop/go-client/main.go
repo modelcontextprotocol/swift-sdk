@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -556,6 +557,15 @@ func (b *battery) runAdvanced() {
 		}
 		if len(silent) > 0 {
 			return "", fmt.Errorf("no progress for %v", silent)
+		}
+		var stray []string
+		for t := range after {
+			if strings.HasPrefix(t, "interop-c") && !slices.Contains(names, t) {
+				stray = append(stray, t)
+			}
+		}
+		if len(stray) > 0 {
+			return "", fmt.Errorf("progress for unknown tokens %v", stray)
 		}
 		return fmt.Sprintf("16 calls, progress kept apart for %d tokens", len(names)), nil
 	})
