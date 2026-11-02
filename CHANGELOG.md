@@ -114,6 +114,8 @@ Behavior that can break working code ([docs/migration.md](docs/migration.md#beha
   read, proactive renewal tries each token once, a failed client registration is tried again,
   `http://[::1]` counts as loopback, and more private address forms are blocked.
 - `HTTPStatusError`'s `debugDescription` names the response headers without their values.
+- An `HTTPClientTransport` dropped without `disconnect()` is released and stops its GET stream;
+  before, it was never released and, with `streaming: true`, kept reconnecting.
 - From `main` after 0.12.1: `Data.parseDataURL(_:)` reads `;base64` from the header only and
   decodes any percent-escaped byte (#309, #310); `client_secret_basic` percent-encodes the client
   credentials (RFC 6749 §2.3.1, #300); PKCE verifier characters are uniformly distributed (#303);

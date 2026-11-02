@@ -7,6 +7,11 @@ import class Foundation.JSONDecoder
 import class Foundation.JSONEncoder
 
 /// Model Context Protocol client
+///
+/// A connected client must be disconnected: its receive loop and inbound
+/// queue keep it, and its transport, alive until ``disconnect()`` or until
+/// the transport closes the connection. Dropping the last reference to a
+/// connected client does not end the connection.
 public actor Client {
     /// The client configuration
     public struct Configuration: Hashable, Codable, Sendable {
@@ -810,7 +815,11 @@ public actor Client {
             isStateless: isStateless)
     }
 
-    /// Disconnect the client and cancel all pending requests
+    /// Disconnect the client and cancel all pending requests.
+    ///
+    /// Call this when done with a connected client: until then, or until the
+    /// transport closes the connection, the client's receive loop keeps the
+    /// client and its transport alive.
     public func disconnect() async {
         await logger?.debug("Initiating client disconnect...")
         // A message loop that ends from here on leaves the teardown to this method.

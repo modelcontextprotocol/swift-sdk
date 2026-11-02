@@ -706,6 +706,10 @@ session ended.
   reopened; the previous release kept reopening it with the expired session
   ID. The session ID is kept, so the next request carries it, receives the
   server's 404 and reports `isSessionExpired` to its caller.
+- A transport dropped without `disconnect()` is released, and stops its GET
+  stream by the next event, the end of the stream or the request's idle
+  timeout. The previous release never released it and, with
+  `streaming: true`, kept reconnecting the GET stream.
 
 ### Authorization
 

@@ -24,6 +24,10 @@ import Logging
 /// - Regular HTTP (`streaming=false`): Simple request/response pattern
 /// - Streaming HTTP with SSE (`streaming=true`): Enables server-to-client push messages
 ///
+/// ``disconnect()`` ends the connection at once. A transport dropped without
+/// it is still released, and stops its GET stream by the next event, the end
+/// of the stream, or the request's idle timeout.
+///
 /// It behaves the same on Apple platforms and Linux. Response bodies are read
 /// as they arrive: with `URLSession.bytes(for:)` on Apple platforms, and with a
 /// data delegate on swift-corelibs-foundation, which has no `bytes(for:)`.
@@ -85,10 +89,8 @@ public actor HTTPClientTransport: Transport {
     private let messageStream: AsyncThrowingStream<Data, Swift.Error>
     private let messageContinuation: AsyncThrowingStream<Data, Swift.Error>.Continuation
 
-    private var initialSessionIDSignalTask: Task<Void, Never>?
-    private var initialSessionIDContinuation: CheckedContinuation<Void, Never>?
-    /// Whether the initial session ID signal fired (a session ID, a timeout or disconnect).
-    private var initialSessionIDSignalled = false
+    /// Ends the GET stream's wait for a session ID; replaced by each ``connect()``.
+    private var sessionIDSignal = SessionIDSignal()
 
     /// The last event ID received from the server for SSE stream resumability
     private var lastEventID: String?
@@ -242,40 +244,78 @@ public actor HTTPClientTransport: Transport {
             )
     }
 
-    // Setup the initial session ID signal
-    private func setupInitialSessionIDSignal() {
-        initialSessionIDSignalled = false
-        self.initialSessionIDSignalTask = Task {
-            await withCheckedContinuation { continuation in
-                // The signal may fire before this task runs.
-                if self.initialSessionIDSignalled {
-                    continuation.resume()
-                } else {
-                    self.initialSessionIDContinuation = continuation
-                }
+    /// The wait of the GET stream for a session ID. It ends once: on a
+    /// session ID, the timeout, ``disconnect()``, ``useStatelessProtocol(_:)``,
+    /// the cancellation of the waiting task, or the release of the transport.
+    /// The transport owns it; the waiting task holds it, not the transport.
+    private final class SessionIDSignal: @unchecked Sendable {
+        enum Outcome { case signalled, timedOut }
+
+        private let lock = NSLock()
+        private var ended = false
+        private var timedOut = false
+        private var waiter: CheckedContinuation<Void, Never>?
+
+        /// Ends the wait, or a later one at once.
+        func signal() { end(timedOut: false) }
+
+        /// Waits for ``signal()`` for at most `timeout`.
+        func wait(timeout: TimeInterval) async -> Outcome {
+            let timer = Task { [self] in
+                try await Task.sleep(for: .seconds(timeout))
+                end(timedOut: true)
             }
+            defer { timer.cancel() }
+            await withTaskCancellationHandler {
+                await withCheckedContinuation { continuation in
+                    let waiting = lock.withLock { () -> Bool in
+                        guard !ended else { return false }
+                        waiter = continuation
+                        return true
+                    }
+                    if !waiting { continuation.resume() }
+                }
+            } onCancel: {
+                signal()
+            }
+            return lock.withLock { timedOut ? .timedOut : .signalled }
+        }
+
+        private func end(timedOut: Bool) {
+            let waiter = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+                guard !ended else { return nil }
+                ended = true
+                self.timedOut = timedOut
+                defer { self.waiter = nil }
+                return self.waiter
+            }
+            waiter?.resume()
         }
     }
 
-    private func sessionIDWaitTimedOut(after timeout: TimeInterval) {
-        guard !initialSessionIDSignalled else { return }
-        logger.warning("⏱️ Timeout waiting for session ID (\(timeout)s). SSE stream will proceed anyway.")
-        triggerInitialSessionIDSignal()
+    /// A weak reference to the transport: the GET stream task holds the
+    /// transport only while it uses it, so a transport dropped without
+    /// ``disconnect()`` is released.
+    private final class WeakReference: @unchecked Sendable {
+        // Set once, in init; reading a weak reference is thread-safe.
+        weak var transport: HTTPClientTransport?
+        init(_ transport: HTTPClientTransport) { self.transport = transport }
     }
 
     // Trigger the initial session ID signal when a session ID is established
     private func triggerInitialSessionIDSignal() {
-        initialSessionIDSignalled = true
-        if let continuation = self.initialSessionIDContinuation {
-            continuation.resume()
-            self.initialSessionIDContinuation = nil
-            logger.debug("✓ Initial session ID signal triggered for SSE task")
-        } else {
-            logger.debug("✗ No continuation to trigger - signal already consumed or SSE task not waiting")
-        }
+        sessionIDSignal.signal()
+        logger.debug("✓ Initial session ID signal triggered for SSE task")
     }
 
-    /// Establishes connection with the transport
+    /// Establishes connection with the transport.
+    ///
+    /// With `streaming`, this starts the standalone GET stream; it opens
+    /// once the server has assigned a session ID, or after
+    /// ``sseInitializationTimeout``. Call ``disconnect()`` to end the
+    /// connection. A transport dropped without it is still released: it
+    /// stops its GET stream by the next event, the end of the stream, or the
+    /// request's idle timeout.
     public func connect() async throws {
         guard !isConnected else { return }
         isConnected = true
@@ -286,16 +326,38 @@ public actor HTTPClientTransport: Transport {
             streamingSession = StreamingSession(configuration: session.configuration)
         }
 
-        setupInitialSessionIDSignal()
+        sessionIDSignal = SessionIDSignal()
 
         if streaming {
-            streamingTask = Task { await startListeningForServerEvents() }
+            let reference = WeakReference(self)
+            let signal = sessionIDSignal
+            let timeout = sseInitializationTimeout
+            let logger = logger
+            streamingTask = Task {
+                await HTTPClientTransport.listenForServerEvents(
+                    reference, sessionIDSignal: signal, timeout: timeout, logger: logger)
+            }
         }
 
         logger.debug("HTTP transport connected")
     }
 
-    /// Disconnects from the transport
+    deinit {
+        // No task can be creating a URLSession task: that holds the transport.
+        streamingTask?.cancel()
+        for task in inFlightPosts.values { task.cancel() }
+        sessionIDSignal.signal()
+        messageContinuation.finish()
+        if !streamingSession.lifetime.isInvalidated {
+            streamingSession.invalidate(along: session)
+        }
+    }
+
+    /// Disconnects from the transport.
+    ///
+    /// This ends the connection at once: it stops the GET stream, cancels
+    /// the POSTs in flight, invalidates the URL sessions and finishes the
+    /// stream ``receive()`` returns. ``connect()`` may be called again.
     public func disconnect() async {
         guard isConnected else { return }
         isConnected = false
@@ -313,12 +375,7 @@ public actor HTTPClientTransport: Transport {
         // until it has; later ones fail instead of trapping.
         streamingSession.invalidate(along: session)
         messageContinuation.finish()
-
-        initialSessionIDSignalTask?.cancel()
-        initialSessionIDSignalTask = nil
-        initialSessionIDSignalled = true
-        initialSessionIDContinuation?.resume()
-        initialSessionIDContinuation = nil
+        sessionIDSignal.signal()
 
         logger.debug("HTTP clienttransport disconnected")
     }
@@ -336,9 +393,7 @@ public actor HTTPClientTransport: Transport {
         sessionID = nil
         streamingTask?.cancel()
         streamingTask = nil
-        initialSessionIDSignalled = true
-        initialSessionIDContinuation?.resume()
-        initialSessionIDContinuation = nil
+        sessionIDSignal.signal()
     }
 
     /// Sends data through an HTTP POST request.
@@ -789,24 +844,29 @@ public actor HTTPClientTransport: Transport {
 
     // MARK: - SSE
 
-    private func startListeningForServerEvents() async {
-        guard isConnected else { return }
+    /// What the GET stream loop reads from the transport before each step:
+    /// `nil` once the transport is disconnected.
+    private func listenState() -> (hasSessionID: Bool, retryInterval: Int)? {
+        isConnected ? (sessionID != nil, retryInterval) : nil
+    }
 
-        if self.sessionID == nil, let signalTask = self.initialSessionIDSignalTask {
-            logger.debug("⏳ Waiting for session ID to be set (timeout: \(self.sseInitializationTimeout)s)...")
+    /// The standalone GET stream loop. It holds `reference`'s transport only
+    /// for one step (an attempt to open the stream, one event), never while
+    /// it waits for a session ID, sleeps before reconnecting or waits for the
+    /// next event, so a transport dropped without ``disconnect()`` is
+    /// released; the loop then ends.
+    private static func listenForServerEvents(
+        _ reference: WeakReference, sessionIDSignal: SessionIDSignal, timeout: TimeInterval, logger: Logger
+    ) async {
+        guard let initial = await reference.transport?.listenState() else { return }
+
+        if !initial.hasSessionID {
+            logger.debug("⏳ Waiting for session ID to be set (timeout: \(timeout)s)...")
 
             let startTime = Date()
-            let timeout = self.sseInitializationTimeout
-            // The signal task waits on a continuation that only a session
-            // ID (or disconnect) resumes, so the timeout resumes it too.
-            let timer = Task { [weak self] in
-                try await Task.sleep(for: .seconds(timeout))
-                await self?.sessionIDWaitTimedOut(after: timeout)
-            }
-            await signalTask.value
-            timer.cancel()
-
-            if self.sessionID != nil {
+            if await sessionIDSignal.wait(timeout: timeout) == .timedOut {
+                logger.warning("⏱️ Timeout waiting for session ID (\(timeout)s). SSE stream will proceed anyway.")
+            } else if await reference.transport?.sessionID != nil {
                 let elapsed = Date().timeIntervalSince(startTime)
                 logger.debug("✓ Session ID received after \(Int(elapsed * 1000))ms, proceeding with SSE connection")
             }
@@ -821,11 +881,10 @@ public actor HTTPClientTransport: Transport {
         var consecutiveFailures = 0
 
         logger.debug("🔄 Starting SSE retry loop", metadata: [
-            "isConnected": "\(isConnected)",
             "isCancelled": "\(Task.isCancelled)"
         ])
 
-        while isConnected && !Task.isCancelled {
+        while !Task.isCancelled, let state = await reference.transport?.listenState() {
             attemptCount += 1
             logger.debug("🔄 SSE retry loop iteration", metadata: [
                 "attempt": "\(attemptCount)",
@@ -834,8 +893,8 @@ public actor HTTPClientTransport: Transport {
 
             do {
                 if !isFirstAttempt {
-                    let delayMs = Self.reconnectDelay(
-                        retryInterval: self.retryInterval, consecutiveFailures: consecutiveFailures)
+                    let delayMs = reconnectDelay(
+                        retryInterval: state.retryInterval, consecutiveFailures: consecutiveFailures)
                     logger.debug("⏳ Waiting before SSE reconnection", metadata: ["retryMs": "\(delayMs)"])
                     try await Task.sleep(for: .milliseconds(delayMs))
                     logger.debug("✓ Wait complete, reconnecting now")
@@ -844,12 +903,11 @@ public actor HTTPClientTransport: Transport {
 
                 logger.debug("📡 Calling connectToEventStream (attempt #\(attemptCount))")
 
-                let receivedEvents = try await self.connectToEventStream()
+                let receivedEvents = try await connectToEventStream(reference, logger: logger)
                 consecutiveFailures = receivedEvents ? 0 : consecutiveFailures + 1
 
                 logger.info("🔌 SSE stream closed gracefully, will reconnect", metadata: [
-                    "attempt": "\(attemptCount)",
-                    "willRetryAfter": "\(self.retryInterval)ms"
+                    "attempt": "\(attemptCount)"
                 ])
             } catch {
                 consecutiveFailures += 1
@@ -865,25 +923,58 @@ public actor HTTPClientTransport: Transport {
             }
 
             logger.debug("🔄 End of retry loop iteration", metadata: [
-                "isConnected": "\(isConnected)",
-                "isCancelled": "\(Task.isCancelled)",
-                "willContinue": "\(isConnected && !Task.isCancelled)"
+                "isCancelled": "\(Task.isCancelled)"
             ])
         }
 
         logger.debug("⏹️ SSE retry loop exited", metadata: [
-            "isConnected": "\(isConnected)",
             "isCancelled": "\(Task.isCancelled)",
             "totalAttempts": "\(attemptCount)"
         ])
     }
 
-    /// Opens the standalone GET stream and reads it until it ends.
-    /// Returns whether any event arrived.
-    private func connectToEventStream() async throws -> Bool {
+    /// Opens the standalone GET stream and reads it until it ends, or until
+    /// `reference`'s transport is released. Returns whether any event arrived.
+    private static func connectToEventStream(_ reference: WeakReference, logger: Logger) async throws -> Bool {
+        guard let stream = try await reference.transport?.openStandaloneStream() else { return false }
+
+        logger.debug("📥 Starting SSE event processing")
+        var eventCount = 0
+        do {
+            for try await event in stream.serverSentEvents {
+                eventCount += 1
+
+                if Task.isCancelled {
+                    logger.debug("⏹️ SSE processing cancelled", metadata: ["eventsProcessed": "\(eventCount)"])
+                    break
+                }
+
+                guard await reference.transport?.receiveStandaloneEvent(event) != nil else {
+                    logger.debug("⏹️ Transport released, closing the SSE stream")
+                    stream.cancel()
+                    break
+                }
+            }
+        } catch is ServerSentEventParser.LineTooLong {
+            // A resumption would replay the same event: the next connection
+            // opens a fresh stream instead, and the event is lost.
+            await reference.transport?.dropStandaloneResumePoint()
+            throw MCPError.internalError(Self.sseLineTooLong)
+        } catch is ServerSentEventParser.EventTooLong {
+            await reference.transport?.dropStandaloneResumePoint()
+            throw MCPError.internalError(Self.sseEventTooLong)
+        }
+
+        logger.debug("✓ SSE event stream completed", metadata: ["eventsProcessed": "\(eventCount)"])
+        return eventCount > 0
+    }
+
+    /// Opens the standalone GET stream: its body once the server accepted
+    /// it, `nil` when the transport is not connected.
+    private func openStandaloneStream() async throws -> ResponseBody? {
         guard isConnected else {
             logger.debug("⚠️ Skipping connectToEventStream - transport not connected")
-            return false
+            return nil
         }
 
         if let authorizer {
@@ -932,15 +1023,39 @@ public actor HTTPClientTransport: Transport {
             logger.debug("Session ID received", metadata: ["sessionID": "\(newSessionID)"])
         }
 
-        do {
-            return try await self.processSSE(
-                stream, onEventID: { self.lastEventID = $0.isEmpty ? nil : $0 },
-                onRetry: { self.retryInterval = Self.clampedRetryInterval($0) })
-        } catch where Self.isOversizedEvent(error) {
-            // A resumption would replay the same event: the next connection
-            // opens a fresh stream instead, and the event is lost.
-            lastEventID = nil
-            throw error
+        return stream
+    }
+
+    /// Forgets the standalone stream's last event ID after an event too
+    /// large to read, so that the next GET does not replay it.
+    private func dropStandaloneResumePoint() {
+        lastEventID = nil
+    }
+
+    /// Handles one event of the standalone GET stream, as ``processSSE(_:until:onEventID:onRetry:onResponse:)``
+    /// does: records its ID and retry interval and yields its message.
+    private func receiveStandaloneEvent(_ event: ServerSentEvent) {
+        logger.trace(
+            "SSE event received",
+            metadata: [
+                "type": "\(event.event ?? "message")",
+                "id": "\(event.id ?? "none")",
+            ]
+        )
+
+        // An empty `id` resets the last event ID.
+        if let eventID = event.id {
+            lastEventID = eventID.isEmpty ? nil : eventID
+            logger.debug("Stored event ID for resumability", metadata: ["eventID": "\(eventID)"])
+        }
+
+        if let retry = event.retry {
+            retryInterval = Self.clampedRetryInterval(retry)
+            logger.debug("SSE retry interval updated", metadata: ["retryMs": "\(retry)"])
+        }
+
+        if !event.data.isEmpty, let data = event.data.data(using: .utf8) {
+            messageContinuation.yield(data)
         }
     }
 
