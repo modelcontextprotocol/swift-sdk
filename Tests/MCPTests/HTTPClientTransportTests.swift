@@ -179,6 +179,98 @@ import Testing
             await transport.disconnect()
         }
 
+        @Test("Modern connect retries a version rejected with a supported-version list", .httpClientTransportSetup)
+        func modernConnectRetriesSupportedProtocolVersion() async throws {
+            let endpoint = URL(string: "https://localhost:8080/modern-retry")!
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [MockURLProtocol.self]
+            let response = HTTPURLResponse(
+                url: endpoint,
+                statusCode: 200,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            await MockURLProtocol.setHandler { request in
+                let body = try #require(request.readBody())
+                let message = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+                guard let requestID = message["id"] else {
+                    return (response, Data())
+                }
+                let method = try #require(message["method"] as? String)
+
+                if method == Discover.name,
+                    await MockURLProtocol.requestHandlerStorage.callCount(for: endpoint) == 1
+                {
+                    let error = try JSONSerialization.data(withJSONObject: [
+                        "jsonrpc": "2.0",
+                        "id": requestID,
+                        "error": [
+                            "code": -32022,
+                            "message": "Unsupported protocol version",
+                            "data": [
+                                "requested": "2026-07-28",
+                                "supported": ["2026-07-28"],
+                            ],
+                        ],
+                    ] as [String: Any])
+                    return (
+                        HTTPURLResponse(
+                            url: endpoint,
+                            statusCode: 400,
+                            httpVersion: "HTTP/1.1",
+                            headerFields: ["Content-Type": "application/json"]
+                        )!,
+                        error
+                    )
+                }
+
+                let result: [String: Any] = method == Discover.name
+                    ? [
+                        "resultType": "complete",
+                        "supportedVersions": ["2026-07-28"],
+                        "capabilities": ["tools": [:]],
+                        "cacheScope": "private",
+                        "ttlMs": 0,
+                    ]
+                    : ["resultType": "complete"]
+                let data = try JSONSerialization.data(withJSONObject: [
+                    "jsonrpc": "2.0",
+                    "id": requestID,
+                    "result": result,
+                ] as [String: Any])
+                return (response, data)
+            }
+
+            let transport = HTTPClientTransport(
+                endpoint: endpoint,
+                configuration: configuration,
+                streaming: false,
+                protocolVersion: "2026-07-28"
+            )
+            let client = Client(name: "test-client", version: "1.0.0")
+            _ = try await client.connect(transport: transport)
+
+            let requests = await MockURLProtocol.requestHandlerStorage.requests()
+            let discovers = requests.filter { request in
+                guard let body = request.readBody(),
+                    let message = try? JSONSerialization.jsonObject(with: body) as? [String: Any]
+                else { return false }
+                return message["method"] as? String == Discover.name
+            }
+            #expect(discovers.count == 2)
+            #expect(discovers.allSatisfy {
+                $0.value(forHTTPHeaderField: "MCP-Protocol-Version") == "2026-07-28"
+            })
+            for request in discovers {
+                let body = try #require(request.readBody())
+                let message = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+                let params = try #require(message["params"] as? [String: Any])
+                let meta = try #require(params["_meta"] as? [String: Any])
+                #expect(meta[ProtocolMetaKey.protocolVersion] as? String == "2026-07-28")
+            }
+            await client.disconnect()
+        }
+
         #if os(Linux)
             @Test("Linux rejects modern HTTP mode while per-request SSE is unsupported", .httpClientTransportSetup)
             func linuxModernModeFailsBeforeConnectSucceeds() async throws {

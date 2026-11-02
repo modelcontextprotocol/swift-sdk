@@ -308,6 +308,26 @@ public actor Client {
         let discover: Discover.Result
         do {
             discover = try await send(Discover.request(.init())).value
+        } catch let error as MCPError {
+            guard case .unsupportedProtocolVersion(_, let supported) = error,
+                let retryVersion = supported.first(where: Version.modern.contains)
+            else {
+                self.modernProtocolVersion = nil
+                throw error
+            }
+
+            // A server may reject the initial version once and advertise the
+            // version to retry in error.data.supported. Retry at most once.
+            self.modernProtocolVersion = retryVersion
+            if let http = self.connection as? HTTPClientTransport {
+                await http.updateNegotiatedProtocolVersion(retryVersion)
+            }
+            do {
+                discover = try await send(Discover.request(.init())).value
+            } catch {
+                self.modernProtocolVersion = nil
+                throw error
+            }
         } catch {
             self.modernProtocolVersion = nil
             throw error
