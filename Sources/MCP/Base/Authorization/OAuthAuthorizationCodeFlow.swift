@@ -23,6 +23,8 @@ protocol OAuthAuthorizationCodeFlowing: Sendable {
         authorizationURL: URL,
         redirectURI: URL,
         state: String,
+        expectedIssuer: String?,
+        issuerRequired: Bool,
         delegate: (any OAuthAuthorizationDelegate)?,
         session: URLSession
     ) async throws -> String
@@ -121,6 +123,8 @@ public struct OAuthAuthorizationCodeFlow: Sendable {
         authorizationURL: URL,
         redirectURI: URL,
         state: String,
+        expectedIssuer: String? = nil,
+        issuerRequired: Bool = false,
         delegate: (any OAuthAuthorizationDelegate)?,
         session: URLSession
     ) async throws -> String {
@@ -129,7 +133,9 @@ public struct OAuthAuthorizationCodeFlow: Sendable {
             return try extractCode(
                 from: redirectURL,
                 expectedRedirectURI: redirectURI,
-                expectedState: state
+                expectedState: state,
+                expectedIssuer: expectedIssuer,
+                issuerRequired: issuerRequired
             )
         }
 
@@ -168,7 +174,9 @@ public struct OAuthAuthorizationCodeFlow: Sendable {
         return try extractCode(
             from: redirectURL,
             expectedRedirectURI: redirectURI,
-            expectedState: state
+            expectedState: state,
+            expectedIssuer: expectedIssuer,
+            issuerRequired: issuerRequired
         )
     }
 
@@ -182,7 +190,9 @@ public struct OAuthAuthorizationCodeFlow: Sendable {
     public func extractCode(
         from redirectURL: URL,
         expectedRedirectURI: URL,
-        expectedState: String
+        expectedState: String,
+        expectedIssuer: String? = nil,
+        issuerRequired: Bool = false
     ) throws -> String {
         guard
             let redirectComponents = URLComponents(url: redirectURL, resolvingAgainstBaseURL: false),
@@ -216,6 +226,20 @@ public struct OAuthAuthorizationCodeFlow: Sendable {
                 expected: expectedState,
                 actual: state
             )
+        }
+
+        let responseIssuer = redirectComponents.queryItems?.first(where: {
+            $0.name == OAuthParameterName.issuer
+        })?.value
+        if let responseIssuer {
+            guard let expectedIssuer, responseIssuer == expectedIssuer else {
+                throw OAuthAuthorizationError.authorizationServerIssuerMismatch(
+                    expected: expectedIssuer ?? "<unknown>",
+                    actual: responseIssuer
+                )
+            }
+        } else if issuerRequired {
+            throw OAuthAuthorizationError.authorizationResponseMissingIssuer
         }
 
         guard

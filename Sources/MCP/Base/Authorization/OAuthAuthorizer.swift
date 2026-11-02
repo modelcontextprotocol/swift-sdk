@@ -115,14 +115,17 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
     // MARK: - Mutable State
 
     private var configuration: OAuthConfiguration
+    private let configuredAuthentication: OAuthConfiguration.TokenEndpointAuthentication
     private let tokenStorage: TokenStorage
     private var selectedAuthorizationServer: URL?
+    private var lastAuthorizationServer: URL?
     private var protectedResourceMetadata: OAuthProtectedResourceMetadata?
     private var authorizationServerMetadata: OAuthAuthorizationServerMetadata?
     private var cachedProtectedResourceMetadataURL: URL?
     private var stepUpAttempts: [String: Int] = [:]
     private var clientRegistrationAttempted = false
     private var clientSecretExpiresAt: Date?
+    private let authorizationGate = OAuthAuthorizationGate()
 
     // MARK: - Composable Dependencies
 
@@ -187,6 +190,7 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
         authCodeFlow: any OAuthAuthorizationCodeFlowing
     ) {
         self.configuration = configuration
+        self.configuredAuthentication = configuration.authentication
         self.tokenStorage = tokenStorage
         self.scopeSelector = scopeSelector
         self.challengeParser = challengeParser
@@ -230,6 +234,30 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
         session: URLSession
     ) async throws -> Bool {
         try validateEndpointSecurity(for: endpoint)
+        await authorizationGate.acquire()
+        do {
+            let result = try await handleChallengeAfterAcquiringGate(
+                statusCode: statusCode,
+                headers: headers,
+                endpoint: endpoint,
+                operationKey: operationKey,
+                session: session
+            )
+            await authorizationGate.release()
+            return result
+        } catch {
+            await authorizationGate.release()
+            throw error
+        }
+    }
+
+    private func handleChallengeAfterAcquiringGate(
+        statusCode: Int,
+        headers: [String: String],
+        endpoint: URL,
+        operationKey: String?,
+        session: URLSession
+    ) async throws -> Bool {
         let challenge = challengeParser.parseBearer(from: headers)
 
         switch statusCode {
@@ -239,6 +267,7 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
                 let metadata = try await discoverProtectedResourceMetadata(
                     endpoint: endpoint,
                     challenge: challenge,
+                    forceRefresh: true,
                     session: session
                 )
                 let asMetadata = try await resolveAuthorizationServerMetadata(
@@ -266,6 +295,7 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
             let metadata = try await discoverProtectedResourceMetadata(
                 endpoint: endpoint,
                 challenge: challenge,
+                forceRefresh: true,
                 session: session
             )
             let requestedScopes = scopeSelector.selectScopes(
@@ -394,8 +424,15 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
     private func discoverProtectedResourceMetadata(
         endpoint: URL,
         challenge: OAuthBearerChallenge?,
+        forceRefresh: Bool = false,
         session: URLSession
     ) async throws -> OAuthProtectedResourceMetadata {
+        if forceRefresh {
+            self.protectedResourceMetadata = nil
+            self.authorizationServerMetadata = nil
+            self.selectedAuthorizationServer = nil
+            self.cachedProtectedResourceMetadataURL = nil
+        }
         if let protectedResourceMetadata {
             let incomingURL = challenge?.resourceMetadataURL
             if let incomingURL, incomingURL != cachedProtectedResourceMetadataURL {
@@ -501,7 +538,18 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
 
         let (server, asMetadata) = try await discoveryClient.fetchAuthorizationServerMetadata(
             candidates: candidates, session: session)
+        if let previousServer = lastAuthorizationServer ?? selectedAuthorizationServer,
+            !authorizationServersMatch(previousServer, server)
+        {
+            tokenStorage.clear()
+            if case .none = configuredAuthentication {
+                configuration.authentication = configuredAuthentication
+                clientRegistrationAttempted = false
+                clientSecretExpiresAt = nil
+            }
+        }
         self.selectedAuthorizationServer = server
+        self.lastAuthorizationServer = server
         self.authorizationServerMetadata = asMetadata
         return asMetadata
     }
@@ -600,6 +648,9 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
             authorizationURL: authorizationURL,
             redirectURI: configuration.authorizationRedirectURI,
             state: state,
+            expectedIssuer: asMetadata.issuer?.absoluteString
+                ?? selectedAuthorizationServer?.absoluteString,
+            issuerRequired: asMetadata.authorizationResponseIssParameterSupported == true,
             delegate: configuration.authorizationDelegate,
             session: session
         )
@@ -869,5 +920,29 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
         guard let operationKey else { return "<unknown>" }
         let normalized = operationKey.trimmingCharacters(in: .whitespacesAndNewlines)
         return normalized.isEmpty ? "<unknown>" : normalized
+    }
+}
+
+/// Serializes challenge handling across suspension points. OAuthAuthorizer is
+/// called by an HTTP transport actor, but actor reentrancy can otherwise let two
+/// concurrent 401 responses mutate registration and PKCE state at once.
+private actor OAuthAuthorizationGate {
+    private var isHeld = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func acquire() async {
+        guard isHeld else {
+            isHeld = true
+            return
+        }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func release() {
+        guard !waiters.isEmpty else {
+            isHeld = false
+            return
+        }
+        waiters.removeFirst().resume()
     }
 }

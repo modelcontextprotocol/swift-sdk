@@ -59,7 +59,8 @@ final class MockDiscoveryClient: OAuthDiscoveryFetching, @unchecked Sendable {
                 registrationEndpoint: nil,
                 codeChallengeMethodsSupported: ["S256"],
                 tokenEndpointAuthMethodsSupported: nil,
-                clientIDMetadataDocumentSupported: nil
+                clientIDMetadataDocumentSupported: nil,
+                authorizationResponseIssParameterSupported: nil
             )
         )
     }
@@ -141,6 +142,8 @@ final class MockAuthCodeFlow: OAuthAuthorizationCodeFlowing, @unchecked Sendable
         authorizationURL: URL,
         redirectURI: URL,
         state: String,
+        expectedIssuer: String?,
+        issuerRequired: Bool,
         delegate: (any OAuthAuthorizationDelegate)?,
         session: URLSession
     ) async throws -> String {

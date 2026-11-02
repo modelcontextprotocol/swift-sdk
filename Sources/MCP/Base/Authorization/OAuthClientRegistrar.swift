@@ -90,6 +90,9 @@ struct OAuthClientRegistrar: Sendable {
             "client_name": configuration.clientName,
             "grant_types": grantTypes,
             "token_endpoint_auth_method": configuration.authentication.methodName,
+            "application_type": configuration.authorizationRedirectURI.scheme?.lowercased() == "https"
+                ? "web"
+                : "native",
         ]
         if !responseTypes.isEmpty {
             registrationPayload["response_types"] = responseTypes
