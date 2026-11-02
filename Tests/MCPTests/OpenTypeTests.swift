@@ -54,6 +54,15 @@ struct OpenTypeTests {
         #expect(BearerTokenValidationResult.valid(BearerTokenInfo()) == .valid(BearerTokenInfo()))
     }
 
+    @Test("A valid bearer result exposes its token info, other results none")
+    func bearerTokenInfo() {
+        let info = BearerTokenInfo(audience: ["https://api.example.com"], scopes: ["read"])
+        #expect(BearerTokenValidationResult.valid(info).tokenInfo == info)
+        #expect(BearerTokenValidationResult.invalidToken().tokenInfo == nil)
+        #expect(BearerTokenValidationResult.insufficientScope(requiredScopes: ["write"]).tokenInfo == nil)
+        #expect(BearerTokenValidationResult.malformedRequest().tokenInfo == nil)
+    }
+
     @Test("A mode the SDK does not know round-trips")
     func unknownModes() throws {
         let toolChoice = try JSONDecoder().decode(

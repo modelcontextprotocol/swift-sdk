@@ -3,9 +3,10 @@ import Foundation
 /// The coding of blocks and requests whose kind the SDK does not know: the
 /// whole JSON object, kept as received.
 enum UnknownBlock {
-    /// The object `decoder` holds.
+    /// The object `decoder` holds, with strings as written: a `data:` URL
+    /// stays a string, so the block encodes back byte for byte.
     static func decode(from decoder: any Decoder) throws -> Value {
-        try Value(from: decoder)
+        try Value.Preserved(from: decoder).value
     }
 
     /// Encodes `value` with its kind under `key` (`type` for content blocks).

@@ -130,6 +130,35 @@ extension CodingUserInfoKey {
     static let valuePreservesStrings = CodingUserInfoKey(rawValue: "mcp.value.preservesStrings")!
 }
 
+extension Value {
+    /// A `Value` decoded with strings as written: a `data:` URL stays a
+    /// string, at any depth.
+    struct Preserved: Decodable, Sendable {
+        let value: Value
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.singleValueContainer()
+            if container.decodeNil() {
+                value = .null
+            } else if let bool = try? container.decode(Bool.self) {
+                value = .bool(bool)
+            } else if let int = try? container.decode(Int.self) {
+                value = .int(int)
+            } else if let double = try? container.decode(Double.self) {
+                value = .double(double)
+            } else if let string = try? container.decode(String.self) {
+                value = .string(string)
+            } else if let array = try? container.decode([Preserved].self) {
+                value = .array(array.map(\.value))
+            } else if let object = try? container.decode([String: Preserved].self) {
+                value = .object(object.mapValues(\.value))
+            } else {
+                throw DecodingError.dataCorruptedError(in: container, debugDescription: "Value type not found")
+            }
+        }
+    }
+}
+
 extension Value: Codable {
     public init(from decoder: Decoder) throws {
         let container = try decoder.singleValueContainer()

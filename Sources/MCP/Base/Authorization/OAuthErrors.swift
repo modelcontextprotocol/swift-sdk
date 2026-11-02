@@ -185,11 +185,17 @@ public struct OAuthAuthorizationError: LocalizedError, Hashable, Sendable {
 
     /// Whether `error` is an `OAuthAuthorizationError` with the code of `pattern`, so that
     /// `catch OAuthAuthorizationError.dpopRequired` and `case .dpopRequired:` match by code.
+    ///
+    /// Only the code is compared. A pattern built with values, such as
+    /// `catch OAuthAuthorizationError.tokenRequestFailed(statusCode: 401, oauthError: nil)`,
+    /// compiles and matches every `tokenRequestFailed` error; compare ``statusCode`` or
+    /// ``oauthError`` in a `where` clause.
     public static func ~= (pattern: OAuthAuthorizationError, error: any Error) -> Bool {
         (error as? OAuthAuthorizationError)?.code == pattern.code
     }
 
-    /// Whether `error` has the code of `pattern`.
+    /// Whether `error` has the code of `pattern`. Only the code is compared: the values of a
+    /// pattern built with values are ignored.
     public static func ~= (pattern: OAuthAuthorizationError, error: OAuthAuthorizationError) -> Bool {
         error.code == pattern.code
     }

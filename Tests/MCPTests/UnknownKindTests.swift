@@ -98,15 +98,79 @@ struct UnknownKindTests {
         #expect(sampling.sampling != nil)
     }
 
+    @Test("An input response that shares a key with a known kind but not its schema is kept")
+    func inputResponseSharedKey() throws {
+        for json in [#"{"action":3}"#, #"{"content":"x","other":1}"#, #"{"model":true}"#, #"{"roots":"all"}"#] {
+            let (response, encoded) = try roundTrip(InputResponse.self, json)
+            #expect(response == .unknown(try value(json)), "\(json)")
+            #expect(encoded == (try value(json)))
+        }
+        // One such response does not fail the parameters that carry it.
+        let params = try CallTool.Parameters(
+            decoding: ["name": "t", "inputResponses": ["a": ["action": 3], "b": ["action": "accept"]]])
+        #expect(params.inputResponses?["a"] == .unknown(["action": 3]))
+        #expect(params.inputResponses?["b"]?.elicitation?.action == .accept)
+        let (roots, _) = try roundTrip(InputResponse.self, #"{"roots":[{"uri":"file:///x"}]}"#)
+        #expect(roots.roots?.first?.uri == "file:///x")
+    }
+
+    @Test("Unknown blocks keep data: URL strings as written")
+    func unknownBlockDataURL() throws {
+        let json = #"{"type":"hologram","src":"data:,hi","frames":["data:text/plain,a%20b"],"_meta":{"k":"data:,x"}}"#
+        let preserved = try JSONDecoder().decode(Value.Preserved.self, from: Data(json.utf8)).value
+        #expect(preserved.objectValue?["src"] == .string("data:,hi"))
+
+        func check<T: Codable>(_ type: T.Type, _ json: String) throws -> T {
+            let decoded = try JSONDecoder().decode(T.self, from: Data(json.utf8))
+            let encoded = try JSONEncoder().encode(decoded)
+            let expected = try JSONDecoder().decode(Value.Preserved.self, from: Data(json.utf8)).value
+            #expect(try JSONDecoder().decode(Value.Preserved.self, from: encoded).value == expected, "\(T.self)")
+            return decoded
+        }
+        #expect(try check(Tool.Content.self, json) == .unknown(type: "hologram", preserved))
+        #expect(try check(Prompt.Message.Content.self, json) == .unknown(type: "hologram", preserved))
+        #expect(try check(Sampling.Message.Content.ContentBlock.self, json) == .unknown(type: "hologram", preserved))
+        #expect(try check(Sampling.ToolResultContent.ContentBlock.self, json) == .unknown(type: "hologram", preserved))
+        let mode = #"{"mode":"voice","message":"Say it","prompt":"data:,hi"}"#
+        let params = try check(CreateElicitation.Parameters.self, mode)
+        #expect(params == .unknown(mode: .init(rawValue: "voice"), ["mode": "voice", "message": "Say it", "prompt": "data:,hi"]))
+    }
+
+    @Test("A tool's unknown block with a data: URL string reaches the client as written")
+    func unknownBlockDataURLEndToEnd() async throws {
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+        let server = Server(name: "s", version: "1", capabilities: .init(tools: .init()))
+        let body: Value = ["type": "hologram", "src": "data:,hi"]
+        await server.withMethodHandler(CallTool.self) { _ in
+            .init(content: [.unknown(type: "hologram", body)])
+        }
+        try await server.start(transport: serverTransport)
+        let client = Client(name: "c", version: "1")
+        try await client.connect(transport: clientTransport)
+        let (content, _) = try await client.callTool(name: "show")
+        #expect(content == [.unknown(type: "hologram", body)])
+        await client.disconnect()
+        await server.stop()
+    }
+
     @Test("Elicitation parameters of an unknown mode are kept")
     func elicitationMode() throws {
         let json = #"{"mode":"voice","message":"Say it","language":"en"}"#
         let (params, encoded) = try roundTrip(CreateElicitation.Parameters.self, json)
         #expect(params == .unknown(mode: .init(rawValue: "voice"), try value(json)))
         #expect(encoded == (try value(json)))
-        let capabilities = Client.Capabilities(elicitation: .init(form: .init(), url: .init()))
-        let supported = InputRequest.elicitation(params).isSupported(by: capabilities)
-        #expect(!supported)
+        // The SDK cannot know the sub-capability of a mode it does not know:
+        // any elicitation declaration is enough, and a missing one is named
+        // without a sub-capability.
+        let request = InputRequest.elicitation(params)
+        let both = Client.Capabilities(elicitation: .init(form: .init(), url: .init()))
+        let urlOnly = Client.Capabilities(elicitation: .init(form: nil, url: .init()))
+        let supported = [both, urlOnly, .init()].map { request.isSupported(by: $0) }
+        #expect(supported == [true, true, false])
+        var missing = Client.Capabilities()
+        request.require(in: &missing)
+        #expect(missing.elicitation == .init(form: nil, url: nil))
+        #expect(try Value(missing) == ["elicitation": [:]])
         let (form, _) = try roundTrip(
             CreateElicitation.Parameters.self, #"{"message":"m","requestedSchema":{"type":"object","properties":{}}}"#)
         guard case .form = form else {

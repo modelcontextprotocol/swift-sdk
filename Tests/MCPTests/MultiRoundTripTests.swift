@@ -370,6 +370,80 @@ struct MultiRoundTripTests {
         }
     }
 
+    @Test(
+        "A form elicitation needs form elicitation: a URL-only client gets -32021, an empty declaration is form",
+        arguments: [Client.ProtocolMode.automatic, .handshake])
+    func testFormElicitationCapability(mode: Client.ProtocolMode) async throws {
+        let server = await makeRoundTripServer()
+        let urlOnly = try await connect(
+            server, mode: mode, capabilities: .init(elicitation: .init(form: nil, url: .init()))
+        ) { await answerEverything($0) }
+        await #expect {
+            _ = try await urlOnly.callTool(name: "confirm")
+        } throws: { error in
+            let error = error as? MCPError
+            return error?.code == -32021
+                && error?.data == ["requiredCapabilities": ["elicitation": ["form": [:]]]]
+        }
+        await urlOnly.disconnect()
+        await server.stop()
+
+        for elicitation in [Client.Capabilities.Elicitation(), .init(form: nil, url: nil), .init(url: .init())] {
+            let server = await makeRoundTripServer()
+            let client = try await connect(server, mode: mode, capabilities: .init(elicitation: elicitation)) {
+                await answerEverything($0)
+            }
+            let (content, _) = try await client.callTool(name: "confirm")
+            #expect(content == [.text(text: "accept pending:confirm", annotations: nil, _meta: nil)], "\(elicitation)")
+            await client.disconnect()
+            await server.stop()
+        }
+    }
+
+    @Test("An elicitation of an unknown mode needs only the elicitation capability")
+    func testUnknownModeCapability() async throws {
+        func makeServer() async -> Server {
+            let server = Server(name: "mrtr", version: "1.0", capabilities: .init(tools: .init()))
+            await server.withMethodHandler(CallTool.self) { params in
+                if params.inputResponses?["voice"] != nil {
+                    return .init(content: [.text(text: "answered", annotations: nil, _meta: nil)])
+                }
+                return .inputRequired(
+                    ["voice": .elicitation(.unknown(mode: .init(rawValue: "voice"), ["message": "Say it"]))],
+                    requestState: "s")
+            }
+            return server
+        }
+        // A client without elicitation is told to declare it, with no sub-capability.
+        let server = await makeServer()
+        let (clientEnd, serverEnd) = await InMemoryTransport.createConnectedPair()
+        try await server.start(transport: serverEnd)
+        try await clientEnd.connect()
+        var incoming = await clientEnd.receive().makeAsyncIterator()
+        func next() async throws -> Value { try JSONDecoder().decode(Value.self, from: try #require(try await incoming.next())) }
+        try await clientEnd.send(
+            Data(
+                #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{"roots":{}},"clientInfo":{"name":"raw","version":"1"}}}"#
+                    .utf8))
+        _ = try await next()
+        try await clientEnd.send(Data(#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#.utf8))
+        try await clientEnd.send(Data(#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"speak"}}"#.utf8))
+        let error = try await next().objectValue?["error"]?.objectValue
+        #expect(error?["code"] == -32021)
+        #expect(error?["data"] == ["requiredCapabilities": ["elicitation": [:]]])
+        await clientEnd.disconnect()
+        await server.stop()
+
+        let other = await makeServer()
+        let with = try await connect(other, capabilities: .init(elicitation: .init(form: nil, url: .init()))) {
+            await $0.withElicitationHandler { _ in .init(action: .decline) }
+        }
+        let (content, _) = try await with.callTool(name: "speak")
+        #expect(content == [.text(text: "answered", annotations: nil, _meta: nil)])
+        await with.disconnect()
+        await other.stop()
+    }
+
     @Test("A result with content and input requests is a server error")
     func testContentAndInput() async throws {
         let server = await makeRoundTripServer()

@@ -51,8 +51,10 @@ public enum InputRequest: Hashable, Sendable {
             guard let elicitation = capabilities.elicitation else { return false }
             switch params {
             case .url: return elicitation.url != nil
-            case .form: return true
-            case .unknown: return false
+            // An empty declaration means form, as the wire decoder reads it.
+            case .form: return elicitation.form != nil || elicitation.url == nil
+            // The SDK does not know which sub-capability the mode needs.
+            case .unknown: return true
             }
         case .sampling: return capabilities.sampling != nil
         case .listRoots: return capabilities.roots != nil
@@ -66,10 +68,10 @@ public enum InputRequest: Hashable, Sendable {
         switch self {
         case .elicitation(let params):
             var elicitation = capabilities.elicitation ?? .init(form: nil)
-            if case .url = params {
-                elicitation.url = .init()
-            } else {
-                elicitation.form = .init()
+            switch params {
+            case .url: elicitation.url = .init()
+            case .form: elicitation.form = .init()
+            case .unknown: break
             }
             capabilities.elicitation = elicitation
         case .sampling: capabilities.sampling = capabilities.sampling ?? .init()
@@ -125,7 +127,10 @@ extension InputRequest: Codable {
 ///
 /// On the wire it is the plain result of the request. Decoding tells the
 /// kinds apart by shape: `roots` for roots, `action` for elicitation,
-/// `content` or `model` for sampling, otherwise ``unknown(_:)``.
+/// `content` or `model` for sampling, otherwise ``unknown(_:)``. A result
+/// with one of these keys that does not decode as that kind is also
+/// ``unknown(_:)``, so a handler that reads ``elicitation``, ``sampling`` or
+/// ``roots`` gets `nil` for a malformed result.
 ///
 /// No other case is added in 1.x: a kind from a later revision is ``unknown(_:)``.
 public enum InputResponse: Hashable, Sendable {
@@ -167,14 +172,19 @@ public enum InputResponse: Hashable, Sendable {
 extension InputResponse: Codable {
     public init(from decoder: Decoder) throws {
         let object = try [String: Value](from: decoder)
-        if object["roots"] != nil {
-            self = .roots(try ListRoots.Result(decoding: Value.object(object)))
-        } else if object["action"] != nil {
-            self = .elicitation(try CreateElicitation.Result(decoding: Value.object(object)))
-        } else if object["content"] != nil || object["model"] != nil {
-            self = .sampling(try CreateSamplingMessage.Result(decoding: Value.object(object)))
+        let value = Value.object(object)
+        // A result of a later kind may share a key with a known one: it is
+        // unknown when it does not decode as the kind its shape suggests.
+        if object["roots"] != nil, let result = try? ListRoots.Result(decoding: value) {
+            self = .roots(result)
+        } else if object["action"] != nil, let result = try? CreateElicitation.Result(decoding: value) {
+            self = .elicitation(result)
+        } else if object["content"] != nil || object["model"] != nil,
+            let result = try? CreateSamplingMessage.Result(decoding: value)
+        {
+            self = .sampling(result)
         } else {
-            self = .unknown(.object(object))
+            self = .unknown(value)
         }
     }
 

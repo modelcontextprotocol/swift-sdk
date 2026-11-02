@@ -404,6 +404,12 @@ public struct BearerTokenValidationResult: Sendable, Equatable {
 
     let outcome: Outcome
 
+    /// The claims of a ``valid(_:)`` result; `nil` for every other result.
+    public var tokenInfo: BearerTokenInfo? {
+        if case .valid(let info) = outcome { return info }
+        return nil
+    }
+
     /// Access token is valid for this request, with its extracted claims.
     ///
     /// Supply a ``BearerTokenInfo`` with `audience` and `expiresAt` populated so that

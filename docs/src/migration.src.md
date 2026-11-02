@@ -152,7 +152,11 @@ labels, so `throw .tokenRequestFailed(statusCode: 400, oauthError: nil)` and
 `catch OAuthAuthorizationError.dpopRequired` compile unchanged. A pattern
 matches by code alone: `catch OAuthAuthorizationError.tokenRequestFailed`
 catches every failed token request. A pattern that binds associated values does
-not compile; read the properties instead.
+not compile; read the properties instead. A pattern built with values still
+compiles, but its values are ignored:
+`catch OAuthAuthorizationError.tokenRequestFailed(statusCode: 401, oauthError: nil)`
+now catches every failed token request, whatever its status. Compare
+`statusCode` or `oauthError` in a `where` clause instead.
 
 Before:
 
@@ -188,8 +192,10 @@ minor release can add values (`VERSIONING.md`):
 `.clientSecretBasic(clientID:clientSecret:)`, `.valid(info)`, `.url` and the
 others are written as before, and `==` works as before. A `switch` needs a
 `default`, and a pattern that binds associated values does not compile:
-`TokenEndpointAuthentication` has `clientID` and `methodName`. The two `Mode`
-types decode a mode the SDK does not know instead of failing.
+`TokenEndpointAuthentication` has `clientID` and `methodName`, and
+`BearerTokenValidationResult` has `tokenInfo`, the `BearerTokenInfo` of a
+`.valid(info)` result. The two `Mode` types decode a mode the SDK does not know
+instead of failing.
 
 %include Examples/Snippets/Guides/Migration.swift migration-open-struct
 
