@@ -66,6 +66,7 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
     /// The standalone SSE stream continuation for server-initiated messages.
     /// Only one GET stream is allowed per session.
     private var standaloneSSEContinuation: AsyncThrowingStream<Data, Swift.Error>.Continuation?
+    private var standaloneStreamGeneration = 0
 
     /// Internal identifier for the standalone GET stream in the event store.
     private let standaloneStreamID = "_GET_stream"
@@ -159,6 +160,8 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
     public func receive() -> AsyncThrowingStream<Data, Swift.Error> {
         incomingStream
     }
+
+    var hasActiveStandaloneStream: Bool { standaloneSSEContinuation != nil }
 
     // MARK: - HTTP Request Handler
 
@@ -356,7 +359,7 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
 
         // Create standalone SSE stream
         let (sseStream, sseContinuation) = AsyncThrowingStream<Data, Swift.Error>.makeStream()
-        standaloneSSEContinuation = sseContinuation
+        registerStandaloneStream(sseContinuation)
 
         // Extract protocol version for priming event
         let protocolVersion = request.header(HTTPHeaderName.protocolVersion) ?? Version.latest
@@ -463,7 +466,7 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
 
         // Re-register the stream for future messages
         if replay.streamID == standaloneStreamID {
-            standaloneSSEContinuation = sseContinuation
+            registerStandaloneStream(sseContinuation)
         } else {
             requestSSEContinuations[replay.streamID] = sseContinuation
         }
@@ -533,6 +536,23 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
     }
 
     // MARK: - Session Helpers
+
+    private func registerStandaloneStream(
+        _ continuation: AsyncThrowingStream<Data, Swift.Error>.Continuation
+    ) {
+        standaloneStreamGeneration += 1
+        let generation = standaloneStreamGeneration
+        standaloneSSEContinuation = continuation
+        continuation.onTermination = { [weak self] _ in
+            Task { await self?.clearStandaloneStream(generation: generation) }
+        }
+    }
+
+    private func clearStandaloneStream(generation: Int) {
+        if standaloneStreamGeneration == generation {
+            standaloneSSEContinuation = nil
+        }
+    }
 
     private func sessionHeaders() -> [String: String] {
         var headers: [String: String] = [:]

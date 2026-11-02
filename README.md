@@ -1348,6 +1348,8 @@ The Swift SDK provides multiple built-in transports:
 | [`InMemoryTransport`](/Sources/MCP/Base/Transports/InMemoryTransport.swift) | Custom in-memory transport for direct communication within the same process | All platforms | Testing, debugging, same-process client-server communication |
 | [`NetworkTransport`](/Sources/MCP/Base/Transports/NetworkTransport.swift) | Custom transport using Apple's Network framework for TCP/UDP connections | Apple platforms only | Low-level networking, custom protocols |
 
+For exposed stateful HTTP endpoints, set `maxSessions` on `StatefulHTTPServerSessionManager` to a limit that fits your server's capacity.
+
 
 ### Custom Transport Implementation
 

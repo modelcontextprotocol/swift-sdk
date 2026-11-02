@@ -657,6 +657,72 @@ struct StatefulHTTPServerTransportTests {
         await manager.stop()
     }
 
+    @Test("Rejected DELETE keeps the session available")
+    func testSessionManagerRejectedDelete() async throws {
+        let bearer = BearerTokenValidator(
+            resourceMetadataURL: authResourceMetadataURL,
+            resourceIdentifier: authResourceIdentifier,
+            tokenValidator: { _, _, _ in .valid(BearerTokenInfo()) }
+        )
+        let manager = StatefulHTTPServerSessionManager(
+            validationPipeline: StandardValidationPipeline(validators: [bearer, SessionValidator()])
+        ) { _, _ in Server(name: "test", version: "1.0") }
+
+        let initialized = await manager.handleRequest(
+            makeStatefulPOSTRequest(
+                body: makeInitializeBody(), authorization: "Bearer valid-token"
+            )
+        )
+        let sessionID = try #require(initialized.headers[HTTPHeaderName.sessionID])
+
+        let rejected = await manager.handleRequest(makeDELETERequest(sessionID: sessionID))
+        #expect(rejected.statusCode == 401)
+
+        let continued = await manager.handleRequest(
+            makeStatefulPOSTRequest(
+                body: makeNotificationBody(),
+                sessionID: sessionID,
+                authorization: "Bearer valid-token"
+            )
+        )
+        #expect(continued.statusCode == 202)
+        await manager.stop()
+    }
+
+    @Test("Idle sessions expire, but an open GET stream keeps its session")
+    func testSessionManagerExpiryWithGetStream() async throws {
+        let manager = StatefulHTTPServerSessionManager(
+            sessionTimeout: 0.1,
+            validationPipeline: StandardValidationPipeline(validators: [SessionValidator()])
+        ) { _, _ in Server(name: "test", version: "1.0") }
+
+        let initialized = await manager.handleRequest(
+            makeStatefulPOSTRequest(body: makeInitializeBody())
+        )
+        let sessionID = try #require(initialized.headers[HTTPHeaderName.sessionID])
+        let get = await manager.handleRequest(makeGETRequest(sessionID: sessionID))
+        guard case .stream(let stream, _) = get else {
+            Issue.record("Expected a GET stream")
+            return
+        }
+        let reader = Task { for try await _ in stream {} }
+
+        try await Task.sleep(for: .milliseconds(200))
+        let active = await manager.handleRequest(
+            makeStatefulPOSTRequest(body: makeNotificationBody(), sessionID: sessionID)
+        )
+        #expect(active.statusCode == 202)
+
+        reader.cancel()
+        _ = await reader.result
+        try await Task.sleep(for: .milliseconds(200))
+        let expired = await manager.handleRequest(
+            makeStatefulPOSTRequest(body: makeNotificationBody(), sessionID: sessionID)
+        )
+        #expect(expired.statusCode == 404)
+        await manager.stop()
+    }
+
     @Test("Session manager validates initialize before creating a server")
     func testSessionManagerValidatesBeforeFactory() async throws {
         final class ValidationCalls: @unchecked Sendable {

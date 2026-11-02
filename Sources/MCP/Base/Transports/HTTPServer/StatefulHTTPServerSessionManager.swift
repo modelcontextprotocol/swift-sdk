@@ -27,6 +27,7 @@ public actor StatefulHTTPServerSessionManager {
     private var sessions: [String: Session] = [:]
     private var creatingSessions = 0
     private var cleanupTask: Task<Void, Never>?
+    private var stoppingSessions: [UUID: Task<Void, Never>] = [:]
     private var stopped = false
 
     /// `serverFactory` must return a new `Server` for each session.
@@ -83,13 +84,9 @@ public actor StatefulHTTPServerSessionManager {
             }
 
             if request.method.uppercased() == "DELETE" {
-                sessions.removeValue(forKey: sessionID)
                 let response = await session.transport.handleRequest(request)
                 if response.statusCode == 200 {
-                    await session.server.stop()
-                } else if !stopped {
-                    sessions[sessionID] = session
-                } else {
+                    sessions.removeValue(forKey: sessionID)
                     await session.server.stop()
                 }
                 return response
@@ -171,6 +168,9 @@ public actor StatefulHTTPServerSessionManager {
         for (_, session) in activeSessions {
             await session.server.stop()
         }
+        for task in Array(stoppingSessions.values) {
+            await task.value
+        }
     }
 
     private func removeExpiredSessions() async {
@@ -182,8 +182,16 @@ public actor StatefulHTTPServerSessionManager {
             guard let session = sessions[sessionID],
                 now.timeIntervalSince(session.lastAccessedAt) > sessionTimeout
             else { continue }
+            guard !(await session.transport.hasActiveStandaloneStream) else { continue }
+            guard let current = sessions[sessionID],
+                now.timeIntervalSince(current.lastAccessedAt) > sessionTimeout
+            else { continue }
             sessions.removeValue(forKey: sessionID)
-            await session.server.stop()
+            let taskID = UUID()
+            stoppingSessions[taskID] = Task {
+                await session.server.stop()
+                self.stoppingSessions.removeValue(forKey: taskID)
+            }
         }
     }
 }
