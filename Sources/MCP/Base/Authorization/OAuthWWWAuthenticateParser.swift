@@ -57,7 +57,20 @@ public struct DefaultOAuthWWWAuthenticateParser: OAuthWWWAuthenticateParsing {
             if value.hasPrefix("\"") && value.hasSuffix("\"") && value.count >= 2 {
                 value.removeFirst()
                 value.removeLast()
-                value = value.replacingOccurrences(of: "\\\"", with: "\"")
+                // RFC 7230 quoted-string: backslash-escape \X → X for any character.
+                var unescaped = ""
+                var escaping = false
+                for ch in value {
+                    if escaping {
+                        unescaped.append(ch)
+                        escaping = false
+                    } else if ch == "\\" {
+                        escaping = true
+                    } else {
+                        unescaped.append(ch)
+                    }
+                }
+                value = unescaped
             }
             parameters[key] = value
         }
