@@ -53,6 +53,58 @@ struct ServerTests {
         await transport.disconnect()
     }
 
+    @Test("Initialize response includes server metadata")
+    func testServerInitializeMetadata() async throws {
+        let transport = MockTransport()
+        let icons = [
+            Icon(
+                src: "https://example.com/icon-light.png",
+                mimeType: "image/png",
+                sizes: ["48x48"],
+                theme: .light
+            ),
+            Icon(
+                src: "https://example.com/icon-dark.svg",
+                mimeType: "image/svg+xml",
+                sizes: ["any"],
+                theme: .dark
+            ),
+        ]
+        let server = Server(
+            name: "TestServer",
+            version: "1.0",
+            title: "Test Server",
+            description: "A server used for testing",
+            websiteUrl: "https://example.com",
+            icons: icons,
+            instructions: "Use this server for tests"
+        )
+
+        try await transport.queue(
+            request: Initialize.request(
+                .init(
+                    protocolVersion: Version.latest,
+                    capabilities: .init(),
+                    clientInfo: .init(name: "TestClient", version: "1.0")
+                )
+            ))
+        try await server.start(transport: transport)
+        try await Task.sleep(for: .milliseconds(200))
+
+        let response: Response<Initialize>? = await transport.decodeLastSentMessage()
+        let result = try #require(response).result.get()
+        #expect(result.serverInfo.name == "TestServer")
+        #expect(result.serverInfo.version == "1.0")
+        #expect(result.serverInfo.title == "Test Server")
+        #expect(result.serverInfo.description == "A server used for testing")
+        #expect(result.serverInfo.websiteUrl == "https://example.com")
+        #expect(result.serverInfo.icons == icons)
+        #expect(result.instructions == "Use this server for tests")
+
+        await server.stop()
+        await transport.disconnect()
+    }
+
     @Test("Initialize hook - successful")
     func testInitializeHookSuccess() async throws {
         let transport = MockTransport()
