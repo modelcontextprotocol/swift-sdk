@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # CI job: runs each fuzz target in fuzz/ for a while. A crash, a failed
-# precondition or a sanitizer report fails the job; the input that caused it
-# is in .build/fuzz/artifacts/.
+# precondition or a sanitizer report fails the job, after the other targets
+# have run; the input that caused it is in .build/fuzz/artifacts/.
 #
 # Usage: scripts/ci/fuzz.sh [<seconds per target>]   (default: 60)
 #
@@ -26,6 +26,7 @@ FLAGS=(-c debug --package-path "$ROOT/fuzz" --scratch-path "$OUT/build"
 swift build "${FLAGS[@]}"
 BIN="$(swift build "${FLAGS[@]}" --show-bin-path)"
 
+failed=()
 for target in "${TARGETS[@]}"; do
     corpus="$OUT/corpus/$target"
     mkdir -p "$corpus"
@@ -35,5 +36,10 @@ for target in "${TARGETS[@]}"; do
     # one) with spare bits set, so it reports reachable globals. The HTTP
     # targets check instead that each input's server is released.
     ASAN_OPTIONS=detect_leaks=0 "$BIN/$target" "$corpus" -max_total_time="$SECONDS_PER_TARGET" -max_len=65536 \
-        -detect_leaks=0 -artifact_prefix="$OUT/artifacts/$target-" -print_final_stats=1
+        -detect_leaks=0 -artifact_prefix="$OUT/artifacts/$target-" -print_final_stats=1 ||
+        failed+=("$target")
 done
+if [[ ${#failed[@]} -gt 0 ]]; then
+    echo "fuzz: failed: ${failed[*]} (inputs in $OUT/artifacts/)" >&2
+    exit 1
+fi

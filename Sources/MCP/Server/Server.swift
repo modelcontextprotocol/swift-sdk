@@ -271,6 +271,9 @@ public actor Server {
     private var clientLogLevel: LogLevel?
     /// Notification handlers
     private var notificationHandlers: [String: [NotificationHandlerBox]] = [:]
+    /// Whether the built-in `notifications/cancelled` handler is registered:
+    /// once per server, not on every `start`.
+    private var registeredCancellationHandler = false
     /// Pending request tasks (for cancellation support)
     private var pendingRequestTasks: [ID: Task<Response<AnyMethod>, Error>] = [:]
     /// Requests received whose handler task is not registered yet, and
@@ -413,7 +416,10 @@ public actor Server {
         self.hasInitializeHook = initializeHook != nil
         self.statelessRequestHook = statelessRequestHook
         registerDefaultHandlers(initializeHook: initializeHook)
-        registerCancellationHandler()
+        if !registeredCancellationHandler {
+            registeredCancellationHandler = true
+            registerCancellationHandler()
+        }
         try await transport.connect()
 
         await logger?.debug(
@@ -519,6 +525,15 @@ public actor Server {
         task?.cancel()
         task = nil
         clientLogLevel = nil
+
+        // Their responses can no longer be sent. A request whose handler
+        // task is not registered yet is cancelled when it registers.
+        let handlerTasks = pendingRequestTasks
+        pendingRequestTasks = [:]
+        for handler in handlerTasks.values { handler.cancel() }
+        for id in startingRequests.keys { startingRequests[id] = true }
+        toolHeaderLoad?.cancel()
+        invalidateToolHeaders()
 
         // Clear pending requests with errors
         let pendingRequestsToCancel = self.pendingRequests

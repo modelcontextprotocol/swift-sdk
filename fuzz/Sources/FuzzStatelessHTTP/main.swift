@@ -29,9 +29,14 @@ private let headerSets: [[String: String]] = [
     [
         "Content-Type": "application/json", "Accept": "application/json, text/event-stream",
         "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call", "Mcp-Name": "echo",
+        "Mcp-Param-Region": "eu",
     ],
     ["Content-Type": "application/json", "Accept": "application/json", "MCP-Protocol-Version": "2025-11-25"],
     ["Content-Type": "text/plain"],
+    [
+        "Content-Type": "application/json", "Accept": "application/json, text/event-stream",
+        "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/list",
+    ],
 ]
 
 private final class Box: @unchecked Sendable { var status = 0 }

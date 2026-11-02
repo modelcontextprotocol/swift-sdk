@@ -9,13 +9,29 @@
 #               HEAD. Without one the job passes and says so.
 #
 # Runs `swift package diagnose-api-breaking-changes`, which builds the
-# baseline in a temporary copy. Needs the tags: a shallow clone fetches them.
+# baseline in a temporary copy. Needs the history and the tags: a shallow
+# clone fetches them, and the job fails when it cannot. Outside a git
+# checkout (a source tarball, as scripts/ci-linux.sh runs it) the job is
+# skipped and says so.
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 
 baseline="${1:-}"
 if [[ -z "$baseline" ]]; then
-    git fetch --quiet --tags 2>/dev/null || true
+    if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        echo "api-breakage: not a git checkout; skipped"
+        exit 0
+    fi
+    if [[ "$(git rev-parse --is-shallow-repository)" == true ]]; then
+        # A shallow clone has neither the release tags nor their commits.
+        if ! git fetch --quiet --unshallow --tags; then
+            echo "api-breakage: shallow clone, and fetching the history and tags failed;" \
+                "fetch them (git fetch --unshallow --tags) or pass a baseline" >&2
+            exit 1
+        fi
+    else
+        git fetch --quiet --tags 2>/dev/null || true
+    fi
     baseline="$(git tag --merged HEAD --list '[0-9]*.[0-9]*.[0-9]*' --sort=-version:refname \
         | grep -E '^[1-9][0-9]*\.[0-9]+\.[0-9]+$' | head -1 || true)"
     if [[ -z "$baseline" ]]; then

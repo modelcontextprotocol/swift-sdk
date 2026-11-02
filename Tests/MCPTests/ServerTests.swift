@@ -1,4 +1,5 @@
 import Foundation
+import Logging
 import Testing
 
 @testable import MCP
@@ -386,5 +387,88 @@ struct ServerDefaultHandlerTests {
         #expect(await iterator.next() == "shown")
         await client.disconnect()
         await server.stop()
+    }
+}
+
+@Suite("Server lifecycle")
+struct ServerLifecycleTests {
+    @Test("restarting a server keeps one notifications/cancelled handler")
+    func oneCancellationHandler() async throws {
+        let server = Server(name: "s", version: "1")
+        let log = LogCollector()
+        for round in 0..<3 {
+            let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair(
+                logger: Logger(label: "mcp.test.lifecycle") { _ in log })
+            let peer = RawPeer(clientTransport)
+            try await peer.start()
+            try await server.start(transport: serverTransport)
+            if round == 2 {
+                try await peer.send(
+                    #"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"gone"}}"#)
+                try await peer.sync("after")
+            }
+            await server.stop()
+            await peer.stop()
+        }
+        #expect(log.count(of: "Received cancellation notification") == 1)
+    }
+
+    @Test("stop cancels the handlers still running")
+    func stopCancelsHandlers() async throws {
+        let server = Server(name: "s", version: "1", capabilities: .init(tools: .init()))
+        let (started, startedSink) = AsyncStream<Void>.makeStream()
+        let (ended, endedSink) = AsyncStream<Bool>.makeStream()
+        await server.withMethodHandler(CallTool.self) { _ in
+            startedSink.yield()
+            do {
+                try await Task.sleep(for: .seconds(30))
+                endedSink.yield(false)
+            } catch {
+                endedSink.yield(Task.isCancelled)
+            }
+            return .init(content: [])
+        }
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+        let peer = RawPeer(clientTransport)
+        try await peer.start()
+        try await server.start(transport: serverTransport)
+        try await peer.send(
+            #"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"slow","arguments":{}}}"#)
+        for await _ in started { break }
+        await server.stop()
+        let result = await outcome(within: .seconds(1)) { () -> Bool in
+            for await cancelled in ended { return cancelled }
+            return false
+        }
+        guard case .returned(let cancelled) = result else {
+            Issue.record("the handler was still running 1 s after stop()")
+            return
+        }
+        #expect(cancelled)
+        await peer.stop()
+    }
+}
+
+/// Collects the messages logged through every logger it backs.
+private final class LogCollector: LogHandler, @unchecked Sendable {
+    private let lock = NSLock()
+    private var messages: [String] = []
+    var metadata: Logger.Metadata = [:]
+    var logLevel: Logger.Level = .trace
+
+    subscript(metadataKey key: String) -> Logger.Metadata.Value? {
+        get { metadata[key] }
+        set { metadata[key] = newValue }
+    }
+
+    func log(
+        level: Logger.Level, message: Logger.Message, metadata: Logger.Metadata?,
+        source: String, file: String, function: String, line: UInt
+    ) {
+        lock.withLock { messages.append(message.description) }
+    }
+
+    func count(of message: String) -> Int {
+        lock.withLock { messages.filter { $0 == message }.count }
     }
 }
