@@ -471,12 +471,18 @@ public enum CallTool: Method {
 
         public init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
-            content = try container.decode([Tool.Content].self, forKey: .content)
+            resultType = try container.decodeIfPresent(ResultType.self, forKey: .resultType)
+            // MRTR input_required responses may omit fields that belong only
+            // to a completed tool result, including `content`.
+            if resultType == .inputRequired {
+                content = try container.decodeIfPresent([Tool.Content].self, forKey: .content) ?? []
+            } else {
+                content = try container.decode([Tool.Content].self, forKey: .content)
+            }
             structuredContent = try container.decodeIfPresent(
                 Value.self, forKey: .structuredContent)
             isError = try container.decodeIfPresent(Bool.self, forKey: .isError)
             _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
-            resultType = try container.decodeIfPresent(ResultType.self, forKey: .resultType)
             inputRequests = try container.decodeIfPresent([String: Value].self, forKey: .inputRequests)
             requestState = try container.decodeIfPresent(String.self, forKey: .requestState)
         }

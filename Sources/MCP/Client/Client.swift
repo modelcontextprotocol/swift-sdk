@@ -1062,11 +1062,45 @@ public actor Client {
     public func callTool(
         name: String,
         arguments: [String: Value]? = nil,
-        meta: Metadata? = nil
+        meta: Metadata? = nil,
+        inputResponses: [String: Value]? = nil,
+        requestState: String? = nil
     ) throws -> RequestContext<CallTool.Result> {
         try validateServerCapability(\.tools, "Tools")
-        let request = CallTool.request(.init(name: name, arguments: arguments, meta: meta))
-        return try send(request)
+        return try send(
+            CallTool.request(
+                .init(
+                    name: name,
+                    arguments: arguments,
+                    meta: meta,
+                    inputResponses: inputResponses,
+                    requestState: requestState
+                )
+            )
+        )
+    }
+
+    /// Call a tool and retain the complete result envelope, including modern
+    /// result type and MRTR input request fields.
+    public func callToolRequest(
+        name: String,
+        arguments: [String: Value]? = nil,
+        meta: Metadata? = nil,
+        inputResponses: [String: Value]? = nil,
+        requestState: String? = nil
+    ) async throws -> CallTool.Result {
+        try validateServerCapability(\.tools, "Tools")
+        try await ensureHTTPToolDefinition(name)
+        let request = CallTool.request(
+            .init(
+                name: name,
+                arguments: arguments,
+                meta: meta,
+                inputResponses: inputResponses,
+                requestState: requestState
+            )
+        )
+        return try await send(request).value
     }
 
     // MARK: - Sampling

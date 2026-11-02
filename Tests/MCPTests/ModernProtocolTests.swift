@@ -274,6 +274,24 @@ struct ModernProtocolTests {
         #expect(json["inputRequests"] as? [String: Any] != nil)
     }
 
+    @Test("tool input-required result can omit complete-result content")
+    func toolInputRequiredResultWithoutContent() throws {
+        let data = Data(
+            #"{"resultType":"input_required","inputRequests":{"confirm":{"method":"elicitation/create","params":{}}}}"#.utf8
+        )
+        let result = try JSONDecoder().decode(CallTool.Result.self, from: data)
+        #expect(result.resultType == .inputRequired)
+        #expect(result.content.isEmpty)
+    }
+
+    @Test("complete tool result still requires content")
+    func completeToolResultRequiresContent() throws {
+        let data = Data(#"{"resultType":"complete"}"#.utf8)
+        #expect(throws: DecodingError.self) {
+            _ = try JSONDecoder().decode(CallTool.Result.self, from: data)
+        }
+    }
+
     @Test("ensuringModernCompleteResult leaves non-object values unchanged")
     func ensuringModernCompleteResultNonObject() {
         let value: Value = .string("ok")

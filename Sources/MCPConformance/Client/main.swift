@@ -483,6 +483,81 @@ func runToolsCallScenario(_ args: [String]) async throws {
     logger.debug("Tools call scenario completed successfully")
 }
 
+/// Exercises the client side of SEP-2322 using the SDK's typed request APIs.
+/// The protocol leaves input fulfillment to the client application, so this
+/// scenario translates the elicitation requests into responses and retries the
+/// original tool call with the server's opaque request state.
+func runMRTRClientScenario(_ args: [String]) async throws {
+    guard let serverURLString = args.last, let serverURL = URL(string: serverURLString) else {
+        throw ConformanceError.invalidArguments("Valid server URL is required")
+    }
+
+    let transport = HTTPClientTransport(
+        endpoint: serverURL,
+        protocolVersion: try conformanceProtocolVersion()
+    )
+    let client = Client(
+        name: "test-client",
+        version: "1.0.0",
+        capabilities: .init(elicitation: .init(form: .init()))
+    )
+    try await client.connect(transport: transport)
+    _ = try await client.listTools()
+
+    func fulfill(_ result: CallTool.Result) async throws -> [String: Value] {
+        guard result.resultType == .inputRequired,
+              let inputRequests = result.inputRequests
+        else { return [:] }
+
+        var responses: [String: Value] = [:]
+        for (key, request) in inputRequests {
+            guard case .object(let object) = request,
+                  object["method"]?.stringValue == CreateElicitation.name,
+                  let params = object["params"]
+            else { continue }
+            let data = try JSONEncoder().encode(params)
+            let elicitationParams = try JSONDecoder().decode(CreateElicitation.Parameters.self, from: data)
+            let response = try await client.send(
+                CreateElicitation.request(elicitationParams)
+            ).value
+            responses[key] = try JSONDecoder().decode(
+                Value.self,
+                from: JSONEncoder().encode(response)
+            )
+        }
+        return responses
+    }
+
+    let first = try await client.callToolRequest(name: "test_mrtr_echo_state", arguments: [:])
+    if first.resultType == .inputRequired {
+        let inputResponses = try await fulfill(first)
+        _ = try await client.callToolRequest(
+            name: "test_mrtr_unrelated",
+            arguments: [:]
+        )
+        _ = try await client.callToolRequest(
+            name: "test_mrtr_echo_state",
+            arguments: [:],
+            inputResponses: inputResponses,
+            requestState: first.requestState
+        )
+    }
+
+    let second = try await client.callToolRequest(name: "test_mrtr_no_state", arguments: [:])
+    if second.resultType == .inputRequired {
+        let inputResponses = try await fulfill(second)
+        _ = try await client.callToolRequest(
+            name: "test_mrtr_no_state",
+            arguments: [:],
+            inputResponses: inputResponses
+        )
+    }
+
+    // A missing resultType is a complete result for backward compatibility.
+    _ = try await client.callToolRequest(name: "test_mrtr_no_result_type", arguments: [:])
+    await client.disconnect()
+}
+
 // MARK: - SSE Scenarios
 
 /// Handler for SSE-related scenarios (retry, reconnection, etc.)
@@ -680,6 +755,7 @@ func runDefaultScenario(_ args: [String]) async throws {
 nonisolated(unsafe) let scenarioHandlers: [String: ScenarioHandler] = [
     "initialize": runInitializeScenario,
     "tools_call": runToolsCallScenario,
+    "sep-2322-client-request-state": runMRTRClientScenario,
     "sse-retry": runSSEScenario,
     "elicitation-sep1034-client-defaults": runElicitationSEP1034ClientDefaults,
 ]
