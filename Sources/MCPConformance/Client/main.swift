@@ -506,15 +506,24 @@ func runMRTRClientScenario(_ args: [String]) async throws {
 
     func fulfill(_ result: CallTool.Result) async throws -> [String: Value] {
         guard result.resultType == .inputRequired,
-              let inputRequests = result.inputRequests
-        else { return [:] }
+              let inputRequests = result.inputRequests,
+              !inputRequests.isEmpty
+        else {
+            throw ConformanceError.invalidArguments(
+                "MRTR response must include elicitation input requests"
+            )
+        }
 
         var responses: [String: Value] = [:]
         for (key, request) in inputRequests {
             guard case .object(let object) = request,
                   object["method"]?.stringValue == CreateElicitation.name,
                   let params = object["params"]
-            else { continue }
+            else {
+                throw ConformanceError.invalidArguments(
+                    "MRTR input request \(key) is malformed or unsupported"
+                )
+            }
             let data = try JSONEncoder().encode(params)
             let elicitationParams = try JSONDecoder().decode(CreateElicitation.Parameters.self, from: data)
             let response = try await client.send(
@@ -525,36 +534,55 @@ func runMRTRClientScenario(_ args: [String]) async throws {
                 from: JSONEncoder().encode(response)
             )
         }
+        guard responses.count == inputRequests.count else {
+            throw ConformanceError.invalidArguments(
+                "MRTR input requests were not all fulfilled"
+            )
+        }
         return responses
     }
 
     let first = try await client.callToolRequest(name: "test_mrtr_echo_state", arguments: [:])
-    if first.resultType == .inputRequired {
-        let inputResponses = try await fulfill(first)
-        _ = try await client.callToolRequest(
-            name: "test_mrtr_unrelated",
-            arguments: [:]
-        )
-        _ = try await client.callToolRequest(
-            name: "test_mrtr_echo_state",
-            arguments: [:],
-            inputResponses: inputResponses,
-            requestState: first.requestState
-        )
+    guard first.resultType == .inputRequired else {
+        throw ConformanceError.invalidArguments("MRTR state scenario did not request input")
+    }
+    let firstInputResponses = try await fulfill(first)
+    _ = try await client.callToolRequest(
+        name: "test_mrtr_unrelated",
+        arguments: [:]
+    )
+    let firstRetry = try await client.callToolRequest(
+        name: "test_mrtr_echo_state",
+        arguments: [:],
+        inputResponses: firstInputResponses,
+        requestState: first.requestState
+    )
+    guard firstRetry.resultType != .inputRequired, firstRetry.isError != true else {
+        throw ConformanceError.invalidArguments("MRTR state retry did not complete")
     }
 
     let second = try await client.callToolRequest(name: "test_mrtr_no_state", arguments: [:])
-    if second.resultType == .inputRequired {
-        let inputResponses = try await fulfill(second)
-        _ = try await client.callToolRequest(
-            name: "test_mrtr_no_state",
-            arguments: [:],
-            inputResponses: inputResponses
-        )
+    guard second.resultType == .inputRequired else {
+        throw ConformanceError.invalidArguments("MRTR no-state scenario did not request input")
+    }
+    let secondInputResponses = try await fulfill(second)
+    let secondRetry = try await client.callToolRequest(
+        name: "test_mrtr_no_state",
+        arguments: [:],
+        inputResponses: secondInputResponses
+    )
+    guard secondRetry.resultType != .inputRequired, secondRetry.isError != true else {
+        throw ConformanceError.invalidArguments("MRTR no-state retry did not complete")
     }
 
     // A missing resultType is a complete result for backward compatibility.
-    _ = try await client.callToolRequest(name: "test_mrtr_no_result_type", arguments: [:])
+    let defaultResult = try await client.callToolRequest(
+        name: "test_mrtr_no_result_type",
+        arguments: [:]
+    )
+    guard defaultResult.resultType == nil || defaultResult.resultType == .complete else {
+        throw ConformanceError.invalidArguments("Missing resultType was not treated as complete")
+    }
     await client.disconnect()
 }
 
