@@ -110,9 +110,7 @@ struct OAuthDiscoveryClient: Sendable {
                     let asMetadata = try decoder.decode(
                         OAuthAuthorizationServerMetadata.self, from: data)
 
-                    guard let issuer = asMetadata.issuer else {
-                        return (server: candidateServer, metadata: asMetadata)
-                    }
+                    guard let issuer = asMetadata.issuer else { continue }
                     if issuer.absoluteString == candidateServer.absoluteString {
                         return (server: candidateServer, metadata: asMetadata)
                     }

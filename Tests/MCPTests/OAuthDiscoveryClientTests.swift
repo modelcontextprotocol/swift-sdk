@@ -209,6 +209,28 @@ import Testing
             }
         }
 
+        @Test("Rejects authorization metadata with no issuer")
+        func testFetchAuthorizationServerMetadataRejectsMissingIssuer() async throws {
+            let body = try JSONSerialization.data(withJSONObject: [
+                "token_endpoint": "https://auth.example.com/token",
+                "code_challenge_methods_supported": ["S256"],
+            ])
+            let (session, key) = makeIsolatedSession()
+            await IsolatedMockURLProtocol.setHandler(key: key) { _ in
+                let response = HTTPURLResponse(
+                    url: URL(string: "https://auth.example.com")!,
+                    statusCode: 200, httpVersion: nil, headerFields: nil)!
+                return (response, body)
+            }
+
+            await #expect(throws: OAuthAuthorizationError.self) {
+                try await makeClient().fetchAuthorizationServerMetadata(
+                    candidates: [URL(string: "https://auth.example.com")!],
+                    session: session
+                )
+            }
+        }
+
         @Test("Skips private IP candidates without making HTTP calls")
         func testFetchAuthorizationServerMetadataSkipsPrivateIP() async throws {
             let (session, _) = makeIsolatedSession()

@@ -152,6 +152,45 @@ final class MockAuthCodeFlow: OAuthAuthorizationCodeFlowing, @unchecked Sendable
     }
 }
 
+private actor OAuthTestBarrier {
+    private var reached = false
+    private var released = false
+    private var reachedWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func pause() async {
+        reached = true
+        reachedWaiters.forEach { $0.resume() }
+        reachedWaiters.removeAll()
+        guard !released else { return }
+        await withCheckedContinuation { releaseWaiters.append($0) }
+    }
+
+    func waitUntilReached() async {
+        guard !reached else { return }
+        await withCheckedContinuation { reachedWaiters.append($0) }
+    }
+
+    func release() {
+        released = true
+        releaseWaiters.forEach { $0.resume() }
+        releaseWaiters.removeAll()
+    }
+}
+
+private actor OAuthTestCounter {
+    private var value = 0
+
+    func increment() -> Int {
+        value += 1
+        return value
+    }
+
+    func current() -> Int {
+        value
+    }
+}
+
 // MARK: - OAuthAuthorizer Invocation Tests
 
 @Suite("OAuthAuthorizer dependency invocations")
@@ -428,5 +467,86 @@ struct OAuthAuthorizerTests {
         #expect(handled == true)
         #expect(registrar.registerCallCount == 1)
         #expect(tokenStorage.load()?.clientID == assignedClientID)
+    }
+
+    @Test("Canceled challenge waiting for authorization gate has no auth side effects")
+    func testCanceledQueuedChallengeDoesNotRunAfterGateRelease() async throws {
+        let tokenStorage = InMemoryTokenStorage()
+        let providerBarrier = OAuthTestBarrier()
+        let providerCallCount = OAuthTestCounter()
+        let config = OAuthConfiguration(
+            authentication: .clientSecretBasic(clientID: "client", clientSecret: "secret"),
+            accessTokenProvider: { _, _ in
+                let call = await providerCallCount.increment()
+                if call == 1 {
+                    await providerBarrier.pause()
+                }
+                return "provider-token-\(call)"
+            }
+        )
+        let authorizer = OAuthAuthorizer(
+            configuration: config,
+            tokenStorage: tokenStorage,
+            urlValidator: MockURLValidator(),
+            discoveryClient: MockDiscoveryClient(),
+            tokenEndpointClient: MockTokenClient(),
+            clientRegistrar: MockClientRegistrar(),
+            authCodeFlow: MockAuthCodeFlow()
+        )
+
+        let activeChallenge = Task {
+            try await authorizer.handleChallenge(
+                statusCode: 401,
+                headers: headers401,
+                endpoint: endpoint,
+                operationKey: "first",
+                session: .shared
+            )
+        }
+        await providerBarrier.waitUntilReached()
+
+        let canceledChallenge = Task {
+            try await authorizer.handleChallenge(
+                statusCode: 401,
+                headers: headers401,
+                endpoint: endpoint,
+                operationKey: "second",
+                session: .shared
+            )
+        }
+        await Task.yield()
+        canceledChallenge.cancel()
+        await providerBarrier.release()
+
+        #expect(try await activeChallenge.value == true)
+        await #expect(throws: CancellationError.self) {
+            try await canceledChallenge.value
+        }
+
+        let followUpHandled = await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                (try? await authorizer.handleChallenge(
+                    statusCode: 401,
+                    headers: headers401,
+                    endpoint: endpoint,
+                    operationKey: "follow-up",
+                    session: .shared
+                )) == true
+            }
+            group.addTask {
+                do {
+                    try await Task.sleep(for: .seconds(1))
+                    return false
+                } catch {
+                    return false
+                }
+            }
+            let result = await group.next() ?? false
+            group.cancelAll()
+            return result
+        }
+        #expect(followUpHandled)
+        #expect(await providerCallCount.current() == 2)
+        #expect(tokenStorage.load()?.value == "provider-token-2")
     }
 }

@@ -234,8 +234,10 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
         session: URLSession
     ) async throws -> Bool {
         try validateEndpointSecurity(for: endpoint)
-        await authorizationGate.acquire()
+        try Task.checkCancellation()
+        try await authorizationGate.acquire()
         do {
+            try Task.checkCancellation()
             let result = try await handleChallengeAfterAcquiringGate(
                 statusCode: statusCode,
                 headers: headers,
@@ -928,14 +930,40 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
 /// concurrent 401 responses mutate registration and PKCE state at once.
 private actor OAuthAuthorizationGate {
     private var isHeld = false
-    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private struct Waiter {
+        let id: UUID
+        let continuation: CheckedContinuation<Void, Error>
+    }
+    private var waiters: [Waiter] = []
 
-    func acquire() async {
+    func acquire() async throws {
+        try Task.checkCancellation()
         guard isHeld else {
             isHeld = true
             return
         }
-        await withCheckedContinuation { waiters.append($0) }
+
+        let waiterID = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<Void, Error>) in
+                if Task.isCancelled {
+                    continuation.resume(throwing: CancellationError())
+                } else {
+                    waiters.append(Waiter(id: waiterID, continuation: continuation))
+                }
+            }
+        } onCancel: {
+            Task { await self.cancelWaiter(waiterID) }
+        }
+        // Once resumed, this task owns the gate. The caller checks cancellation
+        // inside its release-protected scope so it cannot leak that ownership.
+    }
+
+    private func cancelWaiter(_ id: UUID) {
+        guard let index = waiters.firstIndex(where: { $0.id == id }) else { return }
+        let waiter = waiters.remove(at: index)
+        waiter.continuation.resume(throwing: CancellationError())
     }
 
     func release() {
@@ -943,6 +971,6 @@ private actor OAuthAuthorizationGate {
             isHeld = false
             return
         }
-        waiters.removeFirst().resume()
+        waiters.removeFirst().continuation.resume()
     }
 }
