@@ -139,14 +139,16 @@ extension Client {
         defer { endDriving(handle.id) }
         let options = configuration.tasks ?? .init()
         let maxInputRequests = configuration.multiRoundTrip.maxInputRequests
+        let isV1 = negotiatedProtocolVersion.map { Version.profile(for: $0).usesTaskAugmentation } ?? false
         var snapshot: TaskSnapshot
-        if let initial = handle.initial {
+        // At 2026-07-28 the create result carries no outcome or input
+        // requests: only a working task can be driven from it.
+        if let initial = handle.initial, isV1 || initial.status == .working {
             snapshot = initial
         } else {
             snapshot = try await getTask(handle.id)
         }
         var answered: Set<String> = []
-        let isV1 = negotiatedProtocolVersion.map { Version.profile(for: $0).usesTaskAugmentation } ?? false
         while true {
             if isV1 {
                 // 2025-11-25: tasks/result returns the outcome, and the server

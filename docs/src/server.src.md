@@ -131,7 +131,7 @@ At 2026-07-28 over HTTP, a client copies selected `tools/call` arguments into `M
 What the SDK does at 2026-07-28:
 
 - On `tools/list`, it drops tools whose annotations are invalid and logs a warning. Handshake clients receive them unchanged. `Tool.headerParameters()` throws `MCPRequestHeaders.InvalidAnnotation` for the same tools, so check your tools at startup.
-- On `tools/call` over an HTTP transport, it compares each `Mcp-Param-*` header with the argument and answers -32020 (HTTP 400) on a mismatch: a missing header, a header for an absent argument, invalid Base64, or a different value. To find the schemas, the first call that needs them runs your `tools/list` handler through all its pages, up to 100, after the `statelessRequestHook`. Concurrent calls share that pass. The schemas are kept until you send `ToolListChangedNotification` or replace the `tools/list` handler, so send the notification when the list changes. A call without arguments and without `Mcp-Param-*` headers skips the lookup.
+- On `tools/call` over an HTTP transport, it compares each `Mcp-Param-*` header with the argument and answers -32020 (HTTP 400) on a mismatch: a missing header, a header for an absent argument, invalid Base64, or a different value. To find the schemas, each call that needs them runs your `tools/list` handler through all its pages, up to 100, after the `statelessRequestHook`, with the call's `Server.currentHandlerContext`: a list that differs per caller is read as that caller sees it. Nothing is kept between calls, so keep the handler cheap. A call without arguments and without `Mcp-Param-*` headers skips the lookup.
 - The check fails closed: a call with `Mcp-Param-*` headers gets -32020 when the tool is not in the listing or the listing cannot be read (the handler throws, or there are more than 100 pages), and a call to a tool dropped for an invalid annotation always gets -32020.
 - `StatelessHTTPServerTransport` checks `Mcp-Method` and `Mcp-Name` against the body and also answers -32020.
 
@@ -346,7 +346,7 @@ One handler serves both. Set the server up with `withTasks(_:)`, declare each to
 
 The work's outcome becomes the task's: a returned result completes it (a 2025-11-25 task with an `isError` result fails), an `MCPError` fails it as is, any other error fails it with -32603, and cancelling the task cancels the work.
 
-Which tools may run as tasks comes from the `tools/list` handler's output, read once and kept until the tool list changes:
+Which tools may run as tasks comes from the `tools/list` handler's output, read for each `tools/call` with the caller's context:
 
 | `execution.taskSupport` | 2025-11-25 | 2026-07-28 |
 |---|---|---|
@@ -371,7 +371,7 @@ A `TaskManager` runs the work and keeps the tasks in a `TaskStore` (`InMemoryTas
 | `maxActiveTasksPerPrincipal` | 100 | The same, per principal; only with a principal |
 | `sendsStatusNotifications` | `true` | 2025-11-25: the server that created a task sends `notifications/tasks/status` when its status changes |
 
-Without `principal`, any client that knows a task id can read, answer and cancel the task. Ids carry 128 random bits, and 2025-11-25 clients cannot list tasks. With one, a task is visible only to the principal that created it (-32602, as for an unknown task, to anyone else), and 2025-11-25 clients may list theirs. A task is a durable handle, not durable execution: its work runs in this process. After a restart, a stored task that was working has no work behind it.
+Without `principal`, any client that knows a task id can read, answer and cancel the task. Ids carry 128 random bits, and 2025-11-25 clients cannot list tasks. With one, a task is visible only to the principal that created it (-32602, as for an unknown task, to anyone else), and 2025-11-25 clients may list theirs. A caller `principal` returns `nil` for gets no tasks: a `required` tool fails with -32603, any other runs inline, and it sees and lists none. A task is a durable handle, not durable execution: its work runs in this process. After a restart, a stored task that was working has no work behind it.
 
 ### Work outside the task
 

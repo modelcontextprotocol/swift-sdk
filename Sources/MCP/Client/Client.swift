@@ -509,7 +509,7 @@ public actor Client {
     private var taskWakeups: [String: [Int: ResponseSlot<Void>]] = [:]
     private var nextTaskWakeup = 0
     /// `tools/call` requests awaiting their response.
-    private var pendingToolCalls: Set<ID> = []
+    private(set) var pendingToolCalls: Set<ID> = []
     /// `tools/call` requests cancelled before their response arrived, oldest
     /// first: a late response that creates a task gets `tasks/cancel`.
     private var abandonedToolCalls: [ID] = []
@@ -1622,6 +1622,7 @@ public actor Client {
     private func removePendingRequest(id: ID) -> AnyPendingRequest? {
         immediateResponses.remove(id)
         progressTokens[id] = nil
+        pendingToolCalls.remove(id)
         return pendingRequests.removeValue(forKey: id)
     }
 

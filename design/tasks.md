@@ -69,8 +69,9 @@ in memory: a task is a durable handle, not durable execution.
 
 Limits: `maxActiveTasks`, `maxActiveTasksPerPrincipal` (only with a principal), default and
 maximum TTL (a v1 requested `ttl` is clamped). Expiry on access, plus a sweep of the store
-every 64 creations; an expired task's work is cancelled. At a limit, a `required` tool or a
-v1 augmented call fails with -32603 before the work starts, and any other call runs inline (the
+every 64 creations, and of the running tasks before a limit refuses a call; an expired task's
+work is cancelled and its change waiters woken. At a limit, a `required` tool or a v1 augmented
+call fails with -32603 before the work starts, and any other call runs inline (the
 cost: inline work can hold an HTTP request as long as it runs). Inline is the answer only where
 every client accepts it: a 2026-07-28 client that declared the extension handles either result
 (the server decides), and so does a v1 call without `task`. A v1 client that sent `task`
@@ -81,10 +82,11 @@ outlast the request, and at 2026-07-28 inline work cannot ask for input.
 
 Auth binding: an optional `principal` closure, as in `RequestStateProtection`. A task is
 visible only to its owner, and a foreign task reads as unknown (-32602), so its existence does
-not leak. Without a principal, tasks rely on 128-bit random ids, and v1 does not declare
-`tasks.list` (2025-11-25: receivers that cannot identify requestors SHOULD NOT). There is no
-session default: it would break v1 tasks read from a new session, and 2026-07-28 has no
-sessions.
+not leak. A caller the closure returns `nil` for gets no tasks (none created, none visible,
+an empty list): callers without a principal are not one principal. Without a principal, tasks
+rely on 128-bit random ids, and v1 does not declare `tasks.list` (2025-11-25: receivers that
+cannot identify requestors SHOULD NOT). There is no session default: it would break v1 tasks
+read from a new session, and 2026-07-28 has no sessions.
 
 ### The handler API
 
@@ -100,7 +102,8 @@ server.withMethodHandler(CallTool.self) { params in
 
 `Server` decides, before the handler runs, how a `tools/call` may run as a task (`TaskRuntime`
 on the `HandlerContext`). It reads the tool's `execution.taskSupport` from the `tools/list`
-handler's output, cached with the `x-mcp-header` parameters until the tool list changes:
+handler's output, in the same pass as the `x-mcp-header` parameters: once per call, with the
+caller's context, so a per-caller list is honored:
 
 | `taskSupport` | v1 | v2 |
 |---|---|---|
@@ -127,11 +130,12 @@ also cancel the work; the body waits with `TaskContext.untilFinished()`.
   loops: claim the outstanding input not being delivered (`delivering`), send it with
   related-task `_meta` on its own stream (`fulfill(_:relatedTask:)`), record the answers; else
   wait for a change of the record (`waitForChange(from:)` compares the active record, so a
-  change between the read and the wait is not missed). Delivery ends when the task finishes,
-  withdrawing the requests with `notifications/cancelled`. A request the client fails fails the
-  waiting `requestInput`; one cut off by the stream ending is released for the next
-  `tasks/result`. Then the call's result with related-task `_meta`, or the stored error;
-  cancelled: -32603.
+  change between the read and the wait is not missed; a task stored by another process is read
+  again at its poll interval). Delivery ends when the task finishes or expires, withdrawing the
+  requests with `notifications/cancelled`. A request the client answers with an error fails the
+  waiting `requestInput`; one cut off by the stream or the connection ending (a transport
+  error, `stop()`) is released for the next `tasks/result`. Then the call's result with
+  related-task `_meta`, or the stored error; cancelled: -32603.
 - `tools/list` keeps `execution` only at 2025-11-25.
 - `Mcp-Name` carries `params.taskId` for the three v2 methods (`MCPRequestHeaders`, the
   stateless transport's probe and `HTTPClientTransport`).
@@ -154,9 +158,10 @@ each change is a `SubscriptionEvent.task` with the detailed snapshot, sent as
   (`toolTaskSupport`, from every `tools/list`).
 - `callTool` drives a returned task with `TaskHandle.result()`: poll `tasks/get` at the clamped
   interval, ended early by a task notification (or one that arrived before the wait). v2:
-  answer unanswered `inputRequests` with the registered handlers and `tasks/update`. v1: once
-  the task waits for input or finished, `tasks/result`; the server's requests on that stream
-  reach the same handlers. Completed: the tool result; failed: the `MCPError` (v1 with a tool
+  the create result has no outcome or input, so a task created in another state than `working`
+  is read with `tasks/get` first; answer unanswered `inputRequests` with the registered
+  handlers and `tasks/update`. v1: once the task waits for input or finished, `tasks/result`;
+  the server's requests on that stream reach the same handlers. Completed: the tool result; failed: the `MCPError` (v1 with a tool
   error: the `isError` result); cancelled: `TaskCancelledError`. Any other error in the loop,
   including a throwing handler or Swift cancellation, sends a best-effort `tasks/cancel`.
 - Low level: `startToolCall` returns the create result; `task(_:)`, `task(id:)`, `getTask`,

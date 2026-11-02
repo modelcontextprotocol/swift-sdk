@@ -94,7 +94,8 @@ schema:
 2. Skipped when the call has no arguments and no `Mcp-Param-*` header was sent.
 3. Find the tool's `inputSchema` by calling the registered `tools/list` handler, following
    `nextCursor`, at most 100 pages. The handler runs with the same `_meta` and `HandlerContext` as
-   the call.
+   the call, once per call: the task-support check of the same call reads the same pass, and
+   cancelling the call cancels it. Nothing is kept for the next call.
 4. No `tools/list` handler, or no such tool (the pass failed or stopped at 100 pages): refused with
    -32020 when `Mcp-Param-*` headers were sent, otherwise no check. A tool hidden for an invalid
    annotation: always refused with -32020.
@@ -128,7 +129,10 @@ header that disagrees with `_meta` ([stateless.md](stateless.md)).
   of its own. A registry would make schema lookup cheap, but it would be a second way to define
   tools. Paging the application's `tools/list` handler reuses the source of truth.
 - **Caching the schema on the server.** Not done. The `tools/list` handler may return per-client
-  or changing lists, and there is no invalidation signal inside one request.
+  or changing lists, and there is no invalidation signal inside one request. A cache filled by
+  the first caller and cleared by `ToolListChangedNotification` served that caller's view to
+  everyone else: a tool listed only for another caller was refused. The cost is one pass per
+  `tools/call` that has arguments or headers (and per call on a server with tasks).
 - **Checking parameter headers in the transport.** The transport has no access to handlers.
   The check runs in `Server`, where `HandlerContext.httpContext` provides the headers.
 - **Downcasting to `HTTPClientTransport`.** Replaced by `Transport.send(_:additionalHeaders:)`.

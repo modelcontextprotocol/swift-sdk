@@ -238,7 +238,7 @@ types; `TaskSnapshot`'s internal `generation` picks the encoding.
 - Server: `withTasks(manager)`; a `tools/call` handler returns `runAsTask { task in ... }`.
   `Server/TaskManager.swift`: `TaskManager` (work, limits, principal, input exchanges, ordered
   observers) over a `TaskStore`. `Server.taskRuntime` reads `execution.taskSupport` from the
-  `tools/list` handler (`ToolInfo` cache) and refuses before the handler (-32601 v1, -32021
+  `tools/list` handler (`ToolInfo`, one pass per call) and refuses before the handler (-32601 v1, -32021
   v2). Capabilities are derived (`advertisedCapabilities`); `execution` is stripped except at
   2025-11-25. v1 `tasks/result` delivers input on its own stream with related-task `_meta`.
 - Client: `Configuration.tasks` (`nil` = no tasks); `callTool` drives a task

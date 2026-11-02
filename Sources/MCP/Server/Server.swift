@@ -329,14 +329,6 @@ public actor Server {
     /// whether `notifications/cancelled` arrived for them meanwhile.
     private var startingRequests: [ID: Bool] = [:]
 
-    /// `x-mcp-header` parameters and task support by tool name. Filled on
-    /// the first `tools/call` that needs them; cleared when a
-    /// `ToolListChangedNotification` is sent or the `tools/list` handler is
-    /// replaced.
-    private var toolInfoCache: [String: ToolInfo]?
-    private var toolInfoLoad: Task<[String: ToolInfo]?, Never>?
-    private var toolInfoGeneration = 0
-
     /// Runs and keeps tasks; set by ``withTasks(_:)``.
     private var taskManager: TaskManager?
     /// This server's observer of `taskManager`'s changes.
@@ -609,8 +601,6 @@ public actor Server {
         pendingRequestTasks = [:]
         for handler in handlerTasks.values { handler.cancel() }
         startingRequests = [:]
-        toolHeaderLoad?.cancel()
-        invalidateToolHeaders()
 
         // Clear pending requests with errors. A request not registered yet
         // fails when it would register.
@@ -767,7 +757,6 @@ public actor Server {
             let result = try await self.serveRoundTrips(M.self, request.params, handler: handler)
             return Response(id: request.id, result: result)
         }
-        if M.name == ListTools.name { invalidateToolHeaders() }
         defaultHandlerMethods.remove(M.name)
         return self
     }
@@ -878,8 +867,8 @@ public actor Server {
     /// Until then it sends the task's input requests to the client on this
     /// request's stream, with related-task metadata, and records the answers.
     /// A request the client fails fails the call waiting for it; one not
-    /// answered because this request ended is sent again by the next
-    /// `tasks/result`.
+    /// answered because this request or the connection ended (including
+    /// ``stop()``) is sent again by the next `tasks/result`.
     private func serveTaskPayload(_ params: GetTaskPayload.Parameters) async throws -> Value {
         let (manager, context, generation) = try taskRequest(GetTaskPayload.name)
         guard generation == .v1 else {
@@ -911,7 +900,9 @@ public actor Server {
                     } else {
                         await manager.releaseInput(record.id, input.keys)
                     }
-                } catch let error as MCPError {
+                } catch let error as MCPError
+                    where !Task.isCancelled && connection != nil && !Self.isConnectionFailure(error)
+                {
                     await manager.failInput(record.id, Set(input.keys), error)
                 } catch {
                     await manager.releaseInput(record.id, input.keys)
@@ -968,12 +959,14 @@ public actor Server {
     ///   augmentation the tool does not allow, or none for a tool that
     ///   requires it.
     private func taskRuntime(
-        for request: Request<AnyMethod>, context: HandlerContext, manager: TaskManager
+        for request: Request<AnyMethod>, context: HandlerContext, manager: TaskManager,
+        listing: inout ToolListing?
     ) async throws -> TaskRuntime? {
         guard let generation = context.profile?.taskGeneration else { return nil }
         let params = request.params.objectValue
         let name = params?["name"]?.stringValue ?? ""
-        let support = await toolInfo(context: context, request: request)?[name]?.taskSupport ?? .forbidden
+        let support =
+            try await toolInfo(context: context, request: request, listing: &listing)?[name]?.taskSupport ?? .forbidden
         switch generation {
         case .v2:
             let declared = context.clientCapabilities?.declaresTasksExtension == true
@@ -1269,7 +1262,8 @@ public actor Server {
     }
 
     /// Sends one bridged request to the client. A client error fails the
-    /// carrier with -32603; cancellation withdraws the request.
+    /// carrier with -32603; a failure of the connection is thrown as it is;
+    /// cancellation withdraws the request.
     private func ask<M: Method>(_ request: Request<M>) async throws -> M.Result {
         try Task.checkCancellation()
         let task = try send(request)
@@ -1279,8 +1273,16 @@ public actor Server {
             } onCancel: {
                 Task { await self.withdraw(request.id) }
             }
-        } catch let error as MCPError {
+        } catch let error as MCPError where !Self.isConnectionFailure(error) {
             throw MCPError.internalError("The client failed \(request.method): \(error.localizedDescription)")
+        }
+    }
+
+    /// Whether `error` is the transport's, not the client's answer.
+    private static func isConnectionFailure(_ error: MCPError) -> Bool {
+        switch error {
+        case .connectionClosed, .transportError: return true
+        default: return false
         }
     }
 
@@ -1357,7 +1359,6 @@ public actor Server {
             throw MCPError.internalError("Server connection not initialized")
         }
 
-        if N.name == ToolListChangedNotification.name { invalidateToolHeaders() }
         let notificationData = try encoder.encode(notification)
         if let event = SubscriptionEvent(notification) {
             publish(event, to: recipients)
@@ -2133,8 +2134,10 @@ public actor Server {
                         }
                     }
 
+                    var listing: ToolListing?
                     if let http = headerCheck,
-                        let mismatch = await self.parameterHeaderError(request, http: http, context: handlerContext)
+                        let mismatch = try await self.parameterHeaderError(
+                            request, http: http, context: handlerContext, listing: &listing)
                     {
                         return AnyMethod.response(id: request.id, error: mismatch)
                     }
@@ -2143,7 +2146,7 @@ public actor Server {
                     if let manager = taskManager {
                         do {
                             context.taskRuntime = try await self.taskRuntime(
-                                for: request, context: handlerContext, manager: manager)
+                                for: request, context: handlerContext, manager: manager, listing: &listing)
                         } catch let error as MCPError {
                             return annotate(AnyMethod.response(id: request.id, error: error))
                         }
@@ -2240,8 +2243,8 @@ public actor Server {
     /// with -32020 when the tool's schema cannot be found, and a call to a
     /// tool hidden for an invalid annotation is always refused.
     private func parameterHeaderError(
-        _ request: Request<AnyMethod>, http: HTTPRequest, context: HandlerContext
-    ) async -> MCPError? {
+        _ request: Request<AnyMethod>, http: HTTPRequest, context: HandlerContext, listing: inout ToolListing?
+    ) async throws -> MCPError? {
         let params = request.params.objectValue
         let arguments = params?["arguments"]
         let prefix = MCPRequestHeaders.parameterPrefix.lowercased()
@@ -2253,7 +2256,7 @@ public actor Server {
         }
         let name = params?["name"]?.stringValue ?? ""
 
-        switch await toolInfo(context: context, request: request)?[name]?.headers {
+        switch try await toolInfo(context: context, request: request, listing: &listing)?[name]?.headers {
         case .valid(let parameters)?:
             return MCPRequestHeaders.validate(parameters, arguments: arguments, header: http.header)
                 .map { MCPError.headerMismatch($0) }
@@ -2277,60 +2280,62 @@ public actor Server {
         let taskSupport: TaskSupport
     }
 
+    /// What one `tools/call` read from the `tools/list` handler, so that its
+    /// checks share one pass.
+    struct ToolListing {
+        /// `nil` when the pass failed.
+        let tools: [String: ToolInfo]?
+    }
+
     /// The parameters and task support of every tool the `tools/list`
-    /// handler lists, from one pass through its pages. Concurrent calls share
-    /// the pass; the result is kept until the tool list changes. `nil` when
-    /// the pass fails.
-    private func toolInfo(context: HandlerContext, request: Request<AnyMethod>) async
-        -> [String: ToolInfo]?
-    {
-        if let cached = toolInfoCache { return cached }
-        if let pending = toolInfoLoad { return await pending.value }
+    /// handler lists for the caller, from one pass through its pages run
+    /// under the caller's context: the list may differ per caller, so it is
+    /// not kept across calls. `listing` holds the pass for the rest of the
+    /// call. `nil` when the pass fails.
+    ///
+    /// - Throws: `CancellationError` when the call is cancelled.
+    private func toolInfo(
+        context: HandlerContext, request: Request<AnyMethod>, listing: inout ToolListing?
+    ) async throws -> [String: ToolInfo]? {
+        if let listing { return listing.tools }
         guard let handler = methodHandlers[ListTools.name] else { return nil }
-        let generation = toolInfoGeneration
-        let load = Task { () -> [String: ToolInfo]? in
-            var headers: [String: ToolInfo] = [:]
-            var cursor: String?
-            for _ in 0..<Self.maxToolListPages {
-                var params: [String: Value] = [:]
-                if let cursor { params["cursor"] = .string(cursor) }
-                let list = Request<AnyMethod>(
-                    id: request.id, method: ListTools.name, params: .object(params), _meta: request._meta)
-                let response = try? await Server.$currentHandlerContext.withValue(context) {
-                    try await handler(list)
-                }
-                guard case .success(let result)? = response?.result else { return nil }
-                for tool in result.objectValue?["tools"]?.arrayValue ?? [] {
-                    guard let name = tool.objectValue?["name"]?.stringValue else { continue }
-                    let parameters = try? MCPRequestHeaders.parameters(in: tool.objectValue?["inputSchema"] ?? .null)
-                    let support = tool.objectValue?["execution"]?.objectValue?["taskSupport"]?.stringValue
-                    headers[name] = ToolInfo(
-                        headers: parameters.map(ToolHeaders.valid) ?? .invalid,
-                        taskSupport: support.map(TaskSupport.init(rawValue:)) ?? .forbidden)
-                }
-                guard let next = result.objectValue?["nextCursor"]?.stringValue else { return headers }
-                cursor = next
-            }
-            return nil
-        }
-        toolInfoLoad = load
-        let headers = await load.value
-        if toolInfoGeneration == generation {
-            toolInfoLoad = nil
-            toolInfoCache = headers
-        }
-        if headers == nil {
+        let tools = try await Self.listTools(handler, context: context, request: request)
+        listing = ToolListing(tools: tools)
+        if tools == nil {
             await logger?.warning(
                 "Cannot read the tools/list input schemas; calls with Mcp-Param headers are refused")
         }
-        return headers
+        return tools
     }
 
-    /// Forgets the cached tool schemas.
-    private func invalidateToolHeaders() {
-        toolInfoGeneration &+= 1
-        toolInfoCache = nil
-        toolInfoLoad = nil
+    private static func listTools(
+        _ handler: RequestHandlerBox, context: HandlerContext, request: Request<AnyMethod>
+    ) async throws -> [String: ToolInfo]? {
+        var tools: [String: ToolInfo] = [:]
+        var cursor: String?
+        for _ in 0..<maxToolListPages {
+            try Task.checkCancellation()
+            var params: [String: Value] = [:]
+            if let cursor { params["cursor"] = .string(cursor) }
+            let list = Request<AnyMethod>(
+                id: request.id, method: ListTools.name, params: .object(params), _meta: request._meta)
+            let response = try? await Server.$currentHandlerContext.withValue(context) {
+                try await handler(list)
+            }
+            try Task.checkCancellation()
+            guard case .success(let result)? = response?.result else { return nil }
+            for tool in result.objectValue?["tools"]?.arrayValue ?? [] {
+                guard let name = tool.objectValue?["name"]?.stringValue else { continue }
+                let parameters = try? MCPRequestHeaders.parameters(in: tool.objectValue?["inputSchema"] ?? .null)
+                let support = tool.objectValue?["execution"]?.objectValue?["taskSupport"]?.stringValue
+                tools[name] = ToolInfo(
+                    headers: parameters.map(ToolHeaders.valid) ?? .invalid,
+                    taskSupport: support.map(TaskSupport.init(rawValue:)) ?? .forbidden)
+            }
+            guard let next = result.objectValue?["nextCursor"]?.stringValue else { return tools }
+            cursor = next
+        }
+        return nil
     }
 
     private static let maxToolListPages = 100

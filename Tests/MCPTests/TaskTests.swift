@@ -1657,3 +1657,313 @@ struct LateTaskAnswerTests {
         #expect(await seen.messages.contains(CancelTask.name))
     }
 }
+
+// MARK: - Lifecycle edges
+
+/// A store that counts its reads of one task.
+private actor CountingTaskStore: TaskStore {
+    private let base = InMemoryTaskStore()
+    private(set) var reads = 0
+
+    func insert(_ record: TaskRecord) async throws { await base.insert(record) }
+    func record(id: String) async throws -> TaskRecord? {
+        reads += 1
+        return await base.record(id: id)
+    }
+    func update(_ record: TaskRecord) async throws { await base.update(record) }
+    func remove(id: String) async throws { await base.remove(id: id) }
+    func records(owner: String?) async throws -> [TaskRecord] { await base.records(owner: owner) }
+    func removeExpired(asOf date: Date) async throws -> [String] { await base.removeExpired(asOf: date) }
+}
+
+/// Starts `server` on a mock transport and completes `initialize` at 2025-11-25.
+private func startHandshake(_ server: Server) async throws -> WireExchange {
+    let wire = WireExchange(server: server)
+    try await wire.start()
+    try await wire.send(
+        handshakeMessage(
+            id: 0, method: Initialize.name,
+            params: [
+                "protocolVersion": .string(Version.v2025_11_25), "capabilities": ["elicitation": [:]],
+                "clientInfo": ["name": "c", "version": "1"],
+            ]))
+    try await wire.send(#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#, expecting: 0)
+    return wire
+}
+
+private func encodedMessage(_ value: Value) throws -> String {
+    String(decoding: try JSONEncoder().encode(value), as: UTF8.self)
+}
+
+@Suite("Task lifecycle edges")
+struct TaskLifecycleEdgeTests {
+    @Test("Task support is read from the caller's own tools/list, not an earlier caller's")
+    func perCallerTaskSupport() async throws {
+        let server = Server(name: "s", version: "1", capabilities: .init(tools: .init()))
+        await server.withTasks()
+        // Only caller b may run `special` as a task.
+        await server.withMethodHandler(ListTools.self) { _ in
+            let b = Server.currentHandlerContext?.clientInfo?.name == "b"
+            return .init(tools: [
+                Tool(name: "special", description: nil, inputSchema: [:], execution: b ? .init(taskSupport: .optional) : nil)
+            ])
+        }
+        await server.withMethodHandler(CallTool.self) { _ in
+            try await Server.runAsTask { task in .init(content: [.text(text: task.isTask ? "task" : "inline")]) }
+        }
+        let wire = WireExchange(server: server)
+        try await wire.start()
+        defer { Task { await wire.stop() } }
+        func call(_ id: Int, as caller: String) async throws -> [String: Value] {
+            let params: [String: Value] = [
+                "name": "special", "_meta": [MetaKey.clientInfo: ["name": .string(caller), "version": "1"]],
+            ]
+            let replies = try await wire.send(
+                message(id: id, method: CallTool.name, params: params, capabilities: tasksCapabilities))
+            return try #require(replies.first?.objectValue?["result"]?.objectValue)
+        }
+        #expect(try await call(1, as: "a")["content"] == [["type": "text", "text": "inline"]])
+        #expect(try await call(2, as: "b")["resultType"] == "task")
+    }
+
+    @Test("Cancelling a tools/call cancels the tools/list pass it waits for")
+    func cancelsToolListPass() async throws {
+        let cancelled = Flag()
+        let server = Server(name: "s", version: "1", capabilities: .init(tools: .init()))
+        await server.withTasks()
+        await server.withMethodHandler(ListTools.self) { _ in
+            do {
+                try await Task.sleep(for: .seconds(30))
+            } catch {
+                await cancelled.set()
+                throw error
+            }
+            return .init(tools: [])
+        }
+        await server.withMethodHandler(CallTool.self) { _ in .init(content: []) }
+        let wire = try await startHandshake(server)
+        defer { Task { await wire.stop() } }
+
+        try await wire.send(handshakeMessage(id: 7, method: CallTool.name, params: ["name": "t"]), expecting: 0)
+        try await Task.sleep(for: .milliseconds(100))
+        try await wire.send(
+            #"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":7}}"#, expecting: 0)
+        let deadline = ContinuousClock.now + .seconds(2)
+        while await !cancelled.isSet, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(await cancelled.isSet)
+        #expect(try await sentMessage(wire, timeout: .milliseconds(200)) { $0.objectValue?["id"] == 7 } == nil)
+    }
+
+    @Test("At the task limit, expired tasks are reclaimed before a call is refused")
+    func limitReclaimsExpired() async throws {
+        let server = try await TaskServer(manager: TaskManager(configuration: .init(maxActiveTasks: 2)))
+        defer { Task { await server.stop() } }
+        for _ in 0..<2 {
+            #expect(try await server.call("slow", ["seconds": 30, "ttlMs": 200])["resultType"] == "task")
+        }
+        try await Task.sleep(for: .milliseconds(500))
+        #expect(try await server.call("must")["resultType"] == "task")
+        let deadline = ContinuousClock.now + .seconds(2)
+        while await !server.cancelled.isSet, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(await server.cancelled.isSet)
+    }
+
+    @Test("tasks/result ends when its task expires while waiting for input")
+    func expiresWhileDelivering() async throws {
+        let server = try await HandshakeTaskServer()
+        defer { Task { await server.stop() } }
+        let id = try #require(try await server.create("ask", ttl: 300)["taskId"])
+        _ = try await server.wait(id, for: "input_required")
+        let (resultID, messages) = try await server.exchange(GetTaskPayload.name, ["taskId": id])
+        #expect(messages.first?.objectValue?["method"] == "elicitation/create")
+        let reply = try await sentMessage(server.wire, timeout: .seconds(5)) {
+            $0.objectValue?["id"] == .int(resultID) && $0.objectValue?["method"] == nil
+        }
+        #expect(reply?.objectValue?["error"]?.objectValue?["code"] == -32602)
+    }
+
+    @Test("Change waiters are removed when they time out and when the task expires")
+    func changeWaitersAreRemoved() async throws {
+        let manager = TaskManager()
+        let context = Server.HandlerContext(id: 1, httpContext: nil)
+        let record = try #require(
+            try await manager.create(
+                context: context, method: CallTool.name, protocolVersion: Version.v2026_07_28,
+                requestedTTL: nil, ttl: nil, pollInterval: nil))
+        for _ in 0..<500 {
+            try await manager.waitForChange(record.id, from: record, timeout: .milliseconds(1))
+        }
+        #expect(await manager.changeWaiterCount(record.id) == 0)
+
+        let short = try #require(
+            try await manager.create(
+                context: context, method: CallTool.name, protocolVersion: Version.v2026_07_28,
+                requestedTTL: nil, ttl: .milliseconds(100), pollInterval: nil))
+        let waiter = Task { try await manager.waitForChange(short.id, from: short, timeout: .seconds(30)) }
+        try await Task.sleep(for: .milliseconds(200))
+        _ = try await manager.record(id: short.id)
+        try await waiter.value
+        #expect(await manager.changeWaiterCount(short.id) == 0)
+    }
+
+    @Test("tasks/result polls a task that runs in another process at its poll interval")
+    func foreignTaskIsPolled() async throws {
+        let store = CountingTaskStore()
+        try await store.insert(
+            TaskRecord(
+                id: "foreign", owner: nil, protocolVersion: Version.v2025_11_25, method: CallTool.name,
+                createdAt: Date(), ttlMs: nil, pollIntervalMs: 100))
+        let server = try await HandshakeTaskServer(manager: TaskManager(store: store))
+        defer { Task { await server.stop() } }
+        try await server.wire.send(
+            handshakeMessage(id: 99, method: GetTaskPayload.name, params: ["taskId": "foreign"]), expecting: 0)
+        try await Task.sleep(for: .milliseconds(1500))
+        // A lookup and a check of the store each interval.
+        #expect(await store.reads <= 40)
+    }
+
+    @Test("Input cut off by a broken connection is sent again by the next tasks/result")
+    func inputSurvivesBrokenConnection() async throws {
+        let manager = TaskManager(configuration: .init(pollInterval: .milliseconds(10), sendsStatusNotifications: false))
+        let first = try await HandshakeTaskServer(manager: manager)
+        let id = try #require(try await first.create("ask")["taskId"])
+        _ = try await first.wait(id, for: "input_required")
+        await first.wire.transport.setFailSend(true)
+        try await first.wire.send(
+            handshakeMessage(id: 50, method: GetTaskPayload.name, params: ["taskId": id]), expecting: 0)
+        try await Task.sleep(for: .milliseconds(200))
+        await first.stop()
+        let taskID = try #require(id.stringValue)
+        #expect(try await manager.record(id: taskID)?.status == .inputRequired)
+
+        let second = try await HandshakeTaskServer(manager: manager)
+        defer { Task { await second.stop() } }
+        let (resultID, messages) = try await second.exchange(GetTaskPayload.name, ["taskId": id])
+        let elicitation = try #require(messages.first?.objectValue)
+        #expect(elicitation["method"] == "elicitation/create")
+        let response: Value = [
+            "jsonrpc": "2.0", "id": try #require(elicitation["id"]),
+            "result": ["action": "accept", "content": ["name": "Ada"]],
+        ]
+        let replies = try await second.wire.send(try encodedMessage(response))
+        let final = try #require(replies.first { $0.objectValue?["id"] == .int(resultID) }?.objectValue?["result"])
+        #expect(final.objectValue?["content"] == [["type": "text", "text": "Ada"]])
+    }
+
+    @Test("Input being delivered when the server stops is sent again by the next tasks/result")
+    func inputSurvivesStop() async throws {
+        let manager = TaskManager(configuration: .init(pollInterval: .milliseconds(10), sendsStatusNotifications: false))
+        let first = try await HandshakeTaskServer(manager: manager)
+        let id = try #require(try await first.create("ask")["taskId"])
+        _ = try await first.wait(id, for: "input_required")
+        let (_, sent) = try await first.exchange(GetTaskPayload.name, ["taskId": id])
+        #expect(sent.first?.objectValue?["method"] == "elicitation/create")
+        await first.stop()
+        try await Task.sleep(for: .milliseconds(100))
+        let taskID = try #require(id.stringValue)
+        #expect(try await manager.record(id: taskID)?.status == .inputRequired)
+
+        let second = try await HandshakeTaskServer(manager: manager)
+        defer { Task { await second.stop() } }
+        let (_, messages) = try await second.exchange(GetTaskPayload.name, ["taskId": id])
+        #expect(messages.first?.objectValue?["method"] == "elicitation/create")
+    }
+
+    @Test("With a principal hook, a caller it returns nil for gets no tasks and sees none")
+    func nilPrincipal() async throws {
+        let manager = TaskManager { context in context.clientInfo?.name }
+        let server = try await TaskServer(manager: manager)
+        defer { Task { await server.stop() } }
+        // These requests carry no clientInfo.
+        #expect(try await server.errorCode(CallTool.name, ["name": "must"]) == -32603)
+        #expect(try await server.call("slow")["content"] == [["type": "text", "text": "inline"]])
+        try await manager.store.insert(
+            TaskRecord(
+                id: "ownerless", owner: nil, protocolVersion: Version.v2026_07_28, method: CallTool.name,
+                createdAt: Date(), ttlMs: nil, pollIntervalMs: 10))
+        #expect(try await server.errorCode(GetTask.name, ["taskId": "ownerless"]) == -32602)
+        #expect(try await server.errorCode(CancelTask.name, ["taskId": "ownerless"]) == -32602)
+
+        let anonymous = TaskManager { _ in nil }
+        try await anonymous.store.insert(
+            TaskRecord(
+                id: "ownerless", owner: nil, protocolVersion: Version.v2025_11_25, method: CallTool.name,
+                createdAt: Date(), ttlMs: nil, pollIntervalMs: 10))
+        let handshake = try await HandshakeTaskServer(manager: anonymous)
+        defer { Task { await handshake.stop() } }
+        #expect(try await handshake.result(ListTasks.name)["tasks"] == [])
+        #expect(try await handshake.errorCode(GetTask.name, ["taskId": "ownerless"]) == -32602)
+    }
+}
+
+@Suite("Client task edges")
+struct ClientTaskEdgeTests {
+    @Test("A task created already finished is read with tasks/get for its outcome")
+    func createdFinished() async throws {
+        let server = Server(name: "s", version: "1", capabilities: .init(tools: .init()))
+        let stamp = TaskTimestamp.string(from: Date())
+        await server.withMethodHandler(GetTask.self) { params in
+            var task = TaskSnapshot(
+                taskId: params.taskId, status: params.taskId == "done" ? .completed : .failed, createdAt: stamp,
+                lastUpdatedAt: stamp)
+            if params.taskId == "done" {
+                task.result = try Value(CallTool.Result(content: [.text(text: "stored")]))
+            } else {
+                task.error = .invalidParams("bad input")
+            }
+            return task
+        }
+        await server.withTasks()
+        await server.withMethodHandler(CallTool.self) { params in
+            .creating(
+                TaskSnapshot(
+                    taskId: params.name, status: params.name == "done" ? .completed : .failed, createdAt: stamp,
+                    lastUpdatedAt: stamp))
+        }
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+        try await server.start(transport: serverTransport)
+        let client = Client(
+            name: "c", version: "1",
+            configuration: .init(
+                protocolMode: .stateless(Version.v2026_07_28), tasks: .init(minimumPollInterval: .milliseconds(5))))
+        try await client.connect(transport: clientTransport)
+        defer { Task { await client.disconnect(); await server.stop() } }
+
+        #expect(text(try await client.callTool(name: "done")) == "stored")
+        do {
+            _ = try await client.callTool(name: "failed")
+            Issue.record("Expected an error")
+        } catch let error as MCPError {
+            #expect(error.code == -32602)
+        }
+    }
+
+    @Test("A tools/call that fails to send is no longer awaited")
+    func failedSendForgetsToolCall() async throws {
+        let transport = MockTransport()
+        let client = Client(name: "c", version: "1", configuration: .handshake)
+        let initialize = Task {
+            try await transport.waitForSentMessages()
+            guard let sent = await transport.sentMessages.last,
+                let request = try? JSONDecoder().decode(Request<Initialize>.self, from: Data(sent.utf8))
+            else { return }
+            try await transport.queue(
+                response: Initialize.response(
+                    id: request.id,
+                    result: .init(
+                        protocolVersion: Version.latestHandshake, capabilities: .init(tools: .init()),
+                        serverInfo: .init(name: "s", version: "1"), instructions: nil)))
+        }
+        try await client.connect(transport: transport)
+        initialize.cancel()
+        defer { Task { await client.disconnect() } }
+
+        await transport.setFailSend(true)
+        await #expect(throws: MCPError.self) { try await client.callTool(name: "t") }
+        #expect(await client.pendingToolCalls.isEmpty)
+    }
+}

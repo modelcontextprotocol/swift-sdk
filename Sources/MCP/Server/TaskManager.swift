@@ -142,7 +142,9 @@ public protocol TaskStore: Sendable {
     func insert(_ record: TaskRecord) async throws
     /// The task with `id`, or `nil`.
     func record(id: String) async throws -> TaskRecord?
-    /// Replaces the stored task with the same id.
+    /// Replaces the stored task with the same id. A task that is not stored,
+    /// such as one removed or expired, must not be added back: the manager
+    /// may write a task's last change after it expired.
     func update(_ record: TaskRecord) async throws
     /// Removes the task with `id`.
     func remove(id: String) async throws
@@ -209,7 +211,8 @@ public actor InMemoryTaskStore: TaskStore {
 /// Without a `principal`, any client that knows a task's identifier can
 /// read, answer and cancel it; identifiers carry 128 random bits. With one,
 /// a task is visible only to the principal that created it, and
-/// 2025-11-25 clients may list their tasks.
+/// 2025-11-25 clients may list their tasks. A caller the `principal`
+/// returns `nil` for gets no tasks.
 public actor TaskManager {
     /// Limits and defaults of a ``TaskManager``.
     public struct Configuration: Sendable {
@@ -251,6 +254,11 @@ public actor TaskManager {
 
     /// Identifies the caller of a request, for example from
     /// `context.httpContext`; `nil` when there is none.
+    ///
+    /// A caller without a principal cannot use tasks: no task is created for
+    /// it (a tool that requires a task fails with -32603, any other runs
+    /// inline), it sees no task and lists none. Callers without a principal
+    /// are not one principal.
     public typealias Principal = @Sendable (Server.HandlerContext) -> String?
 
     /// Where tasks are kept.
@@ -295,8 +303,8 @@ public actor TaskManager {
     /// Input requests being sent to the client by a `tasks/result` (2025-11-25).
     private var delivering: [String: Set<String>] = [:]
     private var nextToken = 0
-    /// Waiters for the next change of a task.
-    private var changeWaiters: [String: [ResponseSlot<Void>]] = [:]
+    /// Waiters for the next change of a task, by token.
+    private var changeWaiters: [String: [Int: ResponseSlot<Void>]] = [:]
     /// Receives every change, in order, by token.
     private var observers: [Int: AsyncStream<TaskRecord>.Continuation] = [:]
     /// Store writes, in order.
@@ -381,10 +389,12 @@ public actor TaskManager {
         requestedTTL: Int?, ttl: Duration?, pollInterval: Duration?
     ) async throws -> TaskRecord? {
         let owner = owner(of: context)
-        guard active.count < configuration.maxActiveTasks else { return nil }
-        // Without a principal hook every task has the same owner: only the overall limit applies.
-        if bindsPrincipals, active.values.filter({ $0.owner == owner }).count >= configuration.maxActiveTasksPerPrincipal {
-            return nil
+        // A caller without a principal shares tasks with no one.
+        if bindsPrincipals, owner == nil { return nil }
+        if !hasCapacity(for: owner) {
+            // Expired tasks leave `active` only when read: reclaim them first.
+            await expireActive()
+            guard hasCapacity(for: owner) else { return nil }
         }
 
         var ttlMs = requestedTTL ?? (ttl ?? configuration.defaultTTL)?.wholeMilliseconds
@@ -406,6 +416,13 @@ public actor TaskManager {
         creations += 1
         if creations % 64 == 0 { await sweep() }
         return record
+    }
+
+    private func hasCapacity(for owner: String?) -> Bool {
+        guard active.count < configuration.maxActiveTasks else { return false }
+        // Without a principal hook every task has the same owner: only the overall limit applies.
+        return !bindsPrincipals
+            || active.values.filter({ $0.owner == owner }).count < configuration.maxActiveTasksPerPrincipal
     }
 
     /// Runs the work of a created task.
@@ -473,6 +490,7 @@ public actor TaskManager {
         exchanges[id] = nil
         usedInputKeys[id] = nil
         delivering[id] = nil
+        wakeWaiters(id)
     }
 
     // MARK: Reading
@@ -499,32 +517,54 @@ public actor TaskManager {
     func lookup(_ id: String, context: Server.HandlerContext, generation: TaskGeneration) async throws
         -> TaskRecord?
     {
-        guard let record = try await current(id),
-            record.owner == owner(of: context), record.generation == generation
+        let owner = owner(of: context)
+        if bindsPrincipals, owner == nil { return nil }
+        guard let record = try await current(id), record.owner == owner, record.generation == generation
         else { return nil }
         return record
     }
 
     /// The tasks of `context`'s caller of `generation`.
     func list(context: Server.HandlerContext, generation: TaskGeneration) async throws -> [TaskRecord] {
+        let owner = owner(of: context)
+        if bindsPrincipals, owner == nil { return [] }
         let now = Date()
-        return try await store.records(owner: owner(of: context)).compactMap { stored in
+        return try await store.records(owner: owner).compactMap { stored in
             let record = active[stored.id] ?? stored
             return record.generation == generation && !record.isExpired(at: now) ? record : nil
         }
     }
 
-    /// Waits until the task is no longer `seen`, or `timeout` passes.
-    /// Returns at once when it already changed or no longer runs here.
+    /// Waits until the task is no longer `seen`, `timeout` passes, or the
+    /// task expires. Returns at once when it already changed. A task that
+    /// does not run here, such as one another process stored, is read from
+    /// the store again after its poll interval.
     func waitForChange(_ id: String, from seen: TaskRecord, timeout: Duration) async throws {
-        guard let current = active[id], current == seen else { return }
+        var timeout = timeout
+        if let expiresAt = seen.expiresAt {
+            timeout = min(timeout, .milliseconds(max(0, Int(expiresAt.timeIntervalSinceNow * 1000))))
+        }
+        guard let current = active[id] else {
+            // It may also have just finished here.
+            guard try await store.record(id: id) == seen else { return }
+            let interval = Duration.milliseconds(seen.pollIntervalMs ?? configuration.pollInterval.wholeMilliseconds)
+            try await Task.sleep(for: min(timeout, interval))
+            return
+        }
+        guard current == seen else { return }
+        nextToken += 1
+        let token = nextToken
         let slot = ResponseSlot<Void>()
-        changeWaiters[id, default: []].append(slot)
+        changeWaiters[id, default: [:]][token] = slot
         let timer = Task {
             try? await Task.sleep(for: timeout)
             slot.resolve(.success(()))
         }
-        defer { timer.cancel() }
+        defer {
+            timer.cancel()
+            changeWaiters[id]?[token] = nil
+            if changeWaiters[id]?.isEmpty == true { changeWaiters[id] = nil }
+        }
         try await withTaskCancellationHandler {
             try await slot.value()
         } onCancel: {
@@ -535,8 +575,18 @@ public actor TaskManager {
     /// Waits until the task finished, expired or no longer runs here.
     func waitUntilFinished(_ id: String) async throws {
         while let record = active[id], !record.status.isTerminal {
+            if record.isExpired(at: Date()) {
+                await expire([id])
+                try? await store.remove(id: id)
+                return
+            }
             try await waitForChange(id, from: record, timeout: .seconds(30))
         }
+    }
+
+    /// The number of `waitForChange` calls waiting on the task.
+    func changeWaiterCount(_ id: String) -> Int {
+        changeWaiters[id]?.count ?? 0
     }
 
     // MARK: Input
@@ -711,6 +761,15 @@ public actor TaskManager {
         await expire(expired)
     }
 
+    /// Expires the tasks of `active` whose lifetime ended.
+    private func expireActive() async {
+        let now = Date()
+        let expired = active.values.filter { $0.isExpired(at: now) }.map(\.id)
+        guard !expired.isEmpty else { return }
+        await expire(expired)
+        for id in expired { try? await store.remove(id: id) }
+    }
+
     /// Ends the work of tasks whose lifetime ended.
     private func expire(_ ids: [String]) async {
         for id in ids {
@@ -720,13 +779,19 @@ public actor TaskManager {
             active[id] = nil
             usedInputKeys[id] = nil
             delivering[id] = nil
+            wakeWaiters(id)
+        }
+    }
+
+    /// Resolves and forgets the waiters for the next change of a task.
+    private func wakeWaiters(_ id: String) {
+        for slot in (changeWaiters.removeValue(forKey: id) ?? [:]).values {
+            slot.resolve(.success(()))
         }
     }
 
     private func changed(_ record: TaskRecord) {
-        for slot in changeWaiters.removeValue(forKey: record.id) ?? [] {
-            slot.resolve(.success(()))
-        }
+        wakeWaiters(record.id)
         for observer in observers.values {
             observer.yield(record)
         }

@@ -4,9 +4,10 @@ import MCP
 
 /// Shared by every server of the process. Tasks are bound to the HTTP
 /// session that created them, when there is one, which also lets
-/// 2025-11-25 clients list their tasks.
+/// 2025-11-25 clients list their tasks. Callers without a session (stdio,
+/// 2026-07-28) share one principal: a caller without one gets no tasks.
 let conformanceTasks = TaskManager(configuration: .init(pollInterval: .milliseconds(500))) { context in
-    context.httpContext?.header(HTTPHeaderName.sessionID)
+    context.httpContext?.header(HTTPHeaderName.sessionID) ?? "sessionless"
 }
 
 private func schema(_ properties: [String: Value] = [:]) -> Value {
@@ -50,7 +51,7 @@ func callTaskTool(_ params: CallTool.Parameters) async throws -> CallTool.Result
         return text("Hello, \(arguments["name"]?.stringValue ?? "World")!")
 
     case "slow_compute":
-        let seconds = arguments["seconds"].flatMap { $0.doubleValue ?? $0.intValue.map(Double.init) } ?? 0
+        let seconds = arguments["seconds"]?.numberValue ?? 0
         let label = arguments["label"]?.stringValue ?? "task"
         return try await Server.runAsTask { _ in
             if seconds > 0 { try await Task.sleep(for: .milliseconds(Int(seconds * 1000))) }

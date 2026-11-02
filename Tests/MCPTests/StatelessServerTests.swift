@@ -945,8 +945,8 @@ struct ParameterHeaderLookupTests {
                 extraHeaders: headers))
     }
 
-    @Test("tools/list runs once for many calls, and again after the list changes")
-    func cachesSchemas() async throws {
+    @Test("Each call reads tools/list once: the list is not kept across calls")
+    func listsPerCall() async throws {
         let counter = CallCounter()
         let server = await server(counter: counter)
         let transport = try await start(server)
@@ -955,15 +955,11 @@ struct ParameterHeaderLookupTests {
         for _ in 0..<5 {
             #expect(await call(transport, tool: "route").statusCode == 200)
         }
-        #expect(await counter.count == 1)
-
-        try? await server.notify(ToolListChangedNotification.message())
-        #expect(await call(transport, tool: "route").statusCode == 200)
-        #expect(await counter.count == 2)
+        #expect(await counter.count == 5)
     }
 
-    @Test("Concurrent calls share one pass through tools/list")
-    func sharesOnePass() async throws {
+    @Test("Concurrent calls each page through tools/list")
+    func pagesPerCall() async throws {
         let counter = CallCounter()
         let server = await server(counter: counter, pages: 3)
         let transport = try await start(server)
@@ -974,11 +970,11 @@ struct ParameterHeaderLookupTests {
                 group.addTask { _ = await call(transport, tool: "route") }
             }
         }
-        #expect(await counter.count == 3)
+        #expect(await counter.count == 30)
     }
 
-    @Test("A call to an unlisted tool does not page tools/list again")
-    func unknownToolDoesNotPage() async throws {
+    @Test("A call to an unlisted tool pages tools/list once")
+    func unknownToolPagesOnce() async throws {
         let counter = CallCounter()
         let server = await server(counter: counter, pages: 4)
         let transport = try await start(server)
@@ -987,7 +983,27 @@ struct ParameterHeaderLookupTests {
         for _ in 0..<3 {
             _ = await call(transport, tool: "ghost", headers: [:])
         }
-        #expect(await counter.count == 4)
+        #expect(await counter.count == 12)
+    }
+
+    @Test("The schemas come from the caller's own tools/list, not an earlier caller's")
+    func perCallerSchemas() async throws {
+        let server = await makeServer()
+        let route = Tool(name: "route", description: nil, inputSchema: routeSchema)
+        // Only caller b sees `route`.
+        await server.withMethodHandler(ListTools.self) { _ in
+            .init(tools: Server.currentHandlerContext?.httpContext?.header("X-User") == "b" ? [route] : [])
+        }
+        await server.withMethodHandler(CallTool.self) { params in
+            .init(content: [.text(text: params.name)])
+        }
+        let transport = try await start(server)
+        defer { Task { await server.stop() } }
+
+        // Its arguments make a reads tools/list, where `route` is absent.
+        #expect(await call(transport, tool: "route", headers: ["X-User": "a"]).statusCode == 200)
+        let response = await call(transport, tool: "route", headers: ["X-User": "b", "Mcp-Param-Region": "us"])
+        #expect(response.statusCode == 200)
     }
 
     @Test("Mcp-Param headers for an unlisted tool are refused; arguments alone pass")
@@ -1013,14 +1029,16 @@ struct ParameterHeaderLookupTests {
         expectWire(try bodyJSON(response), matches: try wireJSON(#"{"id":"c","error":{"code":-32020}}"#))
     }
 
-    @Test("When tools/list fails, calls with Mcp-Param headers are refused")
+    @Test("When tools/list fails, calls with Mcp-Param headers are refused; each call tries once")
     func failsClosed() async throws {
-        let server = await server(counter: CallCounter(), failing: true)
+        let counter = CallCounter()
+        let server = await server(counter: counter, failing: true)
         let transport = try await start(server)
         defer { Task { await server.stop() } }
 
         #expect(await call(transport, tool: "route").statusCode == 400)
         #expect(await call(transport, tool: "route", headers: [:]).statusCode == 200)
+        #expect(await counter.count == 2)
     }
 
     @Test("A page cap that is reached refuses calls with Mcp-Param headers")
