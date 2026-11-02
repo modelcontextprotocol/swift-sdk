@@ -67,7 +67,9 @@ extension Client {
     /// Reads the view at `uri` (`resources/read`) and its effective metadata.
     ///
     /// The metadata is the content item's `_meta.ui` or, when it has none,
-    /// the `resources/list` entry's (the content item takes precedence). Pass
+    /// the `resources/list` entry's (the content item takes precedence). A
+    /// content item's `_meta.ui` that is not an object gives `nil` metadata,
+    /// and so the restrictive default policy. Pass
     /// the `listing` entry when you have it. Without it, and when the content
     /// item has no `_meta.ui`, the client reads `resources/list` pages to
     /// find the entry, at most 100.
@@ -100,8 +102,10 @@ extension Client {
             throw AppResourceError(
                 .invalidContent, uri: uri, message: "\(uri) has neither text nor a blob of base64-encoded UTF-8")
         }
+        // The listing's only when `_meta.ui` is absent or null, as the
+        // specification's `??`.
         var meta = content.ui
-        if meta == nil {
+        if (content._meta?["ui"] ?? .null) == .null {
             let entry: Resource? =
                 if let listing, listing.uri == uri { listing } else { try await listingEntry(for: uri) }
             meta = entry?.ui

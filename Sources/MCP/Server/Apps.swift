@@ -13,7 +13,7 @@ public struct UIResource: Hashable, Sendable {
     /// The content type of a view: an HTML5 document.
     public static let mimeType = "text/html;profile=mcp-app"
 
-    /// The URI of the view. It starts with `ui://`.
+    /// The URI of the view. It starts with `ui://`, in lowercase.
     public let uri: String
     /// The name of the view.
     public var name: String
@@ -47,13 +47,15 @@ public struct UIResource: Hashable, Sendable {
     /// Creates a view.
     ///
     /// - Throws: ``ValidationError`` when `uri` does not start with `ui://`
-    ///   or has nothing after it.
+    ///   (lowercase) or has nothing after it.
     public init(
         uri: String, name: String, title: String? = nil, description: String? = nil, body: Body,
         meta: UIResourceMeta? = nil
     ) throws {
         let scheme = "ui://"
-        guard uri.count > scheme.count, uri.lowercased().hasPrefix(scheme) else {
+        // Lowercase, as the extension writes it: views are looked up by the
+        // exact URI.
+        guard uri.count > scheme.count, uri.hasPrefix(scheme) else {
             throw ValidationError("\(uri) is not a ui:// URI")
         }
         self.uri = uri
@@ -67,7 +69,7 @@ public struct UIResource: Hashable, Sendable {
     /// Creates a view from an HTML document as text.
     ///
     /// - Throws: ``ValidationError`` when `uri` does not start with `ui://`
-    ///   or has nothing after it.
+    ///   (lowercase) or has nothing after it.
     public init(
         uri: String, name: String, title: String? = nil, description: String? = nil, html: String,
         meta: UIResourceMeta? = nil

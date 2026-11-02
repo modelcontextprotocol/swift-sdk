@@ -42,7 +42,8 @@ or only unknown values, makes both `false`.
 ## Server
 
 `Server.withAppResources(_:listInResources:)` (`Server/Apps.swift`) serves `UIResource`s:
-validated `ui://` URIs (the scheme is case-insensitive), HTML as text or bytes, and one
+validated `ui://` URIs (in lowercase, as the extension writes them: a view is found by its exact
+URI), HTML as text or bytes, and one
 `UIResourceMeta`, which goes on both the listing entry and the content item. The specification
 recommends the content item; the listing entry lets a host review the metadata before it reads
 the view. The MIME type is always `text/html;profile=mcp-app`: the specification reserves other
@@ -52,7 +53,9 @@ Views share the built-in resource path with skills (`Server/BuiltInResources.swi
 sources (views, then skills) answer `resources/read` before the application's handler, and join
 the first `resources/list` page. Later pages continue the application's listing, then each
 source in order. One cursor (`mcp-resources:` and base64 JSON) holds every position; it replaces
-the skills-only cursor. A `ui://` URI that no view has goes to the application's handler, which
+the skills-only cursor. A merged page has the shortest `ttlMs` of the pages it joins, and
+`cacheScope: private` when any of them is private, so no entry is cached longer or more widely
+than its own page allows. A `ui://` URI that no view has goes to the application's handler, which
 can serve views that change.
 
 The server declares `extensions[ui] = {}` and the `resources` capability. The specification
@@ -78,7 +81,9 @@ recommend listing the same tools for every client, with text `content` for hosts
 4. `text`, or a `blob` of base64-encoded UTF-8.
 5. The effective metadata is the content item's `_meta.ui`, or, when it has none, the listing
    entry's: the whole value, not a merge of fields (`resource._meta?.ui ??
-   listingResource._meta?.ui` in the specification). Without a `listing` argument the client
+   listingResource._meta?.ui` in the specification). A content `_meta.ui` that is present but
+   not an object is kept, as `??` keeps it: the metadata is `nil`, and the policy the
+   restrictive default. Without a `listing` argument the client
    reads up to 100 `resources/list` pages, and stops at a repeated cursor.
 
 ## Content Security Policy

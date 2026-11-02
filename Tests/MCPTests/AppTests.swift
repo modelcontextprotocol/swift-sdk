@@ -290,10 +290,11 @@ struct AppServerTests {
 
     @Test("A view must have a ui:// URI")
     func validation() throws {
-        for invalid in ["https://x", "ui://", "ui:x", "skill://a"] {
+        // The scheme must be lowercase: views are looked up by the exact URI.
+        for invalid in ["https://x", "ui://", "ui:x", "skill://a", "UI://Upper", "Ui://x"] {
             #expect(throws: UIResource.ValidationError.self, "\(invalid)") { try view(invalid) }
         }
-        #expect(try view("UI://Upper").uri == "UI://Upper")
+        #expect(try view("ui://Upper").uri == "ui://Upper")
     }
 
     @Test("server/discover declares the extension and resources")
@@ -392,6 +393,40 @@ struct AppServerTests {
         #expect(dynamic.objectValue?["contents"]?.arrayValue?.first?.objectValue?["text"] == "<html>dynamic</html>")
     }
 
+    /// A skill catalog whose `resources/list` page has caching hints.
+    private struct HintedSkillCatalog: SkillCatalog {
+        let ttlMs: Int
+        let cacheScope: CacheScope
+
+        func listSkills(cursor: String?) async throws -> ListSkills.Result { .init(skills: []) }
+        func skill(uri: String) async throws -> Skill? { nil }
+        func readResource(uri: String) async throws -> ReadResource.Result? { nil }
+        func listResources(cursor: String?) async throws -> ListResources.Result {
+            .init(resources: [Resource(name: "s", uri: "skill://s/SKILL.md")], ttlMs: ttlMs, cacheScope: cacheScope)
+        }
+    }
+
+    @Test(
+        "A merged page has the shortest ttlMs and is private when any page is",
+        arguments: [(3600, CacheScope.public, 60, CacheScope.private), (60, .private, 3600, .public)])
+    func mergedCacheHints(application: Int, applicationScope: CacheScope, skills: Int, skillsScope: CacheScope)
+        async throws
+    {
+        let server = Server(name: "s", version: "1", capabilities: .init(tools: .init()))
+        await server.withMethodHandler(ListResources.self) { _ in
+            .init(resources: [Resource(name: "one", uri: "app://1")], ttlMs: application, cacheScope: applicationScope)
+        }
+        await server.withSkills(HintedSkillCatalog(ttlMs: skills, cacheScope: skillsScope))
+        await server.withAppResources([try view()])
+        let wire = WireExchange(server: server)
+        try await wire.start()
+        defer { Task { await wire.stop() } }
+        let page = try await result(wire, ListResources.name)
+        #expect(uris(page) == ["app://1", dashboardURI, "skill://s/SKILL.md"])
+        #expect(page.objectValue?["ttlMs"] == 60)
+        #expect(page.objectValue?["cacheScope"] == "private")
+    }
+
     @Test("The skills merge still works next to the views", arguments: [true, false])
     func skillsNextToViews(listViews: Bool) async throws {
         let wire = try await server(views: [try view()], listInResources: listViews, skills: true)
@@ -474,6 +509,28 @@ struct AppClientTests {
         #expect(try await client.readAppResource(uri: "ui://v").meta == weatherMeta)
         let otherEntry = Resource(name: "o", uri: "ui://other", _meta: entry._meta)
         #expect(try await client.readAppResource(uri: "ui://v", listing: otherEntry).meta == weatherMeta)
+    }
+
+    @Test("A content item's _meta.ui that is not an object gives no meta; a null one, the listing's")
+    func malformedContentMeta() async throws {
+        for (ui, expected) in [(Value.int(5), UIResourceMeta?.none), (.null, weatherMeta)] {
+            let (client, server) = try await connect { server in
+                await listingOnlyServer(server, listed: weatherMeta)
+                await server.withMethodHandler(ReadResource.self) { params in
+                    var item = Resource.Content.text("<html></html>", uri: params.uri, mimeType: UIResource.mimeType)
+                    item._meta = Metadata(additionalFields: ["ui": ui])
+                    return .init(contents: [item])
+                }
+            }
+            defer { Task { await client.disconnect(); await server.stop() } }
+            var entry = Resource(name: "v", uri: "ui://v")
+            entry.ui = weatherMeta
+            let given = try await client.readAppResource(uri: "ui://v", listing: entry)
+            #expect(given.meta == expected, "\(ui)")
+            let found = try await client.readAppResource(uri: "ui://v")
+            #expect(found.meta == expected, "\(ui)")
+            #expect(found.contentSecurityPolicy == (expected ?? .init()).contentSecurityPolicy)
+        }
     }
 
     @Test("Errors: not a ui:// URI, no content for the URI, another MIME type, no HTML")

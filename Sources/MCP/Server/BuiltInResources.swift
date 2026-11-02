@@ -48,7 +48,9 @@ extension Server {
     /// `resources/list` page is the application's first page and the first
     /// page of each listed source, so a client that reads one page sees all
     /// of them. Later pages continue the application's listing, then each
-    /// source's, in order. The cursor carries every position.
+    /// source's, in order. The cursor carries every position. A merged page
+    /// has the shortest `ttlMs` of its pages, and is `private` when any of
+    /// them is.
     static func builtInResources(
         _ request: Request<AnyMethod>, sources: [BuiltInResourceSource], applicationList: RequestHandlerBox?
     ) async throws -> Response<AnyMethod>? {
@@ -90,7 +92,7 @@ extension Server {
             guard case .success(let value) = response.result, let object = value.objectValue else { return response }
             resources += object["resources"]?.arrayValue ?? []
             meta = object["_meta"]
-            for key in [ResultKeys.ttlMs, ResultKeys.cacheScope] { hints[key] = object[key] }
+            mergeCacheHints(object, into: &hints)
             next.application = object["nextCursor"]?.stringValue.map { .page($0) } ?? .done
         }
         // Each source joins the first page, and follows the application's
@@ -104,9 +106,7 @@ extension Server {
             let encoded = try Value.preservingStrings(page)
             resources += encoded.objectValue?["resources"]?.arrayValue ?? []
             if meta == nil { meta = encoded.objectValue?["_meta"] }
-            for key in [ResultKeys.ttlMs, ResultKeys.cacheScope] where hints[key] == nil {
-                hints[key] = encoded.objectValue?[key]
-            }
+            mergeCacheHints(encoded.objectValue ?? [:], into: &hints)
             next.sources[source.key] = page.nextCursor.map { .page($0) } ?? .done
         }
         var result: [String: Value] = ["resources": .array(resources)]
@@ -114,6 +114,24 @@ extension Server {
         if let meta { result["_meta"] = meta }
         result.merge(hints) { current, _ in current }
         return Response(id: request.id, result: .object(result))
+    }
+
+    /// Adds the caching hints of `page` to those of a merged page: the
+    /// shortest `ttlMs`, and `private` when any page is private, so that no
+    /// entry is cached longer or more widely than its own page allows.
+    private static func mergeCacheHints(_ page: [String: Value], into hints: inout [String: Value]) {
+        if let ttl = page[ResultKeys.ttlMs] {
+            if let current = hints[ResultKeys.ttlMs]?.intValue, let new = ttl.intValue {
+                hints[ResultKeys.ttlMs] = .int(min(current, new))
+            } else if hints[ResultKeys.ttlMs]?.intValue == nil {
+                hints[ResultKeys.ttlMs] = ttl
+            }
+        }
+        if let scope = page[ResultKeys.cacheScope],
+            hints[ResultKeys.cacheScope] == nil || scope.stringValue == CacheScope.private.rawValue
+        {
+            hints[ResultKeys.cacheScope] = scope
+        }
     }
 }
 

@@ -1051,7 +1051,7 @@ The server then:
 - answers `resources/read` of a view before your `resources/read` handler, with the HTML as `text` (or base64 `blob` for `.blob`) and `_meta.ui` on the content item. Other URIs, also other `ui://` URIs, go to your handler, so you can serve views that change;
 - adds the views to `resources/list` with `_meta.ui` on the entry, so a host can review the metadata before it reads a view. The first page is your handler's first page and the views' first page, as for [skills](#skills). Pass `listInResources: false` to leave them out; hosts then find them through the tools.
 
-`UIResource(uri:name:title:description:html:meta:)` throws `UIResource.ValidationError` for a URI that does not start with `ui://`. A later view with the URI of an earlier one replaces it. Call `withAppResources` again to replace the views, then send a `ResourceListChangedNotification`.
+`UIResource(uri:name:title:description:html:meta:)` throws `UIResource.ValidationError` for a URI that does not start with `ui://` in lowercase. A later view with the URI of an earlier one replaces it. Call `withAppResources` again to replace the views, then send a `ResourceListChangedNotification`.
 
 `UIResourceMeta` is the view's configuration:
 
