@@ -120,24 +120,41 @@ public struct OAuthURLValidator: Sendable {
     ///   `172.16.0.0/12`, `192.0.0.0/24`, `192.168.0.0/16`, `198.18.0.0/15`,
     ///   `224.0.0.0/4` and `240.0.0.0/4`;
     /// - IPv6: `::` , `fc00::/7` (ULA), `fe80::/10` (link-local), `fec0::/10`,
-    ///   `ff00::/8` (multicast), and IPv4 addresses embedded as IPv4-mapped
-    ///   (`::ffff:0:0/96`), IPv4-compatible (`::/96`) or NAT64 (`64:ff9b::/96`),
-    ///   classified as IPv4;
+    ///   `ff00::/8` (multicast), `64:ff9b:1::/48` (local-use NAT64), and IPv4
+    ///   addresses embedded as IPv4-mapped (`::ffff:0:0/96`), IPv4-translated
+    ///   (`::ffff:0:0:0/96`), IPv4-compatible (`::/96`), NAT64 (`64:ff9b::/96`)
+    ///   or 6to4 (`2002::/16`), classified as IPv4;
     /// - numeric hosts that are not a canonical dotted quad but that resolvers
-    ///   read as IPv4, such as `167772161`, `10.1` or `0x0a.0.0.1`.
+    ///   read as IPv4, such as `167772161`, `10.1`, `0x0a.0.0.1` or `10.0.0.1.`;
+    /// - spellings that parsers read differently: brackets around anything but
+    ///   an IPv6 address (`[127.0.0.1]`) or unbalanced (`[::1`), a host with `:`
+    ///   that is not an IPv6 address (`fc00::1::2`), and an embedded IPv4 address
+    ///   that is not a canonical dotted quad (`::ffff:012.0.0.1`).
     ///
     /// Host names are never blocked. Loopback addresses are not blocked.
     ///
     /// **Limitation**: only literal IP addresses are checked. DNS rebinding is not prevented here.
     public func isPrivateIPHost(_ host: String) -> Bool {
         var literal = host.lowercased()
-        if literal.hasPrefix("["), literal.hasSuffix("]") {
+        if literal.hasPrefix("[") || literal.hasSuffix("]") {
+            // `URLComponents.host` keeps the brackets of an IPv6 literal; they
+            // belong around nothing else.
+            guard literal.hasPrefix("["), literal.hasSuffix("]"), literal.contains(":") else {
+                return true
+            }
             literal = String(literal.dropFirst().dropLast())
         }
         if let zone = literal.firstIndex(of: "%") {
             literal = String(literal[..<zone])  // fe80::1%en0
         }
-        if let bytes = Self.parse(literal, family: AF_INET6, size: 16) {
+        if literal.contains(":") {
+            // `inet_pton` reads `::ffff:012.0.0.1` as 12.0.0.1, resolvers may not.
+            if let tail = literal.split(separator: ":").last, tail.contains("."),
+                !Self.isCanonicalIPv4(String(tail))
+            {
+                return true
+            }
+            guard let bytes = Self.parse(literal, family: AF_INET6, size: 16) else { return true }
             return Self.isPrivateIPv6(bytes)
         }
         if let bytes = Self.parse(literal, family: AF_INET, size: 4) {
@@ -154,6 +171,12 @@ public struct OAuthURLValidator: Sendable {
         var buffer = [UInt8](repeating: 0, count: 16)
         let parsed = buffer.withUnsafeMutableBytes { inet_pton(family, text, $0.baseAddress) }
         return parsed == 1 ? Array(buffer.prefix(size)) : nil
+    }
+
+    /// Whether `text` is an IPv4 address written as a canonical dotted quad.
+    private static func isCanonicalIPv4(_ text: String) -> Bool {
+        guard let bytes = parse(text, family: AF_INET, size: 4) else { return false }
+        return text == bytes.map(String.init).joined(separator: ".")
     }
 
     private static func isPrivateIPv4(_ octets: [UInt8]) -> Bool {
@@ -180,18 +203,27 @@ public struct OAuthURLValidator: Sendable {
             if embedded == [0, 0, 0, 1] { return false }  // ::1 (loopback)
             return isPrivateIPv4(embedded)  // ::/96 (IPv4-compatible)
         }
+        if prefix96.elementsEqual([0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 0, 0]) {
+            return isPrivateIPv4(embedded)  // ::ffff:0:0:0/96 (IPv4-translated)
+        }
         if prefix96.elementsEqual([0x00, 0x64, 0xff, 0x9b, 0, 0, 0, 0, 0, 0, 0, 0]) {
             return isPrivateIPv4(embedded)  // 64:ff9b::/96 (NAT64)
         }
         let (first, second) = (bytes[0], bytes[1])
+        if first == 0x20 && second == 0x02 {
+            return isPrivateIPv4(Array(bytes[2..<6]))  // 2002::/16 (6to4)
+        }
         return first & 0xfe == 0xfc  // fc00::/7 (ULA)
             || (first == 0xfe && second & 0xc0 == 0x80)  // fe80::/10 (link-local)
             || (first == 0xfe && second & 0xc0 == 0xc0)  // fec0::/10 (site-local)
             || first == 0xff  // ff00::/8 (multicast)
+            || bytes.prefix(6).elementsEqual([0, 0x64, 0xff, 0x9b, 0, 1])  // 64:ff9b:1::/48
     }
 
     /// Whether resolvers read `host` as an IPv4 address (`inet_aton`).
     private static func isNumericIPv4(_ host: String) -> Bool {
+        // Resolvers drop a trailing root label: `10.0.0.1.` is 10.0.0.1.
+        let host = host.hasSuffix(".") ? String(host.dropLast()) : host
         guard !host.isEmpty, host.first?.isNumber == true,
             host.allSatisfy({ $0.isHexDigit || $0 == "." || $0 == "x" })
         else { return false }
