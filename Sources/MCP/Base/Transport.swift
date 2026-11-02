@@ -10,6 +10,9 @@ public protocol Transport: Actor {
     func connect() async throws
 
     /// Disconnects from the transport
+    ///
+    /// This should finish the stream returned by ``receive()``, so that a
+    /// client reading it stops.
     func disconnect() async
 
     /// Sends data
@@ -44,6 +47,15 @@ public protocol Transport: Actor {
     func send(_ data: Data, additionalHeaders: [String: String]) async throws
 
     /// Receives data in an async sequence
+    ///
+    /// Finishing the returned stream, normally or by throwing an error, means
+    /// the connection is closed: ``Client`` then does what
+    /// ``Client/disconnect()`` does, calling ``disconnect()``, fails its
+    /// pending requests, and doesn't call `receive()` again. The exception is
+    /// an error for which ``MCPError/isResourceTemporarilyUnavailable(_:)``
+    /// returns `true`: the client then calls `receive()` again, so a transport
+    /// that throws such an error must return a stream that can still deliver
+    /// messages.
     func receive() -> AsyncThrowingStream<Data, Swift.Error>
 }
 

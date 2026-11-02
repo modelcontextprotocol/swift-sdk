@@ -350,6 +350,10 @@ public actor Client {
     private var methodHandlers: [String: RequestHandlerBox] = [:]
     /// The task for the message handling loop
     private var task: Task<Void, Never>?
+    /// Changes on every connect, disconnect and close of the connection. A
+    /// message loop or a batch only acts on the connection while the
+    /// generation it captured is current.
+    private var connectionGeneration = 0
 
     /// A dictionary of type-erased pending requests, keyed by request ID
     private var pendingRequests: [ID: AnyPendingRequest] = [:]
@@ -389,6 +393,8 @@ public actor Client {
 
     /// Set while a notification handler runs.
     @TaskLocal private static var isHandlingNotification = false
+    /// The slot of the server-to-client request whose handler runs.
+    @TaskLocal private static var incomingHandlerToken: UUID?
 
     /// Notifications the client itself handles inside the receive loop,
     /// before later messages: it only updates its state. Handlers registered
@@ -424,8 +430,37 @@ public actor Client {
     }
 
     /// Connect to the server using the given transport
+    ///
+    /// If the client is already connected, it first disconnects the previous
+    /// transport, and that connection's pending requests fail as they do with
+    /// ``disconnect()``.
+    ///
+    /// If the transport later closes the connection, which it signals by
+    /// finishing its receive stream, the client does what ``disconnect()``
+    /// does and fails every pending request with ``MCPError/connectionClosed``.
+    /// If the stream ended with an error, requests fail with that error
+    /// instead, wrapped in ``MCPError/transportError(_:)`` unless it is an
+    /// ``MCPError``. Call `connect(transport:)` again with a new transport to
+    /// reconnect.
+    ///
+    /// - Throws: The error the pending requests fail with when the connection
+    ///   closes before the server answered; `MCPError.internalError("Client
+    ///   disconnected")` if ``disconnect()`` or another `connect(transport:)`
+    ///   runs while the previous transport disconnects or this one connects;
+    ///   or any error from connecting the transport or opening the protocol
+    ///   connection.
     @discardableResult
     public func connect(transport: any Transport) async throws -> Initialize.Result {
+        // Release the previous connection, so that its transport and message
+        // loop stop and its requests don't wait for a response.
+        if connection != nil {
+            let released = await releaseConnection()
+            guard connectionGeneration == released else {
+                throw MCPError.internalError("Client disconnected")
+            }
+        }
+        connectionGeneration += 1
+        let generation = connectionGeneration
         // A reconnect negotiates afresh; requests must not carry the
         // previous connection's stateless `_meta`.
         serverCapabilities = nil
@@ -434,7 +469,10 @@ public actor Client {
         instructions = nil
         self.connection = transport
         toolHeaderParameters = [:]
-        try await self.connection?.connect()
+        try await transport.connect()
+        guard connectionGeneration == generation else {
+            throw MCPError.internalError("Client disconnected")
+        }
 
         await logger?.debug(
             "Client connected", metadata: ["name": "\(name)", "version": "\(version)"])
@@ -445,6 +483,9 @@ public actor Client {
         inboundQueue = queue
         inboundTask = Task {
             for await message in inbound {
+                // A handler that reconnected is not cancelled; the
+                // notifications queued behind it belong to the old connection.
+                if connectionGeneration != generation { break }
                 await Client.$isHandlingNotification.withValue(true) {
                     await self.handleMessage(message)
                 }
@@ -456,15 +497,16 @@ public actor Client {
 
         // Start message handling loop
         task = Task {
-            guard let connection = self.connection else { return }
+            let connection = transport
+            var streamError: (any Swift.Error)?
             repeat {
-                // Check for cancellation before starting the iteration
-                if Task.isCancelled { break }
+                // Stop if cancelled, or if this connection was closed or replaced.
+                if Task.isCancelled || connectionGeneration != generation { break }
 
                 do {
                     let stream = await connection.receive()
                     for try await data in stream {
-                        if Task.isCancelled { break }  // Check inside loop too
+                        if Task.isCancelled || connectionGeneration != generation { break }
 
                         // Attempt to decode data
                         // Try decoding as a batch response first
@@ -475,7 +517,7 @@ public actor Client {
                         } else if let response = try? decoder.decode(AnyResponse.self, from: data) {
                             await deliver(response)
                         } else if let request = try? decoder.decode(AnyRequest.self, from: data) {
-                            startIncomingRequest(request)
+                            startIncomingRequest(request, on: connection)
                         } else if let message = try? decoder.decode(AnyMessage.self, from: data) {
                             if Self.inlineNotifications.contains(message.method) {
                                 await handleBuiltIn(message)
@@ -497,16 +539,21 @@ public actor Client {
                             )
                         }
                     }
+                    // The stream finished, so the transport is closed. Calling
+                    // receive() again would return a stream that has already ended.
+                    break
                 } catch let error where MCPError.isResourceTemporarilyUnavailable(error) {
                     try? await Task.sleep(for: .milliseconds(10))
                     continue
                 } catch {
                     await logger?.error(
                         "Error in message handling loop", metadata: ["error": "\(error)"])
+                    streamError = error
                     break
                 }
             } while true
             await self.logger?.debug("Client message handling loop task is terminating.")
+            await connectionDidClose(generation: generation, error: streamError)
         }
 
         // Open the protocol connection
@@ -526,8 +573,68 @@ public actor Client {
     /// Disconnect the client and cancel all pending requests
     public func disconnect() async {
         await logger?.debug("Initiating client disconnect...")
+        // A message loop that ends from here on leaves the teardown to this method.
+        connectionGeneration += 1
 
         // Close the listen stream while the connection is still open.
+        let (stream, waiters) = closeNotificationStream()
+        for waiter in waiters {
+            waiter.resume(throwing: MCPError.internalError("Client disconnected"))
+        }
+        await stream?.cancel()
+
+        // Grab state and clear internal references. This also fails a
+        // subscribeToResource call made while the stream was closing.
+        let closed = detachConnection(sparingCaller: false)
+
+        // Resume continuations first
+        closed.fail(with: MCPError.internalError("Client disconnected"))
+        await logger?.debug("Pending requests cancelled.")
+
+        // Cancel the task
+        closed.task?.cancel()
+        await logger?.debug("Message loop task cancellation requested.")
+
+        // Disconnect the transport *before* awaiting the task
+        // This should ensure the transport stream is finished, unblocking the loop.
+        if let conn = closed.transport {
+            await conn.disconnect()
+            await logger?.debug("Transport disconnected.")
+        } else {
+            await logger?.debug("No active transport connection to disconnect.")
+        }
+
+        // Await the task completion *after* transport disconnect
+        _ = await closed.task?.value
+        await logger?.debug("Client message loop task finished.")
+
+        await logger?.debug("Client disconnect complete.")
+    }
+
+    /// What is left to finish once the state of a connection is cleared.
+    private struct ClosedConnection {
+        let transport: (any Transport)?
+        let task: Task<Void, Never>?
+        let pendingRequests: [AnyPendingRequest]
+        let resourceWaiters: [CheckedContinuation<Void, Swift.Error>]
+
+        /// Fails the requests and `subscribeToResource` calls that waited
+        /// for the connection.
+        func fail(with error: Swift.Error) {
+            for request in pendingRequests {
+                request.resume(throwing: error)
+            }
+            for waiter in resourceWaiters {
+                waiter.resume(throwing: error)
+            }
+        }
+    }
+
+    /// Forgets the background stream and its retry, and takes the
+    /// `subscribeToResource` calls waiting for it, for the caller to fail.
+    private func closeNotificationStream() -> (
+        stream: Subscription?, waiters: [CheckedContinuation<Void, Swift.Error>]
+    ) {
         let stream = notificationStream
         notificationStream = nil
         notificationStreamRequest = nil
@@ -540,21 +647,27 @@ public actor Client {
         retiredNotificationStreams = []
         subscribedResources = []
         unservedResources = []
-        let waiters = resourceWaiters
+        let waiters = resourceWaiters.map(\.continuation)
         resourceWaiters = []
-        for waiter in waiters {
-            waiter.continuation.resume(throwing: MCPError.internalError("Client disconnected"))
-        }
-        await stream?.cancel()
+        return (stream, waiters)
+    }
 
-        // Part 1: Inside actor - Grab state and clear internal references
-        let taskToCancel = self.task
-        let connectionToDisconnect = self.connection
-        let pendingRequestsToCancel = self.pendingRequests
+    /// Clears the state of the current connection and stops its handlers.
+    /// There is no suspension point, so nothing registers on the connection
+    /// in between. The caller disconnects the transport and fails what the
+    /// connection leaves.
+    ///
+    /// - Parameter sparingCaller: Whether the handler that calls this, to
+    ///   reconnect, keeps running. Its task is not cancelled.
+    private func detachConnection(sparingCaller: Bool) -> ClosedConnection {
+        connectionGeneration += 1
+        let closed = ClosedConnection(
+            transport: connection, task: task, pendingRequests: Array(pendingRequests.values),
+            resourceWaiters: closeNotificationStream().waiters)
 
         self.task = nil
         self.connection = nil
-        self.pendingRequests = [:]  // Use empty dictionary literal
+        self.pendingRequests = [:]
         for cancel in roundTripCancellers.values { cancel() }
         roundTripCancellers = [:]
         roundTrips = [:]
@@ -564,7 +677,8 @@ public actor Client {
 
         // Stop the handlers. They are not awaited: disconnect may be called
         // from one of them.
-        for handler in incomingRequests.values {
+        let caller = sparingCaller ? Client.incomingHandlerToken : nil
+        for handler in incomingRequests.values where handler.token != caller {
             handler.task.cancel()
         }
         incomingRequests = [:]
@@ -576,44 +690,56 @@ public actor Client {
         parkedResponses = [:]
         inboundQueue?.finish()
         inboundQueue = nil
-        inboundTask?.cancel()
+        if !(sparingCaller && Client.isHandlingNotification) {
+            inboundTask?.cancel()
+        }
         inboundTask = nil
+        return closed
+    }
 
-        // A subscribeToResource call made while the stream was closing.
-        subscribedResources = []
-        unservedResources = []
-        let lateWaiters = resourceWaiters
-        resourceWaiters = []
-        for waiter in lateWaiters {
-            waiter.continuation.resume(throwing: MCPError.internalError("Client disconnected"))
-        }
+    /// Releases the current connection before `connect(transport:)` uses a
+    /// new one. Unlike ``disconnect()``, this does not cancel the handler
+    /// that called it nor wait for the message loop, which stops at its next
+    /// message because the connection generation changed.
+    ///
+    /// - Returns: The connection generation after the release.
+    private func releaseConnection() async -> Int {
+        let closed = detachConnection(sparingCaller: true)
+        let released = connectionGeneration
+        closed.task?.cancel()
+        await closed.transport?.disconnect()
+        closed.fail(with: MCPError.internalError("Client disconnected"))
+        return released
+    }
 
-        // Part 2: Outside actor - Resume continuations, disconnect transport, await task
+    /// Handles the end of the message loop when the transport finished its
+    /// stream, normally or by throwing: does what ``disconnect()`` does and
+    /// fails what waited for the connection with the stream's error, or
+    /// ``MCPError/connectionClosed``. Does nothing if ``disconnect()`` or a
+    /// later ``connect(transport:)`` already closed this connection.
+    private func connectionDidClose(generation: Int, error: (any Swift.Error)?) async {
+        guard connectionGeneration == generation else { return }
 
-        // Resume continuations first
-        for (_, request) in pendingRequestsToCancel {
-            request.resume(throwing: MCPError.internalError("Client disconnected"))
-        }
-        await logger?.debug("Pending requests cancelled.")
-
-        // Cancel the task
-        taskToCancel?.cancel()
-        await logger?.debug("Message loop task cancellation requested.")
-
-        // Disconnect the transport *before* awaiting the task
-        // This should ensure the transport stream is finished, unblocking the loop.
-        if let conn = connectionToDisconnect {
-            await conn.disconnect()
-            await logger?.debug("Transport disconnected.")
+        let failure: MCPError
+        if let error = error as? MCPError {
+            failure = error
+        } else if let error {
+            failure = .transportError(error)
         } else {
-            await logger?.debug("No active transport connection to disconnect.")
+            failure = .connectionClosed
         }
+        let closed = detachConnection(sparingCaller: false)
 
-        // Await the task completion *after* transport disconnect
-        _ = await taskToCancel?.value
-        await logger?.debug("Client message loop task finished.")
-
-        await logger?.debug("Client disconnect complete.")
+        // Release the transport before resuming the callers, so that a caller
+        // that reconnects with the same transport is not disconnected afterwards.
+        await closed.transport?.disconnect()
+        closed.fail(with: failure)
+        await closed.transport?.logger.warning(
+            "Client connection closed by the transport",
+            metadata: [
+                "error": "\(failure)",
+                "failedRequests": "\(closed.pendingRequests.count)",
+            ])
     }
 
     // MARK: - Registration
@@ -662,13 +788,11 @@ public actor Client {
         try await connection.send(notificationData)
     }
 
-    /// Send a response back to the server for a server-to-client request
-    private func send<M: Method>(_ response: Response<M>) async throws {
-        guard let connection = connection else {
-            throw MCPError.internalError("Client connection not initialized")
-        }
+    /// Send a response back to the server for a server-to-client request, on
+    /// the transport the request came from
+    private func send<M: Method>(_ response: Response<M>, on transport: any Transport) async throws {
         let responseData = try encoder.encode(response)
-        try await connection.send(responseData)
+        try await transport.send(responseData)
     }
 
     // MARK: - Requests
@@ -1075,17 +1199,20 @@ public actor Client {
 
     /// Retries ``refreshNotificationStream()`` after the backoff delay.
     private func scheduleNotificationStreamRetry() {
-        guard notificationStreamRetry == nil,
+        guard notificationStreamRetry == nil, connection != nil,
             wantedNotifications != (notificationStreamFilter ?? SubscriptionFilter())
         else { return }
         let delay = Self.notificationStreamDelay(failures: notificationStreamFailures)
+        let generation = connectionGeneration
         notificationStreamRetry = Task {
             guard (try? await Task.sleep(for: delay)) != nil else { return }
-            self.retryNotificationStream()
+            self.retryNotificationStream(generation: generation)
         }
     }
 
-    private func retryNotificationStream() {
+    /// Reopens the stream, unless the connection it was for has closed.
+    private func retryNotificationStream(generation: Int) {
+        guard connectionGeneration == generation else { return }
         notificationStreamRetry = nil
         refreshNotificationStream()
     }
@@ -1353,10 +1480,13 @@ public actor Client {
     /// of the ``Client/withBatch(body:)`` method.
     public actor Batch {
         unowned let client: Client
+        /// The client's connection generation when the batch was created.
+        let generation: Int
         var requests: [OutgoingRequest] = []
 
-        init(client: Client) {
+        init(client: Client, generation: Int) {
             self.client = client
+            self.generation = generation
         }
 
         /// Adds a request to the batch and prepares its expected response task.
@@ -1369,15 +1499,19 @@ public actor Client {
         public func addRequest<M: Method>(_ request: Request<M>) async throws -> Task<
             M.Result, Swift.Error
         > {
-            let (outgoing, task) = try await client.registerBatchRequest(request)
+            let (outgoing, task) = try await client.registerBatchRequest(request, generation: generation)
             requests.append(outgoing)
             return task
         }
     }
 
-    private func registerBatchRequest<M: Method>(_ request: Request<M>) throws -> (
+    private func registerBatchRequest<M: Method>(_ request: Request<M>, generation: Int) throws -> (
         OutgoingRequest, Task<M.Result, Error>
     ) {
+        // The connection the batch is for closed or was replaced.
+        guard connectionGeneration == generation else {
+            throw MCPError.connectionClosed
+        }
         guard connection != nil else {
             throw MCPError.internalError("Client connection not initialized")
         }
@@ -1490,6 +1624,9 @@ public actor Client {
     /// - Parameter body: An asynchronous closure that takes a `Batch` object as input.
     ///                   Use this object to add requests to the batch.
     /// - Throws: `MCPError.internalError` if the client is not connected.
+    ///           `MCPError.connectionClosed` if, while `body` ran, the connection
+    ///           closed or was replaced by ``disconnect()`` or
+    ///           ``connect(transport:)``; the batch is then not sent.
     ///           Can also rethrow errors from the `body` closure or from sending the batch request.
     public func withBatch(body: @escaping @Sendable (Batch) async throws -> Void) async throws {
         guard let connection = connection else {
@@ -1497,7 +1634,8 @@ public actor Client {
         }
 
         // Create Batch actor, passing self (Client)
-        let batch = Batch(client: self)
+        let generation = connectionGeneration
+        let batch = Batch(client: self, generation: generation)
 
         // Populate the batch actor by calling the user's closure.
         do {
@@ -1519,6 +1657,11 @@ public actor Client {
 
         await logger?.debug(
             "Sending batch request", metadata: ["count": "\(requests.count)"])
+        // Not on a connection that closed or was replaced while the batch was built.
+        guard connectionGeneration == generation else {
+            abandonBatch(requests, with: MCPError.connectionClosed)
+            throw MCPError.connectionClosed
+        }
         try await sendBatch(requests, on: connection)
 
         // Responses will be handled asynchronously by the message loop and handleBatchResponse/handleResponse.
@@ -1661,8 +1804,9 @@ public actor Client {
             } catch is DiscoverTimeout {
                 await logger?.info("server/discover timed out; falling back to initialize")
                 return try await _initialize()
-            } catch let error as MCPError where fallback {
-                // The peer answered with a JSON-RPC error.
+            } catch let error as MCPError where fallback && connection != nil {
+                // The peer answered with a JSON-RPC error. On a closed
+                // connection the error is rethrown: there is nothing to fall back on.
                 await logger?.info(
                     "server/discover failed; falling back to initialize",
                     metadata: ["error": "\(error)"])
@@ -2202,9 +2346,9 @@ public actor Client {
     /// that the receive loop keeps reading while it runs. At most
     /// ``Configuration/maxConcurrentServerRequests`` run at once; up to
     /// ``incomingRequestBacklog`` more wait, and further ones are refused.
-    private func startIncomingRequest(_ request: Request<AnyMethod>) {
+    private func startIncomingRequest(_ request: Request<AnyMethod>, on transport: any Transport) {
         func refuse(_ error: MCPError) {
-            Task { try? await self.send(AnyMethod.response(id: request.id, error: error)) }
+            Task { try? await self.send(AnyMethod.response(id: request.id, error: error), on: transport) }
         }
         // 2026-07-28 has no server-to-client requests.
         if isStateless {
@@ -2215,9 +2359,9 @@ public actor Client {
         if request.method == Ping.name {
             Task {
                 if self.methodHandlers[Ping.name] != nil {
-                    await self.handleIncomingRequest(request)
+                    await self.handleIncomingRequest(request, on: transport)
                 } else {
-                    try? await self.send(Response<AnyMethod>(id: request.id, result: .object([:])))
+                    try? await self.send(Response<AnyMethod>(id: request.id, result: .object([:])), on: transport)
                 }
             }
             return
@@ -2227,7 +2371,7 @@ public actor Client {
             return
         }
         if hasFreeIncomingSlot {
-            runIncomingRequest(request)
+            runIncomingRequest(request, on: transport)
             return
         }
         guard queuedIncomingRequests.count < Self.incomingRequestBacklog else {
@@ -2237,10 +2381,12 @@ public actor Client {
         queuedIncomingRequests.append(request)
     }
 
-    private func runIncomingRequest(_ request: Request<AnyMethod>) {
+    private func runIncomingRequest(_ request: Request<AnyMethod>, on transport: any Transport) {
         let token = UUID()
         let task = Task {
-            await self.handleIncomingRequest(request)
+            await Client.$incomingHandlerToken.withValue(token) {
+                await self.handleIncomingRequest(request, on: transport)
+            }
             self.incomingRequestFinished(request.id, token: token)
         }
         incomingRequests[request.id] = IncomingHandler(token: token, task: task)
@@ -2263,8 +2409,10 @@ public actor Client {
     }
 
     private func startQueuedIncomingRequests() {
+        // The queue belongs to the current connection; closing it empties the queue.
+        guard let connection else { return }
         while hasFreeIncomingSlot, !queuedIncomingRequests.isEmpty {
-            runIncomingRequest(queuedIncomingRequests.removeFirst())
+            runIncomingRequest(queuedIncomingRequests.removeFirst(), on: connection)
         }
     }
 
@@ -2281,7 +2429,7 @@ public actor Client {
         return true
     }
 
-    private func handleIncomingRequest(_ request: Request<AnyMethod>) async {
+    private func handleIncomingRequest(_ request: Request<AnyMethod>, on transport: any Transport) async {
         await logger?.trace(
             "Processing incoming request from server",
             metadata: ["method": "\(request.method)", "id": "\(request.id)"])
@@ -2293,7 +2441,7 @@ public actor Client {
             let error = MCPError.methodNotFound("Unknown method: \(request.method)")
             let response = AnyMethod.response(id: request.id, error: error)
             do {
-                try await send(response)
+                try await send(response, on: transport)
             } catch {
                 await logger?.error(
                     "Failed to send error response",
@@ -2306,13 +2454,13 @@ public actor Client {
             let response = try await handler(request)
             // A cancelled request is not answered.
             guard !Task.isCancelled else { return }
-            try await send(response)
+            try await send(response, on: transport)
         } catch {
             guard !Task.isCancelled else { return }
             let mcpError = error as? MCPError ?? MCPError.internalError(error.localizedDescription)
             let response = AnyMethod.response(id: request.id, error: mcpError)
             do {
-                try await send(response)
+                try await send(response, on: transport)
             } catch {
                 await logger?.error(
                     "Failed to send error response",
