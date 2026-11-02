@@ -60,6 +60,34 @@ public protocol HTTPClientAuthorizer: AnyObject, Sendable {
         session: URLSession
     ) async throws -> Bool
 
+    /// Handles an authorization challenge, knowing the `Authorization` value
+    /// the challenged request carried.
+    ///
+    /// ``HTTPClientTransport`` calls this method. With the sent value, an
+    /// implementation can tell a challenge for a token that another request
+    /// has already replaced from a challenge for the current token. The
+    /// default implementation calls
+    /// ``handleChallenge(statusCode:headers:endpoint:operationKey:session:)``.
+    ///
+    /// - Parameters:
+    ///   - statusCode: The HTTP status code (401 or 403).
+    ///   - headers: All response headers from the challenge response.
+    ///   - endpoint: The MCP endpoint that returned the challenge.
+    ///   - operationKey: An optional identifier for the MCP operation (e.g., the JSON-RPC method).
+    ///   - sentAuthorization: The `Authorization` header of the challenged request,
+    ///     or `nil` when it had none.
+    ///   - session: The `URLSession` to use for discovery and token requests.
+    /// - Returns: `true` if the original request should be retried; `false` if the
+    ///   challenge cannot be handled.
+    func handleChallenge(
+        statusCode: Int,
+        headers: [String: String],
+        endpoint: URL,
+        operationKey: String?,
+        sentAuthorization: String?,
+        session: URLSession
+    ) async throws -> Bool
+
     /// Proactively refreshes the access token if it is close to expiry.
     ///
     /// Called by ``HTTPClientTransport`` before sending each request and before opening
@@ -75,6 +103,21 @@ public protocol HTTPClientAuthorizer: AnyObject, Sendable {
 
 extension HTTPClientAuthorizer {
     public func prepareAuthorization(for endpoint: URL, session: URLSession) async throws {}
+
+    /// Calls ``handleChallenge(statusCode:headers:endpoint:operationKey:session:)``,
+    /// ignoring `sentAuthorization`.
+    public func handleChallenge(
+        statusCode: Int,
+        headers: [String: String],
+        endpoint: URL,
+        operationKey: String?,
+        sentAuthorization: String?,
+        session: URLSession
+    ) async throws -> Bool {
+        try await handleChallenge(
+            statusCode: statusCode, headers: headers, endpoint: endpoint, operationKey: operationKey,
+            session: session)
+    }
 }
 
 // MARK: - OAuthAuthorizer
@@ -132,6 +175,8 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
     private var _registrationIssuer: URL?
     private var _registrationAttemptIssuer: URL?
     private var _refreshedTokenValue: String?
+    private var _completedChallenges = 0
+    private var _lastChallengeError: (any Error)?
 
     private var configuration: OAuthConfiguration {
         get { stateLock.withLock { _configuration } }
@@ -176,11 +221,23 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
         set { stateLock.withLock { _registrationAttemptIssuer = newValue } }
     }
     /// The access token the last refresh returned. When the resource rejects
-    /// it, the next challenge reads the resource metadata again instead of
+    /// it, the next challenge reads the resource metadata again before
     /// refreshing at the same server.
     private var refreshedTokenValue: String? {
         get { stateLock.withLock { _refreshedTokenValue } }
         set { stateLock.withLock { _refreshedTokenValue = newValue } }
+    }
+    /// The number of challenges handled to the end, and the error the last
+    /// one ended with (`nil` when it succeeded). Cancelled ones are not
+    /// counted.
+    private var lastChallenge: (count: Int, error: (any Error)?) {
+        stateLock.withLock { (_completedChallenges, _lastChallengeError) }
+    }
+    private func recordChallenge(error: (any Error)?) {
+        stateLock.withLock {
+            _completedChallenges += 1
+            _lastChallengeError = error
+        }
     }
 
     private let tokenStorage: TokenStorage
@@ -294,14 +351,67 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
         operationKey: String? = nil,
         session: URLSession
     ) async throws -> Bool {
+        // The sent token is not known: take the stored one, before waiting
+        // for a challenge in progress.
+        try await handleChallenge(
+            statusCode: statusCode, headers: headers, endpoint: endpoint, operationKey: operationKey,
+            sentToken: tokenStorage.load()?.value, session: session)
+    }
+
+    /// Handles a challenge for the request that carried `sentAuthorization`.
+    /// A challenge for a token that another challenge has already replaced
+    /// retries with the new token.
+    public func handleChallenge(
+        statusCode: Int,
+        headers: [String: String],
+        endpoint: URL,
+        operationKey: String?,
+        sentAuthorization: String?,
+        session: URLSession
+    ) async throws -> Bool {
+        // The credentials after the scheme ("Bearer <token>").
+        let sentToken = sentAuthorization.map { value in
+            let trimmed = value.trimmingCharacters(in: .whitespaces)
+            guard let space = trimmed.firstIndex(of: " ") else { return trimmed }
+            return trimmed[space...].trimmingCharacters(in: .whitespaces)
+        }
+        return try await handleChallenge(
+            statusCode: statusCode, headers: headers, endpoint: endpoint, operationKey: operationKey,
+            sentToken: sentToken, session: session)
+    }
+
+    private func handleChallenge(
+        statusCode: Int,
+        headers: [String: String],
+        endpoint: URL,
+        operationKey: String?,
+        sentToken: String?,
+        session: URLSession
+    ) async throws -> Bool {
         try validateEndpointSecurity(for: endpoint)
-        // The token this request was sent with, before waiting for a
-        // challenge in progress.
-        let sentToken = tokenStorage.load()?.value
+        let completedBefore = lastChallenge.count
         return try await gate.run {
-            try await handleChallengeAlone(
-                statusCode: statusCode, headers: headers, endpoint: endpoint, operationKey: operationKey,
-                sentToken: sentToken, session: session)
+            // A challenge that ended while this one waited failed (a user who
+            // cancelled the authorization, a refused grant) and left no
+            // token: fail with it instead of starting the same flow again.
+            let last = lastChallenge
+            if last.count > completedBefore, let error = last.error,
+                tokenStorage.load().map({ $0.isExpired() }) ?? true
+            {
+                throw error
+            }
+            do {
+                let handled = try await handleChallengeAlone(
+                    statusCode: statusCode, headers: headers, endpoint: endpoint, operationKey: operationKey,
+                    sentToken: sentToken, session: session)
+                recordChallenge(error: nil)
+                return handled
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                recordChallenge(error: error)
+                throw error
+            }
         }
     }
 
@@ -346,20 +456,30 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
             // A rejected token: the resource may have moved to another
             // authorization server, so read its metadata again (SEP-2352).
             // A failed read falls back to the cached copy; with none, it
-            // throws and the token is kept.
+            // throws and the token is kept. A refreshed token is refreshed
+            // again only after this read.
             let rejected = tokenStorage.load()
             let current = try await discoverProtectedResourceMetadata(
                 endpoint: endpoint, challenge: challenge, refresh: rejected != nil, session: session)
-            if !triedRefresh, let rejected, let refreshToken = rejected.refreshToken,
-                rejected.value != refreshedTokenValue,
-                let asMetadata = try? await resolveAuthorizationServerMetadata(metadata: current, session: session),
-                try await refreshAccessToken(
-                    rejected, refreshToken: refreshToken, resource: try canonicalResource(for: endpoint),
-                    requestedScopes: scopeSelector.selectScopes(
-                        challengeScope: challenge?.scope, scopesSupported: current.scopesSupported),
-                    asMetadata: asMetadata, session: session)
-            {
-                return true
+            if !triedRefresh, let rejected, let refreshToken = rejected.refreshToken {
+                let asMetadata: OAuthAuthorizationServerMetadata?
+                do {
+                    asMetadata = try await resolveAuthorizationServerMetadata(metadata: current, session: session)
+                } catch let error where error is OAuthMetadataUnavailable || error is CancellationError {
+                    // Says nothing about the server: keep the token.
+                    throw error
+                } catch {
+                    asMetadata = nil
+                }
+                if let asMetadata,
+                    try await refreshAccessToken(
+                        rejected, refreshToken: refreshToken, resource: try canonicalResource(for: endpoint),
+                        requestedScopes: scopeSelector.selectScopes(
+                            challengeScope: challenge?.scope, scopesSupported: current.scopesSupported),
+                        asMetadata: asMetadata, session: session)
+                {
+                    return true
+                }
             }
             tokenStorage.clear()
 
@@ -415,6 +535,13 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
                     scopesSupported: metadata.scopesSupported
                 ) ?? []
 
+            // Another challenge obtained a token with these scopes meanwhile: retry with it.
+            if let current = tokenStorage.load(), current.value != sentToken, !current.isExpired(),
+                current.scopes.isSuperset(of: requiredScopes)
+            {
+                return true
+            }
+
             let existingScopes = tokenStorage.load()?.scopes ?? []
             let upgradedScopes = existingScopes.union(requiredScopes)
             let resourceKey = try discoveryClient.metadataDiscovery.canonicalResourceURI(
@@ -468,7 +595,7 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
         guard let token = tokenStorage.load(),
             token.isExpired(skewSeconds: configuration.proactiveRefreshWindowSeconds)
         else { return }
-        await gate.run {
+        try await gate.run {
             // Read again: a refresh may have run while this one waited.
             guard let token = tokenStorage.load(),
                 token.isExpired(skewSeconds: configuration.proactiveRefreshWindowSeconds)
@@ -855,11 +982,20 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
         clientRegistrationAttempted = true
         registrationAttemptIssuer = selectedAuthorizationServer
 
-        if let (registration, updatedAuth) = try await clientRegistrar.register(
-            configuration: configuration,
-            asMetadata: asMetadata,
-            session: session
-        ) {
+        let result: (OAuthClientRegistrationResponse, OAuthConfiguration.TokenEndpointAuthentication)?
+        do {
+            result = try await clientRegistrar.register(
+                configuration: configuration,
+                asMetadata: asMetadata,
+                session: session
+            )
+        } catch {
+            // Registration failed rather than being unavailable: the next flow tries again.
+            clientRegistrationAttempted = false
+            registrationAttemptIssuer = nil
+            throw error
+        }
+        if let (registration, updatedAuth) = result {
             configuration.authentication = updatedAuth
             registrationIssuer = selectedAuthorizationServer
             if let expiresAt = registration.clientSecretExpiresAt, expiresAt > 0 {
@@ -1043,45 +1179,61 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
     }
 }
 
-/// Runs async operations one at a time, in arrival order.
+/// Runs async operations one at a time, in arrival order. A waiting task
+/// that is cancelled stops waiting and throws `CancellationError`.
 final class AsyncGate: @unchecked Sendable {
     private let lock = NSLock()
     private var busy = false
-    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var nextWaiter = 0
+    private var waiters: [(id: Int, continuation: CheckedContinuation<Void, any Error>)] = []
 
-    func run<T>(_ body: () async throws -> T) async rethrows -> T {
-        await acquire()
+    func run<T>(_ body: () async throws -> T) async throws -> T {
+        try await acquire()
         defer { release() }
         return try await body()
     }
 
-    private func acquire() async {
-        let acquired: Bool = lock.withLock {
-            if busy { return false }
-            busy = true
-            return true
-        }
-        if acquired { return }
-        await withCheckedContinuation { continuation in
-            let resumeNow: Bool = lock.withLock {
-                if busy {
-                    waiters.append(continuation)
-                    return false
-                }
-                busy = true
-                return true
+    private func acquire() async throws {
+        let id: Int? = lock.withLock {
+            if busy {
+                nextWaiter += 1
+                return nextWaiter
             }
-            if resumeNow { continuation.resume() }
+            busy = true
+            return nil
+        }
+        guard let id else { return }
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+                let resumeNow: Result<Void, any Error>? = lock.withLock {
+                    // Checked under the lock: a cancellation either finds
+                    // this waiter or is seen here.
+                    if Task.isCancelled { return .failure(CancellationError()) }
+                    if busy {
+                        waiters.append((id, continuation))
+                        return nil
+                    }
+                    busy = true
+                    return .success(())
+                }
+                if let resumeNow { continuation.resume(with: resumeNow) }
+            }
+        } onCancel: {
+            let cancelled: CheckedContinuation<Void, any Error>? = lock.withLock {
+                guard let index = waiters.firstIndex(where: { $0.id == id }) else { return nil }
+                return waiters.remove(at: index).continuation
+            }
+            cancelled?.resume(throwing: CancellationError())
         }
     }
 
     private func release() {
-        let next: CheckedContinuation<Void, Never>? = lock.withLock {
+        let next: CheckedContinuation<Void, any Error>? = lock.withLock {
             if waiters.isEmpty {
                 busy = false
                 return nil
             }
-            return waiters.removeFirst()
+            return waiters.removeFirst().continuation
         }
         next?.resume()
     }

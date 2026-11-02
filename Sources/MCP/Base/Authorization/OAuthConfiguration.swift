@@ -310,6 +310,10 @@ public struct OAuthConfiguration: Sendable {
     }
 
     /// Optional provider for externally acquired access tokens.
+    ///
+    /// The provider runs while the authorizer handles a challenge, and other
+    /// challenges of the transport wait for it: it must not send requests
+    /// through the transport it authorizes.
     public typealias AccessTokenProvider = @Sendable (
         _ context: AccessTokenProviderContext,
         _ session: URLSession
@@ -450,6 +454,11 @@ extension OAuthConfiguration.TokenEndpointAuthentication {
 public protocol OAuthAuthorizationDelegate: Sendable {
     /// Presents the authorization URL to the user and returns the redirect URL containing
     /// the authorization code.
+    ///
+    /// The method runs while the authorizer handles a challenge, and other
+    /// challenges of the transport wait for it: it must not send requests
+    /// through the transport it authorizes. When it throws (for example, the
+    /// user cancelled), challenges that waited for it fail with the same error.
     func presentAuthorizationURL(_ url: URL) async throws -> URL
 }
 

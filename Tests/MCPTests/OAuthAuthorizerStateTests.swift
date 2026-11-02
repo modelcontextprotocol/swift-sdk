@@ -15,6 +15,7 @@ final class RecordingTokenClient: OAuthTokenRequesting, @unchecked Sendable {
     struct Call {
         let endpoint: URL
         let grantType: String?
+        let refreshToken: String?
     }
 
     private let lock = NSLock()
@@ -35,7 +36,8 @@ final class RecordingTokenClient: OAuthTokenRequesting, @unchecked Sendable {
     ) async throws -> OAuthTokenResponse {
         let grant = parameters[OAuthParameterName.grantType]
         let number: Int = lock.withLock {
-            recorded.append(Call(endpoint: endpoint, grantType: grant))
+            recorded.append(
+                Call(endpoint: endpoint, grantType: grant, refreshToken: parameters[OAuthParameterName.refreshToken]))
             issued += 1
             return issued
         }
@@ -46,6 +48,98 @@ final class RecordingTokenClient: OAuthTokenRequesting, @unchecked Sendable {
         return OAuthTokenResponse(
             accessToken: "token-\(number)", tokenType: "Bearer", expiresIn: expiresIn, scope: nil,
             refreshToken: "refresh-\(number)")
+    }
+}
+
+/// An authorization code flow that waits for `release()` and then returns
+/// a code, or throws `error` when set.
+final class GatedAuthCodeFlow: OAuthAuthorizationCodeFlowing, @unchecked Sendable {
+    private let lock = NSLock()
+    private var performs = 0
+    private let (released, releaseSink) = AsyncStream<Void>.makeStream()
+    private let enteredSink: AsyncStream<Void>.Continuation
+    /// Yields when a flow starts.
+    let entered: AsyncStream<Void>
+    var error: (any Error)?
+
+    init() {
+        (entered, enteredSink) = AsyncStream<Void>.makeStream()
+    }
+
+    var performCount: Int { lock.withLock { performs } }
+
+    func release() { releaseSink.finish() }
+
+    func buildURL(
+        authorizationEndpoint: URL, resource: URL, redirectURI: URL, clientID: String, codeChallenge: String,
+        scopes: Set<String>?, state: String, scopeSerializer: any OAuthScopeSelecting
+    ) throws -> URL {
+        authorizationEndpoint
+    }
+
+    func perform(
+        authorizationURL: URL, redirectURI: URL, state: String, issuer: OAuthAuthorizationCodeFlow.ExpectedIssuer?,
+        delegate: (any OAuthAuthorizationDelegate)?, session: URLSession
+    ) async throws -> String {
+        lock.withLock { performs += 1 }
+        enteredSink.yield()
+        for await _ in released {}
+        if let error { throw error }
+        return "code"
+    }
+}
+
+/// Counts the endpoint checks each challenge starts with.
+final class CountingURLValidator: OAuthURLValidating, @unchecked Sendable {
+    private let lock = NSLock()
+    private var checks = 0
+
+    var endpointChecks: Int { lock.withLock { checks } }
+
+    func validateHTTPSOrLoopback(_ url: URL, context: String) throws { lock.withLock { checks += 1 } }
+    func validateAuthorizationServer(_ url: URL, context: String) throws {}
+    func validateRedirectURI(_ url: URL) throws {}
+    func isPrivateIPHost(_ host: String) -> Bool { false }
+}
+
+/// Fails the first registration, then registers `registered`.
+final class FlakyClientRegistrar: OAuthClientRegistering, @unchecked Sendable {
+    private let lock = NSLock()
+    private var calls = 0
+
+    var registerCallCount: Int { lock.withLock { calls } }
+
+    func register(
+        configuration: OAuthConfiguration, asMetadata: OAuthAuthorizationServerMetadata, session: URLSession
+    ) async throws -> (
+        response: OAuthClientRegistrationResponse,
+        updatedAuthentication: OAuthConfiguration.TokenEndpointAuthentication
+    )? {
+        let call: Int = lock.withLock {
+            calls += 1
+            return calls
+        }
+        if call == 1 { throw URLError(.timedOut) }
+        return (
+            OAuthClientRegistrationResponse(
+                clientID: "registered", clientSecret: "secret", tokenEndpointAuthMethod: "client_secret_basic",
+                clientSecretExpiresAt: nil),
+            .clientSecretBasic(clientID: "registered", clientSecret: "secret")
+        )
+    }
+}
+
+struct UserCancelledAuthorization: Error {}
+
+/// Waits until `condition` holds, for at most `limit`.
+private func waitUntil(within limit: Duration = .seconds(5), _ condition: () -> Bool) async throws {
+    let deadline = ContinuousClock.now + limit
+    while !condition() {
+        guard ContinuousClock.now < deadline else {
+            Issue.record("Condition not met within \(limit)")
+            return
+        }
+        try await Task.sleep(for: .milliseconds(1))
     }
 }
 
@@ -73,19 +167,25 @@ struct OAuthAuthorizerStateTests {
     func makeAuthorizer(
         discovery: MockDiscoveryClient, tokens: RecordingTokenClient,
         storage: TokenStorage = InMemoryTokenStorage(),
-        overrides: OAuthConfiguration.EndpointOverrides = .none
+        overrides: OAuthConfiguration.EndpointOverrides = .none,
+        grantType: OAuthConfiguration.GrantType = .clientCredentials,
+        authentication: OAuthConfiguration.TokenEndpointAuthentication = .clientSecretBasic(
+            clientID: "client", clientSecret: "secret"),
+        urlValidator: any OAuthURLValidating = MockURLValidator(),
+        registrar: any OAuthClientRegistering = MockClientRegistrar(),
+        authCodeFlow: any OAuthAuthorizationCodeFlowing = MockAuthCodeFlow()
     ) -> OAuthAuthorizer {
         OAuthAuthorizer(
             configuration: OAuthConfiguration(
-                grantType: .clientCredentials,
-                authentication: .clientSecretBasic(clientID: "client", clientSecret: "secret"),
+                grantType: grantType,
+                authentication: authentication,
                 endpointOverrides: overrides),
             tokenStorage: storage,
-            urlValidator: MockURLValidator(),
+            urlValidator: urlValidator,
             discoveryClient: discovery,
             tokenEndpointClient: tokens,
-            clientRegistrar: MockClientRegistrar(),
-            authCodeFlow: MockAuthCodeFlow())
+            clientRegistrar: registrar,
+            authCodeFlow: authCodeFlow)
     }
 
     func discovery(listing server: URL) -> MockDiscoveryClient {
@@ -98,6 +198,178 @@ struct OAuthAuthorizerStateTests {
         try await authorizer.handleChallenge(
             statusCode: status, headers: headers ?? challenge, endpoint: endpoint, operationKey: "tools/call",
             session: .shared)
+    }
+
+    /// A challenge for a request sent with `sent` as its `Authorization` value.
+    func challenge(
+        _ authorizer: OAuthAuthorizer, sent: String?, status: Int = 401, headers: [String: String]? = nil
+    ) async throws -> Bool {
+        try await authorizer.handleChallenge(
+            statusCode: status, headers: headers ?? challenge, endpoint: endpoint, operationKey: "tools/call",
+            sentAuthorization: sent, session: .shared)
+    }
+
+    @Test("A 401 for a token another challenge already refreshed retries with the new token")
+    func lateChallengeKeepsRefreshedToken() async throws {
+        let storage = InMemoryTokenStorage()
+        let tokens = RecordingTokenClient()
+        let authorizer = makeAuthorizer(discovery: discovery(listing: serverA), tokens: tokens, storage: storage)
+        #expect(try await challenge(authorizer, sent: nil))
+        #expect(try await challenge(authorizer, sent: "Bearer token-1"))  // refresh
+
+        // A request sent with token-1 before the refresh gets its 401 now.
+        #expect(try await challenge(authorizer, sent: "Bearer token-1"))
+        #expect(tokens.calls.map(\.grantType) == ["client_credentials", "refresh_token"])
+        #expect(storage.load()?.value == "token-2")
+        #expect(storage.load()?.refreshToken == "refresh-2")
+    }
+
+    @Test("A refreshed token rejected later is refreshed again after the resource metadata is read")
+    func refreshedTokenIsRefreshedAgain() async throws {
+        let storage = InMemoryTokenStorage()
+        let discovery = discovery(listing: serverA)
+        let tokens = RecordingTokenClient()
+        let authorizer = makeAuthorizer(discovery: discovery, tokens: tokens, storage: storage)
+        #expect(try await challenge(authorizer, sent: nil))
+        #expect(try await challenge(authorizer, sent: "Bearer token-1"))  // refresh
+        let fetches = discovery.fetchProtectedResourceMetadataCallCount
+
+        #expect(try await challenge(authorizer, sent: "Bearer token-2"))
+        #expect(discovery.fetchProtectedResourceMetadataCallCount == fetches + 1)
+        #expect(tokens.calls.map(\.grantType) == ["client_credentials", "refresh_token", "refresh_token"])
+        #expect(tokens.calls.last?.refreshToken == "refresh-2")
+        #expect(storage.load()?.value == "token-3")
+    }
+
+    @Test("A transient failure to read the authorization server metadata keeps the stored tokens")
+    func transientServerMetadataFailureKeepsToken() async throws {
+        let storage = InMemoryTokenStorage()
+        storage.save(
+            OAuthAccessToken(
+                value: "persisted", tokenType: "Bearer", expiresAt: Date().addingTimeInterval(-60), scopes: [],
+                authorizationServer: serverA, refreshToken: "persisted-refresh"))
+        let discovery = discovery(listing: serverA)
+        discovery.authorizationServerMetadataError = OAuthMetadataUnavailable(url: serverA, reason: "HTTP 503")
+        let tokens = RecordingTokenClient()
+        let authorizer = makeAuthorizer(discovery: discovery, tokens: tokens, storage: storage)
+
+        await #expect(throws: OAuthMetadataUnavailable.self) {
+            _ = try await challenge(authorizer, sent: "Bearer persisted")
+        }
+        #expect(storage.load()?.value == "persisted")
+        #expect(storage.load()?.refreshToken == "persisted-refresh")
+        #expect(tokens.calls.isEmpty)
+
+        // Once the server answers, the token is refreshed.
+        discovery.authorizationServerMetadataError = nil
+        #expect(try await challenge(authorizer, sent: "Bearer persisted"))
+        #expect(tokens.calls.map(\.refreshToken) == ["persisted-refresh"])
+    }
+
+    @Test("Challenges waiting for an authorization that fails fail with its error", .timeLimit(.minutes(1)))
+    func waitersShareFailedAuthorization() async throws {
+        let flow = GatedAuthCodeFlow()
+        flow.error = UserCancelledAuthorization()
+        let validator = CountingURLValidator()
+        let authorizer = makeAuthorizer(
+            discovery: discovery(listing: serverA), tokens: RecordingTokenClient(), grantType: .authorizationCode,
+            urlValidator: validator, authCodeFlow: flow)
+        var entered = flow.entered.makeAsyncIterator()
+
+        let first = Task { try await challenge(authorizer, sent: nil) }
+        await entered.next()
+        let waiting = (0..<2).map { _ in Task { try await challenge(authorizer, sent: nil) } }
+        try await waitUntil { validator.endpointChecks == 3 }
+        try await Task.sleep(for: .milliseconds(50))
+        flow.release()
+
+        for task in [first] + waiting {
+            await #expect(throws: UserCancelledAuthorization.self) { _ = try await task.value }
+        }
+        #expect(flow.performCount == 1)
+
+        // A later challenge starts a new flow.
+        flow.error = nil
+        #expect(try await challenge(authorizer, sent: nil))
+        #expect(flow.performCount == 2)
+    }
+
+    @Test("Concurrent 403 step-ups for the same scopes run one token request", .timeLimit(.minutes(1)))
+    func concurrentStepUps() async throws {
+        let tokens = RecordingTokenClient()
+        let authorizer = makeAuthorizer(discovery: discovery(listing: serverA), tokens: tokens)
+        #expect(try await challenge(authorizer, sent: nil))
+        tokens.delay = .milliseconds(50)
+        let insufficient = ["WWW-Authenticate": #"Bearer error="insufficient_scope", scope="admin""#]
+        try await withThrowingTaskGroup(of: Bool.self) { group in
+            for _ in 0..<2 {
+                group.addTask {
+                    try await challenge(authorizer, sent: "Bearer token-1", status: 403, headers: insufficient)
+                }
+            }
+            for try await handled in group { #expect(handled) }
+        }
+        #expect(tokens.calls.count == 2)
+        #expect(authorizer.authorizationHeader(for: endpoint) == "Bearer token-2")
+    }
+
+    @Test("A registration that failed is tried again by the next challenge")
+    func failedRegistrationIsRetried() async throws {
+        let registrar = FlakyClientRegistrar()
+        let tokens = RecordingTokenClient()
+        let authorizer = makeAuthorizer(
+            discovery: discovery(listing: serverA), tokens: tokens, authentication: .none(clientID: ""),
+            registrar: registrar)
+        await #expect(throws: URLError.self) { _ = try await challenge(authorizer, sent: nil) }
+        #expect(tokens.calls.isEmpty)
+
+        #expect(try await challenge(authorizer, sent: nil))
+        #expect(registrar.registerCallCount == 2)
+        #expect(tokens.calls.count == 1)
+    }
+
+    @Test("A challenge waiting for another one stops waiting when cancelled", .timeLimit(.minutes(1)))
+    func waitingChallengeIsCancellable() async throws {
+        let flow = GatedAuthCodeFlow()
+        let validator = CountingURLValidator()
+        let authorizer = makeAuthorizer(
+            discovery: discovery(listing: serverA), tokens: RecordingTokenClient(), grantType: .authorizationCode,
+            urlValidator: validator, authCodeFlow: flow)
+        var entered = flow.entered.makeAsyncIterator()
+
+        let first = Task { try await challenge(authorizer, sent: nil) }
+        await entered.next()
+        let waiting = Task { try await challenge(authorizer, sent: nil) }
+        try await waitUntil { validator.endpointChecks == 2 }
+        try await Task.sleep(for: .milliseconds(20))
+        waiting.cancel()
+
+        // The cancelled challenge returns while the first still holds the gate.
+        let (outcomes, sink) = AsyncStream<String>.makeStream()
+        let observer = Task {
+            do {
+                _ = try await waiting.value
+                sink.yield("returned")
+            } catch is CancellationError {
+                sink.yield("cancelled")
+            } catch {
+                sink.yield("\(error)")
+            }
+        }
+        let timer = Task {
+            try? await Task.sleep(for: .seconds(5))
+            sink.yield("timed out")
+        }
+        var iterator = outcomes.makeAsyncIterator()
+        let outcome = await iterator.next()
+        timer.cancel()
+        flow.release()
+        #expect(outcome == "cancelled")
+
+        #expect(try await first.value)
+        await observer.value
+        #expect(flow.performCount == 1)
+        #expect(authorizer.authorizationHeader(for: endpoint) == "Bearer token-1")
     }
 
     @Test("A 401 refreshes at the token's server before reading the resource metadata again")

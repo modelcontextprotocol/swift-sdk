@@ -116,9 +116,12 @@ struct HTTPClientConnectionLimitTests {
         private let lock = NSLock()
         private var token = "old"
         private var challenges: [Int] = []
+        private var sent: [String?] = []
 
         var maxAuthorizationAttempts: Int { 3 }
         var handledChallenges: [Int] { lock.withLock { challenges } }
+        /// The `Authorization` value of each challenged request.
+        var sentAuthorizations: [String?] { lock.withLock { sent } }
 
         func validateEndpointSecurity(for endpoint: URL) throws {}
 
@@ -135,6 +138,16 @@ struct HTTPClientConnectionLimitTests {
                 token = "new"
             }
             return true
+        }
+
+        func handleChallenge(
+            statusCode: Int, headers: [String: String], endpoint: URL, operationKey: String?,
+            sentAuthorization: String?, session: URLSession
+        ) async throws -> Bool {
+            lock.withLock { sent.append(sentAuthorization) }
+            return try await handleChallenge(
+                statusCode: statusCode, headers: headers, endpoint: endpoint, operationKey: operationKey,
+                session: session)
         }
     }
 
@@ -331,7 +344,25 @@ struct HTTPClientConnectionLimitTests {
             await transport.disconnect()
             let auth = await requests.gets.map { $0.value(forHTTPHeaderField: "Authorization") }
             #expect(authorizer.handledChallenges == [401])
+            #expect(authorizer.sentAuthorizations == ["Bearer old"])
             #expect(auth.prefix(2) == ["Bearer old", "Bearer new"])
+        }
+
+        @Test("A 401 on a POST gives the authorizer the Authorization the POST carried", .timeLimit(.minutes(1)))
+        func postChallengePassesSentAuthorization() async throws {
+            let authorizer = ChallengeCountingAuthorizer()
+            let (transport, key) = makeTransport(authorizer: authorizer)
+            await IsolatedMockURLProtocol.setHandler(key: key) { [response] request in
+                if request.value(forHTTPHeaderField: "Authorization") == "Bearer old" {
+                    return sse("", status: 401, headers: ["WWW-Authenticate": #"Bearer error="invalid_token""#])
+                }
+                return sse("data: \(response)\n\n")
+            }
+            try await transport.connect()
+            try await transport.send(request)
+            #expect(try await firstMessage(transport) == response)
+            #expect(authorizer.sentAuthorizations == ["Bearer old"])
+            await transport.disconnect()
         }
 
         @Test("A 401 on a response stream's resumption GET goes to the authorizer")
@@ -349,6 +380,7 @@ struct HTTPClientConnectionLimitTests {
             try await transport.send(request)
             #expect(try await firstMessage(transport) == response)
             #expect(authorizer.handledChallenges == [401])
+            #expect(authorizer.sentAuthorizations == ["Bearer old"])
             await transport.disconnect()
         }
     }

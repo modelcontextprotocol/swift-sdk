@@ -1852,19 +1852,29 @@ The authorizer also:
   `OAuthConfiguration(applicationType:)` to choose;
 - when a token is rejected, refreshes it first at the server that issued it,
   and reads the resource metadata again when that fails or the refreshed
-  token is rejected too. When the resource names another authorization
-  server, registered credentials and tokens from the previous server are
-  dropped and the client registers again (SEP-2352). Pre-registered
+  token is rejected too; a refreshed token is then refreshed again when the
+  resource still names the same server. When the resource names another
+  authorization server, registered credentials and tokens from the previous
+  server are dropped and the client registers again (SEP-2352). Pre-registered
   credentials are kept. A failed read falls back to the metadata read before;
-  with none, the request fails and the token is kept;
+  with none, the request fails and the token is kept. A network error or an
+  unexpected status while reading the authorization server metadata also
+  fails the request and keeps the token;
 - refreshes a token only at the server that issued it. A token without a
   recorded server is refreshed only at a configured server or token endpoint;
 - falls back to `/authorize`, `/token` and `/register` at the server origin
   only when every metadata URL answers 404 or 410 on first discovery (2025-03-26
   servers). A network error, a timeout, a cancelled request or another status
   fails the request instead;
-- handles one challenge at a time: concurrent requests that get a 401 wait for
-  the first and retry with the token it obtained.
+- handles one challenge at a time: concurrent requests that get a 401, or a
+  403 for the same scopes, wait for the first and retry with the token it
+  obtained. When it fails and leaves no token (a cancelled authorization, a
+  refused grant), they fail with its error; a later request starts a new
+  flow. A request cancelled while waiting stops waiting;
+- compares a challenge with the token the challenged request carried, so a
+  401 for a token another request already replaced retries with the new one;
+- retries dynamic client registration in the next flow when it failed with
+  an error.
 
 `InMemoryTokenStorage` is safe to use from several tasks; custom
 `TokenStorage` implementations must be too.

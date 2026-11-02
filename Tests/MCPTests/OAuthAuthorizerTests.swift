@@ -68,6 +68,8 @@ final class MockDiscoveryClient: OAuthDiscoveryFetching, @unchecked Sendable {
     var protectedResourceMetadataError: Error?
     /// The `trustedIssuer` of the last authorization server metadata fetch.
     var lastTrustedIssuer: URL?
+    /// Thrown by authorization server metadata fetches while set.
+    var authorizationServerMetadataError: Error?
 
     func fetchProtectedResourceMetadata(candidates: [URL], fallbackIssuer: URL?, session: URLSession) async throws -> OAuthProtectedResourceMetadata {
         fetchProtectedResourceMetadataCallCount += 1
@@ -81,6 +83,7 @@ final class MockDiscoveryClient: OAuthDiscoveryFetching, @unchecked Sendable {
     func fetchAuthorizationServerMetadata(candidates: [URL], trustedIssuer: URL?, session: URLSession) async throws -> (server: URL, metadata: OAuthAuthorizationServerMetadata) {
         fetchAuthorizationServerMetadataCallCount += 1
         lastTrustedIssuer = trustedIssuer
+        if let error = authorizationServerMetadataError { throw error }
         return authorizationServerMetadataResult
     }
 }
