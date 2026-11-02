@@ -27,7 +27,7 @@ The parameters of `Server.init`:
 
 | Parameter | Purpose |
 | --- | --- |
-| `name`, `version`, `title` | Sent as `serverInfo` in the `initialize` result, and as `_meta["io.modelcontextprotocol/serverInfo"]` on stateless results. |
+| `name`, `version`, `title`, `description`, `websiteUrl`, `icons` | Sent as `serverInfo` in the `initialize` result, and as `_meta["io.modelcontextprotocol/serverInfo"]` on every stateless result, icons included: prefer `https` icon URLs to large `data:` URLs, which every result repeats. |
 | `instructions` | Usage hints for the client's model. Sent in the `initialize` and `server/discover` results. |
 | `capabilities` | The features the server provides. See [Capabilities and extensions](#capabilities-and-extensions). |
 | `configuration` | `strict`, served protocol versions and cache hints. |
@@ -122,7 +122,7 @@ func registerToolList(on server: Server) async {
 
 ### Calling tools
 
-There is one handler per method. A server with several tools switches on `params.name`. `params.arguments` is a `[String: Value]?`; read it with `stringValue`, `intValue`, `doubleValue`, `boolValue`, `arrayValue` and `objectValue`.
+There is one handler per method. A server with several tools switches on `params.name`. `params.arguments` is a `[String: Value]?`; read it with `stringValue`, `intValue`, `doubleValue`, `numberValue` (an integer or a double, as `Double`), `boolValue`, `arrayValue` and `objectValue`.
 
 ```swift
 func registerToolCall(on server: Server) async {

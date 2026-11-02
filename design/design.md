@@ -285,7 +285,12 @@ batches with `withBatch(body:)`.
 fields. It has literal conformances, so `["type": "object"]` is a `Value`.
 
 Decoding tries `Bool`, then `Int`, then `Double`, then `String`. A string that is a `data:` URL
-decodes as `.data(mimeType:_:)` and encodes back to the same URL.
+decodes as `.data(mimeType:_:)`, which encodes as a base64 `data:` URL: `data:,hi` comes back as
+`data:text/plain;base64,aGk=`. The SDK's own hops through `Value` (the client and server message
+decoders, batch items, type-erased requests and responses, handler results, `_meta` accessors,
+error data) decode with `userInfo[.valuePreservesStrings]` or `Value.preservingStrings`, so a
+`data:` string is forwarded as written. The typed decode before a handler runs is a plain
+decode: a handler still sees `.data` in a `Value` field, such as a tool argument.
 
 ### `_meta`
 

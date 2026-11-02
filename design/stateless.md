@@ -105,8 +105,13 @@ POST handling, in order:
    `AcceptHeaderValidator(mode: .jsonOnly)`, `ContentTypeValidator()`, `ProtocolVersionValidator()`
    (accepts `Version.stateless + Version.handshake`; unknown → 400 -32022).
 3. `Mcp-Method` and `Mcp-Name` against the body, for requests and notifications at a version
-   with `usesStandardHeaders`: 400 -32020.
-4. Notifications and responses: yielded to the server, 202.
+   with `usesStandardHeaders`: 400 -32020. The body is parsed once and re-serialized; the checks
+   and the server see that one form ([request_headers.md](request_headers.md)).
+4. Notifications and responses: yielded to the server, 202. A `notifications/cancelled` is
+   honored only when it names, by id value, exactly one request in flight with the same
+   `Authorization` header: it is rewritten to that request's internal id, and the exchange is
+   forgotten and ends without a JSON-RPC response (202 when no reply was sent yet, otherwise the
+   SSE stream ends). Otherwise it is dropped.
 5. Requests: `MCP-Protocol-Version` against `_meta`. Stateless header without `_meta` version:
    -32602. Different versions, or a stateless `_meta` version without a matching header: -32020.
 6. The request id is replaced with `mcp-http-<uuid>` and the request is yielded to the server.

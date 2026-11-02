@@ -79,6 +79,13 @@ before the `MCP-Protocol-Version`/`_meta` comparison, and before the message rea
   trimmed): -32020.
 - For methods with a name value: missing `Mcp-Name`, or a decoded value that differs: -32020.
 - Applies to requests and notifications.
+- The checks read the body the server receives. The transport parses the POST body once with
+  `JSONSerialization` and re-serializes it, then classifies the message, compares the headers and
+  the `_meta` version, and dispatches that one form. Parsers resolve duplicate member names
+  differently (`JSONSerialization` keeps the last on Linux, `JSONDecoder` the first), so checking
+  one parse and dispatching another would let `{"name":"a","name":"b"}` pass `Mcp-Name: a` and
+  run `b`. Notifications and responses are forwarded in that form only when their headers were
+  checked; otherwise byte for byte.
 
 Parameter headers are checked in `Server.parameterHeaderError`, because only the server knows the
 schema:
@@ -88,7 +95,9 @@ schema:
 3. Find the tool's `inputSchema` by calling the registered `tools/list` handler, following
    `nextCursor`, at most 100 pages. The handler runs with the same `_meta` and `HandlerContext` as
    the call.
-4. No `tools/list` handler, no such tool, or an invalid annotation: no check.
+4. No `tools/list` handler, or no such tool (the pass failed or stopped at 100 pages): refused with
+   -32020 when `Mcp-Param-*` headers were sent, otherwise no check. A tool hidden for an invalid
+   annotation: always refused with -32020.
 5. `MCPRequestHeaders.validate`: a header must be present exactly when its argument is present and
    not `null`; its decoded value must equal the rendered argument. The first mismatch is answered
    with `MCPError.headerMismatch` (-32020, HTTP 400). The handler does not run.

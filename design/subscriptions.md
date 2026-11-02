@@ -139,13 +139,20 @@ bodies.
   generation counter increments and a background task opens a new stream with `listen`.
 - An opening whose generation is stale is cancelled, unless no stream is open and something is
   wanted: then it serves until its successor is acknowledged.
-- A successful opening is installed; the previous stream is retired: cancelled, and its
-  notifications, which repeat the new stream's, are dropped until it ends.
+- A successful opening is installed; the previous stream is retired: cancelled, and until it
+  ends its notifications are delivered when the client still wants them (a list kind with a
+  handler, a subscribed URI) and dropped otherwise. An event the server published before it
+  registered the successor exists only on the retired stream, so it is kept; one published during
+  the overlap arrives on both streams and may be handled twice. Both kinds are refetch hints.
 - A failed opening keeps the previous stream and its filter, fails the `subscribeToResource` calls
-  that only it served, and schedules a retry.
+  still waiting for a URI that only it named (and unsubscribes those URIs), and schedules a retry.
+  Established subscriptions stay: after the stream dropped, a failed reopen keeps them and the
+  client keeps reopening with backoff.
 - A stream that fails (an error, not a result) is forgotten and reopened after a delay of 1 s,
-  doubled after each further failure up to 60 s. A stream the server ends with its result is
-  forgotten and reopened by the next refresh.
+  doubled after each further failure up to 60 s. The failure count is reset when a stream ends
+  with its result, or when it fails after staying open for at least 60 s, not when a stream is
+  acknowledged: a server that acknowledges each stream and drops it at once sees growing delays.
+  A stream the server ends with its result is forgotten and reopened by the next refresh.
 
 ### Client: resource subscriptions
 
@@ -156,7 +163,8 @@ bodies.
 | `subscribedResourceURIs` | empty | subscribed URIs the open stream serves |
 
 `disconnect()` cancels the background stream and fails waiting subscribe calls before closing the
-transport.
+transport, and again afterwards for a call made while it was closing. After `disconnect()`,
+`subscribeToResource(uri:)` throws instead of waiting.
 
 ## Alternatives considered
 

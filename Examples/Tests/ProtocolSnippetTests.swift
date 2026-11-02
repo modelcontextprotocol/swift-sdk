@@ -68,6 +68,16 @@ struct ProtocolSnippetTests {
         #expect(json.objectValue?["result"]?.objectValue?["resultType"] == "complete")
     }
 
+    @Test func endpointStartsTheStatelessServerOnceForConcurrentRequests() async throws {
+        let endpoint = MCPEndpoint()
+        let request = try statelessListToolsRequest()
+        let statuses = await withTaskGroup(of: Int.self) { group in
+            for _ in 0..<5 { group.addTask { await endpoint.handle(request).statusCode } }
+            return await group.reduce(into: []) { $0.append($1) }
+        }
+        #expect(statuses == [200, 200, 200, 200, 200])
+    }
+
     @Test func endpointRoutesInitializeToASession() async throws {
         let endpoint = MCPEndpoint()
         let initialize = Initialize.request(

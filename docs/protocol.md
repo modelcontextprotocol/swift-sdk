@@ -345,6 +345,9 @@ actor SessionRouter {
             return .error(statusCode: 500, .internalError("\(error)"))
         }
         let response = await transport.handleRequest(request)
+        // A refused `initialize` (an initialize hook threw) carries the header
+        // too: the transport refuses later requests with its ID, and the entry
+        // stays until the router closes idle sessions.
         if let id = response.headers[HTTPHeaderName.sessionID] {
             sessions[id] = (server, transport)
         } else {
@@ -377,6 +380,7 @@ Validation errors:
 - Each request gets an internal JSON-RPC id (`mcp-http-<uuid>`) while in flight, so clients may reuse ids. The response carries the client's id again.
 - Messages not related to an in-flight request are dropped: there is no stream outside a request.
 - If the client closes an SSE reply, the transport cancels the request (see [Cancellation](#cancellation)). If it goes away before the reply is decided, the adapter must cancel the task that awaits `handleRequest(_:)`; the transport then cancels the request too.
+- A POSTed `notifications/cancelled` is honored only when it carries the same `Authorization` header as exactly one request in flight with that id (compared by value: `1` and `"1"` differ). The cancelled request's HTTP response then ends without a JSON-RPC response: 202 Accepted when no reply was sent yet, or the end of its SSE stream.
 - An open SSE reply carries a `: keep-alive` comment every `keepAliveInterval` (15 seconds; `nil` turns it off), so that idle listen streams survive client and proxy timeouts.
 - At 2026-07-28 JSON-RPC errors get an HTTP status: 404 for -32601; 400 for -32600, -32602, -32020, -32021 and -32022; 200 otherwise.
 - After `disconnect()` every request gets 404; a request in flight at that moment gets 503.
@@ -412,6 +416,8 @@ The transport checks, before the server sees the request:
 | `MCP-Protocol-Version` is stateless but `_meta` has no version | 400, -32602 |
 | `_meta` names a stateless version but the header is missing or a handshake revision | 400, -32020 |
 
+The transport parses the body once and re-serializes it; it checks and dispatches that one form. A body with duplicate member names therefore cannot pass `Mcp-Name: a` and run `b`, whichever duplicate the platform's parser keeps.
+
 ### Routing both eras on one endpoint
 
 Route on `HTTPRequest.statelessProtocolVersion`. It returns the `MCP-Protocol-Version` header when the value is not a handshake revision (2026-07-28 or an unknown version), and `nil` otherwise. Send non-`nil` requests to the shared `StatelessHTTPServerTransport`; send the rest to the session router.
@@ -421,24 +427,31 @@ Route on `HTTPRequest.statelessProtocolVersion`. It returns the `MCP-Protocol-Ve
 actor MCPEndpoint {
     private let stateless = StatelessHTTPServerTransport()
     private let sessions = SessionRouter()
-    private var started = false
+    private var startup: Task<Void, Error>?
 
     func handle(_ request: HTTPRequest) async -> HTTPResponse {
         // A 2026-07-28 request names its version in MCP-Protocol-Version.
         guard request.statelessProtocolVersion != nil else {
             return await sessions.handle(request)
         }
-        if !started {
-            started = true
-            // One shared server answers every stateless request.
-            try? await makeHTTPServer().start(transport: stateless)
+        // One shared server answers every stateless request. The first request
+        // starts it; the others wait for the same start.
+        let startup = self.startup ?? Task { try await makeHTTPServer().start(transport: stateless) }
+        self.startup = startup
+        do {
+            try await startup.value
+        } catch {
+            if self.startup == startup { self.startup = nil }  // the next request tries again
+            return .error(statusCode: 500, .internalError("Server failed to start: \(error)"))
         }
         return await stateless.handleRequest(request)
     }
 }
 ```
 
-[`Examples/http-server/main.swift`](../Examples/http-server/main.swift) is this router with a SwiftNIO adapter and one tool. Run it with `swift run HTTPServerExample --port 3000`; the comment at the top of the file has `curl` commands for an `initialize` request and a 2026-07-28 `server/discover` request. It also has the limits a deployed router needs: a session is created only for a POST `initialize` (400 otherwise), at most 100 sessions exist (503 beyond), bodies are capped at 4 MiB (413), the validators check Host and Origin for its port, and a session is closed after 10 minutes without requests only when no response or SSE stream is open. It has no authentication, so it listens on 127.0.0.1.
+The first stateless request starts the shared server, and requests that arrive meanwhile wait for the same start. If it fails, they get 500 and the next request tries again.
+
+[`Examples/http-server/main.swift`](../Examples/http-server/main.swift) is this router with a SwiftNIO adapter and one tool. Run it with `swift run HTTPServerExample --port 3000`; the comment at the top of the file has `curl` commands for an `initialize` request and a 2026-07-28 `server/discover` request. It also has the limits a deployed router needs: a session is created only for a POST `initialize` (400 otherwise), at most 100 sessions exist, counting handshakes still in progress (503 beyond), bodies are capped at 4 MiB (413), the validators check Host and Origin for its port, and a session is closed after 10 minutes without requests only when no response or SSE stream is open. It has no authentication, so it listens on 127.0.0.1. A refused `initialize` (an initialize hook threw) is also an SSE response with an `Mcp-Session-Id`, sent before the router can see the outcome, so the router stores it: the transport refuses later requests with that ID (400), and the slot is freed when the reaper closes the session 10 minutes after its stream ended. The SSE adapter writes each event only after the previous write completed, so a slow client slows its stream down instead of filling the server's buffers.
 
 A client in `.automatic` mode then works against this endpoint in both directions: its `server/discover` reaches the stateless transport; an older client's `initialize` (no stateless header) reaches the session router. Unknown future versions also go to the stateless transport, which answers with -32022 and the versions it serves.
 
@@ -474,7 +487,7 @@ print(headers)  // ["Mcp-Param-Region": "eu-west"]
 print(MCPRequestHeaders.encode("Zürich"))  // =?base64?WsO8cmljaA==?=
 ```
 
-On the server, `StatelessHTTPServerTransport` checks `Mcp-Method` and `Mcp-Name` (see the table above). `Server` checks `Mcp-Param-*` for stateless `tools/call` requests that arrive over HTTP: it reads the input schemas from the `tools/list` handler once (up to 100 pages, kept until `ToolListChangedNotification`) and compares each header with the decoded argument. Headers for a tool it cannot find a schema for, and calls to a tool with an invalid annotation, are refused. A missing, extra or different value fails with -32020 `MCPError.headerMismatch`, HTTP 400. Handshake requests carry none of these headers and are not checked.
+On the server, `StatelessHTTPServerTransport` checks `Mcp-Method` and `Mcp-Name` (see the table above). `Server` checks `Mcp-Param-*` for stateless `tools/call` requests that arrive over HTTP: it reads the input schemas from the `tools/list` handler once (up to 100 pages, kept until `ToolListChangedNotification`) and compares each header with the decoded argument. Headers for a tool it cannot find a schema for, including when the server has no `tools/list` handler, and calls to a tool with an invalid annotation, are refused. A missing, extra or different value fails with -32020 `MCPError.headerMismatch`, HTTP 400. Handshake requests carry none of these headers and are not checked.
 
 ### In-memory
 
@@ -618,7 +631,7 @@ await subscription.cancel()
 
 Most clients do not call `listen` directly:
 
-- At 2026-07-28 the client keeps one background stream for the list kinds that have a registered handler and that the server declares, and for the subscribed resources. When the filter changes, the client opens the new stream and cancels the old one after the new one is acknowledged; if the new one fails, the old one stays. A stream that fails is reopened with a backoff from 1 to 60 seconds; one the server ends with its result is reopened by the next change.
+- At 2026-07-28 the client keeps one background stream for the list kinds that have a registered handler and that the server declares, and for the subscribed resources. When the filter changes, the client opens the new stream and cancels the old one after the new one is acknowledged; if the new one fails, the old one stays. Until the old stream ends, its notifications that the client still wants are delivered, so one sent during the replacement may arrive twice. A stream that fails is reopened with a backoff from 1 to 60 seconds that keeps growing while streams fail within a minute, even after being acknowledged; a failed reopen keeps the subscribed resources. One the server ends with its result is reopened by the next change.
 - `subscribeToResource(uri:)` adds the URI to that stream at 2026-07-28 and waits for an acknowledgement that names it; on handshake connections it sends `resources/subscribe`. `unsubscribeFromResource(uri:)` replaces the stream with one without the URI, or sends `resources/unsubscribe`. `subscribedResourceURIs` lists the URIs the open stream serves.
 - `disconnect()` cancels the stream.
 
@@ -704,7 +717,7 @@ let transport = HTTPClientTransport(
 How the client identifies itself, with `.none(clientID:)`:
 
 - **Client ID Metadata Document (CIMD).** When the client ID is an `https` URL with a path and the server metadata has `client_id_metadata_document_supported: true`, the URL is the client ID; no registration happens. If the server does not support CIMD and has no registration endpoint, the flow fails with `cimdNotSupported`. A URL client ID that is not `https` with a path fails with `invalidClientIDMetadataURL` when the server supports CIMD.
-- **Dynamic client registration (RFC 7591).** Otherwise, when the server has a `registration_endpoint`, the authorizer registers with `client_name` (`clientName`, default `"mcp-swift-sdk"`), the redirect URI, the grant and response types, and `application_type` (SEP-837). `applicationType: nil` sends `web` for the authorization code grant with an `https` redirect URI on a non-loopback host, else `native`. The registered credentials replace `authentication` for this authorizer.
+- **Dynamic client registration (RFC 7591).** Otherwise, when the server has a `registration_endpoint`, the authorizer registers with `client_name` (`clientName`, default `"mcp-swift-sdk"`), the redirect URI, the grant and response types, and `application_type` (SEP-837). `applicationType: nil` sends `web` for the authorization code grant with an `https` redirect URI on a non-loopback host, else `native`. The registered credentials replace `authentication` for this authorizer. A registration that fails with an error is tried again in the next flow.
 - **Pre-registration.** Pass `.clientSecretBasic`, `.clientSecretPost` or `.privateKeyJWT`; no registration happens.
 
 Tokens are kept in a `TokenStorage`. The default `InMemoryTokenStorage` loses them when the process exits. Implement the protocol to persist them, for example in the Keychain. Its methods may be called from several tasks at once:
@@ -735,15 +748,15 @@ let authorizer = OAuthAuthorizer(
     tokenStorage: PersistentTokenStorage())
 ```
 
-Use one `OAuthAuthorizer` per transport. Requests of a transport run concurrently: the authorizer handles one challenge or proactive refresh at a time, and a request whose 401 arrives while another is handled retries with the token that one obtained, so concurrent 401s cause one refresh or sign-in.
+Use one `OAuthAuthorizer` per transport. Requests of a transport run concurrently: the authorizer handles one challenge or proactive refresh at a time, and a request whose 401, or 403 for the same scopes, arrives while another is handled retries with the token that one obtained, so concurrent challenges cause one refresh or sign-in. The authorizer compares a challenge with the token the challenged request carried, so a late 401 for a token another request already replaced retries with the new one instead of starting over. When the challenge being handled fails and leaves no usable token (the user cancelled the authorization, the grant was refused), the requests that waited for it fail with its error instead of each starting the flow again; a later request starts a new flow. A request cancelled while it waits stops waiting.
 
-`accessTokenProvider` lets the app supply a token it got elsewhere. The SDK calls it after discovery with an `AccessTokenProviderContext` (resource, endpoints, scopes); return `nil` to run the configured grant.
+`accessTokenProvider` lets the app supply a token it got elsewhere. The SDK calls it after discovery with an `AccessTokenProviderContext` (resource, endpoints, scopes); return `nil` to run the configured grant. The provider and the `authorizationDelegate` run while the authorizer handles a challenge, and the transport's other challenges wait for them: they must not send requests through the transport they authorize.
 
 Issuer checks and authorization server changes:
 
 - Authorization server metadata is accepted only when its `issuer` equals the issuer the metadata URL was built from (RFC 8414 §3.3). The comparison is case-sensitive; a root issuer may differ by a trailing slash. A mismatch fails with `authorizationServerIssuerMismatch`. An issuer set in `endpointOverrides.authorizationServerURL` is trusted: its metadata is used whatever `issuer` it names.
 - The `iss` parameter of the authorization response must equal the metadata issuer exactly (RFC 9207). A missing `iss` is rejected when the server advertises `authorization_response_iss_parameter_supported`. Errors: `authorizationResponseIssuerMismatch`, `authorizationResponseMissingIssuer`.
-- When a stored token is rejected, the authorizer refreshes it at the server that issued it. It reads the protected resource metadata again when the refresh fails, when the refreshed token is rejected too, or when the challenge names another metadata URL. If the selected authorization server is no longer listed, it drops the stored token, selects a new server (SEP-2352) and drops credentials it registered at the old one; pre-registered credentials are kept. A read that fails falls back to the metadata read before; with none, the request fails and the token is kept.
+- When a stored token is rejected, the authorizer refreshes it at the server that issued it. It reads the protected resource metadata again when the refresh fails, when the refreshed token is rejected too, or when the challenge names another metadata URL; a refreshed token is then refreshed again when the resource still names the same server. If the selected authorization server is no longer listed, it drops the stored token, selects a new server (SEP-2352) and drops credentials it registered at the old one; pre-registered credentials are kept. A read that fails falls back to the metadata read before; with none, the request fails and the token is kept. A network error or an unexpected status while reading the authorization server metadata also fails the request and keeps the token.
 - A refresh token is sent only to the server that issued it. A token without a recorded server is refreshed only at a configured `authorizationServerURL` or `tokenEndpoint`.
 - For 2025-03-26 servers that publish no metadata at all, the authorizer falls back to `/authorize`, `/token` and `/register` at the server origin, with S256. It does so only on first discovery, and only when every metadata URL answers 404 or 410; a network error, a cancelled request or another status fails the request instead.
 
@@ -902,7 +915,7 @@ On the client, `cancelRequest(_:reason:)` fails the pending request with `Cancel
 | 2026-07-28 over `HTTPClientTransport` | Aborts the request's POST. No notification is sent. |
 | 2026-07-28 over stdio, in-memory or a custom transport | Sends `notifications/cancelled`. |
 
-On the server, `notifications/cancelled` cancels the handler's task. Over `StatelessHTTPServerTransport`, the transport does the same when the client closes an SSE reply: it injects `notifications/cancelled` for the request's internal id. A handler stops when it reaches a cancellation point (`Task.sleep`, `Task.checkCancellation()`, a cancellable `await`). If it throws `CancellationError`, the server sends nothing; any other error is sent as a response.
+On the server, `notifications/cancelled` cancels the handler's task. Over `StatelessHTTPServerTransport`, the transport does the same when the client closes an SSE reply: it injects `notifications/cancelled` for the request's internal id. A `notifications/cancelled` POSTed to that transport is honored when its `Authorization` header matches the request's ([Stateless HTTP server](#stateless-http-server)); the request's HTTP response then ends with 202 Accepted, or with the end of its SSE stream, and carries no JSON-RPC response. A handler stops when it reaches a cancellation point (`Task.sleep`, `Task.checkCancellation()`, a cancellable `await`). If it throws `CancellationError`, the server sends nothing; any other error is sent as a response.
 
 To cancel, keep the request id. The convenience methods return results, so use the `callTool` overload that returns a `RequestContext`, or `send(_:)`:
 

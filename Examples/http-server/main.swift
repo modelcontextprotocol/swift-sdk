@@ -72,6 +72,9 @@ actor Router {
     private let port: Int
     private let stateless: StatelessHTTPServerTransport
     private var sessions: [String: Session] = [:]
+    /// `initialize` requests whose session is not stored yet: they count
+    /// toward the limit, since the actor runs other requests at each await.
+    private var pendingSessions = 0
 
     init(port: Int) {
         self.port = port
@@ -113,9 +116,11 @@ actor Router {
         guard request.method == "POST", Self.isInitialize(request.body) else {
             return .error(statusCode: 400, .invalidRequest("Missing Mcp-Session-Id; send initialize first"))
         }
-        guard sessions.count < Self.maxSessions else {
+        guard sessions.count + pendingSessions < Self.maxSessions else {
             return .error(statusCode: 503, .internalError("Too many sessions"))
         }
+        pendingSessions += 1
+        defer { pendingSessions -= 1 }
         let transport = StatefulHTTPServerTransport(
             validationPipeline: StandardValidationPipeline(validators: [
                 OriginValidator.localhost(port: port),
@@ -131,6 +136,9 @@ actor Router {
             return .error(statusCode: 500, .internalError("\(error)"))
         }
         let response = await transport.handleRequest(request)
+        // A refused `initialize` (an initialize hook threw) is a stream with
+        // the header too: the transport refuses later requests with its ID,
+        // and the reaper closes the session once its stream has ended.
         if let id = response.headers[HTTPHeaderName.sessionID], case .stream = response {
             sessions[id] = Session(server: server, transport: transport, inFlight: 1)
             return tracked(response) { await self.finished(id) }
@@ -271,21 +279,21 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             version: version, status: .init(statusCode: response.statusCode),
             headers: HTTPHeaders(response.headers.map { ($0.key, $0.value) }))
 
-        let send: @Sendable (ByteBuffer) -> Void = { buffer in
-            context.eventLoop.execute {
-                context.writeAndFlush(self.wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
+        // Each write completes before the next event is read, so a slow
+        // client slows the stream down instead of filling NIO's buffers.
+        let send: @Sendable (HTTPServerResponsePart) async throws -> Void = { part in
+            try await context.eventLoop.flatSubmit {
+                context.writeAndFlush(self.wrapOutboundOut(part))
+            }.get()
+        }
+        do {
+            try await send(.head(responseHead))
+            if case .stream(let events, _) = response {
+                for try await chunk in events { try await send(.body(.byteBuffer(ByteBuffer(bytes: chunk)))) }
+            } else if let data = response.bodyData {
+                try await send(.body(.byteBuffer(ByteBuffer(bytes: data))))
             }
-        }
-        context.eventLoop.execute {
-            context.writeAndFlush(self.wrapOutboundOut(.head(responseHead)), promise: nil)
-        }
-        if case .stream(let events, _) = response {
-            do {
-                for try await chunk in events { send(ByteBuffer(bytes: chunk)) }
-            } catch {}  // the stream failed: end the response
-        } else if let data = response.bodyData {
-            send(ByteBuffer(bytes: data))
-        }
+        } catch {}  // the stream or a write failed: end the response
         context.eventLoop.execute {
             context.writeAndFlush(self.wrapOutboundOut(.end(nil)), promise: nil)
         }

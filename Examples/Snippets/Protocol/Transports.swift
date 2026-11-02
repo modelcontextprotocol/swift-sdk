@@ -91,6 +91,9 @@ actor SessionRouter {
             return .error(statusCode: 500, .internalError("\(error)"))
         }
         let response = await transport.handleRequest(request)
+        // A refused `initialize` (an initialize hook threw) carries the header
+        // too: the transport refuses later requests with its ID, and the entry
+        // stays until the router closes idle sessions.
         if let id = response.headers[HTTPHeaderName.sessionID] {
             sessions[id] = (server, transport)
         } else {
@@ -106,17 +109,22 @@ actor SessionRouter {
 actor MCPEndpoint {
     private let stateless = StatelessHTTPServerTransport()
     private let sessions = SessionRouter()
-    private var started = false
+    private var startup: Task<Void, Error>?
 
     func handle(_ request: HTTPRequest) async -> HTTPResponse {
         // A 2026-07-28 request names its version in MCP-Protocol-Version.
         guard request.statelessProtocolVersion != nil else {
             return await sessions.handle(request)
         }
-        if !started {
-            started = true
-            // One shared server answers every stateless request.
-            try? await makeHTTPServer().start(transport: stateless)
+        // One shared server answers every stateless request. The first request
+        // starts it; the others wait for the same start.
+        let startup = self.startup ?? Task { try await makeHTTPServer().start(transport: stateless) }
+        self.startup = startup
+        do {
+            try await startup.value
+        } catch {
+            if self.startup == startup { self.startup = nil }  // the next request tries again
+            return .error(statusCode: 500, .internalError("Server failed to start: \(error)"))
         }
         return await stateless.handleRequest(request)
     }
