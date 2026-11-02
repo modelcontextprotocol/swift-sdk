@@ -22,7 +22,9 @@ import Logging
 /// - A client cancels a request by closing its HTTP request; the adapter
 ///   must then cancel the task that awaits ``handleRequest(_:)``.
 ///   `notifications/cancelled` is honored only when it carries the same
-///   `Authorization` header as exactly one request in flight with that id.
+///   `Authorization` header as exactly one request in flight with that id;
+///   the cancelled request's HTTP response then ends without a JSON-RPC
+///   response: 202 Accepted, or the end of its SSE stream.
 /// - At most ``maxBufferedMessages`` messages are buffered per request for a
 ///   slow client; older notifications are dropped first, never the response.
 ///
@@ -67,6 +69,8 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
         case message(Data)
         /// The response, with the client's id, and its error code if any.
         case response(Data, errorCode: Int?)
+        /// The client cancelled the request; no response follows.
+        case cancelled
     }
 
     /// A request handed to the server and not yet answered.
@@ -348,6 +352,14 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
                                 returning: Self.jsonResponse(data, errorCode: errorCode, isStateless: isStateless))
                         }
                         return
+                    case .cancelled:
+                        // No response follows a cancelled request.
+                        if let stream {
+                            stream.finish()
+                        } else {
+                            decision.resume(returning: .accepted())
+                        }
+                        return
                     case .message(let data):
                         guard acceptsSSE else {
                             logger.debug("Notification dropped: client does not accept SSE")
@@ -402,16 +414,21 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
     /// the request it cancels. The request ids of different clients overlap,
     /// so it must match exactly one request in flight with that id and the
     /// same `Authorization` header; without one there is no way to tell
-    /// clients apart, and the notification is not honored.
+    /// clients apart, and the notification is not honored. A request that
+    /// is cancelled is forgotten and its HTTP response ends.
     private func cancellation(_ body: Data, request: HTTPRequest) -> Data? {
         guard let authorization = request.header(HTTPHeaderName.authorization),
-            let requestID = JSONRPCMessageKind.cancelledRequestID(in: body)
+            let requestID = JSONRPCMessageFields.cancelledRequestID(in: body)
         else { return nil }
         let matches = exchanges.filter {
-            $0.value.clientID.description == requestID
+            $0.value.clientID == requestID
                 && $0.value.request.header(HTTPHeaderName.authorization) == authorization
         }
-        guard matches.count == 1, let internalID = matches.first?.key else { return nil }
+        guard matches.count == 1, let internalID = matches.first?.key,
+            let exchange = exchanges.removeValue(forKey: internalID)
+        else { return nil }
+        exchange.outgoing.yield(.cancelled)
+        exchange.outgoing.finish()
         let cancelled = CancelledNotification.message(
             .init(requestId: .string(internalID), reason: "Cancelled by the client"))
         return try? JSONEncoder().encode(cancelled)
@@ -523,6 +540,16 @@ enum JSONRPCMessageFields {
         case .number(let number): json["id"] = number
         }
         return try? JSONSerialization.data(withJSONObject: json, options: [.withoutEscapingSlashes])
+    }
+
+    /// `params.requestId` of a `notifications/cancelled` message, if it is a
+    /// string or an integer.
+    static func cancelledRequestID(in data: Data) -> ID? {
+        struct Cancelled: Decodable {
+            struct Params: Decodable { let requestId: ID? }
+            let params: Params?
+        }
+        return (try? JSONDecoder().decode(Cancelled.self, from: data))?.params?.requestId
     }
 
     /// `params._meta["io.modelcontextprotocol/protocolVersion"]`, if it is a string.

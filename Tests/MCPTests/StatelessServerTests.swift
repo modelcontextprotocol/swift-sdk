@@ -69,6 +69,17 @@ struct StatelessServerTests {
         expectWire(resources[0], matches: try wireJSON(#"{"result":{"ttlMs":5000,"cacheScope":"public"}}"#))
     }
 
+    @Test("serverInfo keeps a data: icon as written")
+    func testServerInfoDataIcon() throws {
+        let info = Server.Info(
+            name: "stateless", version: "2.0.0", icons: [Icon(src: "data:,hi", mimeType: "text/plain")])
+        let annotated = StatelessRequests.annotate(
+            .object([:]), method: ListTools.name, serverInfo: info, cacheHint: .init(ttlMs: 0, scope: .private))
+        let icon = annotated.objectValue?["_meta"]?.objectValue?[MetaKey.serverInfo]?.objectValue?["icons"]?
+            .arrayValue?.first?.objectValue
+        #expect(icon?["src"] == .string("data:,hi"))
+    }
+
     @Test("Legacy results are not annotated")
     func testLegacyNotAnnotated() async throws {
         let wire = WireExchange(server: await makeServer())
@@ -130,6 +141,27 @@ struct StatelessServerTests {
             matches: try wireJSON(
                 #"{"id":9,"error":{"code":-32022,"data":{"supported":["2026-07-28","2025-11-25"],"requested":"2099-01-01"}}}"#
             ))
+    }
+
+    @Test("An unserved version is -32022 before the other _meta members are checked")
+    func testUnsupportedVersionWithoutCapabilities() async throws {
+        let wire = WireExchange(server: await makeServer())
+        try await wire.start()
+        defer { Task { await wire.stop() } }
+
+        let unserved = try await wire.send(
+            #"{"jsonrpc":"2.0","id":10,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2099-01-01"}}}"#
+        )
+        expectWire(
+            unserved[0],
+            matches: try wireJSON(#"{"id":10,"error":{"code":-32022,"data":{"requested":"2099-01-01"}}}"#))
+        let supported = try #require(unserved[0].objectValue?["error"]?.objectValue?["data"]?.objectValue?["supported"])
+        #expect(supported.arrayValue?.isEmpty == false)
+
+        let served = try await wire.send(
+            #"{"jsonrpc":"2.0","id":11,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}"#
+        )
+        expectWire(served[0], matches: try wireJSON(#"{"id":11,"error":{"code":-32602}}"#))
     }
 
     @Test("Removed methods are -32601 at 2026-07-28", arguments: [

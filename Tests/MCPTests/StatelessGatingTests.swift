@@ -217,6 +217,44 @@ private func nextIncoming(_ iterator: inout AsyncThrowingStream<Data, Swift.Erro
     return try JSONDecoder().decode(Value.self, from: data)
 }
 
+/// The result of `task`, or `nil` with a recorded issue when it has not
+/// finished after two seconds (the task is then cancelled).
+private func resultWithinTwoSeconds<T: Sendable, Failure: Error>(
+    of task: Task<T, Failure>
+) async -> Result<T, Failure>? {
+    let timer = Task { () -> Bool in
+        guard (try? await Task.sleep(for: .seconds(2))) != nil else { return false }
+        task.cancel()
+        return true
+    }
+    let result = await task.result
+    timer.cancel()
+    if await timer.value {
+        Issue.record("Not finished within two seconds")
+        return nil
+    }
+    return result
+}
+
+private actor CancellationObserved {
+    var didStart = false
+    var didCancel = false
+    func started() { didStart = true }
+    func cancelled() { didCancel = true }
+}
+
+/// Waits up to two seconds for `condition`.
+private func waitUntil(_ condition: @Sendable () async -> Bool) async throws {
+    let deadline = ContinuousClock.now + .seconds(2)
+    while await !condition() {
+        guard ContinuousClock.now < deadline else {
+            Issue.record("Condition not met within two seconds")
+            return
+        }
+        try await Task.sleep(for: .milliseconds(5))
+    }
+}
+
 @Suite("Stateful transport and stateless requests")
 struct StatefulStatelessBoundaryTests {
     @Test("A stateless version in _meta alone is -32022 on a session")
@@ -328,6 +366,121 @@ struct StatelessTransportExchangeTests {
         let cancelled = try await nextIncoming(&incoming)
         #expect(cancelled.objectValue?["params"]?.objectValue?["requestId"]?.stringValue == internalID)
         #expect(await pending.value.statusCode == 503)
+    }
+
+    @Test("An honored notifications/cancelled ends a JSON exchange with 202")
+    func cancellationEndsJSONExchange() async throws {
+        let transport = try await makeTransport()
+        defer { Task { await transport.disconnect() } }
+        var incoming = await transport.receive().makeAsyncIterator()
+
+        let pending = Task {
+            await transport.handleRequest(
+                post(call(id: 4), version: "2026-07-28", accept: "application/json", authorization: "Bearer a"))
+        }
+        let forwarded = try await nextIncoming(&incoming)
+        let internalID = try #require(forwarded.objectValue?["id"]?.stringValue)
+
+        let cancel = #"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":4}}"#
+        #expect(await transport.handleRequest(post(cancel, authorization: "Bearer a")).statusCode == 202)
+        let response = try #require(await resultWithinTwoSeconds(of: pending)).get()
+        #expect(response.statusCode == 202)
+        #expect(response.bodyData == nil)
+
+        // The server is told once; a late response for the request is dropped.
+        let delivered = try await nextIncoming(&incoming)
+        #expect(delivered.objectValue?["params"]?.objectValue?["requestId"]?.stringValue == internalID)
+        try await transport.send(Data(#"{"jsonrpc":"2.0","id":"\#(internalID)","result":{"content":[]}}"#.utf8))
+    }
+
+    @Test("An honored notifications/cancelled ends an SSE exchange's stream normally")
+    func cancellationEndsSSEExchange() async throws {
+        let transport = try await makeTransport()
+        defer { Task { await transport.disconnect() } }
+        var incoming = await transport.receive().makeAsyncIterator()
+
+        let pending = Task {
+            await transport.handleRequest(post(call(id: 5), version: "2026-07-28", authorization: "Bearer a"))
+        }
+        let forwarded = try await nextIncoming(&incoming)
+        let internalID = try #require(forwarded.objectValue?["id"]?.stringValue)
+        try await transport.send(
+            Data(#"{"jsonrpc":"2.0","method":"notifications/message","params":{"level":"info","data":"x"}}"#.utf8),
+            relatedRequestID: .string(internalID))
+        guard case .stream(let stream, _) = await pending.value else {
+            Issue.record("Expected an SSE stream")
+            return
+        }
+
+        let cancel = #"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":5}}"#
+        #expect(await transport.handleRequest(post(cancel, authorization: "Bearer a")).statusCode == 202)
+        let reader = Task {
+            var text = ""
+            for try await chunk in stream { text += String(decoding: chunk, as: UTF8.self) }
+            return text
+        }
+        let text = try #require(await resultWithinTwoSeconds(of: reader)).get()
+        #expect(text.contains("notifications/message"))
+        #expect(!text.contains(#""result""#))
+    }
+
+    @Test("notifications/cancelled matches the id by value, not by its text")
+    func cancellationMatchesIDType() async throws {
+        let transport = try await makeTransport()
+        defer { Task { await transport.disconnect() } }
+        var incoming = await transport.receive().makeAsyncIterator()
+
+        let number = Task { await transport.handleRequest(post(call(id: 1), version: "2026-07-28", authorization: "Bearer a")) }
+        let numberID = try #require(try await nextIncoming(&incoming).objectValue?["id"]?.stringValue)
+        let string = Task {
+            await transport.handleRequest(
+                post(call(id: 1).replacingOccurrences(of: #""id":1"#, with: #""id":"1""#),
+                    version: "2026-07-28", authorization: "Bearer a"))
+        }
+        let stringID = try #require(try await nextIncoming(&incoming).objectValue?["id"]?.stringValue)
+        defer {
+            number.cancel()
+            string.cancel()
+        }
+
+        let cancel = #"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}}"#
+        #expect(await transport.handleRequest(post(cancel, authorization: "Bearer a")).statusCode == 202)
+        #expect(try #require(await resultWithinTwoSeconds(of: number)).get().statusCode == 202)
+        let delivered = try await nextIncoming(&incoming)
+        #expect(delivered.objectValue?["params"]?.objectValue?["requestId"]?.stringValue == numberID)
+        #expect(numberID != stringID)
+    }
+
+    @Test("A request cancelled with notifications/cancelled stops its handler and returns")
+    func cancellationStopsHandler() async throws {
+        let observed = CancellationObserved()
+        let server = Server(name: "cancel", version: "1", capabilities: .init(tools: .init()))
+        await server.withMethodHandler(CallTool.self) { _ in
+            await observed.started()
+            do {
+                try await Task.sleep(for: .seconds(30))
+            } catch {
+                await observed.cancelled()
+                throw error
+            }
+            return .init(content: [])
+        }
+        let transport = StatelessHTTPServerTransport(
+            validationPipeline: StandardValidationPipeline(validators: []))
+        try await server.start(transport: transport)
+        defer { Task { await server.stop() } }
+
+        let pending = Task {
+            await transport.handleRequest(
+                post(call(id: 6), version: "2026-07-28", accept: "application/json", authorization: "Bearer a"))
+        }
+        try await waitUntil { await observed.didStart }
+        let cancel = #"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":6}}"#
+        #expect(await transport.handleRequest(post(cancel, authorization: "Bearer a")).statusCode == 202)
+
+        let response = try #require(await resultWithinTwoSeconds(of: pending)).get()
+        #expect(response.statusCode == 202)
+        try await waitUntil { await observed.didCancel }
     }
 
     @Test("A slow client's stream keeps the newest messages and the response")

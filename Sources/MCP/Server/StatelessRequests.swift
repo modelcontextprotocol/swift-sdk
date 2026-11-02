@@ -35,7 +35,8 @@ enum StatelessRequests {
     /// A request without `io.modelcontextprotocol/protocolVersion` belongs to
     /// the handshake era, as does one that names a handshake revision in
     /// `served`. Any other version is served statelessly when it is in
-    /// `served`; otherwise the request is rejected with -32022.
+    /// `served`; otherwise the request is rejected with -32022, before its
+    /// other `_meta` members are checked.
     ///
     /// - Throws: ``MCPError/invalidParams(_:)`` for malformed `_meta`;
     ///   ``MCPError/unsupportedProtocolVersion(supported:requested:)``.
@@ -50,6 +51,9 @@ enum StatelessRequests {
             }
             return .handshake
         }
+        guard served.contains(version) else {
+            throw MCPError.unsupportedProtocolVersion(supported: served, requested: version)
+        }
 
         guard let capabilities = meta.clientCapabilities else {
             throw MCPError.invalidParams(
@@ -57,9 +61,6 @@ enum StatelessRequests {
         }
         if meta[MetaKey.clientInfo] != nil, meta.clientInfo == nil {
             throw MCPError.invalidParams("Invalid _meta field \"\(MetaKey.clientInfo)\"")
-        }
-        guard served.contains(version) else {
-            throw MCPError.unsupportedProtocolVersion(supported: served, requested: version)
         }
         return .stateless(
             StatelessRequestInfo(
@@ -96,7 +97,7 @@ enum StatelessRequests {
             object[ResultKeys.resultType] = .string(ResultType.complete.rawValue)
         }
         var meta = object["_meta"]?.objectValue ?? [:]
-        if meta[MetaKey.serverInfo] == nil, let info = try? Value(serverInfo) {
+        if meta[MetaKey.serverInfo] == nil, let info = try? Value.preservingStrings(serverInfo) {
             meta[MetaKey.serverInfo] = info
             object["_meta"] = .object(meta)
         }
