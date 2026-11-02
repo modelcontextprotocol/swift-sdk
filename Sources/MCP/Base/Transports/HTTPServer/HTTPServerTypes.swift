@@ -289,7 +289,11 @@ package enum JSONRPCMessageKind {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return nil
         }
+        self.init(json: json)
+    }
 
+    /// Classifies a message already parsed with `JSONSerialization`.
+    package init?(json: [String: Any]) {
         let id = Self.extractID(from: json)
 
         if let method = json["method"] as? String {

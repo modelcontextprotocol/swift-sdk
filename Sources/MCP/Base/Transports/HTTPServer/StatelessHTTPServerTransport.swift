@@ -233,12 +233,19 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
             return .error(statusCode: 400, .parseError("Empty request body"))
         }
 
-        guard let messageKind = JSONRPCMessageKind(data: body) else {
+        // Parsers resolve duplicate member names differently (JSONSerialization
+        // on Linux keeps the last, JSONDecoder the first). Check and dispatch
+        // one re-serialized form, which has none, so the headers are checked
+        // against the values the server reads.
+        guard let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+            let messageKind = JSONRPCMessageKind(json: json),
+            let normalized = try? JSONSerialization.data(withJSONObject: json, options: [.withoutEscapingSlashes])
+        else {
             return .error(statusCode: 400, .parseError("Invalid JSON-RPC message"))
         }
 
         // One probe for the id and the `_meta` version.
-        let fields = JSONRPCMessageFields.requestFields(in: body)
+        let fields = JSONRPCMessageFields.requestFields(in: normalized)
         var requestID: ID?
         if case .request = messageKind {
             requestID = fields.id
@@ -261,7 +268,7 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
 
         switch messageKind {
         case .notification(let method) where method == CancelledNotification.name:
-            if let cancellation = cancellation(body, request: request) {
+            if let cancellation = cancellation(normalized, request: request) {
                 incomingContinuation.yield(cancellation)
             } else {
                 logger.debug("notifications/cancelled matches no request in flight; ignored")
@@ -269,7 +276,8 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
             return .accepted()
 
         case .notification, .response:
-            incomingContinuation.yield(body)
+            // Forwarded as received unless the headers were checked against it.
+            incomingContinuation.yield(Self.usesStandardHeaders(request) ? normalized : body)
             return .accepted()
 
         case .request:
@@ -280,7 +288,7 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
                 return .error(statusCode: 400, mismatch, id: requestID)
             }
             return await handleJSONRPCRequest(
-                body,
+                normalized,
                 clientID: requestID,
                 isStateless: request.statelessProtocolVersion != nil,
                 request: request
@@ -308,6 +316,12 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
         return nil
     }
 
+    /// Whether the request's protocol revision defines `Mcp-Method` and
+    /// `Mcp-Name` (SEP-2243).
+    private static func usesStandardHeaders(_ request: HTTPRequest) -> Bool {
+        request.statelessProtocolVersion.map { Version.profile(for: $0).usesStandardHeaders } ?? false
+    }
+
     /// Checks `Mcp-Method` and `Mcp-Name` against the body (SEP-2243).
     ///
     /// Applies to protocol revisions that define the headers. Values are
@@ -315,10 +329,7 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
     private static func standardHeaderError(
         _ request: HTTPRequest, fields: JSONRPCMessageFields.RequestFields
     ) -> MCPError? {
-        guard let version = request.statelessProtocolVersion,
-            Version.profile(for: version).usesStandardHeaders,
-            let method = fields.method
-        else { return nil }
+        guard usesStandardHeaders(request), let method = fields.method else { return nil }
 
         let methodHeader = request.header(MCPRequestHeaders.method)?
             .trimmingCharacters(in: .whitespaces)

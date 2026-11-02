@@ -1126,7 +1126,9 @@ public actor Server {
         let hasHeaders = http.headers.keys.contains { $0.lowercased().hasPrefix(prefix) }
         // Nothing to compare: skip the schema lookup.
         if arguments?.objectValue?.isEmpty ?? true, !hasHeaders { return nil }
-        guard methodHandlers[ListTools.name] != nil else { return nil }
+        guard methodHandlers[ListTools.name] != nil else {
+            return hasHeaders ? .headerMismatch("No input schema to check the Mcp-Param headers against") : nil
+        }
         let name = params?["name"]?.stringValue ?? ""
 
         switch await toolHeaders(context: context, request: request)?[name] {
