@@ -13,12 +13,14 @@ constrain their resolution as little as possible. Related: [VERSIONING.md](VERSI
 | [eventsource](https://github.com/mattt/eventsource) | `EventSource` | `from: "1.1.0"` | `MCP` on Apple platforms only | SSE parsing in `HTTPClientTransport` |
 | [swift-crypto](https://github.com/apple/swift-crypto) | `Crypto` | `"3.0.0"..<"5.0.0"` | `MCP` | AES-256-GCM, HKDF-SHA256 and SHA-256 for `requestState` sealing; SHA-256 for PKCE; P-256 for `private_key_jwt` and DPoP proofs |
 | [swift-nio](https://github.com/apple/swift-nio) | `NIOCore`, `NIOPosix`, `NIOHTTP1` | `from: "2.65.0"` | `MCPConformanceServer`, `HTTPServerExample` only | HTTP server in the fixture and the example |
-| [swift-docc-plugin](https://github.com/swiftlang/swift-docc-plugin) | plugin | `from: "1.4.6"` | none | `swift package generate-documentation` |
+| [swift-docc-plugin](https://github.com/swiftlang/swift-docc-plugin) | plugin | `from: "1.4.0"` | none | `swift package generate-documentation` |
 
 Notes:
 
 - swift-nio and swift-docc-plugin are declared only in `Package.swift`. `Package@swift-6.0.swift`
   declares swift-system, swift-log, eventsource and swift-crypto.
+- swift-docc-plugin 1.4.0 is the oldest release that works with current DocC: earlier ones pass
+  `--index`, which `docc convert` no longer accepts.
 - No target of the `MCP` library product depends on swift-nio. HTTP server transports take and
   return `HTTPRequest`/`HTTPResponse`, so applications choose their own HTTP server.
 - swift-crypto was added in 0.13.0 for `requestState` sealing
@@ -58,8 +60,11 @@ relaxed.
   uses exist unchanged in each of them. CI tests only the version in `Package.resolved`, so build
   against the oldest major by hand when the range or the SDK's use changes.
 - No upper bound below the next major unless a release is known to break the SDK.
-- No `branch:` or `revision:` requirements, build tools such as swift-docc-plugin included:
-  a branch moves under everyone who builds the package.
+- No `branch:` or `revision:` requirements, build tools such as swift-docc-plugin included.
+  SwiftPM refuses to resolve a version-based requirement on a package whose manifest has a
+  branch- or revision-based dependency, so a single one would stop every consumer that depends
+  on a released `MCP` version from resolving it. A branch also moves under everyone who builds
+  the package.
 - Moving a dependency to a new major, or adding one to `MCP`, is a breaking change under
   [VERSIONING.md](VERSIONING.md). Raising a floor within a major is allowed in a minor and is
   listed in the release notes.
