@@ -147,7 +147,7 @@ struct UnknownKindTests {
         try await server.start(transport: serverTransport)
         let client = Client(name: "c", version: "1")
         try await client.connect(transport: clientTransport)
-        let (content, _) = try await client.callTool(name: "show")
+        let content = try await client.callTool(name: "show").content
         #expect(content == [.unknown(type: "hologram", body)])
         await client.disconnect()
         await server.stop()

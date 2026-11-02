@@ -410,7 +410,7 @@ struct MultiRoundTripTests {
             let client = try await connect(server, mode: mode, capabilities: .init(elicitation: elicitation)) {
                 await answerEverything($0)
             }
-            let (content, _) = try await client.callTool(name: "confirm")
+            let content = try await client.callTool(name: "confirm").content
             #expect(content == [.text(text: "accept pending:confirm", annotations: nil, _meta: nil)], "\(elicitation)")
             await client.disconnect()
             await server.stop()
@@ -464,7 +464,7 @@ struct MultiRoundTripTests {
         ) {
             await $0.withElicitationHandler { _ in .init(action: .decline) }
         }
-        let (content, _) = try await client.callTool(name: "speak")
+        let content = try await client.callTool(name: "speak").content
         #expect(content == [.text(text: "answered", annotations: nil, _meta: nil)])
         await client.disconnect()
         await server.stop()
@@ -491,7 +491,7 @@ struct MultiRoundTripTests {
                 return response
             }
         }
-        let (content, _) = try await client.callTool(name: "approve")
+        let content = try await client.callTool(name: "approve").content
         #expect(content == [.text(text: "kept", annotations: nil, _meta: nil)])
         #expect(await received.values == [.init(taskId: "t1", src: "data:,hi")])
         await client.disconnect()
@@ -517,7 +517,7 @@ struct MultiRoundTripTests {
                 return .init(model: "test", role: .assistant, content: .text("data:,hi"))
             }
         }
-        let (content, _) = try await client.callTool(name: "sample")
+        let content = try await client.callTool(name: "sample").content
         #expect(content == [.text(text: "data:,hi", annotations: nil, _meta: nil)])
         #expect(await prompts.values == [.text("data:,hello")])
         await client.disconnect()

@@ -31,6 +31,9 @@ public actor Client {
 
         /// The lowest log level to request on stateless (2026-07-28) connections,
         /// sent in each request's `_meta`. `nil` requests no log notifications.
+        /// Changing it on ``Client/configuration`` changes ``Client/logLevel``
+        /// for the following requests, as ``Client/setLoggingLevel(_:)`` does;
+        /// the later of the two wins.
         public var logLevel: LogLevel?
 
         /// How long ``ProtocolMode/automatic`` waits for the answer to
@@ -293,7 +296,11 @@ public actor Client {
     /// The client capabilities
     public var capabilities: Client.Capabilities
     /// The client configuration
-    public var configuration: Configuration
+    public var configuration: Configuration {
+        didSet {
+            if configuration.logLevel != oldValue.logLevel { logLevel = configuration.logLevel }
+        }
+    }
 
     /// The server capabilities, known after ``connect(transport:)``.
     public private(set) var serverCapabilities: Server.Capabilities?
@@ -304,8 +311,9 @@ public actor Client {
     /// `io.modelcontextprotocol/serverInfo`.
     public private(set) var serverInfo: Server.Info?
     /// The lowest log level the server should send, carried in the `_meta` of
-    /// every 2026-07-28 request: ``Configuration/logLevel`` until
-    /// ``setLoggingLevel(_:)`` changes it.
+    /// every 2026-07-28 request: ``Configuration/logLevel``, until
+    /// ``setLoggingLevel(_:)`` or a change of `configuration.logLevel`
+    /// changes it.
     public private(set) var logLevel: LogLevel?
     /// The server instructions
     private var instructions: String?

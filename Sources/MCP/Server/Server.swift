@@ -371,9 +371,22 @@ public actor Server {
     }
 
     /// Start the server
+    ///
+    /// `start` adds the SDK's handlers for `initialize`, `ping`,
+    /// `logging/setLevel` (with the `logging` capability),
+    /// `subscriptions/listen` and `server/discover`, except where a handler
+    /// registered with ``withMethodHandler(_:handler:)`` exists: that one is
+    /// kept. An application `Initialize` handler therefore replaces the SDK's
+    /// handshake: `initializeHook` and version negotiation do not run, and the
+    /// server neither records the client's info and capabilities nor counts
+    /// as initialized: list-changed and resource-updated notifications are
+    /// not sent on the connection, and with
+    /// ``Configuration/strict-swift.property`` later requests are refused.
+    ///
     /// - Parameters:
     ///   - transport: The transport to use for the server
-    ///   - initializeHook: An optional hook that runs when the client sends an initialize request
+    ///   - initializeHook: An optional hook that runs when the client sends an
+    ///     initialize request, in the SDK's `Initialize` handler
     ///   - statelessRequestHook: An optional hook that runs before every
     ///     stateless request (2026-07-28 and later), which never sends
     ///     `initialize`, and behind ``StatelessHTTPServerTransport`` before
@@ -607,6 +620,12 @@ public actor Server {
     /// client, which retries with the responses. For earlier clients the
     /// server sends the input requests itself and calls the handler again
     /// with the responses, calling it at most 10 times, so one handler serves both.
+    ///
+    /// A handler for a method the SDK answers itself (`initialize`, `ping`,
+    /// `logging/setLevel`, `subscriptions/listen`, `server/discover`)
+    /// replaces the SDK's, whether registered before or after
+    /// ``start(transport:initializeHook:statelessRequestHook:)``. For
+    /// `Initialize`, the `initializeHook` passed to `start` then does not run.
     @discardableResult
     public func withMethodHandler<M: Method>(
         _ type: M.Type,

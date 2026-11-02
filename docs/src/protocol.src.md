@@ -193,7 +193,7 @@ What the transport sends depends on the era of each message:
 
 The client switches the transport when the connection opens: `Client` calls `updateNegotiatedProtocolVersion(_:)` after `initialize` and `useStatelessProtocol(_:)` after `server/discover`.
 
-On handshake connections with `streaming: true`, the transport waits up to `sseInitializationTimeout` (10 s) for a session ID, then opens the GET stream for server-initiated messages. When the stream ends it reconnects after the server's SSE `retry:` interval (3000 ms by default) and sends `Last-Event-ID` with the last event ID it saw. A 405 on GET stops the stream. A line, or the data of one event, over 16 MiB ends the stream, and the next GET opens a fresh stream without `Last-Event-ID`, since a replay would repeat the event; that event is lost.
+On handshake connections with `streaming: true`, the transport waits up to `sseInitializationTimeout` (10 s) for a session ID, then opens the GET stream for server-initiated messages. When the stream ends it reconnects after the server's SSE `retry:` interval (3000 ms by default) and sends `Last-Event-ID` with the last event ID it saw. A 405 on GET stops the stream, and so does a 404 on a GET that carried the session ID: the session has expired, and the transport drops it. A line, or the data of one event, over 16 MiB ends the stream, and the next GET opens a fresh stream without `Last-Event-ID`, since a replay would repeat the event; that event is lost.
 
 When a POST's SSE stream ends before the response to its request, a handshake connection resumes that stream: after the stream's `retry:` interval the transport sends a GET with `Last-Event-ID` set to the stream's own last event ID, and reads the replay until the response arrives. It repeats this while the server closes the stream again, up to 10 times in a row without a new message: a resumed stream that delivers a message, such as a progress notification, under an event ID the transport has not seen starts the count again. A message under an event ID it has seen, which a server that ignores `Last-Event-ID` replays, does not. A resumption GET that fails to connect is retried within the same count. When the stream had no event ID, the server refuses the GET (the Go SDK's server keeps no events and answers 400), or the attempts run out, the request fails with -32603 ("The server closed the response stream without a response or an event ID to resume from", or "The response stream could not be resumed") instead of waiting. At 2026-07-28 there is no resumption: the request fails at once ("The server closed the response stream without a response").
 
@@ -201,13 +201,13 @@ When a POST's SSE stream ends before the response to its request, a handshake co
 
 HTTP errors map as follows. At 2026-07-28 a server answers protocol errors with a 4xx status and a JSON-RPC error body; the transport delivers that body, so the caller sees the `MCPError` (-32601, -32602, -32020, -32021, -32022), not an HTTP error. Only an `error` whose ID is the request's ID is delivered. A `result`, an error with another ID (such as a placeholder), a batch, or the reply to a notification gives the status error below. A 404 drops the session ID in both cases.
 
-Without a JSON-RPC error for the request, the transport throws `MCPError.transportError(_:)` with an `HTTPStatusError`: its `statusCode`, the response `headers` (`value(forHeader:)` reads one, such as `Retry-After`), and `isSessionExpired`.
+Without a JSON-RPC error for the request, the transport throws `MCPError.transportError(_:)` with an `HTTPStatusError`: its `statusCode`, the response `headers` (`value(forHeader:)` reads one, such as `Retry-After`), and `isSessionExpired`. Its `debugDescription`, which `MCPError`'s includes, names the headers without their values, so a logged error carries no cookie or challenge.
 
 | Status | Also |
 |---|---|
 | 401, 403 | Handled by the authorizer, if one is set; the error when it is not, or when retries run out |
-| 404 | With a session: the session is dropped and `isSessionExpired` is `true` |
-| 405 | With `streaming: true`, the GET stream also stops |
+| 404 | With a session: the session is dropped and `isSessionExpired` is `true`; on the GET stream, the stream also stops |
+| 405 | On the GET stream, the stream stops; a 405 to a POST does not stop it |
 
 To add headers to every request (an API key, a user agent), pass `requestModifier`. For OAuth, pass an `authorizer` (see [Authorization](#authorization)).
 
@@ -470,7 +470,7 @@ Issuer checks and authorization server changes:
 - A refresh token is sent only to the server that issued it. A token without a recorded server is refreshed only at a configured `authorizationServerURL` or `tokenEndpoint`.
 - For 2025-03-26 servers that publish no metadata at all, the authorizer falls back to `/authorize`, `/token` and `/register` at the server origin, with S256. It does so only on first discovery, and only when every metadata URL answers 404 or 410; a network error, a cancelled request or another status fails the request instead.
 
-Errors reach the caller as `MCPError.transportError(_:)` with the `OAuthAuthorizationError` (or the error a custom authorizer threw), or with an `HTTPStatusError` of 401 or 403 when retries run out.
+Errors reach the caller as `MCPError.transportError(_:)` with the `OAuthAuthorizationError` (or the error a custom authorizer threw; a `CancellationError` is thrown as is), or with an `HTTPStatusError` of 401 or 403 when retries run out.
 
 #### Enterprise-managed authorization
 

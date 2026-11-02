@@ -63,6 +63,25 @@ final class CapturingLogHandler: LogHandler, @unchecked Sendable {
     }
 }
 
+@Suite("HTTP status error descriptions")
+struct HTTPStatusErrorDescriptionTests {
+    @Test("A logged status error names the response headers without their values")
+    func debugDescriptionOmitsHeaderValues() {
+        let status = HTTPStatusError(
+            statusCode: 401,
+            headers: ["Set-Cookie": "session=secret-cookie", "WWW-Authenticate": #"Bearer realm="secret-realm""#])
+        let error = MCPError.transportError(status)
+        for text in [String(reflecting: error), "\(error)", String(reflecting: status), "\(status)"] {
+            #expect(!text.contains("secret"), "\(text)")
+            #expect(text.contains("Set-Cookie"))
+        }
+        #expect(
+            String(reflecting: status)
+                == #"HTTPStatusError(statusCode: 401, isSessionExpired: false, headers: ["Set-Cookie", "WWW-Authenticate"])"#)
+        #expect(status.value(forHeader: "set-cookie") == "session=secret-cookie")
+    }
+}
+
 @Suite("HTTP client connection limit warning")
 struct HTTPClientConnectionLimitTests {
     @Test("A configuration at the platform's default connection limit is reported")
@@ -104,6 +123,16 @@ struct HTTPClientConnectionLimitTests {
         func waitFor(_ count: Int, _ method: String) async {
             guard self.count(of: method) < count else { return }
             await withCheckedContinuation { waiters.append((method, count, $0)) }
+        }
+
+        /// Whether a GET arrives within `limit`.
+        func receivesGET(within limit: Duration) async -> Bool {
+            let deadline = ContinuousClock.now + limit
+            while ContinuousClock.now < deadline {
+                if !gets.isEmpty { return true }
+                try? await Task.sleep(for: .milliseconds(10))
+            }
+            return false
         }
 
         private func count(of method: String) -> Int {
@@ -149,6 +178,34 @@ struct HTTPClientConnectionLimitTests {
                 retry: try await handleChallenge(
                     statusCode: statusCode, headers: headers, endpoint: endpoint, operationKey: operationKey,
                     session: session))
+        }
+    }
+
+    /// An authorizer that throws `CancellationError` at one stage, as one
+    /// whose authorization flow the user cancelled does.
+    private final class CancellingAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
+        enum Stage: Sendable { case validate, headers, challenge }
+
+        let stage: Stage
+        init(_ stage: Stage) { self.stage = stage }
+
+        var maxAuthorizationAttempts: Int { 3 }
+
+        func validateEndpointSecurity(for endpoint: URL) throws {
+            if stage == .validate { throw CancellationError() }
+        }
+
+        func authorizationHeaders(for url: URL, method: String) throws -> [String: String] {
+            if stage == .headers { throw CancellationError() }
+            return ["Authorization": "Bearer t"]
+        }
+
+        func handleChallenge(
+            statusCode: Int, headers: [String: String], endpoint: URL, operationKey: String?,
+            session: URLSession
+        ) async throws -> Bool {
+            if stage == .challenge { throw CancellationError() }
+            return false
         }
     }
 
@@ -210,7 +267,8 @@ struct HTTPClientConnectionLimitTests {
         }
 
         func makeTransport(
-            streaming: Bool = false, authorizer: (any HTTPClientAuthorizer)? = nil, logger: Logger? = nil
+            streaming: Bool = false, sseInitializationTimeout: TimeInterval = 0.05,
+            authorizer: (any HTTPClientAuthorizer)? = nil, logger: Logger? = nil
         ) -> (HTTPClientTransport, String) {
             let key = UUID().uuidString
             let configuration = URLSessionConfiguration.ephemeral
@@ -219,7 +277,7 @@ struct HTTPClientConnectionLimitTests {
             configuration.httpMaximumConnectionsPerHost = HTTPClientTransport.defaultMaximumConnectionsPerHost
             let transport = HTTPClientTransport(
                 endpoint: endpoint, configuration: configuration, streaming: streaming,
-                sseInitializationTimeout: 0.05, authorizer: authorizer, logger: logger)
+                sseInitializationTimeout: sseInitializationTimeout, authorizer: authorizer, logger: logger)
             return (transport, key)
         }
 
@@ -409,6 +467,97 @@ struct HTTPClientConnectionLimitTests {
             try await transport.send(request)
             #expect(try await firstMessage(transport) == response)
             #expect(authorizer.sentAuthorizations == ["Bearer old"])
+            await transport.disconnect()
+        }
+
+        @Test("A 405 to a POST does not stop the GET stream of the session that follows", .timeLimit(.minutes(1)))
+        func postMethodNotAllowedKeepsGetStream() async throws {
+            let (transport, key) = makeTransport(streaming: true, sseInitializationTimeout: 30)
+            let requests = RecordedRequests()
+            await IsolatedMockURLProtocol.setHandler(key: key) { request in
+                await requests.append(request)
+                if request.httpMethod == "GET" { return sse("id: g1\nretry: 10000\ndata: \n\n") }
+                let body = request.httpBodyStreamData().map { String(decoding: $0, as: UTF8.self) } ?? ""
+                if body.contains("server/discover") {
+                    return (
+                        HTTPURLResponse(url: endpoint, statusCode: 405, httpVersion: "HTTP/1.1", headerFields: [:])!,
+                        Data()
+                    )
+                }
+                return (
+                    HTTPURLResponse(
+                        url: endpoint, statusCode: 200, httpVersion: "HTTP/1.1",
+                        headerFields: ["Content-Type": "application/json", "Mcp-Session-Id": "s1"])!,
+                    Data(#"{"jsonrpc":"2.0","id":"i1","result":{}}"#.utf8)
+                )
+            }
+            try await transport.connect()
+            // A handshake-only server refusing the sessionless discovery.
+            await #expect(throws: MCPError.self) {
+                try await transport.send(Data(#"{"jsonrpc":"2.0","id":"d1","method":"server/discover"}"#.utf8))
+            }
+            try await transport.send(Data(#"{"jsonrpc":"2.0","id":"i1","method":"initialize"}"#.utf8))
+            #expect(await requests.receivesGET(within: .seconds(10)))
+            #expect(await requests.gets.first?.value(forHTTPHeaderField: "Mcp-Session-Id") == "s1")
+            await transport.disconnect()
+        }
+
+        @Test("A 404 on the GET stream ends the session and the stream", .timeLimit(.minutes(1)))
+        func getNotFoundExpiresSession() async throws {
+            let (messages, sink) = AsyncStream<String>.makeStream()
+            let logger = Logger(label: "mcp.test.reliability") { _ in StreamingLogHandler(sink: sink) }
+            let (transport, key) = makeTransport(streaming: true, sseInitializationTimeout: 30, logger: logger)
+            let requests = RecordedRequests()
+            await IsolatedMockURLProtocol.setHandler(key: key) { [response] request in
+                await requests.append(request)
+                if request.httpMethod == "POST" { return sse("data: \(response)\n\n") }
+                // The first GET ends at once; the server then forgets the session.
+                if await requests.gets.count == 1 { return sse("id: g1\nretry: 10\ndata: \n\n") }
+                return sse("", status: 404)
+            }
+            try await transport.connect()
+            try await transport.send(request)
+            await requests.waitFor(2, "GET")
+            let logged = try await finishes(within: .seconds(5)) {
+                for await message in messages where message.contains("SSE connection error") { return message }
+                return ""
+            }
+            #expect(logged?.contains("isSessionExpired: true") == true)
+            // Without the fix the GET is retried within about 20 ms.
+            try await Task.sleep(for: .milliseconds(500))
+            #expect(await requests.gets.count == 2)
+            #expect(await transport.sessionID == nil)
+            try await transport.send(request)
+            #expect(await requests.all.last?.value(forHTTPHeaderField: "Mcp-Session-Id") == nil)
+            await transport.disconnect()
+        }
+
+        @Test(
+            "A CancellationError from the authorizer is thrown as is",
+            .timeLimit(.minutes(1)),
+            arguments: [
+                ("validate", "POST"), ("headers", "POST"), ("challenge", "POST"),
+                ("challenge", "stateless POST"), ("challenge", "resumption GET"),
+            ])
+        func authorizerCancellation(stage: String, path: String) async throws {
+            let stages: [String: CancellingAuthorizer.Stage] = [
+                "validate": .validate, "headers": .headers, "challenge": .challenge,
+            ]
+            let (transport, key) = makeTransport(authorizer: CancellingAuthorizer(stages[stage]!))
+            await IsolatedMockURLProtocol.setHandler(key: key) { request in
+                if path == "resumption GET", request.httpMethod == "POST" {
+                    return sse("id: e1\nretry: 10\ndata: \n\n")
+                }
+                return sse("", status: 401, headers: ["WWW-Authenticate": #"Bearer error="invalid_token""#])
+            }
+            try await transport.connect()
+            let message =
+                path == "stateless POST"
+                ? Data(
+                    #"{"jsonrpc":"2.0","id":"r1","method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}"#
+                        .utf8)
+                : request
+            await #expect(throws: CancellationError.self) { try await transport.send(message) }
             await transport.disconnect()
         }
 

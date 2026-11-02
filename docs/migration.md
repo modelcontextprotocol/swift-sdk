@@ -371,10 +371,20 @@ where it threw `MCPError.internalError` with a message:
 |---|---|---|
 | HTTP status without a JSON-RPC answer | `internalError("Bad request")`, `("Session expired")`, `("Too many requests")`, ... | `transportError(HTTPStatusError)`: `statusCode`, `headers`, `isSessionExpired` |
 | 401 or 403 without an authorizer, or after the retries | `internalError("Authentication required")`, `("Access forbidden")` | `transportError(HTTPStatusError)` with 401 or 403 |
-| OAuth | `internalError("Authorization flow failed: …")` | `transportError(OAuthAuthorizationError)`, or the error of a custom `HTTPClientAuthorizer` |
+| OAuth | `internalError("Authorization flow failed: …")` | `transportError(OAuthAuthorizationError)`, or the error of a custom `HTTPClientAuthorizer`; a `CancellationError` from the authorizer is thrown as is |
 
-The descriptions are the same as before, so logs read the same. The error's
-`code` is -32001 instead of -32603; it is never sent on the wire.
+The descriptions changed, so match on the error rather than its text:
+
+- The prefix is `Transport error: ` where it was `Internal error: `.
+- An HTTP status reads as before (`Bad request`, `Session expired`, `Too many
+  requests`, ...), except a 405 with `streaming: true`, which reads `Method not
+  allowed` instead of `Server does not support streaming`, and an unlisted
+  status, which reads `Unexpected HTTP response: <status>` without the content
+  type in parentheses.
+- An authorizer error reads as the error's own description, without
+  `Authorization flow failed: `.
+
+The error's `code` is -32001 instead of -32603; it is never sent on the wire.
 
 ```swift
 /// HTTP and OAuth failures are typed errors inside `transportError`.
@@ -560,7 +570,9 @@ session ended.
 
 - `start(transport:)` keeps a handler you registered for `initialize`, `ping`,
   `server/discover` or `subscriptions/listen` before it. The previous release
-  replaced it with the built-in one.
+  replaced it with the built-in one. An `initialize` handler of yours replaces
+  the handshake: the `initializeHook` and the SDK's version negotiation do not
+  run, and the server does not count as initialized.
 - A server with the `logging` capability answers `logging/setLevel` itself on
   handshake connections and `log(level:logger:data:)` drops messages below the
   level. The previous release had no such handler (clients got -32601) and sent

@@ -50,3 +50,14 @@ public struct HTTPStatusError: LocalizedError, Hashable, Sendable {
         }
     }
 }
+
+extension HTTPStatusError: CustomDebugStringConvertible {
+    /// The status code, ``isSessionExpired`` and the names of the headers.
+    /// Header values, such as `Set-Cookie` or `WWW-Authenticate`, are left
+    /// out, so the error can be logged; read them from ``headers``.
+    public var debugDescription: String {
+        let names = headers.keys.sorted { $0.lowercased() < $1.lowercased() }
+        return
+            "HTTPStatusError(statusCode: \(statusCode), isSessionExpired: \(isSessionExpired), headers: \(names))"
+    }
+}

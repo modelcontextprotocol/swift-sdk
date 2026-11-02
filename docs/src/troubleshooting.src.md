@@ -213,9 +213,9 @@ the request's error when the error's ID is the request's ID. Otherwise it throws
 `Bad request` (400), `Session expired` or `Endpoint not found` (404),
 `Method not allowed` (405), `Request timeout` (408), `Too many requests` (429),
 or `Server error: <status>` (5xx). A 404 with a session drops the session ID
-and sets `isSessionExpired`. The client does not initialize a new session on
-its own; after an expired session, connect a new client. The Go and Python
-clients behave the same way.
+and sets `isSessionExpired`; on the GET stream it also stops the stream. The
+client does not initialize a new session on its own; after an expired session,
+connect a new client. The Go and Python clients behave the same way.
 
 A POST response stream that ends before its response, and that the transport
 cannot resume, fails its request with -32603: `The server closed the response

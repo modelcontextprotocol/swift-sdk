@@ -32,7 +32,9 @@ func makeLoggingServer() async -> Server {
     let server = Server(
         name: "deployer", version: "1.0.0",
         capabilities: .init(logging: .init(), tools: .init()))
-    await server.withMethodHandler(CallTool.self) { _ in
+    // The server keeps its handlers: a strong capture would keep it alive.
+    await server.withMethodHandler(CallTool.self) { [weak server] _ in
+        guard let server else { return .init(content: [.text(text: "Server stopped")], isError: true) }
         try await server.log(level: .info, logger: "deploy", data: ["message": "starting"])
         try await server.log(level: .error, logger: "deploy", data: ["message": "failed"])
         return .init(content: [])

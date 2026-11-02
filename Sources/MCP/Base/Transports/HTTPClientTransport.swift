@@ -472,7 +472,7 @@ public actor HTTPClientTransport: Transport {
             do {
                 try authorizer.validateEndpointSecurity(for: endpoint)
             } catch {
-                throw MCPError.transportError(error)
+                throw Self.authorizerError(error)
             }
         }
 
@@ -548,7 +548,7 @@ public actor HTTPClientTransport: Transport {
                         )
                     }
                 } catch {
-                    throw MCPError.transportError(error)
+                    throw Self.authorizerError(error)
                 }
 
                 // RFC 9449 §9: the authorizer says whether the retry only
@@ -651,10 +651,6 @@ public actor HTTPClientTransport: Transport {
             sessionID = nil
             throw statusError(response, isSessionExpired: true)
 
-        case 405 where streaming:
-            self.streamingTask?.cancel()
-            throw statusError(response)
-
         default:
             throw statusError(response)
         }
@@ -676,7 +672,7 @@ public actor HTTPClientTransport: Transport {
             headers = try authorizer.authorizationHeaders(
                 for: request.url ?? endpoint, method: request.httpMethod ?? "POST")
         } catch {
-            throw MCPError.transportError(error)
+            throw Self.authorizerError(error)
         }
         for (name, value) in headers {
             request.setValue(value, forHTTPHeaderField: name)
@@ -688,6 +684,13 @@ public actor HTTPClientTransport: Transport {
         guard let authorizer, let response = response as? HTTPURLResponse else { return }
         authorizer.didReceiveResponse(
             headers: responseHeaders(from: response), for: request.url ?? endpoint)
+    }
+
+    /// An error of the authorizer, as the transport throws it: wrapped in
+    /// ``MCPError/transportError(_:)``, except `CancellationError`, which is
+    /// thrown as is.
+    private static func authorizerError(_ error: Swift.Error) -> Swift.Error {
+        error is CancellationError ? error : MCPError.transportError(error)
     }
 
     private func mapAuthenticationChallengeError(_ error: HTTPAuthenticationChallengeError) -> MCPError {
@@ -834,6 +837,10 @@ public actor HTTPClientTransport: Transport {
                 } else {
                     logger.debug("⏹️ SSE task cancelled")
                 }
+                // The stream belonged to the session the server ended.
+                if case .transportError(let status as HTTPStatusError) = error as? MCPError, status.isSessionExpired {
+                    break
+                }
             }
 
             logger.debug("🔄 End of retry loop iteration", metadata: [
@@ -862,7 +869,7 @@ public actor HTTPClientTransport: Transport {
             do {
                 try authorizer.validateEndpointSecurity(for: endpoint)
             } catch {
-                throw MCPError.transportError(error)
+                throw Self.authorizerError(error)
             }
         }
 
@@ -879,6 +886,11 @@ public actor HTTPClientTransport: Transport {
             stream.cancel()
             if httpResponse.statusCode == 405 {
                 self.streamingTask?.cancel()
+            }
+            if httpResponse.statusCode == 404, sessionID != nil {
+                logger.warning("Session has expired")
+                sessionID = nil
+                throw statusError(httpResponse, isSessionExpired: true)
             }
             // The server no longer has the event to resume from: the next
             // connection opens a fresh stream instead of repeating the ID.
@@ -964,7 +976,7 @@ public actor HTTPClientTransport: Transport {
                     session: session
                 )
             } catch {
-                throw MCPError.transportError(error)
+                throw Self.authorizerError(error)
             }
             // RFC 9449 §9: a DPoP nonce retry is allowed once per GET, as for a POST.
             if handled.isDPoPNonceRetry {

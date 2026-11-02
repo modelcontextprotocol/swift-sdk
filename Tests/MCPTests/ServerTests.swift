@@ -83,7 +83,7 @@ struct ServerTests {
         try await transport.queue(
             request: Initialize.request(
                 .init(
-                    protocolVersion: Version.latest,
+                    protocolVersion: Version.latestHandshake,
                     capabilities: .init(),
                     clientInfo: .init(name: "TestClient", version: "1.0")
                 )

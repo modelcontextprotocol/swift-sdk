@@ -127,6 +127,23 @@ struct ClientStatelessTests {
         let tools = try await client.listTools().tools
         #expect(tools.first?.name == "true|probe|error")
     }
+
+    @Test("Changing configuration.logLevel after init stamps the new level")
+    func testConfigurationLogLevelChange() async throws {
+        let server = await makeStatelessServer()
+        let (client, _) = try await connectClient(server, mode: .automatic, logLevel: .warning)
+        defer { Task { await client.disconnect(); await server.stop() } }
+
+        func setLevel(_ level: LogLevel?, on client: isolated Client) { client.configuration.logLevel = level }
+        await setLevel(.debug, on: client)
+        #expect(try await client.listTools().tools.first?.name == "true|probe|debug")
+
+        // The later of setLoggingLevel and a configuration change wins.
+        try await client.setLoggingLevel(.error)
+        #expect(try await client.listTools().tools.first?.name == "true|probe|error")
+        await setLevel(nil, on: client)
+        #expect(try await client.listTools().tools.first?.name == "true|probe|-")
+    }
 }
 
 /// Lists different tools on each call: `a` first, then `b`.
