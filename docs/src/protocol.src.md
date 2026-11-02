@@ -173,7 +173,7 @@ The SDK has no process-launching transport. A client starts the server itself an
 
 %include Examples/Snippets/Protocol/Transports.swift transport-stdio-client
 
-`send` fails with `MCPError.transportError` (ENOTCONN) before `connect()` or after `disconnect()`. The protocol era is independent of stdio: with `.automatic` the client sends `server/discover` over the pipe like any other request.
+`send` fails with `MCPError.transportError` (ENOTCONN) before `connect()` or after `disconnect()`. `connect()` makes the descriptors non-blocking; `disconnect()` waits for the read loop and the sends in progress, then makes blocking again each descriptor that was blocking and still refers to the same file. The protocol era is independent of stdio: with `.automatic` the client sends `server/discover` over the pipe like any other request.
 
 ### HTTP client
 

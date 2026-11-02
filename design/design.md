@@ -3,7 +3,7 @@
 This document records the design of the `MCP` Swift package and the reasons behind it. It covers
 0.13.0, which adds the 2026-07-28 revision of the
 [Model Context Protocol](https://modelcontextprotocol.io) next to the `initialize`-based revisions
-(2025-11-25 and earlier). The base of 1.0.0 is `main` at `2a44bfd` (the 0.12 line).
+(2025-11-25 and earlier). The base of 1.0.0 is `main` at `727175f` (the 0.12 line).
 
 Feature notes go deeper on single topics:
 
@@ -549,7 +549,5 @@ Implied by the design, not recorded as separate decisions:
   ordering of progress before results.
 - `Client` downcasts to `HTTPClientTransport` for header parameters and cancellation. A transport
   capability protocol would let custom transports opt in.
-- `Server.Info` built by `Server.init` carries only name, version and title, so
-  `description`, `websiteUrl` and `icons` cannot be set through the initializer.
 - The type-erasure round trip through JSON on every request could be replaced by direct
   decoding from the received bytes.

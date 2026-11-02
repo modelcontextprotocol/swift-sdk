@@ -13,8 +13,8 @@ Releases are git tags `MAJOR.MINOR.PATCH` and follow [Semantic Versioning](https
 - **Patch**: bug fixes only.
 
 Depend on the package with `.upToNextMajor(from: "1.0.0")`. Before 1.0 the minor number played
-the role of the major number; [docs/migration.md](docs/migration.md) lists the changes from 0.12
-to 1.0.0.
+the role of the major number; [docs/migration.md](docs/migration.md) lists the changes from
+0.12.1 to 1.0.0.
 
 ## The public API
 
