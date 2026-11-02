@@ -28,11 +28,12 @@ struct ProtocolSnippetTests {
         await server.stop()
     }
 
-    @Test func initializeHookRefusesClient() async throws {
+    @Test(arguments: [Client.ProtocolMode.handshake, .automatic])
+    func initializeHookRefusesClient(mode: Client.ProtocolMode) async throws {
         let server = Server(name: "example", version: "1.0.0")
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
         try await startWithInitializeHook(server, transport: serverTransport)
-        let client = Client(name: "blocked", version: "1.0.0", configuration: .init(protocolMode: .handshake))
+        let client = Client(name: "blocked", version: "1.0.0", configuration: .init(protocolMode: mode))
         await #expect(throws: MCPError.self) { try await client.connect(transport: clientTransport) }
         await client.disconnect()
         await server.stop()

@@ -76,7 +76,7 @@ Allowed in a patch: bug fixes that change no public API.
 | Change behavior at an already supported revision to match the specification | minor, with release notes |
 | Drop a revision | major |
 
-This major version follows that rule: it serves 2026-07-28, adds it to `Version.supported`, and
+1.0.0 follows that rule: it serves 2026-07-28, adds it to `Version.supported`, and
 makes `ProtocolMode.automatic` the client default ([docs/migration.md](docs/migration.md)).
 
 ## Support window for older revisions

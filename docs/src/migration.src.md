@@ -174,8 +174,12 @@ pipeline passes `Version.stateless + Version.handshake`.
 
 Against a server that serves only the handshake, a default client sends one
 extra request per connection: `server/discover`, answered with an error, then
-`initialize`. Clients that open many short connections to such servers use
-`.handshake`.
+`initialize`. A server that does not answer requests sent before
+`initialize` delays each connection by up to
+`Client.Configuration.discoveryTimeout` (10 seconds by default) before the
+client sends `initialize`. Clients that open many short connections to such
+servers, or that connect to a server that does not answer, use `.handshake`
+or a shorter `discoveryTimeout`.
 
 ### Handlers
 

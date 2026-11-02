@@ -57,7 +57,7 @@ New to the SDK: start with the [quick start](quick_start.md).
 
 ## Backwards compatibility
 
-- [Migration guide](migration.md): breaking and behavior changes in this major version.
+- [Migration guide](migration.md): breaking and behavior changes from 0.12 to 1.0.0.
 - [Rough edges](rough_edges.md): known API decisions kept for compatibility, and what is not implemented.
 
 ## More

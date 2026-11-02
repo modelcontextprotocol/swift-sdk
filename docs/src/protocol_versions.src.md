@@ -274,5 +274,9 @@ A `.handshake` client never sends `server/discover`. A `.stateless(_:)` client
 never sends `initialize`. An `.automatic` client costs one extra request per
 connection to a server that serves only the handshake (`server/discover`,
 then `initialize`); the client does not remember which servers those are, so
-use `.handshake` for many short connections to such a server. See [migration.md](migration.md) for opting in, and
+use `.handshake` for many short connections to such a server. A server that
+does not answer requests sent before `initialize` delays each connection by
+up to `Client.Configuration.discoveryTimeout` (10 seconds by default), after
+which the client sends `initialize`; `.handshake` or a shorter
+`discoveryTimeout` avoids the wait. See [migration.md](migration.md) for opting in, and
 [troubleshooting.md](troubleshooting.md#era-mix-ups) for era mix-ups.
