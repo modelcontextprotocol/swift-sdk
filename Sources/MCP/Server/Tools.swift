@@ -318,22 +318,38 @@ extension Tool {
     }
 
     /// Why `name` does not have the recommended format, or `nil`.
+    ///
+    /// A name longer than `maximumNameLength` bytes is reported for its
+    /// length without listing its characters, and at most
+    /// `maximumListedCharacters` characters are listed: a server can send
+    /// names of any length, and checking one stays linear in its length.
     static func nameProblem(_ name: String) -> String? {
         if name.isEmpty { return "the name is empty" }
+        let length = name.utf8.count
+        if length > maximumNameLength {
+            // A name with the format is ASCII, so a longer one has too many
+            // characters or characters other than ASCII.
+            if name.utf8.allSatisfy({ $0 < 0x80 }) {
+                return "the name has \(length) characters, more than \(maximumNameLength)"
+            }
+            return "the name has characters other than A-Z, a-z, 0-9, _, - and ., and \(length) bytes in UTF-8"
+        }
         var invalid: [Unicode.Scalar] = []
-        for scalar in name.unicodeScalars where !isNameCharacter(scalar) && !invalid.contains(scalar) {
+        var seen: Set<Unicode.Scalar> = []
+        for scalar in name.unicodeScalars where !isNameCharacter(scalar) && seen.insert(scalar).inserted {
             invalid.append(scalar)
+            if invalid.count == maximumListedCharacters { break }
         }
         if !invalid.isEmpty {
             let list = invalid.map { MCPRequestHeaders.sanitized(String($0)) }.map { "\"\($0)\"" }
             return "the name has characters other than A-Z, a-z, 0-9, _, - and .: "
                 + list.joined(separator: ", ")
         }
-        if name.utf8.count > maximumNameLength {
-            return "the name has \(name.utf8.count) characters, more than \(maximumNameLength)"
-        }
         return nil
     }
+
+    /// The most invalid characters a name problem lists.
+    static let maximumListedCharacters = 8
 
     private static func isNameCharacter(_ scalar: Unicode.Scalar) -> Bool {
         switch scalar {
@@ -347,7 +363,8 @@ extension Tool {
 /// logged once. Kept to `limit` names: a server that makes up names cannot
 /// make the set grow without bound.
 struct ToolNameWarnings: Sendable {
-    private var logged: Set<String> = []
+    /// Bounded keys of the logged names (see `key(_:_:)`).
+    private(set) var logged: Set<String> = []
     private let limit = 1000
 
     /// The warnings for `names` not logged before: one for each name with the
@@ -357,19 +374,34 @@ struct ToolNameWarnings: Sendable {
         var result: [(name: String, problem: String)] = []
         var seen: Set<String> = []
         for name in names {
-            if let problem = Tool.nameProblem(name), record("format:" + name) {
+            let format = Self.key("format", name)
+            if canRecord(format), let problem = Tool.nameProblem(name) {
+                logged.insert(format)
                 result.append((name, problem))
             }
-            if checkDuplicates, !seen.insert(name).inserted, record("duplicate:" + name) {
-                result.append((name, "the name is listed more than once; tool names should be unique within a server"))
+            if checkDuplicates, !seen.insert(name).inserted {
+                let duplicate = Self.key("duplicate", name)
+                if canRecord(duplicate) {
+                    logged.insert(duplicate)
+                    result.append((name, "the name is listed more than once; tool names should be unique within a server"))
+                }
             }
         }
         return result
     }
 
-    private mutating func record(_ key: String) -> Bool {
-        guard logged.count < limit else { return false }
-        return logged.insert(key).inserted
+    private func canRecord(_ key: String) -> Bool {
+        logged.count < limit && !logged.contains(key)
+    }
+
+    /// The key of `name` for `kind`: the name itself when it is short, and a
+    /// prefix, the length and a hash otherwise, so that a long name is not
+    /// kept.
+    static func key(_ kind: String, _ name: String) -> String {
+        let length = name.utf8.count
+        guard length > Tool.maximumNameLength else { return kind + ":" + name }
+        let prefix = String(decoding: name.utf8.prefix(Tool.maximumNameLength), as: UTF8.self)
+        return "\(kind):\(prefix)...\(length):\(name.hashValue)"
     }
 }
 

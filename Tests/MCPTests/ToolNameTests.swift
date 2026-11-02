@@ -48,6 +48,48 @@ struct ToolNameTests {
         _ = limited.warnings(for: (0..<1000).map { "bad \($0)" }, checkDuplicates: false)
         #expect(limited.warnings(for: ["bad 1000"], checkDuplicates: false).isEmpty)
     }
+
+    /// A name of `count` distinct scalars from U+0100: none is a name
+    /// character, and each is three bytes or fewer in UTF-8.
+    private static func distinctScalars(_ count: Int) -> String {
+        var scalars = String.UnicodeScalarView()
+        var value: UInt32 = 0x100
+        var appended = 0
+        while appended < count {
+            if let scalar = Unicode.Scalar(value) {
+                scalars.append(scalar)
+                appended += 1
+            }
+            value += 1
+        }
+        return String(scalars)
+    }
+
+    @Test("A long name is reported for its length, without a scan of its characters")
+    func longNames() {
+        // 30,000 distinct characters: scanning them for the list took
+        // seconds (quadratic); the length alone decides.
+        let long = Self.distinctScalars(30_000)
+        let start = ContinuousClock.now
+        let problem = Tool.nameProblem(long)
+        var warnings = ToolNameWarnings()
+        let logged = warnings.warnings(for: [long, long], checkDuplicates: true)
+        #expect(ContinuousClock.now - start < .seconds(2))
+        #expect(problem == "the name has characters other than A-Z, a-z, 0-9, _, - and ., and \(long.utf8.count) bytes in UTF-8")
+        #expect(logged.map(\.problem.utf8.count).allSatisfy { $0 < 200 })
+        #expect(logged.count == 2)
+        // The long name is not kept, and it is reported once.
+        #expect(warnings.logged.allSatisfy { $0.utf8.count < 2 * Tool.maximumNameLength })
+        #expect(warnings.warnings(for: [long, long], checkDuplicates: true).isEmpty)
+        // Another long name with the same beginning is another name.
+        #expect(warnings.warnings(for: [long + "x"], checkDuplicates: false).count == 1)
+
+        let ascii = String(repeating: "a b", count: 1000)
+        #expect(Tool.nameProblem(ascii) == "the name has 3000 characters, more than 128")
+        // A name within the length lists a few of its characters.
+        let short = Self.distinctScalars(40)
+        #expect(Tool.nameProblem(short)?.components(separatedBy: "\", \"").count == Tool.maximumListedCharacters)
+    }
 }
 
 @Suite("Tool names on the wire (SEP-986)", .timeLimit(.minutes(1)))
