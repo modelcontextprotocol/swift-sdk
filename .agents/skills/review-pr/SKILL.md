@@ -34,7 +34,7 @@ Where `review.json` contains:
   "body": "Thanks for your work on this! This review was performed using AI tools.",
   "comments": [
     {
-      "path": "pkg/foo/bar.go",
+      "path": "Sources/MCP/Server/Tools.swift",
       "line": 42,
       "side": "RIGHT",
       "body": "<comment text or suggestion block>"
@@ -61,10 +61,10 @@ The default and preferred format for every actionable inline comment is a GitHub
 Example comment body posted via `gh api .../reviews`:
 
 ````markdown
-Rename to match the suite directory:
+Throw `MCPError` so the client receives a JSON-RPC error:
 
 ```suggestion
-package statusserver
+            throw MCPError.invalidParams("Unknown tool: \(params.name)")
 ```
 ````
 
@@ -81,7 +81,13 @@ In these cases, post a small prose comment with a clear action item instead of a
 ## Review Workflow:
 
 1. **Determine Review Scope**
-   - Check git status to identify changed files
+   - **PR link or number given**: review the PR, not the local checkout. Fetch its diff and metadata:
+     ```bash
+     gh pr diff <PR> --repo <owner>/<repo>
+     gh pr view <PR> --repo <owner>/<repo> --json headRefOid,files,title,body
+     ```
+     The local checkout may be on a different branch, so don't use `git diff` for a PR review.
+   - **No PR given**: review local changes with `git diff` (unstaged) and `git diff --cached` (staged)
    - Parse arguments to see if user requested specific review aspects
    - Default: Run all applicable reviews
 
@@ -95,8 +101,7 @@ In these cases, post a small prose comment with a clear action item instead of a
    - **all** - Run all applicable reviews (default)
 
 3. **Identify Changed Files**
-   - Run `git diff --name-only` to see modified files
-   - Check if PR already exists: `gh pr view`
+   - For a PR, use the `files` list from `gh pr view`. For local changes, run `git diff --name-only`
    - Identify file types and what reviews apply
 
 4. **Determine Applicable Reviews**
@@ -107,14 +112,18 @@ In these cases, post a small prose comment with a clear action item instead of a
    - **If comments/docs added**: comment-analyzer
    - **If error handling changed**: silent-failure-hunter
    - **If types added/modified**: type-design-analyzer
-   - **After passing review**: code-simplifier (polish and refine)
+   - **After passing review**: code-simplifier (advisory only: it proposes simplifications as
+     comments and never edits files)
 
 5. **Launch Review Agents**
 
    Each agent's instructions live in [agents/](agents/) next to this file (e.g. `agents/code-reviewer.md`).
    If an agent with that name is registered in your environment, use it. Otherwise, launch a
    general-purpose subagent and pass the body of the matching file as its prompt, followed by the
-   review scope (PR number or changed files).
+   review scope.
+
+   For a PR review, pass each agent the PR diff from step 1 and tell it to review that diff instead
+   of the local `git diff`. Agents read files for context only; they must not edit the checkout.
 
    **Sequential approach** (one at a time):
    - Easier to understand and act on
@@ -188,7 +197,7 @@ In these cases, post a small prose comment with a clear action item instead of a
 # Reviews only code comments
 
 /review-pr simplify
-# Simplifies code after passing review
+# Suggests simplifications after passing review
 ```
 
 **Parallel review:**
@@ -232,15 +241,15 @@ In these cases, post a small prose comment with a clear action item instead of a
 
 **code-simplifier**:
 
-- Simplifies complex code
+- Suggests simplifications for complex code
 - Improves clarity and readability
 - Applies project standards
-- Preserves functionality
+- Advisory only: never edits files
 
 ## Tips:
 
 - **Run early**: Before creating PR, not after
-- **Focus on changes**: Agents analyze git diff by default
+- **Focus on changes**: Agents analyze the PR diff when given a PR, and the local `git diff` otherwise
 - **Address critical first**: Fix high-priority issues before lower priority
 - **Re-run after fixes**: Verify issues are resolved
 - **Use specific reviews**: Target specific aspects when you know the concern

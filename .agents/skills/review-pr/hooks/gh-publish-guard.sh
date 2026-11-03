@@ -13,14 +13,27 @@ fi
 # `gh` followed by any global options (e.g. `--repo owner/repo`, `-R owner/repo`).
 gh_re='gh([[:space:]]+-[^[:space:]]+([[:space:]]+[^-[:space:]][^[:space:]]*)?)*[[:space:]]+'
 
-# Commands that write to GitHub. `gh api` is only flagged when it uses a
-# write HTTP method, since it defaults to GET (read-only).
+# Commands that write to GitHub.
 write_re="${gh_re}(pr|issue)[[:space:]]+(review|comment|merge|create|edit|close|reopen|ready)"
 write_re+="|${gh_re}release[[:space:]]+(create|edit|delete)"
 write_re+="|${gh_re}api[[:space:]].*(--method([[:space:]]+|=)|-X[[:space:]]*)(POST|PATCH|PUT|DELETE)"
 
-# Join shell line continuations so options split across lines are matched.
-if printf '%s' "${cmd//$'\\\n'/ }" | grep -Eiq "$write_re"; then
+# `gh api` defaults to GET, but switches to POST when it sends parameters
+# (-f/--raw-field, -F/--field) or a body (--input), unless GET is set explicitly.
+api_body_re="${gh_re}api[[:space:]].*[[:space:]](-[fF][^[:space:]]*|--(raw-)?field([[:space:]]|=)|--input([[:space:]]|=))"
+api_get_re="(--method([[:space:]]+|=)|-X[[:space:]]*)GET([[:space:]]|$)"
+
+# Join shell line continuations so options split across lines are matched, then
+# put each chained command (`;`, `&&`, `||`) on its own line so the explicit-GET
+# exemption only applies to the command that sets it.
+line="${cmd//$'\\\n'/ }"
+line="${line//&&/$'\n'}"
+line="${line//||/$'\n'}"
+line="${line//;/$'\n'}"
+
+api_writes="$(grep -E "$api_body_re" <<<"$line" | grep -Eiv "$api_get_re" || true)"
+
+if grep -Eiq "$write_re" <<<"$line" || [[ -n "$api_writes" ]]; then
   cat <<'JSON'
 {
   "hookSpecificOutput": {

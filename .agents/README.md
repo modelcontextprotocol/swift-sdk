@@ -61,14 +61,22 @@ instruction. `hooks/gh-publish-guard.sh` is a Claude Code `PreToolUse` hook that
 enforces: it forces a confirmation prompt before any Bash command that writes to GitHub.
 
 The Agent Skills spec has no field for hooks, and Claude Code does not auto-load hook files from
-`.claude/hooks/`, so register the hook in `.claude/settings.json`. Run from the repository root:
+`.claude/hooks/`, so register the hook yourself. The hook is a personal opt-in, so register it in
+`.claude/settings.local.json`.
+Run from the repository root:
 
 ```bash
-[ -f .claude/settings.json ] || echo '{}' > .claude/settings.json
+mkdir -p .claude
+[ -f .claude/settings.local.json ] || echo '{}' > .claude/settings.local.json
 jq --arg cmd '"$CLAUDE_PROJECT_DIR"/.agents/skills/review-pr/hooks/gh-publish-guard.sh' '
   if any(.hooks.PreToolUse[]?.hooks[]?; .command == $cmd) then .
   else .hooks.PreToolUse += [{matcher: "Bash", hooks: [{type: "command", command: $cmd}]}]
-  end' .claude/settings.json > .claude/settings.json.tmp && mv .claude/settings.json.tmp .claude/settings.json
+  end' .claude/settings.local.json > .claude/settings.local.json.tmp &&
+  mv .claude/settings.local.json.tmp .claude/settings.local.json
 ```
+
+The hook asks for confirmation before `gh pr`/`gh issue` write commands, `gh release` changes, and
+`gh api` calls that write. That covers an explicit `POST`/`PATCH`/`PUT`/`DELETE`, and `-f`, `-F`, or
+`--input` without `--method GET`, because those flags make `gh api` default to `POST`.
 
 Run `/hooks` in Claude Code to verify that it is registered.

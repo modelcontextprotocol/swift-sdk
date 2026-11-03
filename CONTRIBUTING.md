@@ -75,10 +75,10 @@ Follow [the Swift API Design Guidelines](https://www.swift.org/documentation/api
 and match the style of the surrounding code. [AGENTS.md](AGENTS.md#core-development-principles) has
 more rules and examples for message definitions, concurrency, platform gates, and tests.
 
-- **Formatting**: use 4-space indentation, as configured in `.vscode/settings.json`. The repository
-  has no enforced formatter, so don't reformat code you are not otherwise changing.
-- **Imports**: core `Base/` files import specific Foundation symbols
-  (`import struct Foundation.Data`). Other files use `import Foundation`. List `import Logging`
+- **Formatting**: use 4-space indentation. `.vscode/settings.json` enables format-on-save, so don't
+  commit unrelated formatting changes. Check your diff for reformatted lines outside your change.
+- **Imports**: match the file you're editing. Some files import specific Foundation symbols
+  (`import struct Foundation.Data`), and others use `import Foundation`. List `import Logging`
   first.
 - **No file headers**: source files start with imports, with no license or copyright banner.
 - **Doc comments**: document every `public` symbol with `///`, a one-line summary, and DocC

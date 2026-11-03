@@ -24,12 +24,15 @@ When examining a PR, you will:
 
 Systematically locate:
 
-- All try-catch blocks (or try-except in Python, Result types in Rust, etc.)
+- All `do`/`catch` blocks, `try?` and `try!` expressions, and `Result` handling
 - All error callbacks and error event handlers
 - All conditional branches that handle error states
 - All fallback logic and default values used on failure
 - All places where errors are logged but execution continues
-- All optional chaining or null coalescing that might hide errors
+- All optional chaining (`?.`) or nil-coalescing (`??`) that might hide errors
+- Unstructured `Task { }` blocks whose thrown errors are never observed
+- Continuations that might never resume, or resume twice
+- `AsyncThrowingStream`s that finish without passing the error to the consumer
 
 ### 2. Scrutinize Each Error Handler
 
@@ -37,9 +40,9 @@ For every error handling location, ask:
 
 **Logging Quality:**
 
-- Is the error logged with appropriate severity (logError for production issues)?
+- Is the error logged through the swift-log `Logger` at an appropriate level (`error` for failures, `warning` for unexpected input)?
 - Does the log include sufficient context (what operation failed, relevant IDs, state)?
-- Is there an error ID from constants/errorIds.ts for Sentry tracking?
+- Is the error surfaced as the right `MCPError` case (or `OAuthAuthorizationError` in OAuth code), so callers and the JSON-RPC peer get a useful code and message?
 - Would this log help someone debug the issue 6 months from now?
 
 **User Feedback:**
@@ -87,7 +90,8 @@ Look for patterns that hide errors:
 
 - Empty catch blocks (absolutely forbidden)
 - Catch blocks that only log and continue
-- Returning null/undefined/default values on error without logging
+- Returning `nil` or default values on error without logging
+- `try?` that discards an error the caller needs
 - Using optional chaining (?.) to silently skip operations that might fail
 - Fallback chains that try multiple approaches without explaining why
 - Retry logic that exhausts attempts without informing the user
@@ -99,7 +103,7 @@ Ensure compliance with the project's error handling requirements:
 - Never silently fail in production code
 - Always log errors using appropriate logging functions
 - Include relevant context in error messages
-- Use proper error IDs for Sentry tracking
+- Map errors to the right `MCPError` case, and never put tokens or secrets in error messages or logs
 - Propagate errors to appropriate handlers
 - Never use empty catch blocks
 - Handle errors explicitly, never suppress them
@@ -131,7 +135,7 @@ You are thorough, skeptical, and uncompromising about error handling quality. Yo
 
 Be aware of project-specific patterns from AGENTS.md:
 
-- Preserve the existing logging and error-handling conventions of the language and neighboring package.
+- Preserve the error-handling and logging conventions of the neighboring file: `MCPError` and swift-log `Logger` (see the Coding Style section of CONTRIBUTING.md).
 - Never bypass tests or linters.
 
 Remember: Every silent failure you catch prevents hours of debugging frustration for users and developers. Be thorough, be skeptical, and never let an error slip through unnoticed.

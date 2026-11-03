@@ -11,8 +11,13 @@ AI agents should:
 - Follow [CONTRIBUTING.md](CONTRIBUTING.md), including its [Coding Style](CONTRIBUTING.md#coding-style),
   and the patterns in neighboring files
 - Build and test locally (see [Commands](#commands)) before proposing a commit
-- Read the relevant [MCP specification](https://modelcontextprotocol.io/specification/2026-07-28)
-  section before changing protocol behavior, and match the spec's wire format exactly
+- Read the relevant MCP specification section before changing protocol behavior, and match the
+  spec's wire format exactly. Use the revision the work targets:
+  - Changes to existing behavior: [`2025-11-25`](https://modelcontextprotocol.io/specification/2025-11-25),
+    the latest revision the SDK implements
+  - Work that explicitly adopts the new spec: [`2026-07-28`](https://modelcontextprotocol.io/specification/2026-07-28)
+
+  Don't mix the two in one change. If the task doesn't say which revision it targets, ask.
 - Call out every change to public API, and keep source compatibility for existing users
 
 Agents must NOT:
@@ -22,8 +27,8 @@ Agents must NOT:
   explicitly asked
 - Add package dependencies without explicit approval. When approved, update **both**
   `Package.swift` and `Package@swift-6.0.swift`, and commit the updated `Package.resolved`
-- Reformat files they are not otherwise changing. The repository has no formatter configuration, so
-  project-wide formatting produces noisy diffs
+- Commit unrelated formatting changes. `.vscode/settings.json` enables format-on-save, so check the
+  diff for reformatted lines outside the change and revert them
 - Commit secrets, credentials, or changes to git config
 - Post issues, PRs, or review comments to GitHub without a human reviewing them first
 - Describe security vulnerabilities in public issues, PRs, or commit messages. See
@@ -219,8 +224,11 @@ public struct WidgetListChangedNotification: Notification {
 ### 4. Concurrency
 
 - `Client`, `Server`, and every `Transport` are actors. Data types are `Sendable` value types.
-- Don't capture `[weak self]` in closures and tasks owned by an actor. Capture what the closure
-  needs, or rely on the actor's own lifecycle.
+- Don't capture `[weak self]` in handlers that `Client` or `Server` register on themselves (for
+  example `withMethodHandler` or `onNotification` closures in `Server.swift`). The actor owns those
+  closures, so `self` is never `nil` there. Keep `[weak self]` in callbacks handed to other objects,
+  such as `NWConnection` handlers and continuation `onTermination` closures in `NetworkTransport`,
+  where it prevents retain cycles.
 - Avoid `@unchecked Sendable`, `nonisolated(unsafe)`, and `@preconcurrency`. Use them only where a
   type is provably serialized by an actor, and document why next to the declaration (see
   `OAuthAuthorizer`).
