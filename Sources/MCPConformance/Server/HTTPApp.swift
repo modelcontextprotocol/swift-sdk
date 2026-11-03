@@ -43,22 +43,13 @@ actor HTTPApp {
     }
 
     /// Factory function to create MCP Server instances for each session.
-    typealias ServerFactory = @Sendable (String, StatefulHTTPServerTransport) async throws -> Server
+    typealias ServerFactory = StatefulHTTPServerSessionManager.ServerFactory
 
     private let configuration: Configuration
-    private let serverFactory: ServerFactory
-    private let validationPipeline: (any HTTPRequestValidationPipeline)?
+    private let sessionManager: StatefulHTTPServerSessionManager
     private var channel: Channel?
-    private var sessions: [String: SessionContext] = [:]
 
     nonisolated let logger: Logger
-
-    struct SessionContext {
-        let server: Server
-        let transport: StatefulHTTPServerTransport
-        let createdAt: Date
-        var lastAccessedAt: Date
-    }
 
     // MARK: - Init
 
@@ -77,11 +68,16 @@ actor HTTPApp {
         logger: Logger? = nil
     ) {
         self.configuration = configuration
-        self.serverFactory = serverFactory
-        self.validationPipeline = validationPipeline
         self.logger = logger ?? Logger(
             label: "mcp.http.app",
             factory: { _ in SwiftLogNoOpLogHandler() }
+        )
+        self.sessionManager = StatefulHTTPServerSessionManager(
+            sessionTimeout: configuration.sessionTimeout,
+            validationPipeline: validationPipeline,
+            retryInterval: configuration.retryInterval,
+            logger: self.logger,
+            serverFactory: serverFactory
         )
     }
 
@@ -132,14 +128,12 @@ actor HTTPApp {
         let channel = try await bootstrap.bind(host: configuration.host, port: configuration.port).get()
         self.channel = channel
 
-        Task { await sessionCleanupLoop() }
-
         try await channel.closeFuture.get()
     }
 
     /// Stops the HTTP application gracefully, closing all sessions.
     func stop() async {
-        await closeAllSessions()
+        await sessionManager.stop()
         try? await channel?.close()
         channel = nil
         logger.info("MCP HTTP application stopped")
@@ -155,114 +149,7 @@ actor HTTPApp {
     /// - POST requests with an `initialize` body create a new session.
     /// - All other requests without a session return an error.
     func handleHTTPRequest(_ request: HTTPRequest) async -> HTTPResponse {
-        let sessionID = request.header(HTTPHeaderName.sessionID)
-
-        // Route to existing session
-        if let sessionID, var session = sessions[sessionID] {
-            session.lastAccessedAt = Date()
-            sessions[sessionID] = session
-
-            let response = await session.transport.handleRequest(request)
-
-            // Clean up on successful DELETE
-            if request.method.uppercased() == "DELETE" && response.statusCode == 200 {
-                sessions.removeValue(forKey: sessionID)
-            }
-
-            return response
-        }
-
-        // No session — check for initialize request
-        if request.method.uppercased() == "POST",
-            let body = request.body,
-            let kind = JSONRPCMessageKind(data: body),
-            kind.isInitializeRequest
-        {
-            return await createSessionAndHandle(request)
-        }
-
-        // No session and not initialize
-        if sessionID != nil {
-            return .error(statusCode: 404, .invalidRequest("Not Found: Session not found or expired"))
-        }
-        return .error(
-            statusCode: 400,
-            .invalidRequest("Bad Request: Missing \(HTTPHeaderName.sessionID) header")
-        )
-    }
-
-    // MARK: - Session Management
-
-    private struct FixedSessionIDGenerator: SessionIDGenerator {
-        let sessionID: String
-        func generateSessionID() -> String { sessionID }
-    }
-
-    private func createSessionAndHandle(_ request: HTTPRequest) async -> HTTPResponse {
-        let sessionID = UUID().uuidString
-
-        let transport = StatefulHTTPServerTransport(
-            sessionIDGenerator: FixedSessionIDGenerator(sessionID: sessionID),
-            validationPipeline: validationPipeline,
-            retryInterval: configuration.retryInterval,
-            logger: logger
-        )
-
-        do {
-            let server = try await serverFactory(sessionID, transport)
-            try await server.start(transport: transport)
-
-            sessions[sessionID] = SessionContext(
-                server: server,
-                transport: transport,
-                createdAt: Date(),
-                lastAccessedAt: Date()
-            )
-
-            let response = await transport.handleRequest(request)
-
-            // If transport returned an error, clean up
-            if case .error = response {
-                sessions.removeValue(forKey: sessionID)
-                await transport.disconnect()
-            }
-
-            return response
-        } catch {
-            await transport.disconnect()
-            return .error(
-                statusCode: 500,
-                .internalError("Failed to create session: \(error.localizedDescription)")
-            )
-        }
-    }
-
-    private func closeSession(_ sessionID: String) async {
-        guard let session = sessions.removeValue(forKey: sessionID) else { return }
-        await session.transport.disconnect()
-        logger.info("Closed session", metadata: ["sessionID": "\(sessionID)"])
-    }
-
-    private func closeAllSessions() async {
-        for sessionID in sessions.keys {
-            await closeSession(sessionID)
-        }
-    }
-
-    private func sessionCleanupLoop() async {
-        while true {
-            try? await Task.sleep(for: .seconds(60))
-
-            let now = Date()
-            let expired = sessions.filter { _, context in
-                now.timeIntervalSince(context.lastAccessedAt) > configuration.sessionTimeout
-            }
-
-            for (sessionID, _) in expired {
-                logger.info("Session expired", metadata: ["sessionID": "\(sessionID)"])
-                await closeSession(sessionID)
-            }
-        }
+        await sessionManager.handleRequest(request)
     }
 }
 
