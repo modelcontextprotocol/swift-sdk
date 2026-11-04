@@ -307,7 +307,7 @@ flags and checks; keep them in step. Findings: `interop/README.md`.
 
 One job list, two runners. `scripts/ci/jobs` lists every job as
 `<id> <gate|advisory> <script> [args]`; `scripts/ci/<script>.sh` is the job (`build-test`,
-`docs`, `conformance` (flags of run-conformance.sh), `interop`). `scripts/ci/run-jobs.sh
+`docs`, `conformance` (flags of run-conformance.sh), `interop`, `apple-platform`). `scripts/ci/run-jobs.sh
 [--gate|--advisory] [--strict] [--timeout m] [id-regex...]` runs a selection and prints a
 summary. Add or change a job there, not in a runner.
 
@@ -330,6 +330,17 @@ internal `ServerSentEventParser`. On Linux, `URLProtocol` mocks see
 `httpAdditionalHeaders` because the SDK copies them into the request
 (`addingAdditionalHeaders(of:)`), and a mock must not call its client after `stopLoading()`
 (corelibs traps). What differs by design is in `design/linux.md`.
+
+Other Apple platforms: `scripts/ci/apple-platform.sh <iOS|tvOS|watchOS|visionOS|macCatalyst>
+[<simulator id>]` runs `xcodebuild build-for-testing` of the `mcp-swift-sdk-Package` scheme
+(every target, test bundles included) for the device SDK, unsigned, then `xcodebuild test` on
+the first simulator `-showdestinations` offers (result bundle `.build/apple/<platform>/`).
+Only `apple-ios` is a job (and a `ci.yml` matrix entry); another platform is one more line
+in each. Conformance and interop do not run there: the harnesses start fixtures as host
+processes. `Process` does not exist on iOS, tvOS, watchOS or visionOS (Mac Catalyst is
+`os(iOS)`): code that starts one sits behind
+`#if !(os(iOS) || os(tvOS) || os(watchOS) || os(visionOS))` and the executables only compile
+there. The job passes and says so on Linux, as `fuzz` does on macOS.
 
 ## Conformance fixtures
 

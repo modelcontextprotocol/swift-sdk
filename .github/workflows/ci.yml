@@ -47,6 +47,31 @@ jobs:
       - name: Build, test, and run the hello example
         run: scripts/ci/run-jobs.sh build-test
 
+  # Every target built for the device SDK of a platform other than macOS, and
+  # the tests run on its simulator (scripts/ci/apple-platform.sh). One matrix
+  # entry per apple-* line of scripts/ci/jobs.
+  apple-platforms:
+    name: Apple platforms (${{ matrix.platform }})
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: iOS
+            job: apple-ios
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Build for the device, test on the simulator
+        run: scripts/ci/run-jobs.sh ${{ matrix.job }}
+      - name: Upload the test results
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: apple-${{ matrix.platform }}-xcresult
+          path: .build/apple/${{ matrix.platform }}/Tests.xcresult
+          if-no-files-found: ignore
+
   documentation:
     name: Documentation
     runs-on: macos-latest

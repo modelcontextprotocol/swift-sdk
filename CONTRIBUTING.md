@@ -117,7 +117,17 @@ The CI jobs are listed once, in `scripts/ci/jobs`; each is a script in `scripts/
 ```sh
 scripts/ci/run-jobs.sh                        # every job
 scripts/ci/run-jobs.sh 'conformance-.*' interop
+scripts/ci/apple-platform.sh iOS              # every target for iOS, tests on a simulator
 ```
+
+`apple-ios` builds every target, test bundles included, for the iOS device SDK and runs
+`MCPTests` and `SnippetTests` on an iOS simulator (`scripts/ci/apple-platform.sh iOS
+[<simulator id>]`; the first available simulator by default). Conformance and interop run on
+macOS and Linux only: their harnesses start the fixtures as host processes, and `Process`
+does not exist on iOS, tvOS, watchOS or visionOS (code that starts a process is behind
+`#if !(os(iOS) || os(tvOS) || os(watchOS) || os(visionOS))`). The script also takes `tvOS`,
+`watchOS`, `visionOS` and `macCatalyst`; gating another platform is a line in
+`scripts/ci/jobs` and a matrix entry in `ci.yml`.
 
 On a Mac, `scripts/ci-linux.sh` runs the same jobs on Linux in a container, in a RHEL UBI 9
 Swift image (Apple silicon, macOS 26 or later):

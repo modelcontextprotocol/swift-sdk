@@ -834,11 +834,14 @@ func makeClient(_ options: Options, _ counters: Counters, tasks: Bool = false, a
 }
 
 /// A server connection: HTTP, or a child process over stdio. Used from the
-/// main task only.
+/// main task only. iOS, tvOS, watchOS and visionOS cannot start a process:
+/// there `--stdio` fails and only `--url` works.
 final class Connection: @unchecked Sendable {
     let transport: any Transport
-    private var process: Process?
-    private var toServer: Pipe?
+    #if !(os(iOS) || os(tvOS) || os(watchOS) || os(visionOS))
+        private var process: Process?
+        private var toServer: Pipe?
+    #endif
 
     init(_ options: Options) throws {
         if let url = options.url {
@@ -852,24 +855,30 @@ final class Connection: @unchecked Sendable {
             transport = HTTPClientTransport(endpoint: url, streaming: true, logger: logger)
             return
         }
-        let input = Pipe()
-        let output = Pipe()
-        let child = Process()
-        child.executableURL = URL(fileURLWithPath: options.stdio[0])
-        child.arguments = Array(options.stdio.dropFirst())
-        child.standardInput = input
-        child.standardOutput = output
-        try child.run()
-        process = child
-        toServer = input
-        transport = StdioTransport(
-            input: FileDescriptor(rawValue: output.fileHandleForReading.fileDescriptor),
-            output: FileDescriptor(rawValue: input.fileHandleForWriting.fileDescriptor))
+        #if os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)
+            throw Failure("--stdio needs a platform that can start a process; use --url")
+        #else
+            let input = Pipe()
+            let output = Pipe()
+            let child = Process()
+            child.executableURL = URL(fileURLWithPath: options.stdio[0])
+            child.arguments = Array(options.stdio.dropFirst())
+            child.standardInput = input
+            child.standardOutput = output
+            try child.run()
+            process = child
+            toServer = input
+            transport = StdioTransport(
+                input: FileDescriptor(rawValue: output.fileHandleForReading.fileDescriptor),
+                output: FileDescriptor(rawValue: input.fileHandleForWriting.fileDescriptor))
+        #endif
     }
 
     func close() {
-        try? toServer?.fileHandleForWriting.close()
-        process?.terminate()
+        #if !(os(iOS) || os(tvOS) || os(watchOS) || os(visionOS))
+            try? toServer?.fileHandleForWriting.close()
+            process?.terminate()
+        #endif
     }
 }
 

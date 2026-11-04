@@ -484,7 +484,9 @@ struct OutgoingMessageTests {
 
             let result = try await client.connect(transport: transport)
             #expect(result.protocolVersion == Version.v2025_11_25)
-            for _ in 0..<200 where await !UnansweredDiscoverProtocol.state.discoverStopped {
+            // A loaded machine (a simulator in CI) can take over a second.
+            let deadline = ContinuousClock.now + .seconds(10)
+            while await !UnansweredDiscoverProtocol.state.discoverStopped, ContinuousClock.now < deadline {
                 try await Task.sleep(for: .milliseconds(5))
             }
             #expect(await UnansweredDiscoverProtocol.state.discoverStopped)

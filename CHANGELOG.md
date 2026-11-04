@@ -120,6 +120,9 @@ Behavior that can break working code ([docs/migration.md](docs/migration.md#beha
   before, it was never released and, with `streaming: true`, kept reconnecting.
 - A `connect(transport:)` that throws disconnects the transport and stops the receive loop;
   before, both kept running and kept the client and the transport alive.
+- The package builds for iOS, tvOS, watchOS and visionOS: the interop client and the
+  `HelloClient` example no longer use `Process` there. CI builds every target for the iOS device
+  SDK and runs the tests on an iOS simulator.
 - A `tools/call` cancelled while the server's answer creating a task was already on its way gets
   `tasks/cancel` for that task; before, the task could keep running.
 - From `main` after 0.12.1: `Data.parseDataURL(_:)` reads `;base64` from the header only and
