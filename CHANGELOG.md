@@ -120,6 +120,8 @@ Behavior that can break working code ([docs/migration.md](docs/migration.md#beha
   before, it was never released and, with `streaming: true`, kept reconnecting.
 - A `connect(transport:)` that throws disconnects the transport and stops the receive loop;
   before, both kept running and kept the client and the transport alive.
+- A `tools/call` cancelled while the server's answer creating a task was already on its way gets
+  `tasks/cancel` for that task; before, the task could keep running.
 - From `main` after 0.12.1: `Data.parseDataURL(_:)` reads `;base64` from the header only and
   decodes any percent-escaped byte (#309, #310); `client_secret_basic` percent-encodes the client
   credentials (RFC 6749 §2.3.1, #300); PKCE verifier characters are uniformly distributed (#303);

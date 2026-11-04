@@ -2659,16 +2659,11 @@ public actor Client {
             "Processing response",
             metadata: ["id": "\(response.id)"])
 
-        pendingToolCalls.remove(response.id)
+        let isToolCall = pendingToolCalls.remove(response.id) != nil
+        var abandoned = false
         if let index = abandonedToolCalls.firstIndex(of: response.id) {
             abandonedToolCalls.remove(at: index)
-            // The call was cancelled after the server created a task for it.
-            if case .success(let value) = response.result,
-                let taskID = value.objectValue?["taskId"]?.stringValue
-                    ?? value.objectValue?["task"]?.objectValue?["taskId"]?.stringValue
-            {
-                Task { try? await self.cancelTask(taskID) }
-            }
+            abandoned = true
         }
 
         // Attempt to remove the pending request using the response ID.
@@ -2677,7 +2672,9 @@ public actor Client {
             // If we successfully removed it, resume its continuation.
             switch response.result {
             case .success(let value):
-                removedRequest.resume(returning: value)
+                // Refused when the caller was cancelled and its
+                // `cancelRequest` has not run yet: the call is abandoned too.
+                if !removedRequest.resume(returning: value), isToolCall { abandoned = true }
             case .failure(let error):
                 removedRequest.resume(throwing: error)
             }
@@ -2688,6 +2685,14 @@ public actor Client {
                 "Attempted to handle response for already removed request",
                 metadata: ["id": "\(response.id)"]
             )
+        }
+
+        // The call was cancelled after the server created a task for it.
+        if abandoned, case .success(let value) = response.result,
+            let taskID = value.objectValue?["taskId"]?.stringValue
+                ?? value.objectValue?["task"]?.objectValue?["taskId"]?.stringValue
+        {
+            Task { try? await self.cancelTask(taskID) }
         }
     }
 

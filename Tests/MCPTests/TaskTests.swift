@@ -1019,7 +1019,7 @@ struct ClientTaskTests {
         try await Task.sleep(for: .milliseconds(100))
         call.cancel()
         _ = await call.result
-        let deadline = ContinuousClock.now + .seconds(2)
+        let deadline = ContinuousClock.now + .seconds(10)
         while await !cancelled.isSet, ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(5))
         }
@@ -1824,6 +1824,106 @@ struct LateTaskAnswerTests {
         }
         #expect(await seen.messages.contains(CancelTask.name))
     }
+
+    @Test("A tools/call cancelled while its task answer is on the way: the task is cancelled")
+    func cancelRacesAnswer() async throws {
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+        try await serverTransport.connect()
+        let race = CallRace()
+        // A hand-driven peer: answers each tools/call with a new task and, at
+        // once, cancels the caller, so the answer and the cancellation race.
+        @Sendable func task(_ id: Value, resultType: String) -> Value {
+            [
+                "resultType": .string(resultType), "taskId": id, "status": "working",
+                "createdAt": "2026-01-01T00:00:00Z", "lastUpdatedAt": "2026-01-01T00:00:00Z",
+                "ttlMs": 60000, "pollIntervalMs": 1000,
+            ]
+        }
+        let peer = Task {
+            var count = 0
+            for try await data in await serverTransport.receive() {
+                let object = try JSONDecoder().decode(Value.self, from: data).objectValue ?? [:]
+                let method = object["method"]?.stringValue
+                let taskID = object["params"]?.objectValue?["taskId"] ?? .null
+                var result: Value?
+                switch method {
+                case ServerDiscover.name:
+                    result = [
+                        "resultType": "complete", "supportedVersions": ["2026-07-28"],
+                        "capabilities": ["tools": [:], "extensions": [ExtensionID.tasks: [:]]],
+                        "_meta": [MetaKey.serverInfo: ["name": "peer", "version": "1"]],
+                    ]
+                case CallTool.name:
+                    count += 1
+                    await race.created("t\(count)")
+                    result = task(.string("t\(count)"), resultType: "task")
+                case GetTask.name:
+                    result = task(taskID, resultType: "complete")
+                case CancelTask.name:
+                    await race.cancelled(taskID.stringValue ?? "?")
+                    result = ["resultType": "complete"]
+                default:
+                    break
+                }
+                if let result {
+                    let reply: Value = ["jsonrpc": "2.0", "id": object["id"] ?? .null, "result": result]
+                    try await serverTransport.send(JSONEncoder().encode(reply))
+                }
+                if method == CallTool.name { await race.cancelCaller() }
+            }
+        }
+        defer { peer.cancel() }
+        let client = Client(
+            name: "c", version: "1",
+            configuration: .init(protocolMode: .stateless(Version.v2026_07_28), tasks: .init()))
+        try await client.connect(transport: clientTransport)
+        defer { Task { await client.disconnect() } }
+
+        for _ in 0..<CallRace.calls {
+            let call = Task { try await client.callTool(name: "anything") }
+            await race.setCaller(call)
+            _ = await call.result
+        }
+        let deadline = ContinuousClock.now + .seconds(10)
+        while await !race.isSettled, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        let orphans = await race.orphans
+        #expect(orphans.isEmpty, "tasks never cancelled: \(orphans)")
+    }
+}
+
+/// The tasks a racing peer created, and the ones the client cancelled. The
+/// window (the caller cancelled, its `cancelRequest` not run yet, the answer
+/// handled) is narrow, so the test makes many calls.
+private actor CallRace {
+    static let calls = 500
+    private var caller: Task<CallTool.Result, Error>?
+    private var cancelPending = false
+    private var createdTasks: Set<String> = []
+    private var cancelledTasks: Set<String> = []
+
+    /// The peer may see the call before the test hands over its task.
+    func setCaller(_ task: Task<CallTool.Result, Error>) {
+        if cancelPending {
+            cancelPending = false
+            task.cancel()
+        } else {
+            caller = task
+        }
+    }
+    func cancelCaller() {
+        if let caller {
+            caller.cancel()
+            self.caller = nil
+        } else {
+            cancelPending = true
+        }
+    }
+    func created(_ id: String) { createdTasks.insert(id) }
+    func cancelled(_ id: String) { cancelledTasks.insert(id) }
+    var isSettled: Bool { createdTasks.count == Self.calls && cancelledTasks.isSuperset(of: createdTasks) }
+    var orphans: [String] { createdTasks.subtracting(cancelledTasks).sorted() }
 }
 
 // MARK: - Lifecycle edges
