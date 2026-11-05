@@ -255,6 +255,8 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
         // in the header or only in `_meta`. They pass the validators that do
         // not depend on a session (origin, media types, authentication), then
         // get -32022, whose data lets the client fall back to `initialize`.
+        // Validators see the handshake revisions, the ones this transport
+        // serves, so the context does not change with `Version.supported`.
         if case .request(let id, _) = messageKind, !messageKind.isInitializeRequest,
             let version = request.statelessProtocolVersion
                 ?? JSONRPCMessageFields.metaProtocolVersion(in: body).flatMap({
@@ -263,7 +265,7 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
         {
             let sessionless = HTTPValidationContext(
                 httpMethod: "POST", sessionID: nil, isInitializationRequest: true,
-                supportedProtocolVersions: Version.supported)
+                supportedProtocolVersions: Set(Version.handshake))
             if let errorResponse = validationPipeline.validate(request, context: sessionless) {
                 return errorResponse
             }

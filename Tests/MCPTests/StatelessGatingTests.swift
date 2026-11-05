@@ -255,6 +255,13 @@ private func waitUntil(_ condition: @Sendable () async -> Bool) async throws {
     }
 }
 
+/// Answers every request with 418 and the context's supported versions, newest first.
+private struct SupportedVersionsEcho: HTTPRequestValidator {
+    func validate(_ request: HTTPRequest, context: HTTPValidationContext) -> HTTPResponse? {
+        .data(Data(context.supportedProtocolVersions.sorted(by: >).joined(separator: ",").utf8), statusCode: 418)
+    }
+}
+
 @Suite("Stateful transport and stateless requests")
 struct StatefulStatelessBoundaryTests {
     @Test("A stateless version in _meta alone is -32022 on a session")
@@ -322,6 +329,19 @@ struct StatefulStatelessBoundaryTests {
         let response = await transport.handleRequest(
             post(call(id: 3), version: "2026-07-28", origin: "https://attacker.example"))
         #expect(response.statusCode == 403)
+    }
+
+    @Test("A stateless request is validated against the handshake revisions")
+    func statelessRequestContextVersions() async throws {
+        let transport = StatefulHTTPServerTransport(
+            validationPipeline: StandardValidationPipeline(validators: [SupportedVersionsEcho()]))
+        try await transport.connect()
+        defer { Task { await transport.disconnect() } }
+
+        let response = await transport.handleRequest(post(call(id: 4), version: "2026-07-28"))
+        #expect(response.statusCode == 418)
+        let echoed = response.bodyData.map { String(decoding: $0, as: UTF8.self) }
+        #expect(echoed == Version.handshake.joined(separator: ","))
     }
 
     @Test("A refused initialize leaves no session")

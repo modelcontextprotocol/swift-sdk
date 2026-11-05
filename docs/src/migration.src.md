@@ -161,8 +161,15 @@ the connection is stateless: every request carries `_meta`, there is no
 session, and the server cannot send requests to the client; it returns
 input-required results, which the client answers with the same handlers. When
 the server does not serve it, or answers -32601 like a server that predates
-`server/discover`, the client sends `initialize` as before. To keep the
-previous behavior:
+`server/discover`, the client sends `initialize` as before. Some calls behave
+differently on a stateless connection: `notifyRootsChanged()` does nothing,
+`setLoggingLevel(_:)` sets the level of later requests, `ping()` sends
+`server/discover`, and notifications arrive only on `subscriptions/listen`
+streams. The full lists are in
+[client.md](client.md#what-changes-at-2026-07-28) and
+[protocol_versions.md](protocol_versions.md#stateless-connections). Code that
+relies on the handshake behavior, such as `notifications/roots/list_changed`,
+keeps the previous behavior with `.handshake`:
 
 %include Examples/Snippets/Guides/Migration.swift migration-handshake-client
 
