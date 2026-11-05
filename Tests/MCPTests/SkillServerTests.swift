@@ -92,6 +92,24 @@ struct SkillPackageTests {
         #expect(github.skill.uri == "github://owner/repo/pdf/SKILL.md")
     }
 
+    @Test("A directory over the limits is refused before its files are read")
+    func directoryLimits() throws {
+        let skill = FileManager.default.temporaryDirectory.appendingPathComponent("large-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: skill) }
+        try FileManager.default.createDirectory(at: skill, withIntermediateDirectories: true)
+        try manifest("large").write(to: skill.appendingPathComponent("SKILL.md"))
+        // A sparse file over 16 MiB that cannot be read: reading it would
+        // throw a file error instead of the limit.
+        let blob = skill.appendingPathComponent("blob")
+        #expect(FileManager.default.createFile(atPath: blob.path, contents: nil))
+        let handle = try FileHandle(forWritingTo: blob)
+        try handle.truncate(atOffset: UInt64(Skill.maximumTotalSize) + 1)
+        try handle.close()
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: blob.path)
+
+        #expect(throws: SkillPackage.ValidationError.self) { try SkillPackage(path: "large", directory: skill) }
+    }
+
     @Test("A directory: files below it, without dotfiles or links that leave it")
     func directory() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("skill-\(UUID().uuidString)")
@@ -317,6 +335,16 @@ struct SkillServerTests {
         let listed = try await result(wire, ListResources.name)
         #expect(listed.objectValue?["resources"]?.arrayValue?.count == 2)
         #expect(listed.objectValue?["nextCursor"] == nil)
+        #expect(try await result(wire, ListResources.name, ["cursor": .null]) == listed)
+        for invalid: Value in [123, true, ["a": "b"], []] {
+            #expect(try await errorCode(wire, ListResources.name, ["cursor": invalid]) == -32602, "\(invalid)")
+        }
+        // A position in an application listing that this server does not
+        // have is done: the skills continue, and the listing ends.
+        let foreign = try #require(SkillListingCursor(application: .page("x"), skills: .page("1")).encoded)
+        let rest = try await result(wire, ListResources.name, ["cursor": .string(foreign)])
+        #expect(rest.objectValue?["resources"]?.arrayValue?.count == 1)
+        #expect(rest.objectValue?["nextCursor"] == nil)
     }
 
     @Test("resources/list: the first page has both listings, later pages continue each")
@@ -444,10 +472,13 @@ struct SkillWireTests {
         #expect(encoded.contains(#""icon":"data:image\/png;base64,aGk=""#))
     }
 
-    @Test("Settings: declared, with or without directoryRead")
+    @Test("Settings: declared as an object, with or without directoryRead")
     func settings() {
         #expect(SkillsSettings(nil) == nil)
         #expect(SkillsSettings([ExtensionID.skills: [:]]) == SkillsSettings())
         #expect(SkillsSettings([ExtensionID.skills: ["directoryRead": true]])?.directoryRead == true)
+        for value: Value in [.null, false, true, "skills", []] {
+            #expect(SkillsSettings([ExtensionID.skills: value]) == nil, "\(value)")
+        }
     }
 }

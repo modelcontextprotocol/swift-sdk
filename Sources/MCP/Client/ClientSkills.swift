@@ -110,6 +110,16 @@ public actor LoadedSkill {
     ///   ``SkillVerificationError/Reason/unlistedFile`` for a path that leaves
     ///   the skill.
     public nonisolated func uri(of path: String) throws -> String {
+        let components = try Self.components(of: path)
+        guard !components.isEmpty else {
+            throw SkillVerificationError(.unlistedFile, uri: path, message: "\(path) is not a file of the skill")
+        }
+        return rootURI + "/" + components.map(SkillPackage.percentEncoded).joined(separator: "/")
+    }
+
+    /// The components of `path` below the root, after `.` and `..`; empty
+    /// for the root itself.
+    private static func components(of path: String) throws -> [String] {
         var components: [String] = []
         for component in path.split(separator: "/", omittingEmptySubsequences: true) {
             switch component {
@@ -121,10 +131,7 @@ public actor LoadedSkill {
             default: components.append(String(component))
             }
         }
-        guard !components.isEmpty else {
-            throw SkillVerificationError(.unlistedFile, uri: path, message: "\(path) is not a file of the skill")
-        }
-        return rootURI + "/" + components.map(SkillPackage.percentEncoded).joined(separator: "/")
+        return components
     }
 
     /// Reads the file at `path`, relative to the skill's root, and verifies
@@ -163,11 +170,13 @@ public actor LoadedSkill {
         }
     }
 
-    /// The direct children of the directory at `path` (empty for the root),
-    /// from the entry: files as their entries, subdirectories by name.
+    /// The direct children of the directory at `path` (empty, `.` or `/` for
+    /// the root), from the entry: files as their entries, subdirectories by
+    /// name.
     public nonisolated func directory(_ path: String = "") throws -> (files: [SkillResource], directories: [String]) {
         guard let files else { return ([], []) }
-        let prefix = path.isEmpty ? rootURI + "/" : try uri(of: path) + "/"
+        let components = try Self.components(of: path)
+        let prefix = ([rootURI] + components.map(SkillPackage.percentEncoded)).joined(separator: "/") + "/"
         var children: [SkillResource] = []
         var directories = Set<String>()
         for file in files where file.uri.hasPrefix(prefix) {
@@ -375,12 +384,13 @@ extension Client {
     }
 
     /// Whether `uri` names something below `root`: it starts with the root
-    /// and a `/`, and no segment after it, percent-decoded, is `.` or `..`.
+    /// and a `/`, and every segment after it is non-empty and percent-decodes
+    /// to a name other than `.` or `..` without a `/`.
     static func isInside(_ uri: String, root: String) -> Bool {
         guard uri.hasPrefix(root + "/") else { return false }
         return uri.dropFirst(root.count + 1).split(separator: "/", omittingEmptySubsequences: false).allSatisfy {
-            let decoded = $0.removingPercentEncoding ?? String($0)
-            return !decoded.split(separator: "/", omittingEmptySubsequences: false).contains { $0 == "." || $0 == ".." }
+            guard !$0.isEmpty, let decoded = $0.removingPercentEncoding else { return false }
+            return !decoded.contains("/") && decoded != "." && decoded != ".."
         }
     }
 

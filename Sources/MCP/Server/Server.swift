@@ -1155,8 +1155,13 @@ public actor Server {
         guard request.method == ListResources.name, listsSkills else { return nil }
 
         var position = SkillListingCursor.start(listsApplication: applicationList != nil)
-        if let cursor = params["cursor"]?.stringValue {
-            guard let decoded = SkillListingCursor(cursor) else { throw MCPError.invalidParams("Invalid cursor") }
+        if let value = params["cursor"], value != .null {
+            guard let cursor = value.stringValue, var decoded = SkillListingCursor(cursor) else {
+                throw MCPError.invalidParams("Invalid cursor")
+            }
+            // A position that this server cannot advance would give a next
+            // cursor on every page.
+            if applicationList == nil { decoded.application = .done }
             position = decoded
         }
         var resources: [Value] = []

@@ -116,7 +116,27 @@ struct SkillClientTests {
         #expect(listing.files.map(\.uri) == ["skill://pdf/SKILL.md"])
         #expect(listing.directories == ["references", "templates"])
         #expect(try loaded.directory("templates").files.map(\.uri) == ["skill://pdf/templates/a.md"])
+        for root in [".", "/", "./", "templates/.."] {
+            let same = try loaded.directory(root)
+            #expect(same.files.map(\.uri) == listing.files.map(\.uri), "\(root)")
+            #expect(same.directories == listing.directories, "\(root)")
+        }
+        #expect(throws: SkillVerificationError.self) { try loaded.directory("..") }
         _ = try await client.loadSkill(uri: "skill://pdf/SKILL.md")
+    }
+
+    @Test("Inside the root: non-empty segments that decode, without an encoded slash or dot segment")
+    func insideRoot() {
+        for uri in ["skill://pdf/SKILL.md", "skill://pdf/references/FORMS.md", "skill://pdf/a%20b.md"] {
+            #expect(Client.isInside(uri, root: "skill://pdf"), "\(uri)")
+        }
+        for uri in [
+            "skill://pdf", "skill://pdf/", "skill://pdf//a.md", "skill://pdf/a/", "skill://pdfx/a",
+            "skill://pdf/a%2Fb", "skill://pdf/a%2fb", "skill://pdf/%zz", "skill://pdf/a%", "skill://pdf/%2e",
+            "skill://pdf/%2E%2E/other",
+        ] {
+            #expect(!Client.isInside(uri, root: "skill://pdf"), "\(uri)")
+        }
     }
 
     @Test(

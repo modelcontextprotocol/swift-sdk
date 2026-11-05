@@ -22,10 +22,10 @@ public struct SkillsSettings: Hashable, Codable, Sendable {
     }
 
     /// The settings `capabilities` declares, or `nil` when it does not
-    /// declare the extension.
+    /// declare the extension with an object.
     public init?(_ extensions: [String: Value]?) {
-        guard let value = extensions?[ExtensionID.skills] else { return nil }
-        directoryRead = value.objectValue?["directoryRead"]?.boolValue
+        guard let value = extensions?[ExtensionID.skills]?.objectValue else { return nil }
+        directoryRead = value["directoryRead"]?.boolValue
     }
 
     /// The settings as the value of `extensions[ExtensionID.skills]`.

@@ -136,23 +136,18 @@ public struct SkillPackage: Sendable {
             throw ValidationError("\(path): the last segment of the path must be the name, \(name)")
         }
         if enforcesLimits {
-            let total = files.values.reduce(0) { $0 + $1.count }
-            guard files.count <= Skill.maximumResources, total <= Skill.maximumTotalSize else {
-                throw ValidationError(
-                    "\(path): \(files.count) files and \(total) bytes; hosts need accept only \(Skill.maximumResources) files and \(Skill.maximumTotalSize) bytes"
-                )
-            }
+            try Self.checkLimits(path: path, count: files.count, total: files.values.reduce(0) { $0 + $1.count })
         }
         let root = "\(scheme)://\(segments.joined(separator: "/"))"
         var entries: [SkillResource] = []
-        for relative in files.keys.sorted(by: Self.manifestFirst) {
+        for (relative, data) in files.sorted(by: { Self.manifestFirst($0.key, $1.key) }) {
             let components = try Self.fileComponents(relative, in: path)
             for depth in 1..<components.count where files[components[..<depth].joined(separator: "/")] != nil {
                 throw ValidationError(
                     "\(path): \(components[..<depth].joined(separator: "/")) is a file and the directory of \(relative)")
             }
             let uri = root + "/" + components.map(Self.percentEncoded).joined(separator: "/")
-            entries.append(SkillResource(uri: uri, data: files[relative]!))
+            entries.append(SkillResource(uri: uri, data: data))
         }
         self.path = segments.joined(separator: "/")
         self.scheme = scheme
@@ -165,12 +160,14 @@ public struct SkillPackage: Sendable {
     ///
     /// Reads every regular file under the directory. Names that start with
     /// `.` (`.git`, `.DS_Store`) are skipped, and so is a symbolic link that
-    /// leads out of the directory.
+    /// leads out of the directory. With `enforcesLimits`, the file count and
+    /// sizes are checked before any file is read.
     ///
     /// - Throws: ``ValidationError``, or the error reading a file.
     public init(path: String, directory: URL, scheme: String = "skill", enforcesLimits: Bool = true) throws {
         try self.init(
-            path: path, files: try Self.readFiles(in: directory), scheme: scheme, enforcesLimits: enforcesLimits)
+            path: path, files: try Self.readFiles(in: directory, path: path, enforcesLimits: enforcesLimits),
+            scheme: scheme, enforcesLimits: enforcesLimits)
     }
 
     /// The file at `uri`, with its MIME type.
@@ -248,20 +245,33 @@ public struct SkillPackage: Sendable {
 
     // MARK: Files
 
-    private static func readFiles(in directory: URL) throws -> [String: Data] {
+    private static func checkLimits(path: String, count: Int, total: Int) throws {
+        guard count <= Skill.maximumResources, total <= Skill.maximumTotalSize else {
+            throw ValidationError(
+                "\(path): \(count) files and \(total) bytes; hosts need accept only \(Skill.maximumResources) files and \(Skill.maximumTotalSize) bytes"
+            )
+        }
+    }
+
+    private static func readFiles(in directory: URL, path: String, enforcesLimits: Bool) throws -> [String: Data] {
         let root = directory.resolvingSymlinksInPath()
         let rootPath = root.path.hasSuffix("/") ? root.path : root.path + "/"
         let manager = FileManager.default
-        var files: [String: Data] = [:]
+        var found: [(relative: String, url: URL)] = []
+        var total = 0
         for relative in try manager.subpathsOfDirectory(atPath: root.path) {
             guard !relative.split(separator: "/").contains(where: { $0.hasPrefix(".") }) else { continue }
             // A link is followed only when it stays in the directory.
             let resolved = root.appendingPathComponent(relative).resolvingSymlinksInPath()
-            guard resolved.path.hasPrefix(rootPath),
-                (try? resolved.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
-            else { continue }
-            files[relative] = try Data(contentsOf: resolved)
+            let values = try? resolved.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+            guard resolved.path.hasPrefix(rootPath), values?.isRegularFile == true else { continue }
+            found.append((relative, resolved))
+            let (sum, overflow) = total.addingReportingOverflow(values?.fileSize ?? 0)
+            total = overflow ? .max : sum
         }
+        if enforcesLimits { try checkLimits(path: path, count: found.count, total: total) }
+        var files: [String: Data] = [:]
+        for file in found { files[file.relative] = try Data(contentsOf: file.url) }
         return files
     }
 
