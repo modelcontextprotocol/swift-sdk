@@ -95,6 +95,18 @@ private func makeStatelessPOSTRequest(body: Data) -> HTTPRequest {
     )
 }
 
+/// `requestId` is `Any` so tests can exercise both string and integer JSON-RPC ids.
+private func makeCancelledNotificationBody(requestId: Any, reason: String? = nil) -> Data {
+    var params: [String: Any] = ["requestId": requestId]
+    if let reason { params["reason"] = reason }
+    let json: [String: Any] = [
+        "jsonrpc": "2.0",
+        "method": "notifications/cancelled",
+        "params": params,
+    ]
+    return try! JSONSerialization.data(withJSONObject: json)
+}
+
 private func makeStatefulTransport(
     sessionIDGenerator: any SessionIDGenerator = UUIDSessionIDGenerator()
 ) -> StatefulHTTPServerTransport {
@@ -137,6 +149,43 @@ private actor ChunkCollector {
     var chunks: [Data] = []
     func append(_ data: Data) { chunks.append(data) }
     func getChunks() -> [Data] { chunks }
+}
+
+/// Guards a one-shot resume so two racing tasks can't double-resume a continuation.
+private actor OnceGuard {
+    private var fired = false
+    func tryFire() -> Bool {
+        guard !fired else { return false }
+        fired = true
+        return true
+    }
+}
+
+/// Races `operation` against `timeout` without blocking on `operation` if it never
+/// completes. Returns `operation`'s result if it finishes first, or `nil` if the
+/// timeout elapses first — turning an indefinite hang into a bounded, observable
+/// test outcome. If `operation` really does hang, its task is simply abandoned
+/// (not cancelled: a suspended `CheckedContinuation`-based wait doesn't observe
+/// cancellation), which is fine for a short-lived test process.
+private func raceAgainstTimeout<T: Sendable>(
+    _ timeout: Duration,
+    operation: @escaping @Sendable () async -> T
+) async -> T? {
+    let guardActor = OnceGuard()
+    return await withCheckedContinuation { (continuation: CheckedContinuation<T?, Never>) in
+        Task {
+            let value = await operation()
+            if await guardActor.tryFire() {
+                continuation.resume(returning: value)
+            }
+        }
+        Task {
+            try? await Task.sleep(for: timeout)
+            if await guardActor.tryFire() {
+                continuation.resume(returning: nil)
+            }
+        }
+    }
 }
 
 private func drainSSEStream(
@@ -1265,5 +1314,243 @@ struct ServerHandlerContextTests {
 
         await server.stop()
         await transport.disconnect()
+    }
+}
+
+// MARK: - StatelessHTTPServerTransport Cancellation Tests (#255)
+//
+// Covers the fix for https://github.com/modelcontextprotocol/swift-sdk/issues/255:
+// a request cancelled via `notifications/cancelled` gets no JSON-RPC response from
+// `Server` (per the cancellation spec), so the transport itself must complete the
+// hung HTTP exchange with a synthesized "Request cancelled" JSON-RPC error to
+// satisfy the Streamable HTTP requirement that a request POST receive one JSON
+// object or an SSE stream.
+//
+// Companion to fix/254-response-waiter-collision, which covers the separate
+// "colliding JSON-RPC ids overwrite each other's waiter" gap (#254) — not an
+// absence-of-response case, so not in scope here.
+@Suite("StatelessHTTPServerTransport Cancellation Tests")
+struct StatelessHTTPServerTransportCancellationTests {
+
+    /// The implementation-specific JSON-RPC error code the transport synthesizes
+    /// for cancelled requests.
+    private static let requestCancelledCode = -32002
+
+    private struct SlowRequestHarness {
+        let transport: StatelessHTTPServerTransport
+        let server: Server
+        let inFlight: Task<HTTPResponse, Never>
+        /// Yields once the slow handler observes `CancellationError`.
+        let handlerCancelled: AsyncStream<Void>
+    }
+
+    /// Starts a server whose `tools/call` handler sleeps long enough to be cancelled,
+    /// POSTs `requestBody`, and suspends until the handler has entered.
+    ///
+    /// Handler entry is deterministic evidence that the HTTP waiter is registered:
+    /// entry is causally downstream of the transport yielding the request body, and
+    /// the waiter is registered in the same synchronous actor turn as that yield, so
+    /// any cancellation POSTed after this returns is guaranteed to find the waiter.
+    private func startSlowRequest(requestBody: Data) async throws -> SlowRequestHarness {
+        let transport = makeStatelessTransport()
+        let server = Server(name: "TestServer", version: "1.0")
+
+        let (handlerEntered, enteredContinuation) = AsyncStream<Void>.makeStream()
+        let (handlerCancelled, cancelledContinuation) = AsyncStream<Void>.makeStream()
+
+        await server.withMethodHandler(CallTool.self) { _ in
+            enteredContinuation.yield(())
+            do {
+                // `Task.sleep` is cancellation-aware: it throws `CancellationError`
+                // as soon as this handler's Task is cancelled.
+                try await Task.sleep(for: .seconds(5))
+            } catch is CancellationError {
+                cancelledContinuation.yield(())
+                throw CancellationError()
+            }
+            return CallTool.Result(content: [.text(text: "too slow", annotations: nil, _meta: nil)])
+        }
+
+        try await server.start(transport: transport)
+
+        let inFlight = Task {
+            await transport.handleRequest(makeStatelessPOSTRequest(body: requestBody))
+        }
+
+        // Suspend until the handler has actually started (yields are buffered, so
+        // this cannot miss an entry that happened before we began iterating).
+        var entries = handlerEntered.makeAsyncIterator()
+        _ = await entries.next()
+
+        return SlowRequestHarness(
+            transport: transport,
+            server: server,
+            inFlight: inFlight,
+            handlerCancelled: handlerCancelled
+        )
+    }
+
+    private func makeToolCallBody(id: Any) throws -> Data {
+        try JSONSerialization.data(withJSONObject: [
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": ["name": "slow-tool"] as [String: Any],
+        ])
+    }
+
+    @Test("Cancelled request completes its POST with a Request cancelled error")
+    func testCancelledRequestCompletesWithError() async throws {
+        let harness = try await startSlowRequest(requestBody: makeToolCallBody(id: "slow-1"))
+        defer { Task { await harness.server.stop() } }
+
+        let cancelResponse = await harness.transport.handleRequest(
+            makeStatelessPOSTRequest(body: makeCancelledNotificationBody(requestId: "slow-1"))
+        )
+        #expect(cancelResponse.statusCode == 202)
+
+        let completedInTime = await raceAgainstTimeout(.seconds(1)) { await harness.inFlight.value }
+        let response = try #require(
+            completedInTime,
+            "Original POST never completed after its request was cancelled"
+        )
+
+        #expect(response.statusCode == 200)
+        #expect(response.headers["Content-Type"] == "application/json")
+
+        let body = try #require(response.bodyData)
+        let json = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+        #expect(json["jsonrpc"] as? String == "2.0")
+        #expect(json["id"] as? String == "slow-1")
+        #expect(json["result"] == nil)
+
+        let error = try #require(json["error"] as? [String: Any])
+        #expect(error["code"] as? Int == Self.requestCancelledCode)
+        let message = try #require(error["message"] as? String)
+        #expect(message.contains("Request cancelled"))
+
+        // The transport must still forward the notification to the Server: the slow
+        // handler observes CancellationError, not just the HTTP exchange completing.
+        let handlerSawCancellation = await raceAgainstTimeout(.seconds(1)) {
+            var cancellations = harness.handlerCancelled.makeAsyncIterator()
+            return await cancellations.next() != nil
+        }
+        #expect(
+            handlerSawCancellation == true,
+            "Slow handler never observed cancellation"
+        )
+    }
+
+    @Test("Cancellation reason is included in the synthesized error message")
+    func testCancellationReasonIncludedInErrorMessage() async throws {
+        let harness = try await startSlowRequest(requestBody: makeToolCallBody(id: "slow-2"))
+        defer { Task { await harness.server.stop() } }
+
+        let cancelResponse = await harness.transport.handleRequest(
+            makeStatelessPOSTRequest(
+                body: makeCancelledNotificationBody(
+                    requestId: "slow-2", reason: "User requested cancellation"))
+        )
+        #expect(cancelResponse.statusCode == 202)
+
+        let completedInTime = await raceAgainstTimeout(.seconds(1)) { await harness.inFlight.value }
+        let response = try #require(completedInTime)
+        let body = try #require(response.bodyData)
+        let json = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let error = try #require(json["error"] as? [String: Any])
+        let message = try #require(error["message"] as? String)
+        #expect(message.contains("User requested cancellation"))
+    }
+
+    @Test("Integer request id is preserved in the synthesized error response")
+    func testIntegerRequestIDPreserved() async throws {
+        let harness = try await startSlowRequest(requestBody: makeToolCallBody(id: 7))
+        defer { Task { await harness.server.stop() } }
+
+        let cancelResponse = await harness.transport.handleRequest(
+            makeStatelessPOSTRequest(body: makeCancelledNotificationBody(requestId: 7))
+        )
+        #expect(cancelResponse.statusCode == 202)
+
+        let completedInTime = await raceAgainstTimeout(.seconds(1)) { await harness.inFlight.value }
+        let response = try #require(completedInTime)
+        let body = try #require(response.bodyData)
+        let json = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+        // The id must round-trip as a JSON number, not the string "7".
+        #expect(json["id"] as? Int == 7)
+        let error = try #require(json["error"] as? [String: Any])
+        #expect(error["code"] as? Int == Self.requestCancelledCode)
+    }
+
+    @Test("Cancellation for unknown or completed requests is ignored")
+    func testCancellationForUnknownOrCompletedRequestIsIgnored() async throws {
+        let transport = makeStatelessTransport()
+        let server = Server(name: "TestServer", version: "1.0")
+
+        await server.withMethodHandler(CallTool.self) { _ in
+            CallTool.Result(content: [.text(text: "done", annotations: nil, _meta: nil)])
+        }
+
+        try await server.start(transport: transport)
+        defer { Task { await server.stop() } }
+
+        // Complete a request normally.
+        let firstBody = try makeToolCallBody(id: "done-1")
+        let first = await raceAgainstTimeout(.seconds(1)) {
+            await transport.handleRequest(makeStatelessPOSTRequest(body: firstBody))
+        }
+        let firstResponse = try #require(first)
+        #expect(firstResponse.statusCode == 200)
+
+        // Cancelling the already-completed request is ignored ("Invalid cancellation
+        // notifications SHOULD be ignored": already completed requests).
+        let cancelCompleted = await transport.handleRequest(
+            makeStatelessPOSTRequest(body: makeCancelledNotificationBody(requestId: "done-1"))
+        )
+        #expect(cancelCompleted.statusCode == 202)
+
+        // Cancelling an id the transport has never seen is likewise ignored.
+        let cancelUnknown = await transport.handleRequest(
+            makeStatelessPOSTRequest(body: makeCancelledNotificationBody(requestId: "never-seen"))
+        )
+        #expect(cancelUnknown.statusCode == 202)
+
+        // The transport still serves requests normally afterwards.
+        let secondBody = try makeToolCallBody(id: "done-2")
+        let second = await raceAgainstTimeout(.seconds(1)) {
+            await transport.handleRequest(makeStatelessPOSTRequest(body: secondBody))
+        }
+        let secondResponse = try #require(second)
+        #expect(secondResponse.statusCode == 200)
+    }
+
+    @Test("Malformed cancellation without a requestId is ignored")
+    func testMalformedCancellationIsIgnored() async throws {
+        let harness = try await startSlowRequest(requestBody: makeToolCallBody(id: "slow-3"))
+        defer { Task { await harness.server.stop() } }
+
+        // A cancellation with no requestId is ignored (202) and resumes nothing.
+        let malformed = try JSONSerialization.data(withJSONObject: [
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled",
+            "params": [String: Any](),
+        ])
+        let malformedResponse = await harness.transport.handleRequest(
+            makeStatelessPOSTRequest(body: malformed)
+        )
+        #expect(malformedResponse.statusCode == 202)
+
+        // The original request is still in flight; a valid cancellation completes it.
+        let cancelResponse = await harness.transport.handleRequest(
+            makeStatelessPOSTRequest(body: makeCancelledNotificationBody(requestId: "slow-3"))
+        )
+        #expect(cancelResponse.statusCode == 202)
+
+        let completedInTime = await raceAgainstTimeout(.seconds(1)) { await harness.inFlight.value }
+        let response = try #require(completedInTime)
+        let body = try #require(response.bodyData)
+        let json = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let error = try #require(json["error"] as? [String: Any])
+        #expect(error["code"] as? Int == Self.requestCancelledCode)
     }
 }
