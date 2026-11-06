@@ -1051,6 +1051,91 @@ struct StatelessHTTPServerTransportTests {
         // Should return error (500 or similar) since waiter was cancelled
         #expect(response.statusCode == 500)
     }
+
+    // MARK: - Cancellation completes the HTTP exchange (issue #255)
+
+    @Test(
+        "notifications/cancelled completes the cancelled request's HTTP exchange instead of hanging",
+        .timeLimit(.minutes(1))
+    )
+    func testCancelledRequestCompletesHTTPExchange() async throws {
+        let transport = makeStatelessTransport()
+        try await transport.connect()
+
+        // Observe what actually reaches the server: the request and the cancellation.
+        actor SeenMethods {
+            private(set) var methods: [String] = []
+            func add(_ method: String) { methods.append(method) }
+        }
+        let seen = SeenMethods()
+        let drain = Task {
+            let stream = await transport.receive()
+            for try await data in stream {
+                switch JSONRPCMessageKind(data: data) {
+                case .request(_, let method)?: await seen.add(method)
+                case .notification(let method)?: await seen.add(method)
+                default: break
+                }
+            }
+        }
+
+        // POST a request the server will never respond to — it gets cancelled mid-flight.
+        actor ResponseBox {
+            private(set) var response: HTTPResponse?
+            func set(_ value: HTTPResponse) { response = value }
+        }
+        let box = ResponseBox()
+        let requestBody = makeRequestBody(id: "slow-1", method: "tools/call")
+        Task { await box.set(await transport.handleRequest(makeStatelessPOSTRequest(body: requestBody))) }
+
+        // Let the request register its waiter and park.
+        try await Task.sleep(for: .milliseconds(50))
+
+        // Client cancels it with a CancelledNotification for the same id.
+        let cancelBody = try JSONSerialization.data(withJSONObject: [
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled",
+            "params": ["requestId": "slow-1", "reason": "user aborted"] as [String: Any],
+        ])
+        let cancelResponse = await transport.handleRequest(
+            makeStatelessPOSTRequest(body: cancelBody)
+        )
+        #expect(cancelResponse.statusCode == 202)
+
+        // The original POST must now complete (spec: it MUST receive a JSON object), not hang.
+        var requestResult: HTTPResponse?
+        for _ in 0..<200 {
+            if let r = await box.response {
+                requestResult = r
+                break
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(requestResult != nil, "cancelled request's POST must complete, not hang")
+        #expect(requestResult?.statusCode == 200)
+
+        // Body is a JSON-RPC error for the cancelled id so the client can correlate.
+        if let data = requestResult?.bodyData,
+            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        {
+            #expect(json["error"] != nil)
+            let idString: String?
+            if let s = json["id"] as? String { idString = s }
+            else if let n = json["id"] as? Int { idString = String(n) }
+            else { idString = nil }
+            #expect(idString == "slow-1")
+        } else {
+            Issue.record("expected a JSON body carrying an error for the cancelled request")
+        }
+
+        // Both the request and the cancellation still reached the server (so it can cancel work).
+        let seenMethods = await seen.methods
+        #expect(seenMethods.contains("tools/call"))
+        #expect(seenMethods.contains("notifications/cancelled"))
+
+        drain.cancel()
+        await transport.disconnect()
+    }
 }
 
 // MARK: - HTTPContextProviding / Server.currentHandlerContext
