@@ -225,6 +225,14 @@ public protocol HTTPContextProviding: Sendable {
     func httpRequestContext(for id: ID) async -> HTTPRequest?
 }
 
+/// A transport-internal mapping between private routed ids and client wire ids.
+package protocol RoutedRequestIDProviding: Sendable {
+    func originalRequestID(for routedID: ID) async -> ID?
+
+    /// Returns `nil` when the wire id has no active exchange or is ambiguous.
+    func routedRequestID(for originalID: ID) async -> ID?
+}
+
 // MARK: - JSON-RPC Message Classification
 
 /// Classifies a raw JSON-RPC message for routing purposes.
