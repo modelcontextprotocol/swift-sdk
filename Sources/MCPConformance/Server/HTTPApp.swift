@@ -43,13 +43,16 @@ actor HTTPApp {
     }
 
     /// Factory function to create MCP Server instances for each session.
-    typealias ServerFactory = @Sendable (String, StatefulHTTPServerTransport) async throws -> Server
+    typealias ServerFactory = @Sendable (String, any Transport) async throws -> Server
 
     private let configuration: Configuration
     private let serverFactory: ServerFactory
     private let validationPipeline: (any HTTPRequestValidationPipeline)?
     private var channel: Channel?
     private var sessions: [String: SessionContext] = [:]
+    private var statelessServer: Server?
+    private var statelessTransport: StatelessHTTPServerTransport?
+    private let statelessInitialization = AsyncInitialization<(StatelessHTTPServerTransport, Server)>()
 
     nonisolated let logger: Logger
 
@@ -152,7 +155,8 @@ actor HTTPApp {
     /// Routes an incoming HTTP request to the appropriate session transport.
     ///
     /// - Requests with a valid `Mcp-Session-Id` are forwarded to the matching transport.
-    /// - POST requests with an `initialize` body create a new session.
+    /// - POST requests with an `initialize` body or a modern-profile request
+    ///   (`server/discover`, `subscriptions/listen`, modern `_meta`) create a session.
     /// - All other requests without a session return an error.
     func handleHTTPRequest(_ request: HTTPRequest) async -> HTTPResponse {
         let sessionID = request.header(HTTPHeaderName.sessionID)
@@ -172,16 +176,28 @@ actor HTTPApp {
             return response
         }
 
-        // No session — check for initialize request
-        if request.method.uppercased() == "POST",
+        // No session — create one for initialize or modern-profile POSTs
+        // (server/discover, subscriptions/listen, modern `_meta` version).
+        // Stale/unknown Mcp-Session-Id must 404, not mint a replacement session.
+        if sessionID == nil,
+            request.method.uppercased() == "POST",
             let body = request.body,
-            let kind = JSONRPCMessageKind(data: body),
-            kind.isInitializeRequest
+            let kind = JSONRPCMessageKind(data: body)
         {
-            return await createSessionAndHandle(request)
+            let headerVersion = request.header(HTTPHeaderName.protocolVersion)
+            let isModern = JSONRPCMessageKind.isModernProfile(
+                kind: kind,
+                body: body,
+                headerProtocolVersion: headerVersion
+            )
+            let modernHeader = headerVersion.map(Version.isModern) ?? false
+            if kind.isInitializeRequest || isModern || modernHeader {
+                if isModern || modernHeader { return await handleStateless(request) }
+                return await createSessionAndHandle(request)
+            }
         }
 
-        // No session and not initialize
+        // No session and not a session-creating request
         if sessionID != nil {
             return .error(statusCode: 404, .invalidRequest("Not Found: Session not found or expired"))
         }
@@ -189,6 +205,35 @@ actor HTTPApp {
             statusCode: 400,
             .invalidRequest("Bad Request: Missing \(HTTPHeaderName.sessionID) header")
         )
+    }
+
+    private func handleStateless(_ request: HTTPRequest) async -> HTTPResponse {
+        if statelessServer == nil || statelessTransport == nil {
+            do {
+                let (transport, server) = try await statelessInitialization.value {
+                    let transport = StatelessHTTPServerTransport(
+                        validationPipeline: self.validationPipeline,
+                        logger: self.logger
+                    )
+                    do {
+                        let server = try await self.serverFactory("stateless", transport)
+                        try await server.start(transport: transport)
+                        return (transport, server)
+                    } catch {
+                        await transport.disconnect()
+                        throw error
+                    }
+                }
+                statelessTransport = transport
+                statelessServer = server
+            } catch {
+                return .error(statusCode: 500, .internalError("Failed to start stateless server: \(error.localizedDescription)"))
+            }
+        }
+        guard let statelessTransport else {
+            return .error(statusCode: 500, .internalError("Stateless server transport is unavailable"))
+        }
+        return await statelessTransport.handleRequest(request)
     }
 
     // MARK: - Session Management
@@ -247,6 +292,13 @@ actor HTTPApp {
         for sessionID in sessions.keys {
             await closeSession(sessionID)
         }
+        let initializedStateless = await statelessInitialization.existingValue()
+        if let server = statelessServer ?? initializedStateless?.1 { await server.stop() }
+        if let transport = statelessTransport ?? initializedStateless?.0 {
+            await transport.disconnect()
+        }
+        statelessServer = nil
+        statelessTransport = nil
     }
 
     private func sessionCleanupLoop() async {
@@ -275,6 +327,9 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     typealias OutboundOut = HTTPServerResponsePart
 
     private let app: HTTPApp
+    /// The NIO handler is scoped to one TCP channel, providing a stable caller
+    /// identity for unauthenticated requests on that connection.
+    private let clientIdentity = UUID().uuidString
 
     private struct RequestState {
         var head: HTTPRequestHead
@@ -282,9 +337,26 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     }
 
     private var requestState: RequestState?
+    /// Active SSE response pump; cancelled when the client disconnects.
+    /// Mutated only on the channel event loop (channelInactive / eventLoop.execute).
+    private var activeStreamTask: Task<Void, Never>?
+    /// Identity for the active pump (Task is not Equatable).
+    private var activeStreamToken: UUID?
+    /// Set on the event loop when the channel becomes inactive so a late pump
+    /// registration can cancel immediately instead of parking forever.
+    private var channelClosed = false
 
     init(app: HTTPApp) {
         self.app = app
+    }
+
+    func channelInactive(context: ChannelHandlerContext) {
+        channelClosed = true
+        let task = activeStreamTask
+        activeStreamTask = nil
+        activeStreamToken = nil
+        task?.cancel()
+        context.fireChannelInactive()
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -353,12 +425,17 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         }
 
         let path = String(state.head.uri.split(separator: "?").first ?? Substring(state.head.uri))
+        let callerIdentity = HTTPRequest.stableClientIdentity(
+            headers: headers,
+            connectionIdentity: clientIdentity
+        )
 
         return HTTPRequest(
             method: state.head.method.rawValue,
             headers: headers,
             body: body,
-            path: path
+            path: path,
+            clientIdentity: callerIdentity
         )
     }
 
@@ -388,22 +465,53 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 ctx.flush()
             }
 
-            // Await the SSE stream directly — no Task needed since we're already in one
-            do {
-                for try await chunk in stream {
+            // Gate the pump until it is registered on the event loop so
+            // channelInactive can cancel it if the client disconnects immediately.
+            let gate = OneShotGate()
+            let pumpToken = UUID()
+            let pump = Task {
+                await gate.wait()
+                do {
+                    for try await chunk in stream {
+                        if Task.isCancelled { break }
+                        eventLoop.execute {
+                            var buffer = ctx.channel.allocator.buffer(capacity: chunk.count)
+                            buffer.writeBytes(chunk)
+                            ctx.writeAndFlush(
+                                self.wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
+                        }
+                    }
+                } catch {
+                    // Truncate the SSE stream so the client can distinguish failure.
                     eventLoop.execute {
-                        var buffer = ctx.channel.allocator.buffer(capacity: chunk.count)
-                        buffer.writeBytes(chunk)
-                        ctx.writeAndFlush(
-                            self.wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
+                        self.channelClosed = true
+                        ctx.close(promise: nil)
                     }
                 }
-            } catch {
-                // Stream ended with error — close connection
+            }
+            eventLoop.execute {
+                if self.channelClosed {
+                    pump.cancel()
+                } else {
+                    self.activeStreamTask = pump
+                    self.activeStreamToken = pumpToken
+                }
+                gate.open()
+            }
+            await pump.value
+            eventLoop.execute {
+                if self.activeStreamToken == pumpToken {
+                    self.activeStreamTask = nil
+                    self.activeStreamToken = nil
+                }
             }
 
-            eventLoop.execute {
-                ctx.writeAndFlush(self.wrapOutboundOut(.end(nil)), promise: nil)
+            if !pump.isCancelled {
+                eventLoop.execute {
+                    // Skip a graceful .end if the channel already closed (error path).
+                    guard !self.channelClosed else { return }
+                    ctx.writeAndFlush(self.wrapOutboundOut(.end(nil)), promise: nil)
+                }
             }
 
         default:
@@ -428,5 +536,34 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 ctx.writeAndFlush(self.wrapOutboundOut(.end(nil)), promise: nil)
             }
         }
+    }
+}
+
+/// Single-use async gate so an SSE pump can wait until it is registered for cancel.
+private final class OneShotGate: @unchecked Sendable {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var opened = false
+    private let lock = NSLock()
+
+    func wait() async {
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            lock.lock()
+            if opened {
+                lock.unlock()
+                cont.resume()
+            } else {
+                continuation = cont
+                lock.unlock()
+            }
+        }
+    }
+
+    func open() {
+        lock.lock()
+        opened = true
+        let cont = continuation
+        continuation = nil
+        lock.unlock()
+        cont?.resume()
     }
 }

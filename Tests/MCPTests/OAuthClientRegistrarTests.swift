@@ -23,7 +23,8 @@ import Testing
                 registrationEndpoint: registrationEndpoint,
                 codeChallengeMethodsSupported: ["S256"],
                 tokenEndpointAuthMethodsSupported: nil,
-                clientIDMetadataDocumentSupported: nil
+                clientIDMetadataDocumentSupported: nil,
+                authorizationResponseIssParameterSupported: nil
             )
         }
 
@@ -74,7 +75,8 @@ import Testing
             let asMetadata = OAuthAuthorizationServerMetadata(
                 issuer: nil, authorizationEndpoint: nil, tokenEndpoint: nil,
                 registrationEndpoint: nil, codeChallengeMethodsSupported: nil,
-                tokenEndpointAuthMethodsSupported: nil, clientIDMetadataDocumentSupported: false
+                tokenEndpointAuthMethodsSupported: nil, clientIDMetadataDocumentSupported: false,
+                authorizationResponseIssParameterSupported: nil
             )
             let (session, _) = makeIsolatedSession()
 
@@ -110,6 +112,49 @@ import Testing
             let resultValue = try #require(result)
             let expected = OAuthConfiguration.TokenEndpointAuthentication.none(clientID: "registered-client")
             #expect(resultValue.updatedAuthentication == expected)
+        }
+
+        @Test("Dynamic registration identifies loopback redirects as native applications")
+        func testRegisterIncludesNativeApplicationType() async throws {
+            let body = try successRegistrationBody()
+            let (session, key) = makeIsolatedSession()
+            await IsolatedMockURLProtocol.setHandler(key: key) { request in
+                let requestBody: Data
+                if let data = request.httpBody {
+                    requestBody = data
+                } else if let stream = request.httpBodyStream {
+                    stream.open()
+                    defer { stream.close() }
+                    let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: 4096)
+                    defer { buffer.deallocate() }
+                    var data = Data()
+                    while stream.hasBytesAvailable {
+                        data.append(buffer, count: stream.read(buffer, maxLength: 4096))
+                    }
+                    requestBody = data
+                } else {
+                    requestBody = Data()
+                }
+                let payload = try #require(
+                    try? JSONSerialization.jsonObject(with: requestBody) as? [String: Any]
+                )
+                #expect(payload["application_type"] as? String == "native")
+                let response = HTTPURLResponse(
+                    url: self.registrationEndpoint, statusCode: 201,
+                    httpVersion: nil, headerFields: nil)!
+                return (response, body)
+            }
+
+            let config = OAuthConfiguration(
+                grantType: .authorizationCode,
+                authentication: .none(clientID: ""),
+                authorizationRedirectURI: URL(string: "http://127.0.0.1:54321/callback")!
+            )
+            _ = try await registrar.register(
+                configuration: config,
+                asMetadata: makeASMetadata(registrationEndpoint: registrationEndpoint),
+                session: session
+            )
         }
 
         @Test("Throws on 4xx registration response")
