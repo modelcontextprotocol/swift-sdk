@@ -77,6 +77,7 @@ struct OAuthAuthorizationServerMetadata: Decodable, Sendable, Equatable {
     let codeChallengeMethodsSupported: [String]?
     let tokenEndpointAuthMethodsSupported: [String]?
     let clientIDMetadataDocumentSupported: Bool?
+    var authorizationResponseISSParameterSupported: Bool? = nil
 
     enum CodingKeys: String, CodingKey {
         case issuer
@@ -86,6 +87,7 @@ struct OAuthAuthorizationServerMetadata: Decodable, Sendable, Equatable {
         case codeChallengeMethodsSupported = "code_challenge_methods_supported"
         case tokenEndpointAuthMethodsSupported = "token_endpoint_auth_methods_supported"
         case clientIDMetadataDocumentSupported = "client_id_metadata_document_supported"
+        case authorizationResponseISSParameterSupported = "authorization_response_iss_parameter_supported"
     }
 }
 
