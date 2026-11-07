@@ -40,6 +40,11 @@ public enum MCPError: Swift.Error, Sendable {
     // MCP specific errors
     case urlElicitationRequired(message: String, elicitations: [URLElicitationInfo])  // -32042
 
+    // Payment required, per the MPP "Payment" authentication scheme bound to JSON-RPC. Carries the
+    // error `data` verbatim (e.g. `{ httpStatus, challenges, problem? }`) so a client can read the
+    // offered challenges. Decoded when an error's `data` contains a `challenges` array.
+    case paymentRequired(code: Int, message: String, data: [String: Value])  // -32042 / -32043
+
     // Transport specific errors
     case connectionClosed
     case transportError(Swift.Error)
@@ -54,6 +59,7 @@ public enum MCPError: Swift.Error, Sendable {
         case .internalError: return -32603
         case .serverError(let code, _): return code
         case .urlElicitationRequired: return -32042
+        case .paymentRequired(let code, _, _): return code
         case .connectionClosed: return -32000
         case .transportError: return -32001
         }
@@ -93,6 +99,8 @@ extension MCPError: LocalizedError {
             return "Server error: \(message)"
         case .urlElicitationRequired(let message, _):
             return "URL elicitation required: \(message)"
+        case .paymentRequired(_, let message, _):
+            return "Payment required: \(message)"
         case .connectionClosed:
             return "Connection closed"
         case .transportError(let error):
@@ -116,6 +124,8 @@ extension MCPError: LocalizedError {
             return "Server-defined error occurred"
         case .urlElicitationRequired:
             return "The server requires user authentication or input via external URL"
+        case .paymentRequired:
+            return "The server requires payment before fulfilling this request"
         case .connectionClosed:
             return "The connection to the server was closed"
         case .transportError(let error):
@@ -138,6 +148,8 @@ extension MCPError: LocalizedError {
                 return "Visit \(first.url) to complete the required authentication or input"
             }
             return "Complete the required URL-based elicitation"
+        case .paymentRequired:
+            return "Provide a payment credential in the request metadata and retry"
         case .connectionClosed:
             return "Try reconnecting to the server"
         default:
@@ -203,6 +215,10 @@ extension MCPError: Codable {
                 ["elicitations": Value.array(elicitationsData.map { .object($0) })],
                 forKey: .data
             )
+        case .paymentRequired(_, let message, let data):
+            // Encode the raw message + the error data verbatim (carries `challenges`).
+            try container.encode(message, forKey: .message)
+            try container.encode(data, forKey: .data)
         case .connectionClosed:
             try container.encode(errorDescription ?? "Unknown error", forKey: .message)
         case .transportError(let error):
@@ -239,6 +255,12 @@ extension MCPError: Codable {
         case -32603:
             self = .internalError(unwrapDetail(nil))
         case -32042:
+            // -32042 is shared: MPP "Payment Required" carries a `challenges` array, while MCP
+            // URL elicitation carries an `elicitations` array. Disambiguate by payload.
+            if case .array = data?["challenges"] {
+                self = .paymentRequired(code: code, message: message, data: data ?? [:])
+                break
+            }
             // Extract elicitations array from data
             var elicitations: [URLElicitationInfo] = []
             if case .array(let items) = data?["elicitations"] {
@@ -257,6 +279,14 @@ extension MCPError: Codable {
                 }
             }
             self = .urlElicitationRequired(message: message, elicitations: elicitations)
+        case -32043:
+            // MPP "Payment Verification Failed" carries a fresh `challenges` array; without one it
+            // is an ordinary server error.
+            if case .array = data?["challenges"] {
+                self = .paymentRequired(code: code, message: message, data: data ?? [:])
+            } else {
+                self = .serverError(code: code, message: message)
+            }
         case -32000:
             self = .connectionClosed
         case -32001:
@@ -293,6 +323,8 @@ extension MCPError: Equatable {
             return c1 == c2 && m1 == m2
         case (.urlElicitationRequired(let m1, let e1), .urlElicitationRequired(let m2, let e2)):
             return m1 == m2 && e1 == e2
+        case (.paymentRequired(let c1, let m1, let d1), .paymentRequired(let c2, let m2, let d2)):
+            return c1 == c2 && m1 == m2 && d1 == d2
         case (.connectionClosed, .connectionClosed): return true
         case (.transportError(let a), .transportError(let b)):
             return a.localizedDescription == b.localizedDescription
@@ -322,6 +354,10 @@ extension MCPError: Hashable {
         case .urlElicitationRequired(let message, let elicitations):
             hasher.combine(message)
             hasher.combine(elicitations)
+        case .paymentRequired(let code, let message, let data):
+            hasher.combine(code)
+            hasher.combine(message)
+            hasher.combine(data)
         case .connectionClosed:
             break
         case .transportError(let error):
