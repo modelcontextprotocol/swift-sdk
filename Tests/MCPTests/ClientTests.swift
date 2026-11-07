@@ -1,4 +1,5 @@
 import Foundation
+import Logging
 import Testing
 
 @testable import MCP
@@ -771,5 +772,98 @@ struct ClientTests {
         // (If it did, the test would have crashed)
 
         await client.disconnect()
+    }
+
+    @Test("Message loop stops when the transport stream finishes")
+    func testMessageLoopStopsWhenStreamFinishes() async throws {
+        let transport = StreamFinishingTransport()
+        let client = Client(name: "TestClient", version: "1.0")
+
+        // Answer the initialize request so that `connect` can complete.
+        let initTask = Task {
+            try await Task.sleep(for: .milliseconds(10))
+            if let request: Request<Initialize> = await transport.decodeLastSentMessage() {
+                try await transport.queue(
+                    response: Initialize.response(
+                        id: request.id,
+                        result: .init(
+                            protocolVersion: Version.latest,
+                            capabilities: .init(),
+                            serverInfo: .init(name: "TestServer", version: "1.0"),
+                            instructions: nil
+                        )
+                    ))
+            }
+        }
+
+        _ = try await client.connect(transport: transport)
+        initTask.cancel()
+
+        #expect(await transport.receiveCount == 1)
+
+        // The peer goes away: the stream finishes without throwing. This is what
+        // every transport does when the connection is over — StdioTransport on EOF,
+        // HTTPClientTransport and InMemoryTransport on disconnect, NetworkTransport
+        // when it stops. None of them ever reopens a finished stream.
+        await transport.finishStream()
+        try await Task.sleep(for: .milliseconds(100))
+
+        // The message loop must have terminated. Without the fix it called
+        // `receive()` again straight away, got the same finished stream back and
+        // spun at 100% CPU: this count would be in the thousands by now.
+        #expect(await transport.receiveCount == 1)
+
+        await client.disconnect()
+    }
+}
+
+/// A transport that hands out one single-use message stream and counts how many
+/// times the client asks for it, so a test can tell a terminated message loop from
+/// one that keeps re-requesting a stream that has already finished.
+private actor StreamFinishingTransport: Transport {
+    nonisolated let logger = Logger(label: "mcp.test.stream-finishing")
+
+    private let encoder = JSONEncoder()
+    private let decoder = JSONDecoder()
+
+    private let stream: AsyncThrowingStream<Data, Swift.Error>
+    private let continuation: AsyncThrowingStream<Data, Swift.Error>.Continuation
+
+    private(set) var receiveCount = 0
+    private(set) var sentData: [Data] = []
+
+    init() {
+        var continuation: AsyncThrowingStream<Data, Swift.Error>.Continuation!
+        self.stream = AsyncThrowingStream { continuation = $0 }
+        self.continuation = continuation
+    }
+
+    func connect() async throws {}
+
+    func disconnect() async {
+        continuation.finish()
+    }
+
+    func send(_ message: Data) async throws {
+        sentData.append(message)
+    }
+
+    func receive() -> AsyncThrowingStream<Data, Swift.Error> {
+        receiveCount += 1
+        return stream
+    }
+
+    func queue<M: MCP.Method>(response: Response<M>) throws {
+        continuation.yield(try encoder.encode(response))
+    }
+
+    func decodeLastSentMessage<T: Decodable>() -> T? {
+        guard let lastMessage = sentData.last else { return nil }
+        return try? decoder.decode(T.self, from: lastMessage)
+    }
+
+    /// Simulates the peer going away: the stream ends without an error.
+    func finishStream() {
+        continuation.finish()
     }
 }
