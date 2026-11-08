@@ -668,6 +668,34 @@ import Testing
             await transport.disconnect()
         }
 
+        @Test("Heartbeats stop when empty reads reveal a failed connection")
+        func testHeartbeatsStopAfterEmptyReadFailure() async throws {
+            let mockConnection = MockNetworkConnection()
+            let transport = NetworkTransport(
+                mockConnection,
+                heartbeatConfig: .init(enabled: true, interval: 0.1)
+            )
+
+            try await transport.connect()
+            mockConnection.simulateFailure()
+
+            let deadline = ContinuousClock.now + .seconds(3)
+            while mockConnection.state != .cancelled && ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            #expect(mockConnection.state == .cancelled)
+
+            await #expect(throws: MCPError.self) {
+                try await transport.send(Data())
+            }
+
+            let heartbeatsSent = mockConnection.getSentData().count
+            try await Task.sleep(for: .seconds(2.5))
+            #expect(mockConnection.getSentData().count == heartbeatsSent)
+
+            await transport.disconnect()
+        }
+
         @Test("Resource Cleanup")
         func testResourceCleanup() async throws {
             weak var weakConnection: MockNetworkConnection?
