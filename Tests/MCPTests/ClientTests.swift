@@ -1,3 +1,4 @@
+import Logging
 import Foundation
 import Testing
 
@@ -474,6 +475,135 @@ struct ClientTests {
         await client.disconnect()
     }
 
+    @Test("Batch failure completes all result tasks", arguments: [false, true])
+    func testBatchFailureCompletesTasks(bodyThrows: Bool) async throws {
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+        let server = Server(name: "TestServer", version: "1.0")
+        try await server.start(transport: serverTransport)
+        let transport = BatchFailureTransport(base: clientTransport)
+        let client = Client(name: "TestClient", version: "1.0")
+        try await client.connect(transport: transport)
+        let results = BatchFailureResults()
+        let expectedError: BatchFailureError = bodyThrows ? .body : .send
+
+        do {
+            try await client.withBatch { batch in
+                await results.observe(try await batch.addRequest(Ping.request()))
+                await results.observe(try await batch.addRequest(Ping.request()))
+                if bodyThrows { throw BatchFailureError.body }
+            }
+            Issue.record("Expected the batch to fail")
+        } catch {
+            #expect(error as? BatchFailureError == expectedError)
+        }
+
+        // Observe failure before disconnecting, since disconnect itself resumes
+        // pending requests and would hide missing batch cleanup.
+        let errors = await results.waitForErrors(count: 2)
+        #expect(errors.count == 2)
+        #expect(errors.allSatisfy { $0 == expectedError })
+        #expect(await transport.batchSendCount == (bodyThrows ? 0 : 1))
+
+        // A failed batch must not close the connection or break later requests.
+        try await client.ping()
+        await client.disconnect()
+        await server.stop()
+    }
+
+    @Test("Batch failure handles either registration order", arguments: [false, true])
+    func testBatchFailureRegistrationOrder(registerFirst: Bool) async throws {
+        let client = Client(name: "TestClient", version: "1.0")
+        let batchID = UUID()
+        let requestID = ID.random
+        let lateID = ID.random
+        let otherBatchID = UUID()
+        let otherID = ID.random
+        let results = BatchFailureResults()
+        let otherResults = BatchFailureResults()
+        let (registered, registration) = AsyncStream<Void>.makeStream()
+
+        func register(id: ID, batch: UUID) -> Task<Ping.Result, Swift.Error> {
+            Task {
+                try await withCheckedThrowingContinuation { continuation in
+                    Task {
+                        await client.addPendingBatchRequest(
+                            id: id, continuation: continuation,
+                            type: Ping.Result.self, batchID: batch
+                        )
+                        registration.yield(())
+                    }
+                }
+            }
+        }
+
+        var iterator = registered.makeAsyncIterator()
+        await otherResults.observe(register(id: otherID, batch: otherBatchID))
+        _ = await iterator.next()
+        if registerFirst {
+            await results.observe(register(id: requestID, batch: batchID))
+            _ = await iterator.next()
+        }
+
+        await client.finishBatch(
+            id: batchID, requestIDs: [requestID, lateID], error: BatchFailureError.send
+        )
+        if !registerFirst {
+            await results.observe(register(id: requestID, batch: batchID))
+            _ = await iterator.next()
+        }
+        let errors = await results.waitForErrors(count: 1)
+        #expect(errors == [.send])
+        // The failure must remain available for every late registration, not
+        // just the first continuation that arrives after finishBatch.
+        await results.observe(register(id: lateID, batch: batchID))
+        _ = await iterator.next()
+        let lateErrors = await results.waitForErrors(count: 2)
+        #expect(lateErrors == [.send, .send])
+        #expect(await otherResults.errors.isEmpty)
+
+        // Finishing another batch must deliver its own error, not the first
+        // batch's failure. Disconnect also checks that no continuation is resumed twice.
+        await client.finishBatch(id: otherBatchID, requestIDs: [otherID], error: BatchFailureError.body)
+        let otherErrors = await otherResults.waitForErrors(count: 1)
+        #expect(otherErrors == [.body])
+        registration.finish()
+        await client.disconnect()
+    }
+
+    @Test("Batch failure preserves a response that already completed")
+    func testBatchFailureAfterResponse() async throws {
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+        let server = Server(name: "TestServer", version: "1.0")
+        try await server.start(transport: serverTransport)
+        let client = Client(name: "TestClient", version: "1.0")
+        try await client.connect(transport: clientTransport)
+        let batchID = UUID()
+        let requestID = ID.random
+        let (registered, registration) = AsyncStream<Void>.makeStream()
+        let result = Task<Ping.Result, Swift.Error> {
+            try await withCheckedThrowingContinuation { continuation in
+                Task {
+                    await client.addPendingBatchRequest(
+                        id: requestID, continuation: continuation,
+                        type: Ping.Result.self, batchID: batchID
+                    )
+                    registration.yield(())
+                    registration.finish()
+                }
+            }
+        }
+        for await _ in registered {}
+        try await serverTransport.send(JSONEncoder().encode(Ping.response(id: requestID, result: .init())))
+        _ = try await result.value
+
+        // The response has removed the pending request. Failure cleanup must
+        // not resume the same continuation again.
+        await client.finishBatch(id: batchID, requestIDs: [requestID], error: BatchFailureError.send)
+        try await client.ping()
+        await client.disconnect()
+        await server.stop()
+    }
+
     @Test("Batch request - empty")
     func testBatchRequestEmpty() async throws {
         let transport = MockTransport()
@@ -771,5 +901,57 @@ struct ClientTests {
         // (If it did, the test would have crashed)
 
         await client.disconnect()
+    }
+}
+
+private enum BatchFailureError: Swift.Error, Equatable {
+    case send
+    case body
+}
+
+private actor BatchFailureResults {
+    private(set) var errors: [BatchFailureError?] = []
+
+    func observe(_ task: Task<Ping.Result, Swift.Error>) {
+        Task {
+            switch await task.result {
+            case .success:
+                errors.append(nil)
+            case .failure(let error):
+                errors.append(error as? BatchFailureError)
+            }
+        }
+    }
+
+    func waitForErrors(count: Int) async -> [BatchFailureError?] {
+        let deadline = ContinuousClock.now + .seconds(3)
+        while errors.count < count && ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return errors
+    }
+}
+
+private actor BatchFailureTransport: Transport {
+    nonisolated let logger = Logger(label: "mcp.test.batch-failure")
+    let base: InMemoryTransport
+    private var stream = AsyncThrowingStream<Data, Swift.Error> { $0.finish() }
+    private(set) var batchSendCount = 0
+
+    init(base: InMemoryTransport) { self.base = base }
+
+    func connect() async throws {
+        try await base.connect()
+        stream = await base.receive()
+    }
+    func disconnect() async { await base.disconnect() }
+    func receive() -> AsyncThrowingStream<Data, Swift.Error> { stream }
+
+    func send(_ data: Data) async throws {
+        if (try? JSONDecoder().decode([AnyRequest].self, from: data)) != nil {
+            batchSendCount += 1
+            throw BatchFailureError.send
+        }
+        try await base.send(data)
     }
 }
