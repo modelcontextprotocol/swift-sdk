@@ -612,6 +612,9 @@ import Logging
                                 if !isStopping {
                                     // Release the underlying socket and finish the stream so
                                     // receive() callers don't hang.
+                                    isConnected = false
+                                    heartbeatTask?.cancel()
+                                    heartbeatTask = nil
                                     connection.cancel()
                                     messageContinuation.finish(throwing: MCPError.connectionClosed)
                                 }
