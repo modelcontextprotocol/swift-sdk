@@ -138,9 +138,132 @@ struct StatelessGatingTests {
         )
         expectWire(initialize, matches: try wireJSON(#"{"id":7,"error":{"code":-32022}}"#))
         let handshake = try await exchange(
-            transport, #"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"echo"}}"#)
+            transport,
+            #"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"echo","_meta":{"io.modelcontextprotocol/protocolVersion":"2025-11-25"}}}"#
+        )
         expectWire(handshake, matches: try wireJSON(#"{"id":8,"error":{"code":-32022}}"#))
         #expect(await calls.count == 0)
+    }
+
+    @Test(
+        "A server without handshake revisions answers a request without a _meta version with -32602",
+        arguments: [
+            #"{"jsonrpc":"2.0","id":9,"method":"tools/list"}"#,
+            #"{"jsonrpc":"2.0","id":9,"method":"tools/list","params":{}}"#,
+            #"{"jsonrpc":"2.0","id":9,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{}}}}"#,
+            #"{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"echo"}}"#,
+            #"{"jsonrpc":"2.0","id":9,"method":"server/discover","params":{}}"#,
+            #"{"jsonrpc":"2.0","id":9,"method":"subscriptions/listen","params":{"notifications":{}}}"#,
+        ])
+    func missingMetaVersion(_ message: String) async throws {
+        let calls = Calls()
+        let server = await makeServer(calls, configuration: .init(protocolVersions: ["2026-07-28"]))
+        let transport = MockTransport()
+        try await server.start(transport: transport)
+        defer { Task { await server.stop() } }
+
+        let reply = try await exchange(transport, message)
+        expectWire(
+            reply,
+            matches: try wireJSON(#"{"id":9,"error":{"code":-32602,"data":{"supported":["2026-07-28"]}}}"#))
+        #expect(await calls.count == 0)
+    }
+
+    @Test("A dual-era server keeps reading a request without a _meta version as the handshake era")
+    func missingMetaVersionDualEra() async throws {
+        let calls = Calls()
+        let server = await makeServer(calls)
+        let transport = MockTransport()
+        try await server.start(transport: transport)
+        defer { Task { await server.stop() } }
+
+        let discover = try await exchange(
+            transport, #"{"jsonrpc":"2.0","id":10,"method":"server/discover","params":{}}"#)
+        expectWire(discover, matches: try wireJSON(#"{"id":10,"error":{"code":-32601}}"#))
+        let call = try await exchange(
+            transport, #"{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"echo"}}"#)
+        #expect(call.objectValue?["result"] != nil)
+    }
+
+    @Test(
+        "The stateless HTTP transport lists the server's versions in -32022",
+        arguments: ["2025-11-25", "2099-01-01"])
+    func transportListsServedVersions(_ version: String) async throws {
+        let calls = Calls()
+        let server = await makeServer(calls, configuration: .init(protocolVersions: ["2026-07-28"]))
+        let transport = StatelessHTTPServerTransport()
+        try await server.start(transport: transport)
+        defer { Task { await server.stop() } }
+
+        let response = await transport.handleRequest(
+            HTTPRequest(
+                method: "POST",
+                headers: [
+                    "Content-Type": "application/json", "Accept": "application/json",
+                    HTTPHeaderName.protocolVersion: version,
+                ],
+                body: Data(#"{"jsonrpc":"2.0","id":15,"method":"tools/list","params":{}}"#.utf8)))
+        #expect(response.statusCode == 400)
+        let body = try JSONDecoder().decode(Value.self, from: try #require(response.bodyData))
+        let error = body.objectValue?["error"]?.objectValue
+        #expect(error?["code"] == -32022)
+        #expect(error?["data"]?.objectValue?["supported"] == ["2026-07-28"])
+    }
+
+    @Test("Over HTTP without a version header, a missing _meta version is 400 on a stateless-only server")
+    func missingMetaVersionHTTP() async throws {
+        let calls = Calls()
+        let server = await makeServer(calls, configuration: .init(protocolVersions: ["2026-07-28"]))
+        let transport = StatelessHTTPServerTransport()
+        try await server.start(transport: transport)
+        defer { Task { await server.stop() } }
+
+        let response = await transport.handleRequest(
+            HTTPRequest(
+                method: "POST", headers: ["Content-Type": "application/json", "Accept": "application/json"],
+                body: Data(#"{"jsonrpc":"2.0","id":12,"method":"tools/list","params":{}}"#.utf8)))
+        #expect(response.statusCode == 400)
+        let body = try JSONDecoder().decode(Value.self, from: try #require(response.bodyData))
+        expectWire(
+            body, matches: try wireJSON(#"{"id":12,"error":{"code":-32602,"data":{"supported":["2026-07-28"]}}}"#))
+    }
+
+    @Test(
+        "A progressToken that is not a string or an integer is -32602 in both eras",
+        arguments: ["null", "true", "{}", "[]", "1.5"], [true, false])
+    func invalidProgressToken(_ token: String, stateless: Bool) async throws {
+        let calls = Calls()
+        let server = await makeServer(calls)
+        let transport = MockTransport()
+        try await server.start(transport: transport)
+        defer { Task { await server.stop() } }
+
+        let envelope =
+            stateless
+            ? #","io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}"#
+            : ""
+        let reply = try await exchange(
+            transport,
+            #"{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"echo","_meta":{"progressToken":\#(token)\#(envelope)}}}"#
+        )
+        expectWire(reply, matches: try wireJSON(#"{"id":13,"error":{"code":-32602}}"#))
+        #expect(await calls.count == 0)
+    }
+
+    @Test("A string or integer progressToken is served", arguments: [#""t""#, "7"])
+    func validProgressToken(_ token: String) async throws {
+        let calls = Calls()
+        let server = await makeServer(calls)
+        let transport = MockTransport()
+        try await server.start(transport: transport)
+        defer { Task { await server.stop() } }
+
+        let reply = try await exchange(
+            transport,
+            #"{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"echo","_meta":{"progressToken":\#(token)}}}"#
+        )
+        #expect(reply.objectValue?["result"] != nil)
+        #expect(await calls.count == 1)
     }
 
     @Test("Undecodable parameters name the member, not Swift types")

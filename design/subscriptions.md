@@ -76,9 +76,14 @@ Stream end:
 
 | Trigger | Path | Client sees |
 |---|---|---|
-| `server.closeSubscriptions()` or `server.stop()` | event streams finish; handler returns | the result; `Subscription.finished()` returns |
+| `server.closeSubscriptions()` or `server.stop()` | event streams finish; handler returns; `handleRequest` sends the result, then `notifications/cancelled` for the listen id except on `StatelessHTTPServerTransport` | the result, then (stdio and other message streams) the cancellation; `Subscription.finished()` returns |
 | `notifications/cancelled` for the listen id | handler task cancelled; `for await` ends; `checkCancellation` throws | no result |
 | HTTP client closes the response | `StatelessHTTPServerTransport` SSE `onTermination(.cancelled)` → `abandon` yields `notifications/cancelled` for the internal id | stream closed by the client itself |
+
+The cancellation after the result follows cancellation.mdx (2026-07-28): a server MUST send
+`notifications/cancelled` referencing a `subscriptions/listen` request when it tears that stream
+down. Over HTTP the end of the response is the teardown. A stream the client cancelled gets
+nothing more.
 
 `StatelessHTTPServerTransport` gives each exchange an internal id, so the handler stamps the
 internal id in `subscriptionId`. `JSONRPCMessageFields.replacingSubscriptionID` restores the

@@ -19,6 +19,10 @@ import Logging
 ///   (SEP-2243); a mismatch is answered with 400 and -32020.
 /// - On 2026-07-28 requests, JSON-RPC errors use HTTP status codes:
 ///   404 for -32601; 400 for -32600, -32602 and -32020 to -32022.
+/// - Validators check `MCP-Protocol-Version` against the versions of the
+///   server started on the transport (`Server.Configuration.protocolVersions`),
+///   so -32022 lists those. When they include no handshake revision, every
+///   error gets its 2026-07-28 HTTP status.
 /// - Each request is given a unique internal JSON-RPC id while in flight, so
 ///   concurrent clients may reuse ids.
 /// - A client cancels a request by closing its HTTP request; the adapter
@@ -104,6 +108,22 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
 
     /// An SSE comment line: ignored by clients, keeps the connection busy.
     static let keepAliveComment = Data(": keep-alive\n\n".utf8)
+
+    /// The protocol versions the server on this transport serves, newest
+    /// first; set by ``Server/start(transport:initializeHook:statelessRequestHook:)``.
+    private var servedVersions = Version.stateless + Version.handshake
+
+    /// Sets the protocol versions the server on this transport serves.
+    func serve(protocolVersions: [String]) {
+        servedVersions = protocolVersions
+    }
+
+    /// Whether the server serves a handshake revision. A server that serves
+    /// none answers every request by the 2026-07-28 rules, including the
+    /// HTTP status of its errors.
+    private var servesHandshake: Bool {
+        servedVersions.contains { Version.handshake.contains($0) }
+    }
 
     // MARK: - Init
 
@@ -207,6 +227,9 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
                 .message(
                     JSONRPCMessageFields.replacingSubscriptionID(
                         in: data, internalID: related, with: exchange.clientID)))
+
+        case .invalid(let method, _):
+            logger.warning("Invalid outgoing message dropped", metadata: ["method": "\(method)"])
         }
     }
 
@@ -243,7 +266,7 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
             // for every method. Anything else is 405.
             let context = HTTPValidationContext(
                 httpMethod: request.method.uppercased(), sessionID: nil,
-                supportedProtocolVersions: Set(Version.stateless + Version.handshake))
+                supportedProtocolVersions: Set(servedVersions))
             if let response = validationPipeline.validate(request, context: context),
                 (200..<300).contains(response.statusCode) || response.statusCode == 304
             {
@@ -278,19 +301,28 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
         // One probe for the id and the `_meta` version.
         let fields = JSONRPCMessageFields.requestFields(in: normalized)
         var requestID: ID?
-        if case .request = messageKind {
-            requestID = fields.id
+        switch messageKind {
+        case .request, .invalid: requestID = fields.id
+        case .notification, .response: break
         }
 
+        // Validators see the versions the server serves, so a version it
+        // does not serve gets -32022 listing those, here or in the server.
         let context = HTTPValidationContext(
             httpMethod: "POST",
             sessionID: nil,
             isInitializationRequest: messageKind.isInitializeRequest,
-            supportedProtocolVersions: Set(Version.stateless + Version.handshake)
+            supportedProtocolVersions: Set(servedVersions)
         )
 
         if let errorResponse = validationPipeline.validate(request, context: context) {
             return errorResponse.withRequestID(requestID)
+        }
+
+        // JSON-RPC 2.0 §5: a request whose `id` cannot be read is answered
+        // with -32600 and `"id": null`, not treated as a notification.
+        if case .invalid(_, let reason) = messageKind {
+            return .error(statusCode: 400, .invalidRequest(reason), id: requestID)
         }
 
         if let mismatch = Self.standardHeaderError(request, fields: fields) {
@@ -298,6 +330,10 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
         }
 
         switch messageKind {
+        case .invalid(_, let reason):
+            // Answered above, before the headers are checked.
+            return .error(statusCode: 400, .invalidRequest(reason), id: requestID)
+
         case .notification(let method) where method == CancelledNotification.name:
             if let cancellation = cancellation(normalized, request: request) {
                 incomingContinuation.yield(cancellation)
@@ -329,7 +365,7 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
             return await handleJSONRPCRequest(
                 normalized,
                 clientID: requestID,
-                isStateless: request.statelessProtocolVersion != nil,
+                isStateless: request.statelessProtocolVersion != nil || !servesHandshake,
                 request: request
             )
         }
@@ -375,6 +411,11 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
         guard let methodHeader else {
             return .headerMismatch("Missing \(MCPRequestHeaders.method) header")
         }
+        // Single-valued: repeated on several field lines, or joined with
+        // commas, which method names never contain (RFC 9110 §5.3).
+        guard !request.isRepeated(MCPRequestHeaders.method) else {
+            return .headerMismatch("\(MCPRequestHeaders.method) header appears more than once")
+        }
         guard methodHeader == method else {
             return .headerMismatch(
                 "\(MCPRequestHeaders.method) header \(methodHeader) does not match method \(method)")
@@ -383,6 +424,10 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
         guard let expected = fields.nameValue else { return nil }
         guard let raw = request.header(MCPRequestHeaders.name) else {
             return .headerMismatch("Missing \(MCPRequestHeaders.name) header")
+        }
+        // A resource URI may contain commas: only separate lines count.
+        guard !request.isRepeated(MCPRequestHeaders.name, valuesMayContainCommas: true) else {
+            return .headerMismatch("\(MCPRequestHeaders.name) header appears more than once")
         }
         guard MCPRequestHeaders.decode(raw) == expected else {
             return .headerMismatch("\(MCPRequestHeaders.name) header does not match the request")
@@ -614,10 +659,10 @@ enum JSONRPCMessageFields {
         try? JSONDecoder().decode(Probe.self, from: data)
     }
 
-    /// The `id` of a message, if it is a string or an integer.
+    /// The `id` of a message, if it is a string or an integer. `""` is a
+    /// valid id; `null` is none.
     static func id(in data: Data) -> ID? {
-        guard let id = probe(data)?.id, id != .string("") else { return nil }
-        return id
+        probe(data)?.id
     }
 
     /// The members of a request the transport reads, from one decode.
@@ -635,7 +680,7 @@ enum JSONRPCMessageFields {
     static func requestFields(in data: Data) -> RequestFields {
         let probe = probe(data)
         return RequestFields(
-            id: probe?.id == .string("") ? nil : probe?.id,
+            id: probe?.id,
             method: probe?.method,
             nameValue: probe?.method.flatMap {
                 MCPRequestHeaders.nameValue(

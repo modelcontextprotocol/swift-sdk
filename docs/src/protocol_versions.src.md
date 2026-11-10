@@ -265,9 +265,11 @@ Configure `protocolVersions: Version.stateless`:
 
 %include Examples/Snippets/Guides/ProtocolVersions.swift versions-stateless-only
 
-The server then answers `initialize`, and every other request without a
-stateless `io.modelcontextprotocol/protocolVersion`, with -32022 listing
-`Version.stateless`. A `.handshake` client fails to connect with -32022, and
+The server then answers `initialize`, and every request that names a
+handshake revision in `io.modelcontextprotocol/protocolVersion`, with -32022
+listing `Version.stateless`. A request that names no version is missing a
+required `_meta` field: it gets -32602 (HTTP 400), with the served versions in
+`data.supported`. A `.handshake` client fails to connect with -32022, and
 an `.automatic` client connects at 2026-07-28.
 
 ### Clients

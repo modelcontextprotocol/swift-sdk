@@ -469,6 +469,15 @@ struct PromptTests {
         #expect(decoded[2].role == .user)
         #expect(decoded[3].role == .assistant)
     }
+
+    @Test("arguments null reads as absent: the Go SDK sends it for a call without arguments")
+    func testNullArgumentsAreAbsent() throws {
+        let decoder = JSONDecoder()
+        let prompt = try decoder.decode(GetPrompt.Parameters.self, from: Data(#"{"name":"p","arguments":null}"#.utf8))
+        #expect(prompt.arguments == nil)
+        let call = try decoder.decode(CallTool.Parameters.self, from: Data(#"{"name":"t","arguments":null}"#.utf8))
+        #expect(call.arguments == nil)
+    }
 }
 
 @Suite("Prompt Integration Tests")

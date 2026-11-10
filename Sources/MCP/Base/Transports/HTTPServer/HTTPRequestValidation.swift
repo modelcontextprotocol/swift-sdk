@@ -178,7 +178,9 @@ public struct ProtocolVersionValidator: HTTPRequestValidator {
 
     /// Returns 400 with ``MCPError/unsupportedProtocolVersion(supported:requested:)``
     /// when the header names a version outside
-    /// ``HTTPValidationContext/supportedProtocolVersions``.
+    /// ``HTTPValidationContext/supportedProtocolVersions``, and 400 with
+    /// ``MCPError/headerMismatch(_:)`` when it was sent more than once and
+    /// names a revision that defines that error (2026-07-28 and later).
     public func validate(_ request: HTTPRequest, context: HTTPValidationContext) -> HTTPResponse? {
         // Skip for initialization requests (version is in the body, not the header)
         guard !context.isInitializationRequest else { return nil }
@@ -188,6 +190,21 @@ public struct ProtocolVersionValidator: HTTPRequestValidator {
         guard let version = request.header(HTTPHeaderName.protocolVersion) else {
             // Per spec: if not received, assume default version
             return nil
+        }
+
+        // The header is single-valued. A repeated one arrives on several
+        // field lines or joined with commas (RFC 9110 §5.3); at revisions
+        // that define HeaderMismatch it is a header failure, not an
+        // unsupported version.
+        let copies = request.headerValues(HTTPHeaderName.protocolVersion)
+            .flatMap { $0.split(separator: ",") }
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+        if copies.count > 1, copies.contains(where: { Version.profile(for: $0).usesStandardHeaders }) {
+            return .error(
+                statusCode: 400,
+                .headerMismatch("\(HTTPHeaderName.protocolVersion) appears more than once"),
+                sessionID: context.sessionID
+            )
         }
 
         guard context.supportedProtocolVersions.contains(version) else {
@@ -460,9 +477,10 @@ public struct BearerTokenValidationResult: Sendable, Equatable {
 /// Validates OAuth 2.1 Bearer authorization for protected MCP HTTP endpoints.
 ///
 /// This validator implements resource-server error semantics aligned with the MCP auth spec:
-/// - `401` with `WWW-Authenticate: Bearer ...` for missing/invalid tokens
+/// - `401` with `WWW-Authenticate: Bearer ...` for missing/invalid tokens, and for credentials
+///   of another scheme
 /// - `403` with `error="insufficient_scope"` for insufficient permissions
-/// - `400` for malformed authorization requests
+/// - `400` with `error="invalid_request"` for malformed Bearer authorization requests
 ///
 /// Include this validator early in your pipeline, before `SessionValidator`, so unauthenticated
 /// initialization requests can return a challenge.
@@ -558,31 +576,31 @@ public struct BearerTokenValidator: HTTPRequestValidator {
 
     /// Checks the Bearer token of a request that requires authentication.
     ///
-    /// Returns 401 with a `WWW-Authenticate` challenge for a missing, invalid,
-    /// expired or wrong-audience token, 403 for insufficient scope, and 400 for
-    /// a malformed `Authorization` header.
+    /// Returns 401 with a `WWW-Authenticate` challenge for a request without
+    /// Bearer credentials (no `Authorization` header, or another scheme) and
+    /// for an invalid, expired or wrong-audience token, 403 for insufficient
+    /// scope, and 400 with an `error="invalid_request"` challenge for a
+    /// malformed Bearer `Authorization` header (RFC 6750 §3.1).
     public func validate(_ request: HTTPRequest, context: HTTPValidationContext) -> HTTPResponse? {
         guard requiresAuthentication(request, context) else { return nil }
 
-        guard let authorizationHeader = request.header(HTTPHeaderName.authorization) else {
+        let parsedToken: String
+        switch bearerCredentials(in: request.header(HTTPHeaderName.authorization)) {
+        case .token(let token):
+            parsedToken = token
+        case .none:
+            // RFC 6750 §3.1: a request without Bearer credentials gets the
+            // challenge without an error code.
             return unauthorizedResponse(
                 challengeScope: challengeScopeProvider?(request, context),
                 error: nil,
                 errorDescription: nil,
                 sessionID: context.sessionID
             )
-        }
-
-        let parsedToken: String
-        switch parseBearerToken(from: authorizationHeader) {
-        case .success(let token):
-            parsedToken = token
-        case .failure(let error):
-            return .error(
-                statusCode: 400,
-                .invalidRequest("Bad Request: \(error.message)"),
-                sessionID: context.sessionID
-            )
+        case .malformed(let message):
+            return invalidRequestResponse(
+                message: message, challengeScope: challengeScopeProvider?(request, context),
+                sessionID: context.sessionID)
         }
 
         switch tokenValidator(parsedToken, request, context).outcome {
@@ -630,13 +648,29 @@ public struct BearerTokenValidator: HTTPRequestValidator {
             )
 
         case .malformedRequest(let errorDescription):
-            let message = errorDescription ?? "Malformed authorization request"
-            return .error(
-                statusCode: 400,
-                .invalidRequest("Bad Request: \(message)"),
-                sessionID: context.sessionID
-            )
+            return invalidRequestResponse(
+                message: errorDescription ?? "Malformed authorization request",
+                challengeScope: challengeScopeProvider?(request, context), sessionID: context.sessionID)
         }
+    }
+
+    /// 400 with a Bearer challenge carrying `error="invalid_request"`
+    /// (RFC 6750 §3.1), so the client still learns `resource_metadata`.
+    private func invalidRequestResponse(
+        message: String, challengeScope: Set<String>?, sessionID: String?
+    ) -> HTTPResponse {
+        let challenge = makeBearerChallenge(
+            resourceMetadataURL: resourceMetadataURL,
+            scope: challengeScope,
+            error: "invalid_request",
+            errorDescription: message
+        )
+        return .error(
+            statusCode: 400,
+            .invalidRequest("Bad Request: \(message)"),
+            sessionID: sessionID,
+            extraHeaders: [HTTPHeaderName.wwwAuthenticate: challenge]
+        )
     }
 
     private func unauthorizedResponse(
@@ -709,43 +743,36 @@ public struct BearerTokenValidator: HTTPRequestValidator {
             .replacingOccurrences(of: "\"", with: "\\\"")
     }
 
-    private struct BearerTokenParseError: Swift.Error {
-        let message: String
+    /// What the `Authorization` header of a request holds.
+    private enum BearerCredentials {
+        case token(String)
+        /// No Bearer credentials: no header, an empty one, or another scheme.
+        case none
+        /// A Bearer header that is malformed, for example without a token
+        /// or with two of them.
+        case malformed(String)
     }
 
-    private func parseBearerToken(
-        from authorizationHeader: String
-    ) -> Result<String, BearerTokenParseError> {
-        let trimmed = authorizationHeader.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            return .failure(.init(message: "Authorization header is empty"))
+    private func bearerCredentials(in authorizationHeader: String?) -> BearerCredentials {
+        let trimmed = (authorizationHeader ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let parts = trimmed.split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
+        guard let scheme = parts.first,
+            String(scheme).caseInsensitiveCompare(OAuthTokenType.bearer) == .orderedSame
+        else {
+            return .none
         }
 
-        let parts = trimmed.split(
-            maxSplits: 1,
-            whereSeparator: { $0.isWhitespace }
-        )
-
-        guard parts.count == 2 else {
-            return .failure(
-                .init(message: "Authorization header must be in the form: Bearer <token>")
-            )
-        }
-
-        guard String(parts[0]).caseInsensitiveCompare(OAuthTokenType.bearer) == .orderedSame else {
-            return .failure(.init(message: "Authorization scheme must be Bearer"))
-        }
-
-        let token = String(parts[1]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let token = parts.count == 2 ? String(parts[1]).trimmingCharacters(in: .whitespacesAndNewlines) : ""
         guard !token.isEmpty else {
-            return .failure(.init(message: "Bearer token is empty"))
+            return .malformed("Bearer token is empty")
         }
 
+        // Also two Authorization lines joined into `Bearer a, Bearer b`.
         if token.contains(where: \.isWhitespace) {
-            return .failure(.init(message: "Bearer token must not contain whitespace"))
+            return .malformed("Bearer token must not contain whitespace")
         }
 
-        return .success(token)
+        return .token(token)
     }
 }
 

@@ -208,6 +208,90 @@ struct SubscriptionTests {
         #expect(!(await transport.sentMessages.contains { $0.contains("notifications/subscriptions/acknowledged") }))
     }
 
+    /// Opens a listen stream with id `listen-1` from a raw peer; returns
+    /// the peer's transport and an iterator of what the server sends.
+    private func rawListen(_ server: Server) async throws -> (
+        InMemoryTransport, AsyncThrowingStream<Data, Swift.Error>.AsyncIterator
+    ) {
+        let (peer, serverEnd) = await InMemoryTransport.createConnectedPair()
+        try await server.start(transport: serverEnd)
+        try await peer.connect()
+        var messages = await peer.receive().makeAsyncIterator()
+        try await peer.send(
+            Data(
+                #"{"jsonrpc":"2.0","id":"listen-1","method":"subscriptions/listen","params":{"notifications":{"toolsListChanged":true},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#
+                    .utf8))
+        let ack = try JSONDecoder().decode(Value.self, from: try #require(try await messages.next()))
+        #expect(ack.objectValue?["method"] == .string(SubscriptionsAcknowledgedNotification.name))
+        return (peer, messages)
+    }
+
+    @Test("A stream the server closes gets its result, then notifications/cancelled for the listen id")
+    func testGracefulCloseSendsCancelled() async throws {
+        let server = makeListenServer()
+        var (peer, messages) = try await rawListen(server)
+        await server.closeSubscriptions()
+
+        let result = try JSONDecoder().decode(Value.self, from: try #require(try await messages.next()))
+        #expect(result.objectValue?["id"] == "listen-1")
+        #expect(result.objectValue?["result"] != nil)
+        let cancelled = try JSONDecoder().decode(Value.self, from: try #require(try await messages.next()))
+        #expect(cancelled.objectValue?["method"] == .string(CancelledNotification.name))
+        #expect(cancelled.objectValue?["params"]?.objectValue?["requestId"] == "listen-1")
+
+        // Nothing else follows: the next message answers a later request.
+        try await peer.send(Data(#"{"jsonrpc":"2.0","id":"after","method":"ping"}"#.utf8))
+        let next = try JSONDecoder().decode(Value.self, from: try #require(try await messages.next()))
+        #expect(next.objectValue?["id"] == "after")
+        await peer.disconnect()
+        await server.stop()
+    }
+
+    @Test("A stream the client cancels gets no result and no notifications/cancelled")
+    func testClientCancelSendsNothing() async throws {
+        let server = makeListenServer()
+        var (peer, messages) = try await rawListen(server)
+        try await peer.send(
+            Data(#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"listen-1"}}"#.utf8))
+        #expect(await eventually { await server.openSubscriptionCount == 0 })
+
+        try await peer.send(Data(#"{"jsonrpc":"2.0","id":"after","method":"ping"}"#.utf8))
+        let next = try JSONDecoder().decode(Value.self, from: try #require(try await messages.next()))
+        #expect(next.objectValue?["id"] == "after")
+        await peer.disconnect()
+        await server.stop()
+    }
+
+    @Test("Over the stateless HTTP transport the end of the response is the teardown")
+    func testGracefulCloseOverHTTPSendsNoCancelled() async throws {
+        let server = makeListenServer()
+        let transport = StatelessHTTPServerTransport(keepAliveInterval: nil)
+        try await server.start(transport: transport)
+        defer { Task { await server.stop() } }
+
+        let response = await transport.handleRequest(
+            HTTPRequest(
+                method: "POST",
+                headers: [
+                    "Content-Type": "application/json", "Accept": "application/json, text/event-stream",
+                    HTTPHeaderName.protocolVersion: "2026-07-28", MCPRequestHeaders.method: "subscriptions/listen",
+                ],
+                body: Data(
+                    #"{"jsonrpc":"2.0","id":"listen-1","method":"subscriptions/listen","params":{"notifications":{"toolsListChanged":true},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#
+                        .utf8)))
+        guard case .stream(let events, _) = response else {
+            Issue.record("expected an SSE stream, got \(response.statusCode)")
+            return
+        }
+        var text = ""
+        for try await chunk in events {
+            text += String(decoding: chunk, as: UTF8.self)
+            if text.contains(SubscriptionsAcknowledgedNotification.name) { await server.closeSubscriptions() }
+        }
+        #expect(text.contains(#""result""#))
+        #expect(!text.contains(CancelledNotification.name))
+    }
+
     @Test("listen requires a stateless connection")
     func testHandshakeRejected() async throws {
         let server = makeListenServer()

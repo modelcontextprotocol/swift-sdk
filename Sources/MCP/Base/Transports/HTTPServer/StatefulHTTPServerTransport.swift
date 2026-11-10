@@ -221,6 +221,8 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
             } else {
                 routeServerInitiatedMessage(data)
             }
+        case .invalid(let method, _):
+            logger.warning("Invalid outgoing message dropped", metadata: ["method": "\(method)"])
         }
     }
 
@@ -360,6 +362,14 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
 
         case .request(let id, _):
             return handleJSONRPCRequest(body, requestID: id, request: request)
+
+        case .invalid(_, let reason):
+            // JSON-RPC 2.0 §5: a request whose `id` cannot be read is
+            // answered with -32600 and `"id": null`, not treated as a
+            // notification.
+            return .error(
+                statusCode: 400, .invalidRequest(reason), id: JSONRPCMessageFields.id(in: body),
+                sessionID: sessionID)
         }
     }
 

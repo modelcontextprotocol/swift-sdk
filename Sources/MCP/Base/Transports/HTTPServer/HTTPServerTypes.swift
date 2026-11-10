@@ -34,11 +34,22 @@ public struct UUIDSessionIDGenerator: SessionIDGenerator {
 ///
 /// This type decouples the transport from any specific HTTP framework.
 /// The HTTP framework adapter converts its native request type into this before passing to the transport.
+///
+/// An adapter should pass the header field lines as received, with
+/// ``init(method:headerFields:body:path:)``: the transports then see how many
+/// times a header was sent, and refuse a repeated single-valued header such
+/// as `MCP-Protocol-Version` or `Mcp-Name` (RFC 9110 §5.3).
 public struct HTTPRequest: Sendable {
     /// The HTTP method (e.g., "GET", "POST", "DELETE").
     public let method: String
 
     /// HTTP headers as key-value pairs.
+    ///
+    /// Built with ``init(method:headerFields:body:path:)``, it has one key
+    /// per field name, spelled as first received, and the values of
+    /// repeated field lines joined with `", "` in order (RFC 9110 §5.3).
+    /// Built from a dictionary, it is that dictionary: an adapter that
+    /// joins repeated lines itself should join them the same way.
     public let headers: [String: String]
 
     /// The request body data, if any.
@@ -48,18 +59,84 @@ public struct HTTPRequest: Sendable {
     /// Used by validators that need to match on specific paths.
     public let path: String?
 
-    /// Creates an HTTP request.
+    /// The header field lines as received, or `nil` when the request was
+    /// built from a dictionary.
+    private let fieldLines: [(name: String, value: String)]?
+
+    /// Creates an HTTP request from a dictionary of headers.
+    ///
+    /// The transports cannot tell how many field lines a value came from;
+    /// prefer ``init(method:headerFields:body:path:)`` in an adapter.
     public init(method: String, headers: [String: String] = [:], body: Data? = nil, path: String? = nil) {
         self.method = method
         self.headers = headers
         self.body = body
         self.path = path
+        self.fieldLines = nil
+    }
+
+    /// Creates an HTTP request from its header field lines, in the order
+    /// received.
+    ///
+    /// Names are compared case-insensitively (RFC 9110 §5.1). ``headers``
+    /// joins the values of repeated lines; ``headerValues(_:)`` returns
+    /// each line's value. A SwiftNIO adapter passes `Array(head.headers)`.
+    ///
+    /// - Parameters:
+    ///   - method: The HTTP method, such as `"POST"`.
+    ///   - headerFields: The header field lines, as `(name, value)` pairs.
+    ///   - body: The request body, if any.
+    ///   - path: The request path without the query, such as `"/mcp"`.
+    public init(
+        method: String, headerFields: [(name: String, value: String)], body: Data? = nil, path: String? = nil
+    ) {
+        var headers: [String: String] = [:]
+        var keys: [String: String] = [:]
+        for (name, value) in headerFields {
+            let key = keys[name.lowercased(), default: name]
+            keys[name.lowercased()] = key
+            headers[key] = headers[key].map { "\($0), \(value)" } ?? value
+        }
+        self.method = method
+        self.headers = headers
+        self.body = body
+        self.path = path
+        self.fieldLines = headerFields
     }
 
     /// Case-insensitive header lookup.
+    ///
+    /// Keys that differ only in case are one field (RFC 9110 §5.1): their
+    /// values are joined with `", "` in the order of their keys, so the
+    /// result does not depend on the dictionary's order.
     public func header(_ name: String) -> String? {
         let lowercased = name.lowercased()
-        return headers.first { $0.key.lowercased() == lowercased }?.value
+        let matches = headers.filter { $0.key.lowercased() == lowercased }
+        guard matches.count > 1 else { return matches.first?.value }
+        return matches.sorted { $0.key < $1.key }.map(\.value).joined(separator: ", ")
+    }
+
+    /// The value of each field line named `name`, compared
+    /// case-insensitively, in the order received; empty when there is none.
+    ///
+    /// For a request built from a dictionary, the value of each key that
+    /// matches, in the order of the keys: a value the adapter joined from
+    /// several lines counts once.
+    public func headerValues(_ name: String) -> [String] {
+        let lowercased = name.lowercased()
+        if let fieldLines {
+            return fieldLines.filter { $0.name.lowercased() == lowercased }.map(\.value)
+        }
+        return headers.filter { $0.key.lowercased() == lowercased }.sorted { $0.key < $1.key }.map(\.value)
+    }
+
+    /// Whether the single-valued header `name` was sent more than once:
+    /// on several field lines, or, for a header whose values never contain
+    /// a comma, as a comma-joined value.
+    func isRepeated(_ name: String, valuesMayContainCommas: Bool = false) -> Bool {
+        let values = headerValues(name)
+        if values.count > 1 { return true }
+        return !valuesMayContainCommas && values.first?.contains(",") == true
     }
 
     /// The `MCP-Protocol-Version` header when it names a revision served
@@ -312,6 +389,10 @@ package enum JSONRPCMessageKind {
     case request(id: String, method: String)
     case notification(method: String)
     case response(id: String)
+    /// A message with a string `method` that is neither a valid request
+    /// nor a valid notification: its `id` is not a string or an integer, or
+    /// its `jsonrpc` is not `"2.0"`. It must be answered with -32600.
+    case invalid(method: String, reason: String)
 
     /// Attempts to classify raw JSON-RPC data.
     /// Returns `nil` if the data cannot be parsed or classified.
@@ -323,14 +404,23 @@ package enum JSONRPCMessageKind {
     }
 
     /// Classifies a message already parsed with `JSONSerialization`.
+    ///
+    /// A message with a string `method` is a request when it has an `id`
+    /// member and a notification when it has none, whatever the type of
+    /// the `id`: an `id` that is not a string or an integer makes it
+    /// ``invalid(method:reason:)``, not a notification (JSON-RPC 2.0 §5).
     package init?(json: [String: Any]) {
         let id = Self.extractID(from: json)
 
         if let method = json["method"] as? String {
-            if let id {
+            if json["jsonrpc"] as? String != "2.0" {
+                self = .invalid(method: method, reason: InvalidRequestReason.jsonrpc)
+            } else if !json.keys.contains("id") {
+                self = .notification(method: method)
+            } else if let id {
                 self = .request(id: id, method: method)
             } else {
-                self = .notification(method: method)
+                self = .invalid(method: method, reason: InvalidRequestReason.id(json["id"]))
             }
         } else if json["result"] != nil || json["error"] != nil {
             guard let id else { return nil }
@@ -355,14 +445,22 @@ package enum JSONRPCMessageKind {
     }
 
     /// A message's `id`, rendered as a string; `nil` when absent or not a
-    /// string or an integer.
+    /// string or an integer that fits `Int`.
     package static func extractID(from json: [String: Any]) -> String? {
-        if let stringID = json["id"] as? String {
-            return stringID
-        } else if let intID = json["id"] as? Int {
-            return String(intID)
+        switch json["id"] {
+        case let string as String:
+            return string
+        // A JSON boolean is an `NSNumber` too, and `true as? Int` is 1 on Darwin.
+        case let number as NSNumber where !isBoolean(number):
+            return (number as? Int).map(String.init)
+        default:
+            return nil
         }
-        return nil
+    }
+
+    /// Whether `number` came from a JSON `true` or `false`.
+    static func isBoolean(_ number: NSNumber) -> Bool {
+        String(cString: number.objCType) == "c"
     }
 
     /// The `requestId` of a `notifications/cancelled` message, rendered like
@@ -374,4 +472,40 @@ package enum JSONRPCMessageKind {
         else { return nil }
         return extractID(from: ["id": params["requestId"] as Any])
     }
+}
+
+/// Why a message with a `method` is not a valid request or notification,
+/// for the message of the -32600 answer.
+enum InvalidRequestReason {
+    /// `jsonrpc` is missing or not `"2.0"`.
+    static let jsonrpc = "jsonrpc must be \"2.0\""
+
+    /// The problem with an `id` that is not a string or an integer, as
+    /// parsed by `JSONSerialization`; `nil` is a number it could not read.
+    static func id(_ value: Any?) -> String {
+        switch value {
+        case is NSNull:
+            return null
+        case let number as NSNumber where !JSONRPCMessageKind.isBoolean(number):
+            let double = number.doubleValue
+            return double.isFinite && double.rounded() == double ? outOfRange : type
+        default:
+            return type
+        }
+    }
+
+    /// The problem with an `id` that is not a string or an integer, as
+    /// decoded into a ``Value``; `nil` is a number too large to decode.
+    static func id(_ value: Value?) -> String {
+        switch value {
+        case .null?: return null
+        case .double(let double)?: return double.rounded() == double ? outOfRange : type
+        case nil: return outOfRange
+        default: return type
+        }
+    }
+
+    private static let null = "id must not be null"
+    private static let outOfRange = "id is out of range"
+    private static let type = "id must be a string or an integer"
 }

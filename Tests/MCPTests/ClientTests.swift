@@ -773,3 +773,57 @@ struct ClientTests {
         await client.disconnect()
     }
 }
+
+@Suite("Client undecodable responses", .timeLimit(.minutes(1)))
+struct ClientUndecodableResponseTests {
+    /// A handshake client connected to `transport`, which answers initialize.
+    private func connect(_ transport: MockTransport) async throws -> Client {
+        let client = Client(name: "c", version: "1", configuration: .handshake)
+        let answer = Task {
+            try await transport.waitForSentMessages()
+            let data = try #require(await transport.sentMessages.last?.data(using: .utf8))
+            let request = try JSONDecoder().decode(Request<Initialize>.self, from: data)
+            try await transport.queue(
+                response: Initialize.response(
+                    id: request.id,
+                    result: .init(
+                        protocolVersion: Version.latestHandshake, capabilities: .init(),
+                        serverInfo: .init(name: "s", version: "1"), instructions: nil)))
+        }
+        _ = try await client.connect(transport: transport)
+        try await answer.value
+        return client
+    }
+
+    @Test(
+        "An answer that does not decode fails the request it names",
+        arguments: [
+            #"{"jsonrpc":"2.0","id":"ID","error":{"code":"bad","message":"x"}}"#,
+            #"{"jsonrpc":"2.0","id":"ID","error":{"message":"x"}}"#,
+            #"{"id":"ID","result":{}}"#,
+        ])
+    func undecodableAnswer(_ template: String) async throws {
+        let transport = MockTransport()
+        let client = try await connect(transport)
+        let request = Ping.request()
+        let context = try await client.send(request)
+        await transport.queue(data: Data(template.replacingOccurrences(of: "ID", with: request.id.description).utf8))
+
+        await #expect(throws: MCPError.internalError("The server sent an invalid response")) {
+            try await context.value
+        }
+        await client.disconnect()
+    }
+
+    @Test("An undecodable message for no pending request changes nothing")
+    func unknownID() async throws {
+        let transport = MockTransport()
+        let client = try await connect(transport)
+        await transport.queue(data: Data(#"{"jsonrpc":"2.0","id":"other","error":{"code":"bad"}}"#.utf8))
+        let request = Ping.request()
+        let context = try await client.send(request)
+        try await transport.queue(response: Ping.response(id: request.id))
+        _ = try await context.value
+        await client.disconnect()
+    }
+}

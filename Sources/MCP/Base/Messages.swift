@@ -177,6 +177,12 @@ extension Request {
             throw DecodingError.dataCorruptedError(
                 forKey: .jsonrpc, in: container, debugDescription: "Invalid JSON-RPC version")
         }
+        // `ID` reads `null` as `""` for error responses; a request's id
+        // must not be null, and `""` is a valid string id.
+        if try container.decodeNil(forKey: .id) {
+            throw DecodingError.dataCorruptedError(
+                forKey: .id, in: container, debugDescription: "Request id must not be null")
+        }
         id = try container.decode(ID.self, forKey: .id)
         method = try container.decode(String.self, forKey: .method)
         _meta = (try? container.decodeIfPresent(MetaProbe.self, forKey: .params))??._meta
@@ -215,6 +221,37 @@ extension Request {
 
 /// A type-erased request for request/response handling
 typealias AnyRequest = Request<AnyMethod>
+
+/// A message with a string `method` that is not a valid request or
+/// notification: its `id` is not a string or an integer, or its `jsonrpc`
+/// is not `"2.0"`. `reason` is `nil` for any other message.
+struct InvalidRequestShape: Decodable {
+    /// The id to answer with, when it is a string or an integer.
+    let id: ID?
+    /// Why the message is invalid, for the -32600 answer.
+    let reason: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case jsonrpc, id, method
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        // `ID` reads `null` as `""`.
+        let isNull = (try? container.decodeNil(forKey: .id)) == true
+        let id = isNull ? nil : try? container.decode(ID.self, forKey: .id)
+        if (try? container.decode(String.self, forKey: .method)) == nil {
+            (self.id, reason) = (nil, nil)
+        } else if (try? container.decode(String.self, forKey: .jsonrpc)) != jsonrpc {
+            (self.id, reason) = (id, InvalidRequestReason.jsonrpc)
+        } else if container.contains(.id), id == nil {
+            // A number too large to decode as a `Value` is `nil` here.
+            (self.id, reason) = (nil, InvalidRequestReason.id(try? container.decode(Value.self, forKey: .id)))
+        } else {
+            (self.id, reason) = (nil, nil)
+        }
+    }
+}
 
 extension AnyRequest {
     init<T: Method>(_ request: Request<T>) throws {
@@ -441,6 +478,11 @@ public struct Message<N: Notification>: Hashable, Codable, Sendable {
         case jsonrpc, method, params
     }
 
+    /// A member a notification must not have.
+    private enum RequestKeys: String, CodingKey {
+        case id
+    }
+
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(jsonrpc, forKey: .jsonrpc)
@@ -458,6 +500,13 @@ public struct Message<N: Notification>: Hashable, Codable, Sendable {
         guard version == jsonrpc else {
             throw DecodingError.dataCorruptedError(
                 forKey: .jsonrpc, in: container, debugDescription: "Invalid JSON-RPC version")
+        }
+        // A message with an `id` is a request, even when the id is not one
+        // a request may have; it is never a notification.
+        let requestKeys = try decoder.container(keyedBy: RequestKeys.self)
+        guard !requestKeys.contains(.id) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .id, in: requestKeys, debugDescription: "A notification must not have an id")
         }
         method = try container.decode(String.self, forKey: .method)
         _meta = (try? container.decodeIfPresent(MetaProbe.self, forKey: .params))??._meta

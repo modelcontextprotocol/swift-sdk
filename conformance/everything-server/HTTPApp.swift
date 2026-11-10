@@ -385,16 +385,6 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     // MARK: - NIO ↔ HTTPRequest/HTTPResponse Conversion
 
     private func makeHTTPRequest(from state: RequestState) -> HTTPRequest {
-        // Combine multiple header values per RFC 7230
-        var headers: [String: String] = [:]
-        for (name, value) in state.head.headers {
-            if let existing = headers[name] {
-                headers[name] = existing + ", " + value
-            } else {
-                headers[name] = value
-            }
-        }
-
         let body: Data?
         if state.bodyBuffer.readableBytes > 0,
             let bytes = state.bodyBuffer.getBytes(at: 0, length: state.bodyBuffer.readableBytes)
@@ -406,9 +396,11 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
         let path = String(state.head.uri.split(separator: "?").first ?? Substring(state.head.uri))
 
+        // The field lines as received: the transport joins repeated ones
+        // (RFC 9110 §5.3) and refuses a repeated single-valued header.
         return HTTPRequest(
             method: state.head.method.rawValue,
-            headers: headers,
+            headerFields: Array(state.head.headers),
             body: body,
             path: path
         )

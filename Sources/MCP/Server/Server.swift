@@ -488,6 +488,9 @@ public actor Server {
             registeredCancellationHandler = true
             registerCancellationHandler()
         }
+        if let stateless = transport as? StatelessHTTPServerTransport {
+            await stateless.serve(protocolVersions: configuration.protocolVersions)
+        }
         try await transport.connect()
 
         await logger?.debug(
@@ -535,6 +538,17 @@ public actor Server {
                                 if isListen { self.listenRequests[request.id] = nil }
                             }
                             if isListen { listenRequests[request.id] = handling }
+                        } else if let invalid = try? decoder.decode(InvalidRequestShape.self, from: data),
+                            let reason = invalid.reason
+                        {
+                            // JSON-RPC 2.0 §5: a request whose `id` or
+                            // `jsonrpc` is invalid gets -32600; it is not a
+                            // notification.
+                            if let id = invalid.id {
+                                try? await send(AnyMethod.response(id: id, error: .invalidRequest(reason)))
+                            } else {
+                                await sendUnattributedError(.invalidRequest(reason))
+                            }
                         } else if let message = try? decoder.decode(AnyMessage.self, from: data) {
                             try await handleMessage(message)
                         } else {
@@ -1638,6 +1652,23 @@ public actor Server {
         return SubscriptionsListen.Result(_meta: meta)
     }
 
+    /// After the result that closes a `subscriptions/listen` stream the
+    /// server ended, sends `notifications/cancelled` for it: a server MUST
+    /// send one when it tears a subscription down. Over HTTP the end of the
+    /// response is the teardown, so nothing is sent there; nor after a
+    /// stream the client cancelled.
+    ///
+    /// - SeeAlso: https://modelcontextprotocol.io/specification/2026-07-28/basic/utilities/cancellation
+    private func sendListenTeardown(_ id: ID) async {
+        guard !isSessionless, let connection else { return }
+        let cancelled = CancelledNotification.message(.init(requestId: id, reason: "Subscription closed"))
+        do {
+            try await connection.send(encoder.encode(cancelled))
+        } catch {
+            await logger?.debug("Listen teardown not sent", metadata: ["error": "\(error)"])
+        }
+    }
+
     /// Send a request to the client and return a Task for the response
     private func send<M: Method>(_ request: Request<M>) throws -> Task<M.Result, Error> {
         guard let connection = connection else {
@@ -2161,12 +2192,22 @@ public actor Server {
         do {
             era = try StatelessRequests.classify(
                 request._meta, served: configuration.protocolVersions)
+            try StatelessRequests.checkProgressToken(request._meta)
         } catch let error as MCPError {
             return try await reject(error)
         }
 
         switch era {
         case .handshake:
+            // A server that serves no handshake revision serves only requests
+            // that name their version: one that names none is missing a
+            // required `_meta` field (-32602), not at an unsupported version.
+            if handshakeVersions.isEmpty, request.method != Initialize.name,
+                request._meta?[MetaKey.protocolVersion] == nil
+            {
+                return try await reject(
+                    StatelessRequests.missingProtocolVersion(served: configuration.protocolVersions))
+            }
             if StatelessRequests.statelessOnlyMethods.contains(request.method) {
                 return try await reject(
                     .methodNotFound("\(request.method) requires protocol version 2026-07-28 or later"))
@@ -2421,6 +2462,11 @@ public actor Server {
 
             if sendResponse {
                 try await send(response)
+                if request.method == SubscriptionsListen.name, case .success = response.result,
+                    !handlerTask.isCancelled
+                {
+                    await sendListenTeardown(request.id)
+                }
                 return nil
             }
 
@@ -2468,6 +2514,13 @@ public actor Server {
 
         switch try await toolInfo(context: context, request: request, listing: &listing)?[name]?.headers {
         case .valid(let parameters)?:
+            // Single-valued, and a value may contain commas: only separate
+            // field lines count as a repeat.
+            if let repeated = parameters.first(where: {
+                http.isRepeated($0.fieldName, valuesMayContainCommas: true)
+            }) {
+                return .headerMismatch("\(repeated.fieldName) header appears more than once")
+            }
             return MCPRequestHeaders.validate(parameters, arguments: arguments, header: http.header)
                 .map { MCPError.headerMismatch($0) }
         case .invalid?:

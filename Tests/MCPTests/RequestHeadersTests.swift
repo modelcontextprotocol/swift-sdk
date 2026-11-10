@@ -94,6 +94,50 @@ struct RequestHeadersTests {
         #expect(throws: MCPRequestHeaders.InvalidAnnotation.self) { try tool.headerParameters() }
     }
 
+    @Test("An annotation off the properties chain is rejected", arguments: [
+        ["type": "array", "items": ["type": "string", "x-mcp-header": "Item"]],
+        ["type": "array", "prefixItems": [["type": "string", "x-mcp-header": "First"]]],
+        ["type": "object", "additionalProperties": ["type": "string", "x-mcp-header": "Extra"]],
+        ["anyOf": [["type": "string", "x-mcp-header": "Choice"], ["type": "integer"]]],
+        ["allOf": [["properties": ["inner": ["type": "string", "x-mcp-header": "Inner"]]]]],
+        ["not": ["type": "string", "x-mcp-header": "Not"]],
+        ["if": ["type": "string"], "then": ["type": "string", "x-mcp-header": "Then"]],
+        ["type": "object", "patternProperties": ["^x": ["type": "string", "x-mcp-header": "Pattern"]]],
+    ] as [Value])
+    func testUnreachableAnnotations(property: Value) {
+        let schema: Value = ["type": "object", "properties": ["value": property]]
+        #expect(throws: MCPRequestHeaders.InvalidAnnotation.self) { try MCPRequestHeaders.parameters(in: schema) }
+    }
+
+    @Test("An annotation in $defs, or on the root, is rejected")
+    func testDefsAndRootAnnotations() {
+        let defs: Value = [
+            "type": "object",
+            "properties": ["region": ["$ref": "#/$defs/region"]],
+            "$defs": ["region": ["type": "string", "x-mcp-header": "Region"]],
+        ]
+        #expect(throws: MCPRequestHeaders.InvalidAnnotation.self) { try MCPRequestHeaders.parameters(in: defs) }
+        let root: Value = ["type": "string", "x-mcp-header": "Root"]
+        #expect(throws: MCPRequestHeaders.InvalidAnnotation.self) { try MCPRequestHeaders.parameters(in: root) }
+    }
+
+    @Test("Values and names that are not subschemas are not read for annotations")
+    func testNonSchemaValues() throws {
+        let schema: Value = [
+            "type": "object",
+            "properties": [
+                "x-mcp-header": ["type": "string"],
+                "region": [
+                    "type": "string", "x-mcp-header": "Region",
+                    "default": ["x-mcp-header": "Default"], "enum": [["x-mcp-header": "Enum"]],
+                ],
+                "list": ["type": "array", "items": ["type": "string"]],
+            ],
+            "examples": [["x-mcp-header": "Example"]],
+        ]
+        #expect(try MCPRequestHeaders.parameters(in: schema).map(\.headerName) == ["Region"])
+    }
+
     @Test("An annotation count above the limit is rejected")
     func testAnnotationLimit() throws {
         func schema(_ count: Int) -> Value {
@@ -165,5 +209,157 @@ struct RequestHeadersTests {
                 "Mcp-Param-Note": "=?base64?IHg=?=",
                 "Mcp-Param-Level": "2",
             ])
+    }
+}
+
+@Suite("Repeated request headers")
+struct RepeatedRequestHeaderTests {
+    private static let listBody =
+        #"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#
+
+    /// POSTs `tools/list` at 2026-07-28 with `headers` added to a server
+    /// that serves it.
+    private func post(_ headers: [String: String]) async throws -> HTTPResponse {
+        let server = Server(name: "headers", version: "1", capabilities: .init(tools: .init()))
+        await server.withMethodHandler(ListTools.self) { _ in .init(tools: []) }
+        let transport = StatelessHTTPServerTransport()
+        try await server.start(transport: transport)
+        var all = ["Content-Type": "application/json", "Accept": "application/json"]
+        all.merge(headers) { $1 }
+        let response = await transport.handleRequest(
+            HTTPRequest(method: "POST", headers: all, body: Data(Self.listBody.utf8)))
+        await server.stop()
+        return response
+    }
+
+    private func errorCode(_ response: HTTPResponse) throws -> Value? {
+        try JSONDecoder().decode(Value.self, from: try #require(response.bodyData))
+            .objectValue?["error"]?.objectValue?["code"]
+    }
+
+    @Test("Keys that differ only in case are joined in key order, whatever the dictionary order")
+    func caseVariantKeysAreJoined() {
+        var forward: [String: String] = [:]
+        forward["mcp-method"] = "a"
+        forward["MCP-Method"] = "b"
+        var backward: [String: String] = [:]
+        backward["MCP-Method"] = "b"
+        backward["mcp-method"] = "a"
+        for headers in [forward, backward] {
+            #expect(HTTPRequest(method: "POST", headers: headers).header("Mcp-Method") == "b, a")
+        }
+        #expect(HTTPRequest(method: "POST", headers: ["Mcp-Method": "a"]).header("mcp-method") == "a")
+    }
+
+    @Test("The headers of one request are served")
+    func singleHeaders() async throws {
+        let response = try await post([HTTPHeaderName.protocolVersion: "2026-07-28", "Mcp-Method": "tools/list"])
+        #expect(response.statusCode == 200)
+    }
+
+    @Test(
+        "A repeated MCP-Protocol-Version or Mcp-Method is -32020",
+        arguments: [
+            [HTTPHeaderName.protocolVersion: "2026-07-28, 2026-07-28", "Mcp-Method": "tools/list"],
+            ["MCP-Protocol-Version": "2026-07-28", "mcp-protocol-version": "2026-07-28", "Mcp-Method": "tools/list"],
+            [HTTPHeaderName.protocolVersion: "2026-07-28", "Mcp-Method": "tools/list, tools/list"],
+            [HTTPHeaderName.protocolVersion: "2026-07-28", "mcp-method": "tools/list", "Mcp-Method": "tools/call"],
+        ])
+    func repeatedHeaders(_ headers: [String: String]) async throws {
+        let response = try await post(headers)
+        #expect(response.statusCode == 400)
+        #expect(try errorCode(response) == -32020)
+    }
+
+    @Test("A repeated handshake MCP-Protocol-Version stays -32022")
+    func repeatedHandshakeVersion() async throws {
+        let response = try await post([HTTPHeaderName.protocolVersion: "2025-11-25, 2025-11-25"])
+        #expect(response.statusCode == 400)
+        #expect(try errorCode(response) == -32022)
+    }
+}
+
+@Suite("Header field lines")
+struct HeaderFieldLineTests {
+    private static let meta =
+        #""_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}"#
+
+    private static func call(_ name: String, arguments: String = "{}") -> String {
+        #"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"\#(name)","arguments":\#(arguments),\#(meta)}}"#
+    }
+
+    /// The headers of a 2026-07-28 `tools/call` of `name`, then `extra`.
+    private static func fields(
+        calling name: String, _ extra: [(name: String, value: String)] = []
+    ) -> [(name: String, value: String)] {
+        [
+            ("Content-Type", "application/json"), ("Accept", "application/json"),
+            (HTTPHeaderName.protocolVersion, "2026-07-28"), (MCPRequestHeaders.method, "tools/call"),
+            (MCPRequestHeaders.name, name),
+        ] + extra
+    }
+
+    /// Sends `body` with `fields` to a server with a `route` tool that
+    /// mirrors `region` into `Mcp-Param-Region`.
+    private func post(_ body: String, fields: [(name: String, value: String)]) async throws -> HTTPResponse {
+        let server = Server(name: "fields", version: "1", capabilities: .init(tools: .init()))
+        let route = Tool(
+            name: "route", description: nil,
+            inputSchema: ["type": "object", "properties": ["region": ["type": "string", "x-mcp-header": "Region"]]])
+        await server.withMethodHandler(ListTools.self) { _ in .init(tools: [route]) }
+        await server.withMethodHandler(CallTool.self) { params in .init(content: [.text(text: params.name)]) }
+        let transport = StatelessHTTPServerTransport()
+        try await server.start(transport: transport)
+        let response = await transport.handleRequest(
+            HTTPRequest(method: "POST", headerFields: fields, body: Data(body.utf8), path: "/mcp"))
+        await server.stop()
+        return response
+    }
+
+    private func errorCode(_ response: HTTPResponse) throws -> Value? {
+        try JSONDecoder().decode(Value.self, from: try #require(response.bodyData))
+            .objectValue?["error"]?.objectValue?["code"]
+    }
+
+    @Test("Field lines are folded case-insensitively and joined in order; each value stays readable")
+    func folding() {
+        let request = HTTPRequest(
+            method: "POST",
+            headerFields: [("Accept", "application/json"), ("X-Tag", "a"), ("x-tag", "b"), ("X-TAG", "c")])
+        #expect(request.headers == ["Accept": "application/json", "X-Tag": "a, b, c"])
+        #expect(request.header("x-tag") == "a, b, c")
+        #expect(request.headerValues("X-Tag") == ["a", "b", "c"])
+        #expect(request.headerValues("Accept") == ["application/json"])
+        #expect(request.headerValues("Missing") == [])
+
+        let dictionary = HTTPRequest(method: "POST", headers: ["X-Tag": "a, b"])
+        #expect(dictionary.headerValues("x-tag") == ["a, b"])
+    }
+
+    @Test("One line of each header is served, including a name with a comma")
+    func singleLines() async throws {
+        for (name, arguments, extra) in [
+            ("route", #"{"region":"us"}"#, [(name: "Mcp-Param-Region", value: "us")]),
+            ("a,b", "{}", []),
+        ] {
+            let response = try await post(Self.call(name, arguments: arguments), fields: Self.fields(calling: name, extra))
+            #expect(response.statusCode == 200, "\(name)")
+        }
+    }
+
+    @Test("A repeated single-valued header on separate lines is -32020, even with equal values")
+    func repeatedLines() async throws {
+        let cases: [(String, [(name: String, value: String)])] = [
+            ("protocol version", [(HTTPHeaderName.protocolVersion, "2026-07-28")]),
+            ("method", [("mcp-method", "tools/call")]),
+            ("name", [("MCP-NAME", "route")]),
+            ("parameter", [("Mcp-Param-Region", "us"), ("mcp-param-region", "us")]),
+        ]
+        for (label, extra) in cases {
+            let response = try await post(
+                Self.call("route", arguments: #"{"region":"us"}"#), fields: Self.fields(calling: "route", extra))
+            #expect(response.statusCode == 400, "\(label)")
+            #expect(try errorCode(response) == -32020, "\(label)")
+        }
     }
 }
