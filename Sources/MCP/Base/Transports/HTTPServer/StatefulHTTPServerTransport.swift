@@ -1,7 +1,7 @@
 import Foundation
 import Logging
 
-/// A stateful HTTP server transport that manages sessions and uses SSE for streaming responses.
+/// A stateful HTTP server transport for one session, using SSE for responses.
 ///
 /// This transport implements the MCP Streamable HTTP specification with full session management:
 /// - Assigns a session ID during initialization (via `Mcp-Session-Id` header)
@@ -13,15 +13,17 @@ import Logging
 /// ## Usage
 ///
 /// ```swift
-/// let transport = StatefulHTTPServerTransport()  // Uses UUID by default
+/// let transport = StatefulHTTPServerTransport()  // One transport per session
 ///
 /// // Start the MCP server with this transport
 /// try await server.start(transport: transport)
 ///
-/// // In your HTTP framework handler:
+/// // In your HTTP framework handler for this session:
 /// let response = await transport.handleRequest(httpRequest)
 /// // Convert response to your framework's response type and return it
 /// ```
+/// Use ``StatefulHTTPServerSessionManager`` for an endpoint that creates new
+/// sessions after DELETE. A terminated transport cannot be reused.
 ///
 /// ## Framework Integration
 ///
@@ -64,6 +66,7 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
     /// The standalone SSE stream continuation for server-initiated messages.
     /// Only one GET stream is allowed per session.
     private var standaloneSSEContinuation: AsyncThrowingStream<Data, Swift.Error>.Continuation?
+    private var standaloneStreamGeneration = 0
 
     /// Internal identifier for the standalone GET stream in the event store.
     private let standaloneStreamID = "_GET_stream"
@@ -158,6 +161,8 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
         incomingStream
     }
 
+    var hasActiveStandaloneStream: Bool { standaloneSSEContinuation != nil }
+
     // MARK: - HTTP Request Handler
 
     /// Handles an incoming HTTP request from the framework adapter.
@@ -193,9 +198,20 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
         }
     }
 
+    func handleValidatedInitializationRequest(_ request: HTTPRequest) -> HTTPResponse {
+        if terminated {
+            return .error(
+                statusCode: 404,
+                .invalidRequest("Not Found: Session has been terminated"),
+                sessionID: sessionID
+            )
+        }
+        return handlePost(request, skipValidation: true)
+    }
+
     // MARK: - POST Handler
 
-    private func handlePost(_ request: HTTPRequest) -> HTTPResponse {
+    private func handlePost(_ request: HTTPRequest, skipValidation: Bool = false) -> HTTPResponse {
         // Parse body first so we can determine if it's an initialization request
         guard let body = request.body, !body.isEmpty else {
             return .error(
@@ -222,7 +238,9 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
         )
 
         // Run validation pipeline
-        if let errorResponse = validationPipeline.validate(request, context: context) {
+        if !skipValidation,
+            let errorResponse = validationPipeline.validate(request, context: context)
+        {
             return errorResponse
         }
 
@@ -341,7 +359,7 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
 
         // Create standalone SSE stream
         let (sseStream, sseContinuation) = AsyncThrowingStream<Data, Swift.Error>.makeStream()
-        standaloneSSEContinuation = sseContinuation
+        registerStandaloneStream(sseContinuation)
 
         // Extract protocol version for priming event
         let protocolVersion = request.header(HTTPHeaderName.protocolVersion) ?? Version.latest
@@ -448,7 +466,7 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
 
         // Re-register the stream for future messages
         if replay.streamID == standaloneStreamID {
-            standaloneSSEContinuation = sseContinuation
+            registerStandaloneStream(sseContinuation)
         } else {
             requestSSEContinuations[replay.streamID] = sseContinuation
         }
@@ -518,6 +536,23 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
     }
 
     // MARK: - Session Helpers
+
+    private func registerStandaloneStream(
+        _ continuation: AsyncThrowingStream<Data, Swift.Error>.Continuation
+    ) {
+        standaloneStreamGeneration += 1
+        let generation = standaloneStreamGeneration
+        standaloneSSEContinuation = continuation
+        continuation.onTermination = { [weak self] _ in
+            Task { await self?.clearStandaloneStream(generation: generation) }
+        }
+    }
+
+    private func clearStandaloneStream(generation: Int) {
+        if standaloneStreamGeneration == generation {
+            standaloneSSEContinuation = nil
+        }
+    }
 
     private func sessionHeaders() -> [String: String] {
         var headers: [String: String] = [:]
