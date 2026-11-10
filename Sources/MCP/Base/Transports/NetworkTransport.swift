@@ -348,12 +348,7 @@ import Logging
         ///
         /// - Throws: Error if the connection fails
         private func attemptConnection() async throws {
-            // Create stream for state changes with proper cleanup
             let stateStream = AsyncStream<NWConnection.State> { continuation in
-                continuation.onTermination = { [weak self] _ in
-                    self?.connection.stateUpdateHandler = nil
-                }
-
                 connection.stateUpdateHandler = { state in
                     continuation.yield(state)
                     switch state {
@@ -366,6 +361,10 @@ import Logging
             }
 
             connection.start(queue: .main)
+
+            // Clear the handler on the actor's executor once the stream is exhausted,
+            // regardless of whether the function returns normally or throws.
+            defer { connection.stateUpdateHandler = nil }
 
             // Process states until terminal state
             for await state in stateStream {
@@ -613,6 +612,9 @@ import Logging
                                 if !isStopping {
                                     // Release the underlying socket and finish the stream so
                                     // receive() callers don't hang.
+                                    isConnected = false
+                                    heartbeatTask?.cancel()
+                                    heartbeatTask = nil
                                     connection.cancel()
                                     messageContinuation.finish(throwing: MCPError.connectionClosed)
                                 }
