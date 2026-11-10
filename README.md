@@ -598,6 +598,12 @@ do {
 
 #### Request Batching
 
+If `withBatch` throws, any tasks returned by `batch.addRequest(_:)` that have not already
+completed fail with the same error. Catch the `withBatch` error to continue awaiting those tasks.
+
+`addRequest` throws `MCPError.invalidRequest` when an ID is repeated within the same batch.
+Callers must still keep request IDs unique across the session, including outside that batch.
+
 Improve performance by sending multiple requests in a single batch:
 
 ```swift

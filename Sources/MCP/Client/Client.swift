@@ -2,6 +2,7 @@ import Logging
 
 import struct Foundation.Data
 import struct Foundation.Date
+import struct Foundation.UUID
 import class Foundation.JSONDecoder
 import class Foundation.JSONEncoder
 
@@ -467,13 +468,67 @@ public actor Client {
 
     // MARK: - Batching
 
+    private struct BatchState {
+        var registeredIDs: Set<ID> = []
+        // Non-nil once the body/send has finished. Retain failures until all
+        // asynchronously created continuations have had a chance to register.
+        var remainingIDs: Set<ID>?
+        var error: Swift.Error?
+    }
+
+    private var batchStates: [UUID: BatchState] = [:]
+
+    // Internal so tests can deterministically exercise registration before and after failure.
+    func addPendingBatchRequest<T: Sendable & Decodable>(
+        id: ID,
+        continuation: CheckedContinuation<T, Swift.Error>,
+        type: T.Type,
+        batchID: UUID
+    ) {
+        // Mutate in place to avoid copying the ID sets on every registration.
+        batchStates[batchID, default: BatchState()].registeredIDs.insert(id)
+        batchStates[batchID]?.remainingIDs?.remove(id)
+        let error = batchStates[batchID]?.error
+        if batchStates[batchID]?.remainingIDs?.isEmpty == true {
+            batchStates.removeValue(forKey: batchID)
+        }
+
+        if let error {
+            continuation.resume(throwing: error)
+        } else {
+            addPendingRequest(id: id, continuation: continuation, type: type)
+        }
+    }
+
+    // Internal so tests can finish a batch before its continuations register.
+    func finishBatch(id: UUID, requestIDs: Set<ID>, error: Swift.Error? = nil) {
+        var state = batchStates[id] ?? BatchState()
+        state.error = error
+        state.remainingIDs = requestIDs.subtracting(state.registeredIDs)
+        if state.remainingIDs?.isEmpty == true {
+            batchStates.removeValue(forKey: id)
+        } else {
+            batchStates[id] = state
+        }
+
+        if let error {
+            for requestID in requestIDs {
+                // A response, cancellation, or disconnect may have already
+                // removed the request and resumed its continuation.
+                removePendingRequest(id: requestID)?.resume(throwing: error)
+            }
+        }
+    }
+
     /// A batch of requests.
     ///
     /// Objects of this type are passed as an argument to the closure
     /// of the ``Client/withBatch(body:)`` method.
     public actor Batch {
         unowned let client: Client
+        let id = UUID()
         var requests: [AnyRequest] = []
+        private var requestIDs: Set<ID> = []
 
         init(client: Client) {
             self.client = client
@@ -481,23 +536,36 @@ public actor Client {
 
         /// Adds a request to the batch and prepares its expected response task.
         /// The actual sending happens when the `withBatch` scope completes.
+        /// If `withBatch` throws before this task completes, the task fails with the same error.
+        ///
+        /// - Parameter request: A request whose ID has not already been added to this batch.
         /// - Returns: A `Task` that will eventually produce the result or throw an error.
+        /// - Throws: `MCPError.invalidRequest` if the ID is already present in this batch,
+        ///           or an error if the request cannot be encoded.
+        /// - Important: Request IDs must be unique across the session. This method only
+        ///              checks for duplicates within this batch.
         public func addRequest<M: Method>(_ request: Request<M>) async throws -> Task<
             M.Result, Swift.Error
         > {
-            requests.append(try AnyRequest(request))
+            guard !requestIDs.contains(request.id) else {
+                throw MCPError.invalidRequest("Duplicate request ID in batch: \(request.id)")
+            }
+            let anyRequest = try AnyRequest(request)
+            requestIDs.insert(request.id)
+            requests.append(anyRequest)
 
             // Return a Task that registers the pending request and awaits its result.
-            // The continuation is resumed when the response arrives.
+            // The continuation is resumed when a response arrives or the batch fails.
             return Task<M.Result, Swift.Error> {
                 try await withCheckedThrowingContinuation { continuation in
                     // We are already inside a Task, but need another Task
                     // to bridge to the client actor's context.
                     Task {
-                        await client.addPendingRequest(
+                        await client.addPendingBatchRequest(
                             id: request.id,
                             continuation: continuation,
-                            type: M.Result.self
+                            type: M.Result.self,
+                            batchID: id
                         )
                     }
                 }
@@ -516,6 +584,9 @@ public actor Client {
     /// requests using `batch.addRequest(_:)`. Each call to `addRequest`
     /// returns a `Task` handle representing the asynchronous operation
     /// for that specific request's result.
+    ///
+    /// If this method throws, any tasks returned by `batch.addRequest(_:)` that have not
+    /// already completed fail with the same error. Tasks that already completed keep their results.
     ///
     /// It's recommended to collect these `Task` handles into an array
     /// within the `body` closure`. After the `withBatch` method returns
@@ -587,24 +658,31 @@ public actor Client {
         // Create Batch actor, passing self (Client)
         let batch = Batch(client: self)
 
-        // Populate the batch actor by calling the user's closure.
-        try await body(batch)
+        do {
+            // Populate the batch actor by calling the user's closure.
+            try await body(batch)
 
-        // Get the collected requests from the batch actor
-        let requests = await batch.requests
+            // Get the collected requests from the batch actor
+            let requests = await batch.requests
 
-        // Check if there are any requests to send
-        guard !requests.isEmpty else {
-            await logger?.debug("Batch requested but no requests were added.")
-            return  // Nothing to send
+            // Check if there are any requests to send
+            guard !requests.isEmpty else {
+                await logger?.debug("Batch requested but no requests were added.")
+                return  // Nothing to send
+            }
+
+            await logger?.debug(
+                "Sending batch request", metadata: ["count": "\(requests.count)"])
+
+            // Encode the array of AnyMethod requests into a single JSON payload
+            let data = try encoder.encode(requests)
+            try await connection.send(data)
+            finishBatch(id: batch.id, requestIDs: Set(requests.map(\.id)))
+        } catch {
+            let requests = await batch.requests
+            finishBatch(id: batch.id, requestIDs: Set(requests.map(\.id)), error: error)
+            throw error
         }
-
-        await logger?.debug(
-            "Sending batch request", metadata: ["count": "\(requests.count)"])
-
-        // Encode the array of AnyMethod requests into a single JSON payload
-        let data = try encoder.encode(requests)
-        try await connection.send(data)
 
         // Responses will be handled asynchronously by the message loop and handleBatchResponse/handleResponse.
     }
