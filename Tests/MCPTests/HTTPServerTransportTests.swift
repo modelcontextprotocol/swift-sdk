@@ -10,6 +10,11 @@ private struct FixedSessionIDGenerator: SessionIDGenerator {
     func generateSessionID() -> String { sessionID }
 }
 
+private actor InitializationCounter {
+    private(set) var count = 0
+    func increment() { count += 1 }
+}
+
 private func makeInitializeBody(id: String = "1") -> Data {
     let json: [String: Any] = [
         "jsonrpc": "2.0",
@@ -46,6 +51,14 @@ private func makeResponseBody(id: String = "2") -> Data {
         "result": ["tools": []] as [String: Any],
     ]
     return try! JSONSerialization.data(withJSONObject: json)
+}
+
+private func makeCancellationBody(id: String) throws -> Data {
+    try JSONSerialization.data(withJSONObject: [
+        "jsonrpc": "2.0",
+        "method": CancelledNotification.name,
+        "params": ["requestId": id],
+    ] as [String: Any])
 }
 
 private func makeStatefulPOSTRequest(
@@ -218,10 +231,295 @@ private func initializeSession(
     return sid
 }
 
+private struct LegacyHTTPContextProvider: HTTPContextProviding {
+    func httpRequestContext(for id: ID) async -> HTTPRequest? { nil }
+}
+
 // MARK: - StatefulHTTPServerTransport Tests
 
 @Suite("StatefulHTTPServerTransport Tests")
 struct StatefulHTTPServerTransportTests {
+
+    @Test("Concurrent initialization callers share one successful startup")
+    func concurrentInitializationRunsOnce() async throws {
+        let initialization = AsyncInitialization<Int>()
+        let counter = InitializationCounter()
+        let results = await withTaskGroup(of: Int?.self, returning: [Int].self) { group in
+            for _ in 0..<12 {
+                group.addTask {
+                    try? await initialization.value {
+                        await counter.increment()
+                        try? await Task.sleep(for: .milliseconds(20))
+                        return 42
+                    }
+                }
+            }
+            var values: [Int] = []
+            for await result in group {
+                if let result { values.append(result) }
+            }
+            return values
+        }
+        #expect(results.count == 12)
+        #expect(results.allSatisfy { $0 == 42 })
+        #expect(await counter.count == 1)
+    }
+
+    @Test("Stateless cancellation identity respects explicit identity and credentials")
+    func stableClientIdentitySelection() {
+        #expect(HTTPRequest.stableClientIdentity(
+            headers: ["mCp-ClIeNt-IdEnTiTy": "stable-capability", "Authorization": "Bearer token"],
+            connectionIdentity: "channel"
+        ) == "stable-capability")
+        #expect(HTTPRequest.stableClientIdentity(
+            headers: ["Authorization": "Bearer token"], connectionIdentity: "channel"
+        ) == nil)
+        #expect(HTTPRequest.stableClientIdentity(
+            headers: ["Cookie": "session=value"], connectionIdentity: "channel"
+        ) == nil)
+        #expect(HTTPRequest.stableClientIdentity(
+            headers: [:], connectionIdentity: "channel"
+        ) == "channel")
+    }
+
+    @Test("HTTP context providers can omit optional stream closing")
+    func httpContextProviderStreamClosingDefaultsToNoOp() async {
+        let provider = LegacyHTTPContextProvider()
+        await provider.closeRequestStream(for: .string("request"))
+    }
+
+    @Test("Numeric and string JSON-RPC IDs keep separate HTTP request contexts")
+    func numericAndStringRequestIDsHaveSeparateContexts() async throws {
+        let transport = makeStatefulTransport()
+        try await transport.connect()
+        let stringBody = try JSONSerialization.data(withJSONObject: [
+            "jsonrpc": "2.0", "id": "1", "method": "ping", "params": [:] as [String: Any],
+        ] as [String: Any])
+        let numberBody = try JSONSerialization.data(withJSONObject: [
+            "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": [:] as [String: Any],
+        ] as [String: Any])
+        let stringResponse = await transport.handleRequest(makeStatefulPOSTRequest(body: stringBody))
+        let numberResponse = await transport.handleRequest(makeStatefulPOSTRequest(body: numberBody))
+        guard case .stream = stringResponse, case .stream = numberResponse else {
+            Issue.record("Expected both requests to have separate response streams")
+            await transport.disconnect()
+            return
+        }
+
+        let stringContext = try #require(await transport.httpRequestContext(for: .string("1")))
+        let numberContext = try #require(await transport.httpRequestContext(for: .number(1)))
+        #expect(JSONRPCMessageKind.jsonRPCID(inBody: try #require(stringContext.body)) == .string("1"))
+        #expect(JSONRPCMessageKind.jsonRPCID(inBody: try #require(numberContext.body)) == .number(1))
+        await transport.disconnect()
+    }
+
+    @Test("Stateful transport rejects duplicate active JSON-RPC IDs without replacing the stream")
+    func duplicateActiveStatefulRequestIDIsRejected() async throws {
+        let transport = makeStatefulTransport()
+        try await transport.connect()
+        let body = try JSONSerialization.data(withJSONObject: [
+            "jsonrpc": "2.0", "id": "duplicate", "method": "tools/list", "params": [:] as [String: Any],
+        ] as [String: Any])
+        let first = await transport.handleRequest(makeStatefulPOSTRequest(body: body))
+        guard case .stream(let firstStream, _) = first else {
+            Issue.record("Expected first request to retain an SSE response stream")
+            await transport.disconnect()
+            return
+        }
+
+        let duplicate = await transport.handleRequest(makeStatefulPOSTRequest(body: body))
+        #expect(duplicate.statusCode == 409)
+        let duplicateJSON = try #require(duplicate.bodyData.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] })
+        #expect(duplicateJSON["id"] as? String == "duplicate")
+
+        try await transport.send(try JSONSerialization.data(withJSONObject: [
+            "jsonrpc": "2.0", "id": "duplicate", "result": ["tools": []],
+        ] as [String: Any]))
+        let chunks = await drainSSEStream(.stream(firstStream, headers: [:]), maxChunks: 3, timeout: .milliseconds(100))
+        #expect(chunks.contains { String(decoding: $0, as: UTF8.self).contains("\"id\":\"duplicate\"") })
+        await transport.disconnect()
+    }
+
+    @Test("Modern subscriptions/listen receives an acknowledgement and tagged notifications")
+    func modernSubscriptionsListenReceivesAcknowledgementAndTaggedNotifications() async throws {
+        let transport = makeStatefulTransport()
+        try await transport.connect()
+        let listenID = "stateful-listen-1"
+        let listenBody = try JSONSerialization.data(withJSONObject: [
+            "jsonrpc": "2.0",
+            "id": listenID,
+            "method": "subscriptions/listen",
+            "params": [
+                "_meta": [
+                    ProtocolMetaKey.protocolVersion: "2026-07-28",
+                    ProtocolMetaKey.clientCapabilities: [String: Any](),
+                ],
+                "notifications": ["toolsListChanged": true],
+            ],
+        ] as [String: Any])
+        let response = await transport.handleRequest(makeStatefulPOSTRequest(body: listenBody))
+        guard case .stream(let stream, let headers) = response else {
+            Issue.record("Expected subscriptions/listen to return an SSE stream")
+            await transport.disconnect()
+            return
+        }
+        #expect(headers[HTTPHeaderName.sessionID] == nil)
+
+        let acknowledgment = Data("""
+            {"jsonrpc":"2.0","method":"notifications/subscriptions/acknowledged","params":{"notifications":{"toolsListChanged":true},"_meta":{"\(ProtocolMetaKey.subscriptionId)":"\(listenID)"}}}
+            """.utf8)
+        let notification = Data("""
+            {"jsonrpc":"2.0","method":"notifications/tools/list_changed","params":{}}
+            """.utf8)
+        try await transport.send(notification)
+        try await transport.send(acknowledgment)
+        try await transport.send(notification)
+
+        var iterator = stream.makeAsyncIterator()
+        var firstMessage: [String: Any]?
+        for _ in 0..<4 {
+            guard let frame = try await iterator.next() else { break }
+            if let message = Self.jsonFromSSE(frame) {
+                firstMessage = message
+                break
+            }
+        }
+        let acknowledgmentJSON = try #require(firstMessage)
+        if acknowledgmentJSON["method"] as? String == "notifications/subscriptions/acknowledged" {
+            let acknowledgmentParams = try #require(acknowledgmentJSON["params"] as? [String: Any])
+            #expect(acknowledgmentParams["notifications"] as? [String: Any] != nil)
+
+            let notificationFrame = try await iterator.next()
+            let notificationJSON = try #require(notificationFrame.flatMap(Self.jsonFromSSE))
+            let params = try #require(notificationJSON["params"] as? [String: Any])
+            let meta = try #require(params["_meta"] as? [String: Any])
+            #expect(notificationJSON["method"] as? String == "notifications/tools/list_changed")
+            #expect(meta[ProtocolMetaKey.subscriptionId] as? String == listenID)
+        } else {
+            Issue.record("Expected the subscription acknowledgment before change notifications")
+            let notificationParams = try #require(acknowledgmentJSON["params"] as? [String: Any])
+            let notificationMeta = notificationParams["_meta"] as? [String: Any]
+            #expect(notificationMeta?[ProtocolMetaKey.subscriptionId] as? String == listenID)
+        }
+
+        await transport.closeRequestStream(for: .string(listenID))
+        await transport.disconnect()
+    }
+
+    @Test("Modern stateful request receives progress notification for its token")
+    func modernRequestReceivesMatchingProgressNotification() async throws {
+        let transport = makeStatefulTransport()
+        try await transport.connect()
+        let requestBody = try JSONSerialization.data(withJSONObject: [
+            "jsonrpc": "2.0", "id": "progress-request", "method": "tools/call",
+            "params": ["_meta": [
+                "progressToken": "progress-token",
+                ProtocolMetaKey.protocolVersion: "2026-07-28",
+            ]],
+        ] as [String: Any])
+        let response = await transport.handleRequest(makeStatefulPOSTRequest(body: requestBody))
+        guard case .stream(let stream, _) = response else {
+            Issue.record("Expected request SSE stream")
+            await transport.disconnect()
+            return
+        }
+        let progress = Data("""
+            {"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":"progress-token","progress":0.5}}
+            """.utf8)
+        try await transport.send(progress)
+        var iterator = stream.makeAsyncIterator()
+        var delivered: [String: Any]?
+        for _ in 0..<2 {
+            guard let frame = try await iterator.next() else { break }
+            if Self.jsonFromSSE(frame)?["method"] as? String == "notifications/progress" {
+                delivered = Self.jsonFromSSE(frame)
+                break
+            }
+        }
+        #expect(delivered?["method"] as? String == "notifications/progress")
+        await transport.closeRequestStream(for: .string("progress-request"))
+        await transport.disconnect()
+    }
+
+    @Test("Modern stateful progress routing preserves integer and string token types")
+    func modernProgressTokensKeepJSONValueType() async throws {
+        let transport = makeStatefulTransport()
+        try await transport.connect()
+
+        func request(id: String, token: Any) async throws -> HTTPResponse {
+            let body = try JSONSerialization.data(withJSONObject: [
+                "jsonrpc": "2.0", "id": id, "method": "tools/call",
+                "params": ["_meta": [
+                    "progressToken": token,
+                    ProtocolMetaKey.protocolVersion: "2026-07-28",
+                ]],
+            ] as [String: Any])
+            return await transport.handleRequest(makeStatefulPOSTRequest(body: body))
+        }
+        let integerResponse = try await request(id: "integer-token", token: 1)
+        let stringResponse = try await request(id: "string-token", token: "1")
+        func sendProgress(_ token: Any, _ progress: Double) async throws {
+            let data = try JSONSerialization.data(withJSONObject: [
+                "jsonrpc": "2.0", "method": "notifications/progress",
+                "params": ["progressToken": token, "progress": progress],
+            ] as [String: Any])
+            try await transport.send(data)
+        }
+        try await sendProgress(1, 0.25)
+        try await sendProgress("1", 0.75)
+        let integerFrames = await drainSSEStream(integerResponse, maxChunks: 2, timeout: .milliseconds(80))
+        let stringFrames = await drainSSEStream(stringResponse, maxChunks: 3, timeout: .milliseconds(80))
+        let integerEvents = integerFrames.compactMap(Self.jsonFromSSE)
+        let stringEvents = stringFrames.compactMap(Self.jsonFromSSE)
+        #expect(integerEvents.count == 1)
+        #expect((integerEvents.first?["params"] as? [String: Any])?["progressToken"] as? Int == 1)
+        #expect(stringEvents.count == 1)
+        #expect((stringEvents.first?["params"] as? [String: Any])?["progressToken"] as? String == "1")
+        await transport.disconnect()
+    }
+
+    @Test("Modern stateful header validation rejects a mismatched method header")
+    func modernStatefulHeaderMismatchIsRejected() async throws {
+        let transport = StatefulHTTPServerTransport()
+        try await transport.connect()
+        let body = try JSONSerialization.data(withJSONObject: [
+            "jsonrpc": "2.0", "method": "notifications/tools/list_changed",
+            "params": ["_meta": [ProtocolMetaKey.protocolVersion: "2026-07-28"]],
+        ] as [String: Any])
+        let response = await transport.handleRequest(HTTPRequest(
+            method: "POST",
+            headers: [
+                "Host": "localhost:3000", HTTPHeaderName.contentType: ContentType.json,
+                HTTPHeaderName.accept: "application/json, text/event-stream",
+                HTTPHeaderName.protocolVersion: "2026-07-28", "Mcp-Method": "notifications/prompts/list_changed",
+            ], body: body
+        ))
+        #expect(response.statusCode == 400)
+        let json = try #require(response.bodyData.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] })
+        #expect((json["error"] as? [String: Any])?["code"] as? Int == -32020)
+        await transport.disconnect()
+    }
+
+    @Test("Malformed stateful subscriptions/listen error preserves request ID")
+    func malformedStatefulListenPreservesRequestID() async throws {
+        let transport = makeStatefulTransport()
+        try await transport.connect()
+        let body = try JSONSerialization.data(withJSONObject: [
+            "jsonrpc": "2.0", "id": 72, "method": "subscriptions/listen", "params": [:] as [String: Any],
+        ] as [String: Any])
+        let response = await transport.handleRequest(makeStatefulPOSTRequest(body: body))
+        let json = try #require(response.bodyData.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] })
+        #expect(json["id"] as? Int == 72)
+        await transport.disconnect()
+    }
+
+    fileprivate static func jsonFromSSE(_ frame: Data) -> [String: Any]? {
+        let text = String(decoding: frame, as: UTF8.self)
+        guard let line = text.split(separator: "\n").first(where: { $0.hasPrefix("data: ") }) else {
+            return nil
+        }
+        return try? JSONSerialization.jsonObject(with: Data(line.dropFirst(6).utf8)) as? [String: Any]
+    }
 
     // MARK: - Lifecycle
 
@@ -851,6 +1149,779 @@ struct StatefulHTTPServerTransportTests {
 
 @Suite("StatelessHTTPServerTransport Tests")
 struct StatelessHTTPServerTransportTests {
+
+    @Test("Schema provider rejects direct annotated calls before tools/list")
+    func directAnnotatedCallUsesSchemaProvider() async throws {
+        let transport = makeStatelessTransport()
+        let server = Server(name: "schema-provider-test", version: "1.0")
+        let callCounter = InitializationCounter()
+        await server.withMethodHandler(ListTools.self) { _ in
+            ListTools.Result(tools: [Tool(
+                name: "lookup", description: nil,
+                inputSchema: .object([
+                    "type": .string("object"),
+                    "properties": .object(["tenant": .object([
+                        "type": .string("string"), "x-mcp-header": .string("Tenant"),
+                    ])]),
+                    "required": .array([.string("tenant")]),
+                ])
+            )])
+        }
+        await server.withMethodHandler(CallTool.self) { _ in
+            await callCounter.increment()
+            return .init(content: [.text(text: "called", annotations: nil, _meta: nil)], isError: false)
+        }
+        try await server.start(transport: transport)
+        let body = try JSONSerialization.data(withJSONObject: [
+            "jsonrpc": "2.0", "id": 82, "method": "tools/call",
+            "params": [
+                "name": "lookup", "arguments": ["tenant": "acme"],
+                "_meta": [
+                    ProtocolMetaKey.protocolVersion: "2026-07-28",
+                    ProtocolMetaKey.clientCapabilities: [String: Any](),
+                ],
+            ],
+        ] as [String: Any])
+        let response = await transport.handleRequest(HTTPRequest(
+            method: "POST",
+            headers: [HTTPHeaderName.contentType: ContentType.json],
+            body: body,
+            clientIdentity: "direct-call-client"
+        ))
+        #expect(response.statusCode == 400)
+        let json = try #require(response.bodyData.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] })
+        #expect(json["id"] as? Int == 82)
+        #expect((json["error"] as? [String: Any])?["code"] as? Int == -32020)
+        #expect(await callCounter.count == 0)
+        await server.stop()
+    }
+
+    @Test("Schema provider follows pagination for direct annotated calls")
+    func directAnnotatedCallOnLaterToolPageUsesSchemaProvider() async throws {
+        let transport = makeStatelessTransport()
+        let server = Server(name: "schema-provider-pagination-test", version: "1.0")
+        let callCounter = InitializationCounter()
+        await server.withMethodHandler(ListTools.self) { params in
+            if params.cursor == nil {
+                return ListTools.Result(tools: [Tool(
+                    name: "first-page-tool", description: nil,
+                    inputSchema: .object(["type": .string("object")])
+                )], nextCursor: "page-2")
+            }
+            return ListTools.Result(tools: [Tool(
+                name: "lookup", description: nil,
+                inputSchema: .object([
+                    "type": .string("object"),
+                    "properties": .object(["tenant": .object([
+                        "type": .string("string"), "x-mcp-header": .string("Tenant"),
+                    ])]),
+                    "required": .array([.string("tenant")]),
+                ])
+            )])
+        }
+        await server.withMethodHandler(CallTool.self) { _ in
+            await callCounter.increment()
+            return .init(content: [.text(text: "called", annotations: nil, _meta: nil)], isError: false)
+        }
+        try await server.start(transport: transport)
+        let body = try JSONSerialization.data(withJSONObject: [
+            "jsonrpc": "2.0", "id": 83, "method": "tools/call",
+            "params": [
+                "name": "lookup", "arguments": ["tenant": "acme"],
+                "_meta": [
+                    ProtocolMetaKey.protocolVersion: "2026-07-28",
+                    ProtocolMetaKey.clientCapabilities: [String: Any](),
+                ],
+            ],
+        ] as [String: Any])
+        let response = await transport.handleRequest(HTTPRequest(
+            method: "POST",
+            headers: [
+                HTTPHeaderName.contentType: ContentType.json,
+                "Mcp-Param-Tenant": "acme",
+            ],
+            body: body,
+            clientIdentity: "later-page-client"
+        ))
+        #expect(response.statusCode == 200)
+        let json = try #require(response.bodyData.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] })
+        #expect(json["id"] as? Int == 83)
+        #expect(await callCounter.count == 1)
+        await server.stop()
+    }
+
+    @Test("Calls to tools absent from tools/list reach the registered handler")
+    func directUnlistedToolCallReachesHandler() async throws {
+        let transport = makeStatelessTransport()
+        let server = Server(name: "unlisted-tool-test", version: "1.0")
+        let listCounter = InitializationCounter()
+        let callCounter = InitializationCounter()
+        await server.withMethodHandler(ListTools.self) { _ in
+            await listCounter.increment()
+            return ListTools.Result(tools: [])
+        }
+        await server.withMethodHandler(CallTool.self) { _ in
+            await callCounter.increment()
+            return .init(content: [.text(text: "called", annotations: nil, _meta: nil)], isError: false)
+        }
+        try await server.start(transport: transport)
+        for id in [84, 87] {
+            let body = try JSONSerialization.data(withJSONObject: [
+                "jsonrpc": "2.0", "id": id, "method": "tools/call",
+                "params": [
+                    "name": "diagnostic-tool", "arguments": [:] as [String: String],
+                    "_meta": [
+                        ProtocolMetaKey.protocolVersion: "2026-07-28",
+                        ProtocolMetaKey.clientCapabilities: [String: Any](),
+                    ],
+                ],
+            ] as [String: Any])
+            let response = await transport.handleRequest(HTTPRequest(
+                method: "POST",
+                headers: [HTTPHeaderName.contentType: ContentType.json],
+                body: body,
+                clientIdentity: "unlisted-tool-client"
+            ))
+            #expect(response.statusCode == 200)
+        }
+        #expect(await listCounter.count == 1)
+        #expect(await callCounter.count == 2)
+        await server.stop()
+    }
+
+    @Test("Tool-list notifications invalidate cached HTTP schemas")
+    func toolsListChangedInvalidatesCachedSchemas() async throws {
+        let transport = makeStatelessTransport()
+        let server = Server(name: "schema-invalidation-test", version: "1.0")
+        let listCounter = InitializationCounter()
+        let callCounter = InitializationCounter()
+        await server.withMethodHandler(ListTools.self) { _ in
+            await listCounter.increment()
+            if await listCounter.count == 1 {
+                return ListTools.Result(tools: [Tool(
+                    name: "lookup", description: nil,
+                    inputSchema: .object(["type": .string("object")])
+                )])
+            }
+            return ListTools.Result(tools: [Tool(
+                name: "lookup", description: nil,
+                inputSchema: .object([
+                    "type": .string("object"),
+                    "properties": .object(["tenant": .object([
+                        "type": .string("string"), "x-mcp-header": .string("Tenant"),
+                    ])]),
+                    "required": .array([.string("tenant")]),
+                ])
+            )])
+        }
+        await server.withMethodHandler(CallTool.self) { _ in
+            await callCounter.increment()
+            return .init(content: [.text(text: "called", annotations: nil, _meta: nil)], isError: false)
+        }
+        try await server.start(transport: transport)
+
+        let metadata: [String: Any] = [
+            ProtocolMetaKey.protocolVersion: "2026-07-28",
+            ProtocolMetaKey.clientCapabilities: [String: Any](),
+        ]
+        let listBody = try JSONSerialization.data(withJSONObject: [
+            "jsonrpc": "2.0", "id": 85, "method": "tools/list",
+            "params": ["_meta": metadata],
+        ] as [String: Any])
+        let listResponse = await transport.handleRequest(HTTPRequest(
+            method: "POST",
+            headers: [HTTPHeaderName.contentType: ContentType.json],
+            body: listBody,
+            clientIdentity: "schema-change-client"
+        ))
+        #expect(listResponse.statusCode == 200)
+
+        try await server.notify(ToolListChangedNotification.message())
+
+        let callBody = try JSONSerialization.data(withJSONObject: [
+            "jsonrpc": "2.0", "id": 86, "method": "tools/call",
+            "params": ["name": "lookup", "arguments": ["tenant": "acme"], "_meta": metadata],
+        ] as [String: Any])
+        let callResponse = await transport.handleRequest(HTTPRequest(
+            method: "POST",
+            headers: [HTTPHeaderName.contentType: ContentType.json],
+            body: callBody,
+            clientIdentity: "schema-change-client"
+        ))
+        #expect(callResponse.statusCode == 400)
+        let json = try #require(callResponse.bodyData.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] })
+        #expect((json["error"] as? [String: Any])?["code"] as? Int == -32020)
+        #expect(await listCounter.count == 2)
+        #expect(await callCounter.count == 0)
+        await server.stop()
+    }
+
+    @Test("Modern stateless header validation rejects missing method header and preserves request ID")
+    func modernStatelessMissingMethodHeaderIsRejected() async throws {
+        let transport = StatelessHTTPServerTransport()
+        try await transport.connect()
+        let body = try JSONSerialization.data(withJSONObject: [
+            "jsonrpc": "2.0", "id": 81, "method": "subscriptions/listen",
+            "params": [
+                "_meta": [ProtocolMetaKey.protocolVersion: "2026-07-28"],
+                "notifications": ["toolsListChanged": true],
+            ],
+        ] as [String: Any])
+        let response = await transport.handleRequest(HTTPRequest(
+            method: "POST",
+            headers: [
+                "Host": "localhost:3000", HTTPHeaderName.contentType: ContentType.json,
+                HTTPHeaderName.accept: "application/json, text/event-stream",
+                HTTPHeaderName.protocolVersion: "2026-07-28",
+            ], body: body
+        ))
+        #expect(response.statusCode == 400)
+        let json = try #require(response.bodyData.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] })
+        #expect(json["id"] as? Int == 81)
+        #expect((json["error"] as? [String: Any])?["code"] as? Int == -32020)
+        await transport.disconnect()
+    }
+
+    @Test("Modern stateless progress routing preserves integer and string token types")
+    func statelessProgressTokensKeepJSONValueType() async throws {
+        let transport = makeStatelessTransport()
+        try await transport.connect()
+        func makeRequest(id: String, token: Any) throws -> Data {
+            try JSONSerialization.data(withJSONObject: [
+                "jsonrpc": "2.0", "id": id, "method": "tools/call",
+                "params": ["_meta": [
+                    "progressToken": token,
+                    ProtocolMetaKey.protocolVersion: "2026-07-28",
+                ]],
+            ] as [String: Any])
+        }
+        let headers = [
+            HTTPHeaderName.contentType: ContentType.json,
+            HTTPHeaderName.accept: "application/json, text/event-stream",
+        ]
+        let integerResponse = await transport.handleRequest(HTTPRequest(method: "POST", headers: headers, body: try makeRequest(id: "integer", token: 1)))
+        let stringResponse = await transport.handleRequest(HTTPRequest(method: "POST", headers: headers, body: try makeRequest(id: "string", token: "1")))
+        let progressEvents: [(Any, Double)] = [(1, 0.25), ("1", 0.75)]
+        for (token, value) in progressEvents {
+            try await transport.send(JSONSerialization.data(withJSONObject: [
+                "jsonrpc": "2.0", "method": "notifications/progress",
+                "params": ["progressToken": token, "progress": value],
+            ] as [String: Any]))
+        }
+        let integerEvents = (await drainSSEStream(integerResponse, maxChunks: 1, timeout: .milliseconds(80))).compactMap(StatefulHTTPServerTransportTests.jsonFromSSE)
+        let stringEvents = (await drainSSEStream(stringResponse, maxChunks: 2, timeout: .milliseconds(80))).compactMap(StatefulHTTPServerTransportTests.jsonFromSSE)
+        #expect(integerEvents.count == 1)
+        #expect((integerEvents.first?["params"] as? [String: Any])?["progressToken"] as? Int == 1)
+        #expect(stringEvents.count == 1)
+        #expect((stringEvents.first?["params"] as? [String: Any])?["progressToken"] as? String == "1")
+        await transport.disconnect()
+    }
+
+    @Test("Malformed stateless subscriptions/listen error preserves request ID")
+    func malformedStatelessListenPreservesRequestID() async throws {
+        let transport = makeStatelessTransport()
+        try await transport.connect()
+        let body = try JSONSerialization.data(withJSONObject: [
+            "jsonrpc": "2.0", "id": 82, "method": "subscriptions/listen", "params": [:] as [String: Any],
+        ] as [String: Any])
+        let response = await transport.handleRequest(HTTPRequest(method: "POST", headers: [:], body: body))
+        let json = try #require(response.bodyData.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] })
+        #expect(json["id"] as? Int == 82)
+        await transport.disconnect()
+    }
+
+    @Test("Modern subscriptions/listen opens an SSE stream with an acknowledgement")
+    func testModernSubscriptionsListenOpensSSEStreamWithAcknowledgement() async throws {
+        let transport = makeStatelessTransport()
+        try await transport.connect()
+
+        let requestBody = try JSONSerialization.data(withJSONObject: [
+            "jsonrpc": "2.0",
+            "id": "listen-1",
+            "method": "subscriptions/listen",
+            "params": [
+                "_meta": [
+                    ProtocolMetaKey.protocolVersion: "2026-07-28",
+                    ProtocolMetaKey.clientCapabilities: [String: Any](),
+                ],
+                "notifications": ["toolsListChanged": true],
+            ],
+        ] as [String: Any])
+        let request = HTTPRequest(
+            method: "POST",
+            headers: [
+                HTTPHeaderName.contentType: ContentType.json,
+                HTTPHeaderName.accept: "application/json, text/event-stream",
+            ],
+            body: requestBody
+        )
+
+        let response = await transport.handleRequest(request)
+        guard case .stream(let stream, let headers) = response else {
+            Issue.record("Expected subscriptions/listen to return an SSE stream")
+            await transport.disconnect()
+            return
+        }
+        #expect(response.statusCode == 200)
+        #expect(headers[HTTPHeaderName.contentType] == ContentType.sse)
+        #expect(headers[HTTPHeaderName.sessionID] == nil)
+
+        try await transport.send(try JSONEncoder().encode(
+            SubscriptionsAcknowledgedNotification.message(
+                .init(
+                    subscriptionId: .string("listen-1"),
+                    notifications: .init(toolsListChanged: true)
+                )
+            )
+        ))
+
+        var iterator = stream.makeAsyncIterator()
+        let firstFrame = try await iterator.next()
+        let frameText = firstFrame.map { String(decoding: $0, as: UTF8.self) } ?? ""
+        let jsonText = frameText
+            .split(separator: "\n")
+            .first(where: { $0.hasPrefix("data: ") })
+            .map { String($0.dropFirst(6)) }
+        let acknowledgement = try jsonText.map {
+            try JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]
+        } ?? nil
+        #expect(acknowledgement?["method"] as? String == "notifications/subscriptions/acknowledged")
+        let params = acknowledgement?["params"] as? [String: Any]
+        let meta = params?["_meta"] as? [String: Any]
+        #expect(meta?[ProtocolMetaKey.subscriptionId] as? String == "listen-1")
+
+        await transport.closeRequestStream(for: .string("listen-1"))
+        await transport.disconnect()
+    }
+
+    @Test("Modern listen stream delivers only opted-in notifications with subscription metadata")
+    func testModernListenStreamFiltersAndTagsNotifications() async throws {
+        let transport = makeStatelessTransport()
+        try await transport.connect()
+
+        let requestBody = try JSONSerialization.data(withJSONObject: [
+            "jsonrpc": "2.0",
+            "id": "listen-2",
+            "method": "subscriptions/listen",
+            "params": [
+                "_meta": [
+                    ProtocolMetaKey.protocolVersion: "2026-07-28",
+                    ProtocolMetaKey.clientCapabilities: [String: Any](),
+                ],
+                "notifications": ["toolsListChanged": true],
+            ],
+        ] as [String: Any])
+        let response = await transport.handleRequest(
+            HTTPRequest(
+                method: "POST",
+                headers: [
+                    HTTPHeaderName.contentType: ContentType.json,
+                    HTTPHeaderName.accept: "application/json, text/event-stream",
+                ],
+                body: requestBody
+            )
+        )
+        guard case .stream(let stream, _) = response else {
+            Issue.record("Expected subscriptions/listen to return an SSE stream")
+            await transport.disconnect()
+            return
+        }
+
+        let excluded = Data(#"{"jsonrpc":"2.0","method":"notifications/prompts/list_changed"}"#.utf8)
+        let included = Data(#"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#.utf8)
+        try await transport.send(included)
+        try await transport.send(try JSONEncoder().encode(
+            SubscriptionsAcknowledgedNotification.message(
+                .init(
+                    subscriptionId: .string("listen-2"),
+                    notifications: .init(toolsListChanged: true)
+                )
+            )
+        ))
+        try await transport.send(excluded)
+        try await transport.send(included)
+
+        var iterator = stream.makeAsyncIterator()
+        let acknowledgementFrame = try await iterator.next()
+        let notificationFrame = try await iterator.next()
+        let acknowledgementText = acknowledgementFrame.map { String(decoding: $0, as: UTF8.self) } ?? ""
+        let frameText = notificationFrame.map { String(decoding: $0, as: UTF8.self) } ?? ""
+        let jsonText = frameText
+            .split(separator: "\n")
+            .first(where: { $0.hasPrefix("data: ") })
+            .map { String($0.dropFirst(6)) }
+        let notification = try jsonText.map {
+            try JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]
+        } ?? nil
+        let params = notification?["params"] as? [String: Any]
+        let meta = params?["_meta"] as? [String: Any]
+        #expect(acknowledgementText.contains("notifications\\/subscriptions\\/acknowledged"))
+        #expect(notification?["method"] as? String == "notifications/tools/list_changed")
+        #expect(meta?[ProtocolMetaKey.subscriptionId] as? String == "listen-2")
+
+        await transport.closeRequestStream(for: .string("listen-2"))
+        await transport.disconnect()
+    }
+
+    @Test("Duplicate active listen IDs do not replace another client's stream or context")
+    func duplicateActiveListenIDIsRejectedWithoutOverwritingState() async throws {
+        let transport = makeStatelessTransport()
+        try await transport.connect()
+        let sharedID = "shared-listen-id"
+
+        func request(client: String) throws -> HTTPRequest {
+            let body = try JSONSerialization.data(withJSONObject: [
+                "jsonrpc": "2.0",
+                "id": sharedID,
+                "method": "subscriptions/listen",
+                "params": [
+                    "_meta": [
+                        ProtocolMetaKey.protocolVersion: "2026-07-28",
+                        ProtocolMetaKey.clientCapabilities: [String: Any](),
+                    ],
+                    "notifications": ["toolsListChanged": true],
+                ],
+            ] as [String: Any])
+            return HTTPRequest(
+                method: "POST",
+                headers: [
+                    HTTPHeaderName.contentType: ContentType.json,
+                    HTTPHeaderName.accept: "application/json, text/event-stream",
+                    "X-Test-Client": client,
+                ],
+                body: body
+            )
+        }
+
+        let firstResponse = await transport.handleRequest(try request(client: "first"))
+        guard case .stream = firstResponse else {
+            Issue.record("Expected the first listen to open an SSE stream")
+            await transport.disconnect()
+            return
+        }
+        let secondResponse = await transport.handleRequest(try request(client: "second"))
+        #expect(secondResponse.statusCode == 409)
+
+        let context = try #require(await transport.httpRequestContext(for: .string(sharedID)))
+        #expect(context.header("X-Test-Client") == "first")
+
+        await transport.disconnect()
+    }
+
+    @Test("Stateless cancellation only reaches a request with the same authorization principal")
+    func statelessCancellationIsScopedToAuthorizationPrincipal() async throws {
+        let transport = makeStatelessTransport()
+        try await transport.connect()
+        let requestStream = await transport.receive()
+        var iterator = requestStream.makeAsyncIterator()
+        let requestID = "shared-request-id"
+
+        let activeRequest = HTTPRequest(
+            method: "POST",
+            headers: [
+                HTTPHeaderName.contentType: ContentType.json,
+                HTTPHeaderName.accept: "application/json",
+                HTTPHeaderName.authorization: "Bearer first-client",
+            ],
+            body: makeRequestBody(id: requestID)
+        )
+        let responseTask = Task { await transport.handleRequest(activeRequest) }
+        _ = try #require(await iterator.next())
+
+        let otherClientCancellation = HTTPRequest(
+            method: "POST",
+            headers: [
+                HTTPHeaderName.contentType: ContentType.json,
+                HTTPHeaderName.authorization: "Bearer other-client",
+            ],
+            body: try makeCancellationBody(id: requestID)
+        )
+        _ = await transport.handleRequest(otherClientCancellation)
+
+        let sentinelNotification = makeNotificationBody(method: "notifications/initialized")
+        _ = await transport.handleRequest(makeStatelessPOSTRequest(body: sentinelNotification))
+        let forwarded = try #require(await iterator.next())
+        let forwardedJSON = try #require(
+            JSONSerialization.jsonObject(with: forwarded) as? [String: Any]
+        )
+        #expect(forwardedJSON["method"] as? String == "notifications/initialized")
+
+        let ownerCancellation = HTTPRequest(
+            method: "POST",
+            headers: [
+                HTTPHeaderName.contentType: ContentType.json,
+                HTTPHeaderName.authorization: "Bearer first-client",
+            ],
+            body: try makeCancellationBody(id: requestID)
+        )
+        _ = await transport.handleRequest(ownerCancellation)
+        let forwardedCancellation = try #require(await iterator.next())
+        let cancellationJSON = try #require(
+            JSONSerialization.jsonObject(with: forwardedCancellation) as? [String: Any]
+        )
+        #expect(cancellationJSON["method"] as? String == CancelledNotification.name)
+
+        await transport.disconnect()
+        _ = await responseTask.value
+    }
+
+    @Test("Stateless cancellation supports an adapter-supplied identity without credentials")
+    func statelessCancellationSupportsAdapterIdentity() async throws {
+        let transport = makeStatelessTransport()
+        try await transport.connect()
+        let requestStream = await transport.receive()
+        var iterator = requestStream.makeAsyncIterator()
+        let requestID = "unauthenticated-request"
+
+        let activeRequest = HTTPRequest(
+            method: "POST",
+            headers: [
+                HTTPHeaderName.contentType: ContentType.json,
+                HTTPHeaderName.accept: "application/json",
+            ],
+            body: makeRequestBody(id: requestID),
+            clientIdentity: "application-user-42"
+        )
+        let responseTask = Task { await transport.handleRequest(activeRequest) }
+        _ = try #require(await iterator.next())
+
+        let ownerCancellation = HTTPRequest(
+            method: "POST",
+            headers: [HTTPHeaderName.contentType: ContentType.json],
+            body: try makeCancellationBody(id: requestID),
+            clientIdentity: "application-user-42"
+        )
+        _ = await transport.handleRequest(ownerCancellation)
+        let forwardedCancellation = try #require(await iterator.next())
+        let cancellationJSON = try #require(
+            JSONSerialization.jsonObject(with: forwardedCancellation) as? [String: Any]
+        )
+        #expect(cancellationJSON["method"] as? String == CancelledNotification.name)
+
+        await transport.disconnect()
+        _ = await responseTask.value
+    }
+
+    @Test("Numeric and string listen IDs keep separate HTTP request contexts")
+    func numericAndStringListenIDsHaveSeparateContexts() async throws {
+        let transport = makeStatelessTransport()
+        try await transport.connect()
+
+        func request(_ id: Any) throws -> HTTPRequest {
+            let body = try JSONSerialization.data(withJSONObject: [
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "subscriptions/listen",
+                "params": [
+                    "_meta": [
+                        ProtocolMetaKey.protocolVersion: "2026-07-28",
+                        ProtocolMetaKey.clientCapabilities: [String: Any](),
+                    ],
+                    "notifications": ["toolsListChanged": true],
+                ],
+            ] as [String: Any])
+            return HTTPRequest(
+                method: "POST",
+                headers: [
+                    HTTPHeaderName.contentType: ContentType.json,
+                    HTTPHeaderName.accept: "application/json, text/event-stream",
+                ],
+                body: body
+            )
+        }
+
+        let stringResponse = await transport.handleRequest(try request("1"))
+        let numberResponse = await transport.handleRequest(try request(1))
+        guard case .stream = stringResponse, case .stream = numberResponse else {
+            Issue.record("Expected both listen requests to have separate streams")
+            await transport.disconnect()
+            return
+        }
+        let stringContext = try #require(await transport.httpRequestContext(for: .string("1")))
+        let numberContext = try #require(await transport.httpRequestContext(for: .number(1)))
+        #expect(JSONRPCMessageKind.jsonRPCID(inBody: try #require(stringContext.body)) == .string("1"))
+        #expect(JSONRPCMessageKind.jsonRPCID(inBody: try #require(numberContext.body)) == .number(1))
+        await transport.disconnect()
+    }
+
+    @Test("Modern acknowledgments are routed only to their originating listen stream")
+    func modernAcknowledgmentIsIsolatedToItsListenStream() async throws {
+        let transport = makeStatelessTransport()
+        try await transport.connect()
+
+        func listenRequest(_ id: String) throws -> HTTPRequest {
+            let body = try JSONSerialization.data(withJSONObject: [
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "subscriptions/listen",
+                "params": [
+                    "_meta": [
+                        ProtocolMetaKey.protocolVersion: "2026-07-28",
+                        ProtocolMetaKey.clientCapabilities: [String: Any](),
+                    ],
+                    "notifications": ["toolsListChanged": true],
+                ],
+            ] as [String: Any])
+            return HTTPRequest(
+                method: "POST",
+                headers: [
+                    HTTPHeaderName.contentType: ContentType.json,
+                    HTTPHeaderName.accept: "application/json, text/event-stream",
+                ],
+                body: body
+            )
+        }
+
+        let firstResponse = await transport.handleRequest(try listenRequest("listen-a"))
+        let secondResponse = await transport.handleRequest(try listenRequest("listen-b"))
+        guard case .stream(let firstStream, _) = firstResponse,
+            case .stream(let secondStream, _) = secondResponse
+        else {
+            Issue.record("Expected both subscriptions to return SSE streams")
+            await transport.disconnect()
+            return
+        }
+
+        func acknowledgment(_ id: String) -> Data {
+            Data("""
+                {"jsonrpc":"2.0","method":"notifications/subscriptions/acknowledged","params":{"notifications":{"toolsListChanged":true},"_meta":{"\(ProtocolMetaKey.subscriptionId)":"\(id)"}}}
+                """.utf8)
+        }
+        try await transport.send(acknowledgment("listen-a"))
+        try await transport.send(acknowledgment("listen-b"))
+        var firstIterator = firstStream.makeAsyncIterator()
+        var secondIterator = secondStream.makeAsyncIterator()
+        let firstFrameValue = try await firstIterator.next()
+        let firstFrame = try #require(firstFrameValue)
+        let secondFrameValue = try await secondIterator.next()
+        let secondFrame = try #require(secondFrameValue)
+        await transport.closeRequestStream(for: .string("listen-a"))
+        await transport.closeRequestStream(for: .string("listen-b"))
+        #expect(await transport.httpRequestContext(for: .string("listen-a")) == nil)
+        #expect(await transport.httpRequestContext(for: .string("listen-b")) == nil)
+
+        func message(from frame: Data) throws -> [String: Any] {
+            let text = String(decoding: frame, as: UTF8.self)
+            let line = try #require(text.split(separator: "\n").first(where: { $0.hasPrefix("data: ") }))
+            return try #require(
+                JSONSerialization.jsonObject(with: Data(line.dropFirst(6).utf8)) as? [String: Any]
+            )
+        }
+        let firstMessage = try message(from: firstFrame)
+        let firstMeta = (firstMessage["params"] as? [String: Any])?["_meta"] as? [String: Any]
+        #expect(firstMeta?[ProtocolMetaKey.subscriptionId] as? String == "listen-a")
+        let secondMessage = try message(from: secondFrame)
+        let secondMeta = (secondMessage["params"] as? [String: Any])?["_meta"] as? [String: Any]
+        #expect(secondMeta?[ProtocolMetaKey.subscriptionId] as? String == "listen-b")
+        await transport.disconnect()
+    }
+
+    @Test("Modern listen only delivers notification types accepted in the acknowledgment")
+    func modernListenHonorsAcknowledgedNotificationSubset() async throws {
+        let transport = makeStatelessTransport()
+        try await transport.connect()
+        let requestBody = try JSONSerialization.data(withJSONObject: [
+            "jsonrpc": "2.0",
+            "id": "listen-subset",
+            "method": "subscriptions/listen",
+            "params": [
+                "_meta": [
+                    ProtocolMetaKey.protocolVersion: "2026-07-28",
+                    ProtocolMetaKey.clientCapabilities: [String: Any](),
+                ],
+                "notifications": ["toolsListChanged": true],
+            ],
+        ] as [String: Any])
+        let response = await transport.handleRequest(HTTPRequest(
+            method: "POST",
+            headers: [
+                HTTPHeaderName.contentType: ContentType.json,
+                HTTPHeaderName.accept: "application/json, text/event-stream",
+            ],
+            body: requestBody
+        ))
+        guard case .stream(let stream, _) = response else {
+            Issue.record("Expected subscriptions/listen to return an SSE stream")
+            await transport.disconnect()
+            return
+        }
+        let acknowledgment = Data("""
+            {"jsonrpc":"2.0","method":"notifications/subscriptions/acknowledged","params":{"notifications":{},"_meta":{"\(ProtocolMetaKey.subscriptionId)":"listen-subset"}}}
+            """.utf8)
+        let toolsChanged = Data(#"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#.utf8)
+        try await transport.send(acknowledgment)
+        try await transport.send(toolsChanged)
+        await transport.closeRequestStream(for: .string("listen-subset"))
+
+        var methods: [String] = []
+        for try await frame in stream {
+            let text = String(decoding: frame, as: UTF8.self)
+            guard let line = text.split(separator: "\n").first(where: { $0.hasPrefix("data: ") }),
+                let json = try? JSONSerialization.jsonObject(
+                    with: Data(line.dropFirst(6).utf8)
+                ) as? [String: Any],
+                let method = json["method"] as? String
+            else { continue }
+            methods.append(method)
+        }
+        #expect(methods == [SubscriptionsAcknowledgedNotification.name])
+        await transport.disconnect()
+    }
+
+    @Test("Modern validation errors preserve request ID and use JSON-RPC invalid params")
+    func testModernValidationErrorPreservesRequestID() async throws {
+        let transport = StatelessHTTPServerTransport(
+            validationPipeline: StandardValidationPipeline(validators: [ProtocolVersionValidator()])
+        )
+        try await transport.connect()
+        let requestBody = try JSONSerialization.data(withJSONObject: [
+            "jsonrpc": "2.0",
+            "id": 101,
+            "method": "server/discover",
+            "params": [:] as [String: Any],
+        ] as [String: Any])
+
+        let response = await transport.handleRequest(
+            HTTPRequest(
+                method: "POST",
+                headers: [HTTPHeaderName.protocolVersion: "2026-07-28"],
+                body: requestBody
+            )
+        )
+        let body = try #require(response.bodyData)
+        let envelope = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let error = try #require(envelope["error"] as? [String: Any])
+
+        #expect(response.statusCode == 400)
+        #expect(envelope["id"] as? Int == 101)
+        #expect(error["code"] as? Int == -32602)
+
+        await transport.disconnect()
+    }
+
+    @Test("Modern method-not-found maps to HTTP 404")
+    func testModernMethodNotFoundUsesHTTP404() async throws {
+        let transport = makeStatelessTransport()
+        let server = Server(name: "TestServer", version: "1.0")
+        try await server.start(transport: transport)
+        let requestBody = try JSONSerialization.data(withJSONObject: [
+            "jsonrpc": "2.0", "id": 102, "method": "unknown/method",
+            "params": ["_meta": [
+                ProtocolMetaKey.protocolVersion: "2026-07-28",
+                ProtocolMetaKey.clientCapabilities: [String: Any](),
+            ]],
+        ] as [String: Any])
+        let response = await transport.handleRequest(HTTPRequest(
+            method: "POST",
+            headers: [HTTPHeaderName.contentType: ContentType.json, HTTPHeaderName.accept: "application/json, text/event-stream"],
+            body: requestBody
+        ))
+        #expect(response.statusCode == 404)
+        let envelope = try #require(response.bodyData.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] })
+        let error = try #require(envelope["error"] as? [String: Any])
+        #expect(error["code"] as? Int == -32601)
+        await server.stop()
+    }
 
     // MARK: - Lifecycle
 

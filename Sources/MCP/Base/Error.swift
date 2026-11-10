@@ -36,9 +36,14 @@ public enum MCPError: Swift.Error, Sendable {
 
     // Server errors (-32000 to -32099)
     case serverError(code: Int, message: String)
+    case missingRequiredClientCapability([String: Value])
 
     // MCP specific errors
+    /// Modern resources/read error with the requested URI in structured error data.
+    case resourceNotFound(uri: String)
     case urlElicitationRequired(message: String, elicitations: [URLElicitationInfo])  // -32042
+    /// Modern protocol: requested version is unknown or unimplemented (-32022).
+    case unsupportedProtocolVersion(requested: String, supported: [String])
 
     // Transport specific errors
     case connectionClosed
@@ -51,9 +56,12 @@ public enum MCPError: Swift.Error, Sendable {
         case .invalidRequest: return -32600
         case .methodNotFound: return -32601
         case .invalidParams: return -32602
+        case .resourceNotFound: return -32602
         case .internalError: return -32603
         case .serverError(let code, _): return code
+        case .missingRequiredClientCapability: return -32021
         case .urlElicitationRequired: return -32042
+        case .unsupportedProtocolVersion: return -32022
         case .connectionClosed: return -32000
         case .transportError: return -32001
         }
@@ -91,8 +99,15 @@ extension MCPError: LocalizedError {
             return "Internal error" + (detail.map { ": \($0)" } ?? "")
         case .serverError(_, let message):
             return "Server error: \(message)"
+        case .resourceNotFound(let uri):
+            return "Invalid params: Resource not found: \(uri)"
+        case .missingRequiredClientCapability:
+            return "Missing required client capability"
         case .urlElicitationRequired(let message, _):
             return "URL elicitation required: \(message)"
+        case .unsupportedProtocolVersion(let requested, let supported):
+            let list = supported.joined(separator: ", ")
+            return "Unsupported protocol version: \(requested). Supported: \(list)"
         case .connectionClosed:
             return "Connection closed"
         case .transportError(let error):
@@ -114,8 +129,14 @@ extension MCPError: LocalizedError {
             return "Internal JSON-RPC error"
         case .serverError:
             return "Server-defined error occurred"
+        case .resourceNotFound:
+            return "The requested resource does not exist"
+        case .missingRequiredClientCapability:
+            return "The client did not declare a required capability"
         case .urlElicitationRequired:
             return "The server requires user authentication or input via external URL"
+        case .unsupportedProtocolVersion:
+            return "The requested MCP protocol version is not implemented by this server"
         case .connectionClosed:
             return "The connection to the server was closed"
         case .transportError(let error):
@@ -183,10 +204,16 @@ extension MCPError: Codable {
             if let detail = detail {
                 try container.encode(["detail": detail], forKey: .data)
             }
+        case .resourceNotFound(let uri):
+            try container.encode(errorDescription ?? "Resource not found", forKey: .message)
+            try container.encode(["uri": Value.string(uri)], forKey: .data)
         case .serverError(_, _):
             // No additional data for server errors
             try container.encode(errorDescription ?? "Unknown error", forKey: .message)
             break
+        case .missingRequiredClientCapability(let capabilities):
+            try container.encode("Missing required client capability", forKey: .message)
+            try container.encode(["requiredCapabilities": Value.object(capabilities)], forKey: .data)
         case .urlElicitationRequired(let message, let elicitations):
             // Encode the raw message so decode can round-trip without prefix doubling
             try container.encode(message, forKey: .message)
@@ -201,6 +228,18 @@ extension MCPError: Codable {
             }
             try container.encode(
                 ["elicitations": Value.array(elicitationsData.map { .object($0) })],
+                forKey: .data
+            )
+        case .unsupportedProtocolVersion(let requested, let supported):
+            try container.encode(
+                errorDescription ?? "Unsupported protocol version",
+                forKey: .message
+            )
+            try container.encode(
+                [
+                    "requested": Value.string(requested),
+                    "supported": Value.array(supported.map { .string($0) }),
+                ] as [String: Value],
                 forKey: .data
             )
         case .connectionClosed:
@@ -235,7 +274,11 @@ extension MCPError: Codable {
         case -32601:
             self = .methodNotFound(unwrapDetail(message))
         case -32602:
-            self = .invalidParams(unwrapDetail(message))
+            if let data, data.count == 1, case .string(let uri)? = data["uri"] {
+                self = .resourceNotFound(uri: uri)
+            } else {
+                self = .invalidParams(unwrapDetail(message))
+            }
         case -32603:
             self = .internalError(unwrapDetail(nil))
         case -32042:
@@ -257,6 +300,30 @@ extension MCPError: Codable {
                 }
             }
             self = .urlElicitationRequired(message: message, elicitations: elicitations)
+        case -32022:
+            let requested: String
+            if case .string(let value) = data?["requested"] {
+                requested = value
+            } else {
+                // Keep `requested` as a bare version (or empty). Do not re-feed
+                // the human-readable RPC message into this field.
+                requested = ""
+            }
+            var supported: [String] = []
+            if case .array(let items) = data?["supported"] {
+                for item in items {
+                    if case .string(let version) = item {
+                        supported.append(version)
+                    }
+                }
+            }
+            self = .unsupportedProtocolVersion(requested: requested, supported: supported)
+        case -32021:
+            if case .object(let capabilities) = data?["requiredCapabilities"] {
+                self = .missingRequiredClientCapability(capabilities)
+            } else {
+                self = .serverError(code: code, message: message)
+            }
         case -32000:
             self = .connectionClosed
         case -32001:
@@ -291,8 +358,17 @@ extension MCPError: Equatable {
         case (.internalError(let a), .internalError(let b)): return a == b
         case (.serverError(let c1, let m1), .serverError(let c2, let m2)):
             return c1 == c2 && m1 == m2
+        case (.resourceNotFound(let a), .resourceNotFound(let b)):
+            return a == b
+        case (.missingRequiredClientCapability(let c1), .missingRequiredClientCapability(let c2)):
+            return c1 == c2
         case (.urlElicitationRequired(let m1, let e1), .urlElicitationRequired(let m2, let e2)):
             return m1 == m2 && e1 == e2
+        case (
+            .unsupportedProtocolVersion(let r1, let s1),
+            .unsupportedProtocolVersion(let r2, let s2)
+        ):
+            return r1 == r2 && s1 == s2
         case (.connectionClosed, .connectionClosed): return true
         case (.transportError(let a), .transportError(let b)):
             return a.localizedDescription == b.localizedDescription
@@ -319,9 +395,19 @@ extension MCPError: Hashable {
             hasher.combine(detail)
         case .serverError(_, let message):
             hasher.combine(message)
+        case .resourceNotFound(let uri):
+            hasher.combine(uri)
+        case .missingRequiredClientCapability(let capabilities):
+            for key in capabilities.keys.sorted() {
+                hasher.combine(key)
+                hasher.combine(capabilities[key])
+            }
         case .urlElicitationRequired(let message, let elicitations):
             hasher.combine(message)
             hasher.combine(elicitations)
+        case .unsupportedProtocolVersion(let requested, let supported):
+            hasher.combine(requested)
+            hasher.combine(supported)
         case .connectionClosed:
             break
         case .transportError(let error):

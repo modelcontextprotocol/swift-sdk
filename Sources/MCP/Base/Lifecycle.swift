@@ -14,7 +14,7 @@ public enum Initialize: Method {
         public let clientInfo: Client.Info
 
         public init(
-            protocolVersion: String = Version.latest,
+            protocolVersion: String = Version.latestLegacy,
             capabilities: Client.Capabilities,
             clientInfo: Client.Info
         ) {
@@ -31,7 +31,7 @@ public enum Initialize: Method {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             protocolVersion =
                 try container.decodeIfPresent(String.self, forKey: .protocolVersion)
-                ?? Version.latest
+                ?? Version.latestLegacy
             capabilities =
                 try container.decodeIfPresent(Client.Capabilities.self, forKey: .capabilities)
                 ?? .init()

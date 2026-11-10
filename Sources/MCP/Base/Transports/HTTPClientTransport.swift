@@ -21,6 +21,7 @@ import Logging
 /// - Sending JSON-RPC messages via HTTP POST requests
 /// - Receiving responses via both direct JSON responses and SSE streams
 /// - Session management using the `MCP-Session-Id` header
+/// - A stable per-transport `MCP-Client-Identity` capability for sessionless cancellation
 /// - Protocol version negotiation via `MCP-Protocol-Version` header
 /// - Automatic reconnection for dropped SSE streams with resumability support
 /// - Platform-specific optimizations for different operating systems
@@ -53,10 +54,12 @@ import Logging
 /// // The transport will automatically handle SSE events
 /// // and deliver them through the client's notification handlers
 /// ```
-public actor HTTPClientTransport: Transport {
+public actor HTTPClientTransport: Transport, RequestStreamCancelling {
     /// The server endpoint URL to connect to
     public let endpoint: URL
     private let session: URLSession
+    /// Stable high-entropy identity used to scope sessionless cancellation across HTTP connections.
+    private let clientIdentity = UUID().uuidString
 
     /// The session ID assigned by the server, used for maintaining state across requests
     public private(set) var sessionID: String?
@@ -96,6 +99,12 @@ public actor HTTPClientTransport: Transport {
     /// Used to trigger reconnection when a POST SSE stream closes without delivering data.
     private var activeGETSessionTask: URLSessionDataTask?
 
+    /// In-flight POST response tasks keyed by JSON-RPC request id string.
+    /// Cancelled by ``cancelInFlightRequestStream(for:)`` so listen refresh
+    /// does not leak open SSE connections.
+    private var inFlightPOSTTasks: [String: URLSessionTask] = [:]
+    private var toolParameterHeaders: [String: [MCPToolHeaderMapping]] = [:]
+
     /// Creates a new HTTP transport client with the specified endpoint
     ///
     /// - Parameters:
@@ -103,7 +112,7 @@ public actor HTTPClientTransport: Transport {
     ///   - configuration: URLSession configuration to use for HTTP requests
     ///   - streaming: Whether to enable SSE streaming mode (default: true)
     ///   - sseInitializationTimeout: Maximum time to wait for session ID before proceeding with SSE (default: 10 seconds)
-    ///   - protocolVersion: The MCP protocol version to use (default: "2025-11-25")
+    ///   - protocolVersion: The MCP protocol version to use (default: latest legacy, currently "2025-11-25")
     ///   - authorizer: Optional ``HTTPClientAuthorizer`` for automatic Bearer token acquisition and retries.
     ///   - requestModifier: Optional closure to customize requests before they are sent (default: no modification)
     ///   - logger: Optional logger instance for transport events
@@ -112,7 +121,7 @@ public actor HTTPClientTransport: Transport {
         configuration: URLSessionConfiguration = .default,
         streaming: Bool = true,
         sseInitializationTimeout: TimeInterval = 10,
-        protocolVersion: String = Version.latest,
+        protocolVersion: String = Version.latestLegacy,
         authorizer: (any HTTPClientAuthorizer)? = nil,
         requestModifier: @escaping (URLRequest) -> URLRequest = { $0 },
         logger: Logger? = nil
@@ -134,7 +143,7 @@ public actor HTTPClientTransport: Transport {
         session: URLSession,
         streaming: Bool = false,
         sseInitializationTimeout: TimeInterval = 10,
-        protocolVersion: String = Version.latest,
+        protocolVersion: String = Version.latestLegacy,
         authorizer: (any HTTPClientAuthorizer)? = nil,
         requestModifier: @escaping (URLRequest) -> URLRequest = { $0 },
         logger: Logger? = nil
@@ -183,11 +192,19 @@ public actor HTTPClientTransport: Transport {
     /// Establishes connection with the transport
     public func connect() async throws {
         guard !isConnected else { return }
+        #if os(Linux)
+            guard !(protocolVersion.map(Version.isModern) ?? false) else {
+                throw MCPError.internalError(
+                    "Modern Streamable HTTP is not supported on Linux because POST SSE streams cannot be consumed"
+                )
+            }
+        #endif
         isConnected = true
 
         setupInitialSessionIDSignal()
 
-        if streaming {
+        // Legacy GET notification stream is not used on the modern profile.
+        if streaming, !(protocolVersion.map(Version.isModern) ?? false) {
             streamingTask = Task { await startListeningForServerEvents() }
         }
 
@@ -218,11 +235,47 @@ public actor HTTPClientTransport: Transport {
         self.protocolVersion = version
     }
 
+    func updateToolDefinitions(_ tools: [Tool], reset: Bool) -> [Tool] {
+        var names = Set<String>()
+        if !reset { names.formUnion(toolParameterHeaders.keys) }
+        var validTools: [Tool] = []
+        var newMappings: [String: [MCPToolHeaderMapping]] = [:]
+        for tool in tools {
+            guard names.insert(tool.name).inserted else { continue }
+            let schema = Self.jsonObject(tool.inputSchema)
+            guard let mappings = MCPToolHeaderSupport.validatedMappings(in: schema) else { continue }
+            validTools.append(tool)
+            newMappings[tool.name] = mappings
+        }
+        if reset { toolParameterHeaders.removeAll() }
+        toolParameterHeaders.merge(newMappings) { _, new in new }
+        return validTools
+    }
+
+    func hasToolDefinition(_ name: String) -> Bool {
+        toolParameterHeaders[name] != nil
+    }
+
+    private static func jsonObject(_ value: Value) -> [String: Any] {
+        guard let data = try? JSONEncoder().encode(value),
+            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return [:] }
+        return object
+    }
+
     /// Sends data through an HTTP POST request
     public func send(_ data: Data) async throws {
         guard isConnected else {
             throw MCPError.internalError("Transport not connected")
         }
+        #if os(Linux)
+            let requestVersion = JSONRPCMessageKind.protocolVersion(inBody: data) ?? protocolVersion
+            guard !(requestVersion.map(Version.isModern) ?? false) else {
+                throw MCPError.internalError(
+                    "Modern Streamable HTTP is not supported on Linux because POST SSE streams cannot be consumed"
+                )
+            }
+        #endif
 
         if let authorizer {
             do {
@@ -249,10 +302,28 @@ public actor HTTPClientTransport: Transport {
                 forHTTPHeaderField: HTTPHeaderName.accept
             )
             request.addValue(ContentType.json, forHTTPHeaderField: HTTPHeaderName.contentType)
+            request.setValue(clientIdentity, forHTTPHeaderField: HTTPHeaderName.clientIdentity)
             request.httpBody = data
 
-            if let protocolVersion = protocolVersion {
-                request.addValue(protocolVersion, forHTTPHeaderField: HTTPHeaderName.protocolVersion)
+            // Prefer per-request body `_meta` so modern Discover/listen agree with the header.
+            let headerVersion =
+                JSONRPCMessageKind.protocolVersion(inBody: data) ?? protocolVersion
+            if let headerVersion {
+                request.addValue(headerVersion, forHTTPHeaderField: HTTPHeaderName.protocolVersion)
+                if Version.isModern(headerVersion),
+                    let message = JSONRPCMessageKind(data: data),
+                    let method = message.methodName
+                {
+                    request.setValue(method, forHTTPHeaderField: HTTPHeaderName.mcpMethod)
+                    if let name = Self.mcpName(inBody: data, method: method) {
+                        request.setValue(name, forHTTPHeaderField: HTTPHeaderName.mcpName)
+                    }
+                    if Version.isModern(headerVersion),
+                        JSONRPCMessageKind(data: data)?.methodName == CallTool.name
+                    {
+                        Self.addToolParameterHeaders(to: &request, body: data, mappings: toolParameterHeaders)
+                    }
+                }
             }
 
             if let sessionID = sessionID {
@@ -265,13 +336,28 @@ public actor HTTPClientTransport: Transport {
 
             request = requestModifier(request)
 
+            let requestIDKey = JSONRPCMessageKind.routingIDKey(from: data)
             do {
                 #if os(Linux)
                     let (responseData, response) = try await session.data(for: request)
-                    try await processResponse(response: response, data: responseData)
+                    try await processResponse(
+                        response: response, data: responseData,
+                        expectedRequestID: requestIDKey
+                    )
                 #else
                     let (responseStream, response) = try await session.bytes(for: request)
-                    try await processResponse(response: response, stream: responseStream)
+                    if let requestIDKey {
+                        inFlightPOSTTasks[requestIDKey] = responseStream.task
+                    }
+                    defer {
+                        if let requestIDKey {
+                            inFlightPOSTTasks.removeValue(forKey: requestIDKey)
+                        }
+                    }
+                    try await processResponse(
+                        response: response, stream: responseStream,
+                        expectedRequestID: requestIDKey
+                    )
                 #endif
                 return
             } catch let authError as HTTPAuthenticationChallengeError {
@@ -305,7 +391,9 @@ public actor HTTPClientTransport: Transport {
     }
 
     #if os(Linux)
-        private func processResponse(response: URLResponse, data: Data) async throws {
+        private func processResponse(
+            response: URLResponse, data: Data, expectedRequestID: String?
+        ) async throws {
             guard let httpResponse = response as? HTTPURLResponse else {
                 throw MCPError.internalError("Invalid HTTP response")
             }
@@ -321,7 +409,10 @@ public actor HTTPClientTransport: Transport {
                 logger.debug("Session ID received", metadata: ["sessionID": "\(newSessionID)"])
             }
 
-            try processHTTPResponse(httpResponse, contentType: contentType)
+            try processHTTPResponse(
+                httpResponse, contentType: contentType, body: data,
+                expectedRequestID: expectedRequestID
+            )
             guard case 200..<300 = httpResponse.statusCode else { return }
 
             if contentType.contains(ContentType.sse) {
@@ -335,7 +426,10 @@ public actor HTTPClientTransport: Transport {
             }
         }
     #else
-        private func processResponse(response: URLResponse, stream: URLSession.AsyncBytes)
+        private func processResponse(
+            response: URLResponse, stream: URLSession.AsyncBytes,
+            expectedRequestID: String?
+        )
             async throws
         {
             guard let httpResponse = response as? HTTPURLResponse else {
@@ -353,8 +447,20 @@ public actor HTTPClientTransport: Transport {
                 logger.debug("Session ID received", metadata: ["sessionID": "\(newSessionID)"])
             }
 
-            try processHTTPResponse(httpResponse, contentType: contentType)
-            guard case 200..<300 = httpResponse.statusCode else { return }
+            if !(200..<300).contains(httpResponse.statusCode) {
+                var errorBody = Data()
+                if contentType.contains(ContentType.json) || contentType.isEmpty {
+                    let maxErrorBodyBytes = 16_384
+                    for try await byte in stream {
+                        if errorBody.count >= maxErrorBodyBytes { break }
+                        errorBody.append(byte)
+                    }
+                }
+                try processHTTPResponse(
+                    httpResponse, contentType: contentType, body: errorBody,
+                    expectedRequestID: expectedRequestID)
+                return
+            }
 
             if contentType.contains(ContentType.sse) {
                 logger.trace("Received SSE response, processing in streaming task")
@@ -377,12 +483,38 @@ public actor HTTPClientTransport: Transport {
         }
     #endif
 
-    private func processHTTPResponse(_ response: HTTPURLResponse, contentType: String) throws {
+
+    /// Parses a JSON-RPC error object from an HTTP error body when present.
+    private static func jsonRPCError(from body: Data?) -> MCPError? {
+        guard let body, !body.isEmpty else { return nil }
+        // Prefer a full JSON-RPC response envelope.
+        if let response = try? JSONDecoder().decode(AnyResponse.self, from: body),
+            case .failure(let error) = response.result
+        {
+            return error
+        }
+        // Some servers may return a bare `{ "error": ... }` object.
+        struct ErrorEnvelope: Decodable { let error: MCPError }
+        if let envelope = try? JSONDecoder().decode(ErrorEnvelope.self, from: body) {
+            return envelope.error
+        }
+        return nil
+    }
+
+    private func processHTTPResponse(
+        _ response: HTTPURLResponse,
+        contentType: String,
+        body: Data? = nil,
+        expectedRequestID: String? = nil
+    ) throws {
         switch response.statusCode {
         case 200..<300:
             return
 
         case 400:
+            if let mcpError = Self.jsonRPCError(from: body) {
+                throw mcpError
+            }
             throw MCPError.internalError("Bad request")
 
         case 401:
@@ -398,6 +530,12 @@ public actor HTTPClientTransport: Transport {
             )
 
         case 404:
+            if let body, let expectedRequestID,
+                JSONRPCMessageKind.routingIDKey(from: body) == expectedRequestID,
+                let mcpError = Self.jsonRPCError(from: body)
+            {
+                throw mcpError
+            }
             if sessionID != nil {
                 logger.warning("Session has expired")
                 sessionID = nil
@@ -447,6 +585,41 @@ public actor HTTPClientTransport: Transport {
         return headers
     }
 
+    private static func mcpName(inBody body: Data, method: String) -> String? {
+        guard let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+            let params = json["params"] as? [String: Any]
+        else { return nil }
+        let field: String
+        switch method {
+        case "tools/call", "prompts/get": field = "name"
+        case "resources/read": field = "uri"
+        case "tasks/get", "tasks/update", "tasks/cancel": field = "taskId"
+        default: return nil
+        }
+        return params[field] as? String
+    }
+
+    private static func addToolParameterHeaders(
+        to request: inout URLRequest,
+        body: Data,
+        mappings: [String: [MCPToolHeaderMapping]]
+    ) {
+        guard let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+            let params = json["params"] as? [String: Any],
+            let name = params["name"] as? String,
+            let arguments = params["arguments"] as? [String: Any]
+        else { return }
+        for mapping in mappings[name] ?? [] {
+            guard let value = MCPToolHeaderSupport.lookupValue(at: mapping.path, in: arguments), !(value is NSNull),
+                let text = MCPToolHeaderSupport.primitiveString(value)
+            else { continue }
+            request.setValue(
+                MCPToolHeaderSupport.encodeHeaderValue(text),
+                forHTTPHeaderField: "Mcp-Param-\(mapping.suffix)"
+            )
+        }
+    }
+
     private func jsonRPCOperationKey(from data: Data) -> String? {
         guard
             let jsonObject = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -462,6 +635,13 @@ public actor HTTPClientTransport: Transport {
     /// Receives data in an async sequence
     public func receive() -> AsyncThrowingStream<Data, Swift.Error> {
         return messageStream
+    }
+
+    public func cancelInFlightRequestStream(for id: ID) {
+        let key = id.transportKey
+        guard let task = inFlightPOSTTasks.removeValue(forKey: key) else { return }
+        logger.debug("Cancelling in-flight POST stream", metadata: ["requestID": "\(key)"])
+        task.cancel()
     }
 
     // MARK: - SSE
@@ -588,6 +768,7 @@ public actor HTTPClientTransport: Transport {
 
             var request = URLRequest(url: endpoint)
             request.httpMethod = "GET"
+            request.setValue(clientIdentity, forHTTPHeaderField: HTTPHeaderName.clientIdentity)
             request.addValue(ContentType.sse, forHTTPHeaderField: HTTPHeaderName.accept)
             request.addValue("no-cache", forHTTPHeaderField: HTTPHeaderName.cacheControl)
 

@@ -50,6 +50,18 @@ private func loadConformanceContext() -> [String: String] {
     return parsed
 }
 
+private func conformanceProtocolVersion() throws -> String {
+    guard let version = ProcessInfo.processInfo.environment["MCP_CONFORMANCE_PROTOCOL_VERSION"] else {
+        return Version.latestLegacy
+    }
+    guard Version.supported.contains(version) else {
+        throw ConformanceError.invalidArguments(
+            "Unsupported MCP_CONFORMANCE_PROTOCOL_VERSION: \(version)"
+        )
+    }
+    return version
+}
+
 private func percentEncodeFormValue(_ value: String) -> String {
     let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
     return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
@@ -326,6 +338,7 @@ func runAuthorizationScenario(scenario: String, args: [String]) async throws {
     let transport = HTTPClientTransport(
         endpoint: serverURL,
         streaming: true,
+        protocolVersion: try conformanceProtocolVersion(),
         authorizer: OAuthAuthorizer(configuration: oauthConfig),
         logger: logger
     )
@@ -388,6 +401,7 @@ func runInitializeScenario(_ args: [String]) async throws {
     // Create HTTP transport
     let transport = HTTPClientTransport(
         endpoint: serverURL,
+        protocolVersion: try conformanceProtocolVersion(),
         logger: logger
     )
 
@@ -432,6 +446,7 @@ func runToolsCallScenario(_ args: [String]) async throws {
     // Create HTTP transport
     let transport = HTTPClientTransport(
         endpoint: serverURL,
+        protocolVersion: try conformanceProtocolVersion(),
         logger: logger
     )
 
@@ -468,6 +483,109 @@ func runToolsCallScenario(_ args: [String]) async throws {
     logger.debug("Tools call scenario completed successfully")
 }
 
+/// Exercises the client side of SEP-2322 using the SDK's typed request APIs.
+/// The protocol leaves input fulfillment to the client application, so this
+/// scenario translates the elicitation requests into responses and retries the
+/// original tool call with the server's opaque request state.
+func runMRTRClientScenario(_ args: [String]) async throws {
+    guard let serverURLString = args.last, let serverURL = URL(string: serverURLString) else {
+        throw ConformanceError.invalidArguments("Valid server URL is required")
+    }
+
+    let transport = HTTPClientTransport(
+        endpoint: serverURL,
+        protocolVersion: try conformanceProtocolVersion()
+    )
+    let client = Client(
+        name: "test-client",
+        version: "1.0.0",
+        capabilities: .init(elicitation: .init(form: .init()))
+    )
+    try await client.connect(transport: transport)
+    _ = try await client.listTools()
+
+    func fulfill(_ result: CallTool.Result) async throws -> [String: Value] {
+        guard result.resultType == .inputRequired,
+              let inputRequests = result.inputRequests,
+              !inputRequests.isEmpty
+        else {
+            throw ConformanceError.invalidArguments(
+                "MRTR response must include elicitation input requests"
+            )
+        }
+
+        var responses: [String: Value] = [:]
+        for (key, request) in inputRequests {
+            guard case .object(let object) = request,
+                  object["method"]?.stringValue == CreateElicitation.name,
+                  let params = object["params"]
+            else {
+                throw ConformanceError.invalidArguments(
+                    "MRTR input request \(key) is malformed or unsupported"
+                )
+            }
+            let data = try JSONEncoder().encode(params)
+            let elicitationParams = try JSONDecoder().decode(CreateElicitation.Parameters.self, from: data)
+            let response = try await client.send(
+                CreateElicitation.request(elicitationParams)
+            ).value
+            responses[key] = try JSONDecoder().decode(
+                Value.self,
+                from: JSONEncoder().encode(response)
+            )
+        }
+        guard responses.count == inputRequests.count else {
+            throw ConformanceError.invalidArguments(
+                "MRTR input requests were not all fulfilled"
+            )
+        }
+        return responses
+    }
+
+    let first = try await client.callToolRequest(name: "test_mrtr_echo_state", arguments: [:])
+    guard first.resultType == .inputRequired else {
+        throw ConformanceError.invalidArguments("MRTR state scenario did not request input")
+    }
+    let firstInputResponses = try await fulfill(first)
+    _ = try await client.callToolRequest(
+        name: "test_mrtr_unrelated",
+        arguments: [:]
+    )
+    let firstRetry = try await client.callToolRequest(
+        name: "test_mrtr_echo_state",
+        arguments: [:],
+        inputResponses: firstInputResponses,
+        requestState: first.requestState
+    )
+    guard firstRetry.resultType != .inputRequired, firstRetry.isError != true else {
+        throw ConformanceError.invalidArguments("MRTR state retry did not complete")
+    }
+
+    let second = try await client.callToolRequest(name: "test_mrtr_no_state", arguments: [:])
+    guard second.resultType == .inputRequired else {
+        throw ConformanceError.invalidArguments("MRTR no-state scenario did not request input")
+    }
+    let secondInputResponses = try await fulfill(second)
+    let secondRetry = try await client.callToolRequest(
+        name: "test_mrtr_no_state",
+        arguments: [:],
+        inputResponses: secondInputResponses
+    )
+    guard secondRetry.resultType != .inputRequired, secondRetry.isError != true else {
+        throw ConformanceError.invalidArguments("MRTR no-state retry did not complete")
+    }
+
+    // A missing resultType is a complete result for backward compatibility.
+    let defaultResult = try await client.callToolRequest(
+        name: "test_mrtr_no_result_type",
+        arguments: [:]
+    )
+    guard defaultResult.resultType == nil || defaultResult.resultType == .complete else {
+        throw ConformanceError.invalidArguments("Missing resultType was not treated as complete")
+    }
+    await client.disconnect()
+}
+
 // MARK: - SSE Scenarios
 
 /// Handler for SSE-related scenarios (retry, reconnection, etc.)
@@ -490,6 +608,7 @@ func runSSEScenario(_ args: [String]) async throws {
     let transport = HTTPClientTransport(
         endpoint: serverURL,
         streaming: true,
+        protocolVersion: try conformanceProtocolVersion(),
         logger: logger
     )
 
@@ -546,6 +665,7 @@ func runElicitationSEP1034ClientDefaults(_ args: [String]) async throws {
     let transport = HTTPClientTransport(
         endpoint: serverURL,
         streaming: true,
+        protocolVersion: try conformanceProtocolVersion(),
         logger: logger
     )
 
@@ -638,6 +758,7 @@ func runDefaultScenario(_ args: [String]) async throws {
     // Create HTTP transport
     let transport = HTTPClientTransport(
         endpoint: serverURL,
+        protocolVersion: try conformanceProtocolVersion(),
         logger: logger
     )
 
@@ -662,6 +783,7 @@ func runDefaultScenario(_ args: [String]) async throws {
 nonisolated(unsafe) let scenarioHandlers: [String: ScenarioHandler] = [
     "initialize": runInitializeScenario,
     "tools_call": runToolsCallScenario,
+    "sep-2322-client-request-state": runMRTRClientScenario,
     "sse-retry": runSSEScenario,
     "elicitation-sep1034-client-defaults": runElicitationSEP1034ClientDefaults,
 ]
