@@ -478,28 +478,29 @@ public actor Client {
 
     private var batchStates: [UUID: BatchState] = [:]
 
+    // Internal so tests can deterministically exercise registration before and after failure.
     func addPendingBatchRequest<T: Sendable & Decodable>(
         id: ID,
         continuation: CheckedContinuation<T, Swift.Error>,
         type: T.Type,
         batchID: UUID
     ) {
-        var state = batchStates[batchID] ?? BatchState()
-        state.registeredIDs.insert(id)
-        state.remainingIDs?.remove(id)
-        if state.remainingIDs?.isEmpty == true {
+        // Mutate in place to avoid copying the ID sets on every registration.
+        batchStates[batchID, default: BatchState()].registeredIDs.insert(id)
+        batchStates[batchID]?.remainingIDs?.remove(id)
+        let error = batchStates[batchID]?.error
+        if batchStates[batchID]?.remainingIDs?.isEmpty == true {
             batchStates.removeValue(forKey: batchID)
-        } else {
-            batchStates[batchID] = state
         }
 
-        if let error = state.error {
+        if let error {
             continuation.resume(throwing: error)
         } else {
             addPendingRequest(id: id, continuation: continuation, type: type)
         }
     }
 
+    // Internal so tests can finish a batch before its continuations register.
     func finishBatch(id: UUID, requestIDs: Set<ID>, error: Swift.Error? = nil) {
         var state = batchStates[id] ?? BatchState()
         state.error = error
@@ -527,6 +528,7 @@ public actor Client {
         unowned let client: Client
         let id = UUID()
         var requests: [AnyRequest] = []
+        private var requestIDs: Set<ID> = []
 
         init(client: Client) {
             self.client = client
@@ -534,14 +536,26 @@ public actor Client {
 
         /// Adds a request to the batch and prepares its expected response task.
         /// The actual sending happens when the `withBatch` scope completes.
+        /// If `withBatch` throws before this task completes, the task fails with the same error.
+        ///
+        /// - Parameter request: A request whose ID has not already been added to this batch.
         /// - Returns: A `Task` that will eventually produce the result or throw an error.
+        /// - Throws: `MCPError.invalidRequest` if the ID is already present in this batch,
+        ///           or an error if the request cannot be encoded.
+        /// - Important: Request IDs must be unique across the session. This method only
+        ///              checks for duplicates within this batch.
         public func addRequest<M: Method>(_ request: Request<M>) async throws -> Task<
             M.Result, Swift.Error
         > {
-            requests.append(try AnyRequest(request))
+            guard !requestIDs.contains(request.id) else {
+                throw MCPError.invalidRequest("Duplicate request ID in batch: \(request.id)")
+            }
+            let anyRequest = try AnyRequest(request)
+            requestIDs.insert(request.id)
+            requests.append(anyRequest)
 
             // Return a Task that registers the pending request and awaits its result.
-            // The continuation is resumed when the response arrives.
+            // The continuation is resumed when a response arrives or the batch fails.
             return Task<M.Result, Swift.Error> {
                 try await withCheckedThrowingContinuation { continuation in
                     // We are already inside a Task, but need another Task
@@ -570,6 +584,9 @@ public actor Client {
     /// requests using `batch.addRequest(_:)`. Each call to `addRequest`
     /// returns a `Task` handle representing the asynchronous operation
     /// for that specific request's result.
+    ///
+    /// If this method throws, any tasks returned by `batch.addRequest(_:)` that have not
+    /// already completed fail with the same error. Tasks that already completed keep their results.
     ///
     /// It's recommended to collect these `Task` handles into an array
     /// within the `body` closure`. After the `withBatch` method returns

@@ -483,7 +483,7 @@ struct ClientTests {
         let transport = BatchFailureTransport(base: clientTransport)
         let client = Client(name: "TestClient", version: "1.0")
         try await client.connect(transport: transport)
-        let results = BatchFailureResults()
+        let results = BatchFailureResults<BatchFailureError>()
         let expectedError: BatchFailureError = bodyThrows ? .body : .send
 
         do {
@@ -510,6 +510,66 @@ struct ClientTests {
         await server.stop()
     }
 
+    @Test("Batch rejects duplicate request IDs", arguments: [ID.string("duplicate"), ID.number(42)])
+    func testBatchRejectsDuplicateRequestIDs(id: ID) async throws {
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+        let server = Server(name: "TestServer", version: "1.0")
+        try await server.start(transport: serverTransport)
+        let transport = BatchFailureTransport(base: clientTransport)
+        let client = Client(name: "TestClient", version: "1.0")
+        try await client.connect(transport: transport)
+        let results = BatchFailureResults<MCPError>()
+        let expectedError = MCPError.invalidRequest("Duplicate request ID in batch: \(id)")
+
+        await #expect(throws: expectedError) {
+            try await client.withBatch { batch in
+                await results.observe(try await batch.addRequest(Ping.request(id: id)))
+                _ = try await batch.addRequest(Ping.request(id: id))
+            }
+        }
+
+        // Reject the duplicate before sending, and fail the original task with
+        // the error that escaped the body rather than leaving it suspended.
+        let errors = await results.waitForErrors(count: 1)
+        #expect(errors == [expectedError])
+        #expect(await transport.batchSendCount == 0)
+        try await client.ping()
+        await client.disconnect()
+        await server.stop()
+    }
+
+    @Test("Catching a duplicate ID error preserves the batch")
+    func testBatchCaughtDuplicateID() async throws {
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+        let server = Server(name: "TestServer", version: "1.0")
+        try await server.start(transport: serverTransport)
+        let transport = BatchFailureTransport(base: clientTransport)
+        let client = Client(name: "TestClient", version: "1.0")
+        try await client.connect(transport: transport)
+        let results = BatchFailureResults<BatchFailureError>()
+
+        do {
+            try await client.withBatch { batch in
+                let id = ID.random
+                await results.observe(try await batch.addRequest(Ping.request(id: id)))
+                await #expect(throws: MCPError.invalidRequest("Duplicate request ID in batch: \(id)")) {
+                    _ = try await batch.addRequest(Ping.request(id: id))
+                }
+                await results.observe(try await batch.addRequest(Ping.request()))
+                #expect(await batch.requests.count == 2)
+            }
+            Issue.record("Expected the batch send to fail")
+        } catch {
+            #expect(error as? BatchFailureError == .send)
+        }
+
+        let errors = await results.waitForErrors(count: 2)
+        #expect(errors == [.send, .send])
+        #expect(await transport.batchSendCount == 1)
+        await client.disconnect()
+        await server.stop()
+    }
+
     @Test("Batch failure handles either registration order", arguments: [false, true])
     func testBatchFailureRegistrationOrder(registerFirst: Bool) async throws {
         let client = Client(name: "TestClient", version: "1.0")
@@ -518,8 +578,8 @@ struct ClientTests {
         let lateID = ID.random
         let otherBatchID = UUID()
         let otherID = ID.random
-        let results = BatchFailureResults()
-        let otherResults = BatchFailureResults()
+        let results = BatchFailureResults<BatchFailureError>()
+        let otherResults = BatchFailureResults<BatchFailureError>()
         let (registered, registration) = AsyncStream<Void>.makeStream()
 
         func register(id: ID, batch: UUID) -> Task<Ping.Result, Swift.Error> {
@@ -909,8 +969,8 @@ private enum BatchFailureError: Swift.Error, Equatable {
     case body
 }
 
-private actor BatchFailureResults {
-    private(set) var errors: [BatchFailureError?] = []
+private actor BatchFailureResults<Failure: Swift.Error> {
+    private(set) var errors: [Failure?] = []
 
     func observe(_ task: Task<Ping.Result, Swift.Error>) {
         Task {
@@ -918,12 +978,12 @@ private actor BatchFailureResults {
             case .success:
                 errors.append(nil)
             case .failure(let error):
-                errors.append(error as? BatchFailureError)
+                errors.append(error as? Failure)
             }
         }
     }
 
-    func waitForErrors(count: Int) async -> [BatchFailureError?] {
+    func waitForErrors(count: Int) async -> [Failure?] {
         let deadline = ContinuousClock.now + .seconds(3)
         while errors.count < count && ContinuousClock.now < deadline {
             try? await Task.sleep(for: .milliseconds(10))
