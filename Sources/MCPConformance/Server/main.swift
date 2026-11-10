@@ -133,13 +133,13 @@ func createConformanceServer(state: ServerState, transport: StatefulHTTPServerTr
                     .init(progressToken: token, progress: 0, total: 100)
                 )
                 try await server?.notify(notification1)
-                try await Task.sleep(for: .microseconds(50))
+                try await Task.sleep(for: .milliseconds(50))
 
                 let notification2 = ProgressNotification.message(
                     .init(progressToken: token, progress: 50, total: 100)
                 )
                 try await server?.notify(notification2)
-                try await Task.sleep(for: .microseconds(50))
+                try await Task.sleep(for: .milliseconds(50))
 
                 let notification3 = ProgressNotification.message(
                     .init(progressToken: token, progress: 100, total: 100)
