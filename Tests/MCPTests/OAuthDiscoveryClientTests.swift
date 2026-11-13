@@ -224,11 +224,54 @@ import Testing
         @Test("Skips private IP candidates without making HTTP calls")
         func testFetchAuthorizationServerMetadataSkipsPrivateIP() async throws {
             let (session, _) = makeIsolatedSession()
-            await #expect(throws: OAuthAuthorizationError.self) {
+            await #expect {
                 try await makeClient().fetchAuthorizationServerMetadata(
                     candidates: [URL(string: "https://10.0.0.1")!],
                     session: session
                 )
+            } throws: { error in
+                guard case .privateIPAddressBlocked = error as? OAuthAuthorizationError else { return false }
+                return true
+            }
+        }
+
+        // Discovery used to fail with "Failed to discover authorization server
+        // metadata", which hides that the URL was refused.
+        @Test("An insecure issuer is reported as insecure, not as missing metadata")
+        func testFetchAuthorizationServerMetadataReportsInsecureIssuer() async throws {
+            let (session, key) = makeIsolatedSession()
+            await IsolatedMockURLProtocol.setHandler(key: key) { request in
+                Issue.record("no request may be sent to a refused issuer: \(request.url!)")
+                return (HTTPURLResponse(url: request.url!, statusCode: 404, httpVersion: nil, headerFields: nil)!, Data())
+            }
+            await #expect {
+                try await makeClient().fetchAuthorizationServerMetadata(
+                    candidates: [URL(string: "http://localhost.:8091")!],
+                    session: session
+                )
+            } throws: { error in
+                guard case .insecureAuthorizationServerEndpoint(_, let url) = error as? OAuthAuthorizationError
+                else { return false }
+                return url == "http://localhost.:8091"
+            }
+        }
+
+        @Test("A refused candidate next to one without metadata still reports missing metadata")
+        func testFetchAuthorizationServerMetadataRefusedAndAbsent() async throws {
+            let (session, key) = makeIsolatedSession()
+            await IsolatedMockURLProtocol.setHandler(key: key) { request in
+                (HTTPURLResponse(url: request.url!, statusCode: 404, httpVersion: nil, headerFields: nil)!, Data())
+            }
+            await #expect {
+                try await makeClient().fetchAuthorizationServerMetadata(
+                    candidates: [URL(string: "https://10.0.0.1")!, URL(string: "https://auth.example.com")!],
+                    session: session
+                )
+            } throws: { error in
+                guard case .authorizationServerMetadataDiscoveryFailed = error as? OAuthAuthorizationError else {
+                    return false
+                }
+                return true
             }
         }
 
