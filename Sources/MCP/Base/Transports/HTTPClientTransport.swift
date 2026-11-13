@@ -600,7 +600,8 @@ public actor HTTPClientTransport: Transport {
             } else if contentType.contains(ContentType.json) {
                 logger.trace("Received JSON response", metadata: ["size": "\(data.count)"])
                 messageContinuation.yield(data)
-            } else {
+            } else if httpResponse.statusCode != 202 {
+                // 202 Accepted has no body: how a server accepts a notification or a response.
                 logger.warning("Unexpected content type: \(contentType)")
             }
         }
@@ -662,7 +663,8 @@ public actor HTTPClientTransport: Transport {
                 }
                 logger.trace("Received JSON response", metadata: ["size": "\(buffer.count)"])
                 messageContinuation.yield(buffer)
-            } else {
+            } else if httpResponse.statusCode != 202 {
+                // 202 Accepted has no body: how a server accepts a notification or a response.
                 logger.warning("Unexpected content type: \(contentType)")
             }
         }
