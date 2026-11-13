@@ -70,7 +70,7 @@ At 2026-07-28 there is no handshake. A client may send `server/discover` to lear
 - The server answers -32022, no retry is possible, and `data.supported` is empty or lists a handshake revision.
 - The server answers with any other JSON-RPC error, such as -32601.
 - `HTTPClientTransport` reports HTTP 400, 404 or 405 without a JSON-RPC error for the request.
-- No answer arrives within `Client.Configuration.discoveryTimeout` (10 seconds by default).
+- No answer arrives within `Client.Configuration.discoveryTimeout` (10 seconds by default). Time spent authorizing the request, such as a user signing in, does not count.
 
 Other transport errors are thrown in every mode: authorization failures, 408, 429, 5xx, `transportError`, and errors that are not `MCPError`, such as a `URLError`.
 

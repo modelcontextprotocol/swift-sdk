@@ -489,5 +489,145 @@ struct OutgoingMessageTests {
             #expect(await UnansweredDiscoverProtocol.state.discoverStopped)
             await client.disconnect()
         }
+
+        // A user who takes longer than `discoveryTimeout` to sign in must not
+        // be asked to sign in again, nor be moved to the handshake.
+        @Test("Signing in does not count against the discovery timeout")
+        func signInOutlastsDiscoveryTimeout() async throws {
+            let authorizer = SlowSignInAuthorizer(signIn: .milliseconds(500))
+            let client = Client(
+                name: "probe", version: "1.0",
+                configuration: .init(protocolMode: .automatic, discoveryTimeout: .milliseconds(100)))
+
+            let result = try await client.connect(
+                transport: ChallengedDiscoverProtocol.transport(host: "answering.test", authorizer: authorizer))
+            #expect(result.protocolVersion == Version.v2026_07_28)
+            #expect(authorizer.challenges == 1)
+            #expect(ChallengedDiscoverProtocol.state.methods(of: "answering.test") == [ServerDiscover.name])
+            await client.disconnect()
+        }
+
+        @Test("The discovery timeout starts again after signing in")
+        func timeoutAfterSignIn() async throws {
+            let authorizer = SlowSignInAuthorizer(signIn: .milliseconds(300))
+            let client = Client(
+                name: "probe", version: "1.0",
+                configuration: .init(protocolMode: .automatic, discoveryTimeout: .milliseconds(100)))
+
+            // The server never answers the authorized server/discover.
+            let result = try await client.connect(
+                transport: ChallengedDiscoverProtocol.transport(host: "silent.test", authorizer: authorizer))
+            #expect(result.protocolVersion == Version.v2025_11_25)
+            #expect(authorizer.challenges == 1)
+            await client.disconnect()
+        }
+    }
+
+    /// Signs in on a 401 after `signIn`, like a user at a browser, then
+    /// authorizes every request.
+    private final class SlowSignInAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
+        private let lock = NSLock()
+        private let signIn: Duration
+        private var signedIn = false
+        private var challengeCount = 0
+
+        init(signIn: Duration) { self.signIn = signIn }
+
+        var challenges: Int { lock.withLock { challengeCount } }
+        var maxAuthorizationAttempts: Int { 2 }
+
+        func validateEndpointSecurity(for endpoint: URL) throws {}
+
+        func authorizationHeaders(for url: URL, method: String) throws -> [String: String] {
+            lock.withLock { signedIn ? ["Authorization": "Bearer signed-in"] : [:] }
+        }
+
+        func handleChallenge(
+            statusCode: Int, headers: [String: String], endpoint: URL, operationKey: String?,
+            session: URLSession
+        ) async throws -> Bool {
+            lock.withLock { challengeCount += 1 }
+            try await Task.sleep(for: signIn)
+            lock.withLock { signedIn = true }
+            return true
+        }
+    }
+
+    /// Answers 401 to a request without credentials. With them, the host
+    /// `answering.test` serves 2026-07-28 and `silent.test` never answers
+    /// `server/discover`; both answer `initialize`.
+    private final class ChallengedDiscoverProtocol: URLProtocol, @unchecked Sendable {
+        final class State: @unchecked Sendable {
+            private let lock = NSLock()
+            private var authorized: [String: [String]] = [:]
+            func record(_ method: String, host: String) { lock.withLock { authorized[host, default: []].append(method) } }
+            /// The methods of authorized requests to `host`.
+            func methods(of host: String) -> [String] { lock.withLock { authorized[host] ?? [] } }
+        }
+        static let state = State()
+
+        static func transport(host: String, authorizer: any HTTPClientAuthorizer) -> HTTPClientTransport {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [ChallengedDiscoverProtocol.self]
+            return HTTPClientTransport(
+                endpoint: URL(string: "http://\(host)/mcp")!, configuration: configuration, streaming: false,
+                authorizer: authorizer)
+        }
+
+        override class func canInit(with request: URLRequest) -> Bool { true }
+        override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+        override func startLoading() {
+            let host = request.url?.host ?? ""
+            guard request.value(forHTTPHeaderField: "Authorization") != nil else {
+                return reply(401, headers: ["WWW-Authenticate": "Bearer"])
+            }
+            let message = (try? JSONSerialization.jsonObject(with: body())) as? [String: Any] ?? [:]
+            let method = message["method"] as? String ?? ""
+            let id = message["id"] as? String ?? ""
+            Self.state.record(method, host: host)
+            switch method {
+            case ServerDiscover.name where host == "silent.test":
+                return
+            case ServerDiscover.name:
+                reply(
+                    200,
+                    #"{"jsonrpc":"2.0","id":"\#(id)","result":{"supportedVersions":["2026-07-28"],"capabilities":{},"resultType":"complete"}}"#
+                )
+            case Initialize.name:
+                reply(
+                    200,
+                    #"{"jsonrpc":"2.0","id":"\#(id)","result":{"protocolVersion":"2025-11-25","capabilities":{},"serverInfo":{"name":"old","version":"0"}}}"#
+                )
+            default:
+                reply(202)
+            }
+        }
+
+        override func stopLoading() {}
+
+        private func reply(_ status: Int, _ body: String = "", headers: [String: String] = [:]) {
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: status, httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "application/json"].merging(headers) { $1 })!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: Data(body.utf8))
+            client?.urlProtocolDidFinishLoading(self)
+        }
+
+        private func body() -> Data {
+            if let body = request.httpBody { return body }
+            guard let stream = request.httpBodyStream else { return Data() }
+            stream.open()
+            defer { stream.close() }
+            var data = Data()
+            var buffer = [UInt8](repeating: 0, count: 4096)
+            while stream.hasBytesAvailable {
+                let count = stream.read(&buffer, maxLength: buffer.count)
+                guard count > 0 else { break }
+                data.append(buffer, count: count)
+            }
+            return data
+        }
     }
 #endif

@@ -29,7 +29,7 @@ This guide covers the `Client` actor: connecting at either protocol era, calling
 | `strict` | `false` | Check the server's capabilities before sending. See [Strict mode](#strict-mode). |
 | `protocolMode` | `.automatic` | How `connect` opens the connection. See [Protocol modes](#protocol-modes). |
 | `logLevel` | `nil` | The lowest log level requested in the `_meta` of each 2026-07-28 request. See [Logging](#logging). |
-| `discoveryTimeout` | 10 seconds | How long `.automatic` waits for the answer to `server/discover` before it sends `initialize`. `nil` waits indefinitely. |
+| `discoveryTimeout` | 10 seconds | How long `.automatic` waits for the answer to `server/discover` before it sends `initialize`. `nil` waits indefinitely. Time `HTTPClientTransport` spends authorizing the request, such as a user signing in, does not count. |
 | `multiRoundTrip` | `.init()` (enabled, 10 rounds) | How input-required results are answered. See [Multi round-trip requests](#multi-round-trip-requests). |
 
 `Client.Configuration.default` and `.strict` are the default configuration with `strict` off and on.
@@ -48,7 +48,7 @@ This guide covers the `Client` actor: connecting at either protocol era, calling
 - the server answers -32022 (`unsupportedProtocolVersion`) and its `data.supported` list is empty or contains a handshake version;
 - the server answers with any other JSON-RPC error, for example -32601 from a server that predates `server/discover`;
 - `HTTPClientTransport` reports HTTP 400, 404 or 405 without a JSON-RPC error for the request: how a server that serves only the handshake refuses a request without a session;
-- no answer arrives within `discoveryTimeout`. A late answer is ignored.
+- no answer arrives within `discoveryTimeout`. A late answer is ignored. The timeout starts again when the request's authorization ends.
 
 On -32022, `.automatic` first retries once with the first stateless version in the server's `data.supported` list (servers list versions newest first). `.stateless(version)` never retries: it connects at `version` or throws. Other transport errors are rethrown, so the caller can retry: authorization failures, 401 and 403 after the authorization attempts, 408, 429, 5xx, `transportError` and errors that are not `MCPError`, such as a `URLError`. Other requests and `connect` as a whole have no timeout.
 
