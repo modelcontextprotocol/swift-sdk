@@ -35,6 +35,8 @@ struct OAuthClientRegistrar: Sendable {
     /// - CIMD is in use and the server supports it
     /// - No registration endpoint is available and no CIMD mismatch error
     ///
+    /// Throws ``OAuthAuthorizationError/registrationInformationRequired`` when
+    /// the client ID is empty and the server has no registration endpoint.
     /// Throws if registration was attempted but failed (4xx, 5xx, or unexpected response).
     func register(
         configuration: OAuthConfiguration,
@@ -70,6 +72,10 @@ struct OAuthClientRegistrar: Sendable {
         guard let registrationEndpoint = asMetadata.registrationEndpoint else {
             if hasClientIDMetadataDocument && !supportsClientIDMetadataDocument {
                 throw OAuthAuthorizationError.cimdNotSupported(clientID: clientID)
+            }
+            // No client ID, and no way to get one: do not send an empty client_id.
+            if clientID.isEmpty {
+                throw OAuthAuthorizationError.registrationInformationRequired
             }
             return nil
         }
