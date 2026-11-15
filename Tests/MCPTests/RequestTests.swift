@@ -206,6 +206,61 @@ struct RequestTests {
         #expect(decoded.params.clientInfo.name == "unknown")
     }
 
+    @Test("Initialize parameters decoding - nested experimental and extensions")
+    func testInitializeParametersDecodingNestedCapabilities() throws {
+        let jsonString = """
+            {
+              "protocolVersion": "2025-11-25",
+              "capabilities": {
+                "experimental": {
+                  "openai/visibility": { "enabled": true }
+                },
+                "extensions": {
+                  "io.modelcontextprotocol/ui": {
+                    "mimeTypes": ["text/html;profile=mcp-app"]
+                  }
+                }
+              },
+              "clientInfo": { "name": "openai-mcp", "version": "1.0.0" }
+            }
+            """
+        let data = jsonString.data(using: .utf8)!
+
+        let decoder = JSONDecoder()
+        let decoded = try decoder.decode(Initialize.Parameters.self, from: data)
+
+        #expect(decoded.protocolVersion == "2025-11-25")
+        #expect(decoded.clientInfo.name == "openai-mcp")
+        #expect(decoded.clientInfo.version == "1.0.0")
+
+        #expect(
+            decoded.capabilities.experimental?["openai/visibility"]
+                == .object(["enabled": .bool(true)]))
+        #expect(
+            decoded.capabilities.extensions?["io.modelcontextprotocol/ui"]
+                == .object(["mimeTypes": .array([.string("text/html;profile=mcp-app")])]))
+    }
+
+    @Test("Client capabilities round-trip with experimental and extensions")
+    func testClientCapabilitiesExperimentalExtensionsRoundTrip() throws {
+        let capabilities = Client.Capabilities(
+            experimental: ["openai/visibility": .object(["enabled": .bool(true)])],
+            extensions: [
+                "io.modelcontextprotocol/ui": .object([
+                    "mimeTypes": .array([.string("text/html;profile=mcp-app")])
+                ])
+            ]
+        )
+
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+
+        let data = try encoder.encode(capabilities)
+        let decoded = try decoder.decode(Client.Capabilities.self, from: data)
+
+        #expect(decoded == capabilities)
+    }
+
     @Test("Invalid parameters request decoding")
     func testInvalidParametersRequestDecoding() throws {
         let jsonString = """
