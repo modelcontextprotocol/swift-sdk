@@ -25,6 +25,8 @@ private let testAudioBase64 = "UklGRiYAAABXQVZFZm10IBAAAAABAAEAQB8AAAB9AAACABAAZ
 actor ServerState {
     var resourceSubscriptions: Set<String> = []
     var watchedResourceContent = "Watched resource content"
+    var promptListHasChanged = false
+    var toolListHasChanged = false
 
     func subscribe(to uri: String) {
         resourceSubscriptions.insert(uri)
@@ -41,11 +43,87 @@ actor ServerState {
     func updateWatchedResource(_ newContent: String) {
         watchedResourceContent = newContent
     }
+
+    func markPromptListChanged() {
+        promptListHasChanged = true
+    }
+
+    func markToolListChanged() {
+        toolListHasChanged = true
+    }
+}
+
+private func inputRequest(_ method: String, params: [String: Value]) -> Value {
+    .object(["method": .string(method), "params": .object(params)])
+}
+
+private func inputRequiredFixture(_ params: CallTool.Parameters) throws -> CallTool.Result? {
+    let name = params.name
+    guard name.hasPrefix("test_input_required_result_") else { return nil }
+    if name == "test_input_required_result_tampered_state",
+       params.inputResponses != nil,
+       params.requestState != "signed-state" {
+        throw MCPError.invalidParams("requestState integrity check failed")
+    }
+    if name == "test_input_required_result_elicitation",
+       let responses = params.inputResponses,
+       !(responses["user_name"].map { if case .object = $0 { true } else { false } } ?? false) {
+        return CallTool.Result(
+            resultType: .inputRequired,
+            inputRequests: ["user_name": inputRequest("elicitation/create", params: [
+                "message": .string("What is your name?"),
+                "requestedSchema": .object([
+                    "type": .string("object"),
+                    "properties": .object(["name": .object(["type": .string("string")])]),
+                    "required": .array([.string("name")]),
+                ]),
+            ])]
+        )
+    }
+    if params.inputResponses != nil {
+        if name == "test_input_required_result_multi_round", params.requestState == "round-1" {
+            return CallTool.Result(
+                resultType: .inputRequired,
+                inputRequests: ["step2": inputRequest("elicitation/create", params: [
+                    "message": .string("Step 2: What is your favorite color?"),
+                    "requestedSchema": .object(["type": .string("object"), "properties": .object(["color": .object(["type": .string("string")])]), "required": .array([.string("color")])]),
+                ])],
+                requestState: "round-2"
+            )
+        }
+        return CallTool.Result(content: [.text(text: "Input received", annotations: nil, _meta: nil)])
+    }
+
+    let elicitation = inputRequest("elicitation/create", params: [
+        "message": .string("What is your name?"),
+        "requestedSchema": .object(["type": .string("object"), "properties": .object(["name": .object(["type": .string("string")])]), "required": .array([.string("name")])]),
+    ])
+    let sampling = inputRequest("sampling/createMessage", params: [
+        "messages": .array([.object(["role": .string("user"), "content": .object(["type": .string("text"), "text": .string("What is the capital of France?")])])]),
+        "maxTokens": .int(100),
+    ])
+    let roots = inputRequest("roots/list", params: [:])
+    var requests: [String: Value]
+    var state: String? = nil
+    switch name {
+    case "test_input_required_result_sampling": requests = ["capital_question": sampling]
+    case "test_input_required_result_list_roots": requests = ["client_roots": roots]
+    case "test_input_required_result_request_state": requests = ["confirm": elicitation]; state = "request-state-v1"
+    case "test_input_required_result_multiple_inputs": requests = ["user_name": elicitation, "greeting": sampling, "client_roots": roots]; state = "multiple-inputs-v1"
+    case "test_input_required_result_multi_round": requests = ["step1": elicitation]; state = "round-1"
+    case "test_input_required_result_tampered_state": requests = ["confirm": elicitation]; state = "signed-state"
+    case "test_input_required_result_capabilities":
+        let caps = params._meta?[ProtocolMetaKey.clientCapabilities]
+        requests = [:]
+        if case .object(let values) = caps, values["sampling"] != nil { requests["capital_question"] = sampling }
+    default: requests = ["user_name": elicitation]
+    }
+    return CallTool.Result(resultType: .inputRequired, inputRequests: requests, requestState: state)
 }
 
 // MARK: - Server Setup
 
-func createConformanceServer(state: ServerState, transport: StatefulHTTPServerTransport) async -> Server {
+func createConformanceServer(state: ServerState, transport: any Transport) async -> Server {
     let server = Server(
         name: "mcp-conformance-test-server",
         version: "1.0.0",
@@ -60,8 +138,9 @@ func createConformanceServer(state: ServerState, transport: StatefulHTTPServerTr
 
     // Tools
     await server.withMethodHandler(ListTools.self) { _ in
-        .init(tools: [
+        var tools = [
             Tool(name: "test_simple_text", description: "Tests simple text content response", inputSchema: .object(["type": "object", "properties": [:]])),
+            Tool(name: "test_custom_header", description: "Tests SEP-2243 custom parameter headers", inputSchema: .object(["type": "object", "properties": ["tenant": ["type": "string", "x-mcp-header": "Tenant"]], "required": ["tenant"]])),
             Tool(name: "test_image_content", description: "Tests image content response", inputSchema: .object(["type": "object", "properties": [:]])),
             Tool(name: "test_audio_content", description: "Tests audio content response", inputSchema: .object(["type": "object", "properties": [:]])),
             Tool(name: "test_embedded_resource", description: "Tests embedded resource content response", inputSchema: .object(["type": "object", "properties": [:]])),
@@ -74,6 +153,15 @@ func createConformanceServer(state: ServerState, transport: StatefulHTTPServerTr
             Tool(name: "test_tool_with_logging", description: "Tool sends log messages during execution", inputSchema: .object(["type": "object", "properties": [:]])),
             Tool(name: "test_reconnection", description: "Tests SSE reconnection and resumption with Last-Event-ID", inputSchema: .object(["type": "object", "properties": [:]])),
             Tool(name: "test_sampling", description: "Tests LLM sampling capabilities", inputSchema: .object(["type": "object", "properties": ["prompt": ["type": "string", "description": "Text to send to the LLM"]], "required": ["prompt"]])),
+            Tool(name: "test_missing_capability", description: "Diagnostic tool requiring sampling capability", inputSchema: .object(["type": "object", "properties": [:]])),
+            Tool(name: "test_input_required_result_elicitation", description: "Input-required elicitation fixture", inputSchema: .object(["type": "object", "properties": [:]])),
+            Tool(name: "test_input_required_result_sampling", description: "Input-required sampling fixture", inputSchema: .object(["type": "object", "properties": [:]])),
+            Tool(name: "test_input_required_result_list_roots", description: "Input-required roots fixture", inputSchema: .object(["type": "object", "properties": [:]])),
+            Tool(name: "test_input_required_result_request_state", description: "Input-required state fixture", inputSchema: .object(["type": "object", "properties": [:]])),
+            Tool(name: "test_input_required_result_multiple_inputs", description: "Multiple input-required fixture", inputSchema: .object(["type": "object", "properties": [:]])),
+            Tool(name: "test_input_required_result_multi_round", description: "Multi-round input-required fixture", inputSchema: .object(["type": "object", "properties": [:]])),
+            Tool(name: "test_input_required_result_tampered_state", description: "Tampered state fixture", inputSchema: .object(["type": "object", "properties": [:]])),
+            Tool(name: "test_input_required_result_capabilities", description: "Capability-filtered input-required fixture", inputSchema: .object(["type": "object", "properties": [:]])),
             Tool(name: "test_elicitation", description: "Tests user input elicitation", inputSchema: .object(["type": "object", "properties": ["message": ["type": "string", "description": "Text displayed to user"]], "required": ["message"]])),
             Tool(name: "test_elicitation_sep1034_defaults", description: "Tests elicitation with default values (SEP-1034)", inputSchema: .object(["type": "object", "properties": [:]])),
             Tool(name: "test_elicitation_sep1330_enums", description: "Tests elicitation with enum variants (SEP-1330)", inputSchema: .object(["type": "object", "properties": [:]])),
@@ -95,14 +183,28 @@ func createConformanceServer(state: ServerState, transport: StatefulHTTPServerTr
                     "address": .object(["$ref": .string("#/$defs/address")])
                 ]),
                 "additionalProperties": .bool(false)
-            ]))
-        ])
+            ])),
+            Tool(name: "test_trigger_prompt_change", description: "Conformance hook that changes the prompt list", inputSchema: .object(["type": .string("object")])),
+            Tool(name: "test_trigger_tool_change", description: "Conformance hook that changes the tool list", inputSchema: .object(["type": .string("object")])),
+        ]
+        if await state.toolListHasChanged {
+            tools.append(Tool(name: "test_dynamic_tool", description: "Added by the conformance list-change hook", inputSchema: .object(["type": .string("object")])))
+        }
+        return .init(tools: tools)
     }
 
     await server.withMethodHandler(CallTool.self) { [weak server, transport] params in
+        if let fixture = try inputRequiredFixture(params) { return fixture }
         switch params.name {
+        case "test_missing_capability":
+            guard Server.currentHandlerContext?.clientCapabilities?.sampling != nil else {
+                throw MCPError.missingRequiredClientCapability(["sampling": .object([:])])
+            }
+            return .init(content: [.text(text: "Sampling capability declared", annotations: nil, _meta: nil)], isError: false)
         case "test_simple_text":
             return .init(content: [.text(text: "This is a simple text response for testing.", annotations: nil, _meta: nil)], isError: false)
+        case "test_custom_header":
+            return .init(content: [.text(text: params.arguments?["tenant"]?.stringValue ?? "missing", annotations: nil, _meta: nil)], isError: false)
         case "test_image_content":
             return .init(content: [.image(data: testImageBase64, mimeType: "image/png", annotations: nil, _meta: nil)], isError: false)
         case "test_audio_content":
@@ -120,7 +222,13 @@ func createConformanceServer(state: ServerState, transport: StatefulHTTPServerTr
             return .init(content: [.text(text: "Logging test completed", annotations: nil, _meta: nil)], isError: false)
         case "test_progress":
             let duration = params.arguments?["duration_ms"]?.intValue ?? 1000
-            try? await Task.sleep(for: .milliseconds(duration))
+            if let token = params._meta?.progressToken {
+                try await server?.notify(ProgressNotification.message(.init(progressToken: token, progress: 0, total: 100)))
+                try await Task.sleep(for: .milliseconds(max(1, duration / 2)))
+                try await server?.notify(ProgressNotification.message(.init(progressToken: token, progress: 50, total: 100)))
+            } else {
+                try? await Task.sleep(for: .milliseconds(duration))
+            }
             return .init(content: [.text(text: "Progress test completed", annotations: nil, _meta: nil)], isError: false)
         case "add_numbers":
             guard let a = params.arguments?["a"]?.intValue, let b = params.arguments?["b"]?.intValue else {
@@ -176,12 +284,20 @@ func createConformanceServer(state: ServerState, transport: StatefulHTTPServerTr
             try await server?.notify(log3)
 
             return .init(content: [.text(text: "Logging test completed", annotations: nil, _meta: nil)], isError: false)
+        case "test_trigger_tool_change":
+            await state.markToolListChanged()
+            try await server?.notify(ToolListChangedNotification.message())
+            return .init(content: [.text(text: "Tool list changed", annotations: nil, _meta: nil)], isError: false)
+        case "test_trigger_prompt_change":
+            await state.markPromptListChanged()
+            try await server?.notify(PromptListChangedNotification.message())
+            return .init(content: [.text(text: "Prompt list changed", annotations: nil, _meta: nil)], isError: false)
         case "test_reconnection":
             // SEP-1699: Close the SSE stream mid-call to trigger client reconnection.
             // The client should reconnect via GET with Last-Event-ID and receive the
             // response on the new stream.
             if let requestID = Server.currentHandlerContext?.id {
-                await transport.closeSSEStream(forRequestID: requestID.description)
+                await (transport as? StatefulHTTPServerTransport)?.closeSSEStream(forRequestID: requestID)
             }
             // Wait briefly for the client to reconnect before sending the response.
             try await Task.sleep(for: .milliseconds(100))
@@ -371,12 +487,19 @@ func createConformanceServer(state: ServerState, transport: StatefulHTTPServerTr
     }
 
     // Resources
+    await server.withMethodHandler(ListResourceTemplates.self) { _ in
+        .init(templates: [Resource.Template(
+            uriTemplate: "test://template/{id}",
+            name: "Template Resource",
+            description: "A resource template with URI parameters",
+            mimeType: "text/plain"
+        )])
+    }
     await server.withMethodHandler(ListResources.self) { _ in
         .init(resources: [
             Resource(name: "Static Text Resource", uri: "test://static-text", description: "A simple static text resource", mimeType: "text/plain"),
             Resource(name: "Static Binary Resource", uri: "test://static-binary", description: "A simple static binary resource", mimeType: "application/octet-stream"),
             Resource(name: "Watched Resource", uri: "test://watched", description: "A resource that can be subscribed to for updates", mimeType: "text/plain"),
-            Resource(name: "Template Resource", uri: "test://template/{id}", description: "A resource template with URI parameters", mimeType: "text/plain"),
         ])
     }
 
@@ -397,7 +520,7 @@ func createConformanceServer(state: ServerState, transport: StatefulHTTPServerTr
                 let id = String(params.uri.dropFirst("test://template/".count))
                 return .init(contents: [.text("Template resource with id: \(id)", uri: params.uri)])
             }
-            return .init(contents: [.text("Resource not found: \(params.uri)", uri: params.uri)])
+            throw MCPError.resourceNotFound(uri: params.uri)
         }
     }
 
@@ -413,15 +536,33 @@ func createConformanceServer(state: ServerState, transport: StatefulHTTPServerTr
 
     // Prompts
     await server.withMethodHandler(ListPrompts.self) { _ in
-        .init(prompts: [
+        var prompts = [
+            Prompt(name: "test_input_required_result_prompt", description: "Prompt requiring context"),
             Prompt(name: "test_simple_prompt", description: "A simple prompt without arguments"),
             Prompt(name: "test_prompt_with_arguments", description: "A prompt that accepts arguments", arguments: [Prompt.Argument(name: "arg1", description: "First test argument", required: true), Prompt.Argument(name: "arg2", description: "Second test argument", required: true)]),
             Prompt(name: "test_prompt_with_embedded_resource", description: "A prompt that includes embedded resources", arguments: [Prompt.Argument(name: "resourceUri", description: "URI of the resource to embed", required: true)]),
             Prompt(name: "test_prompt_with_image", description: "A prompt with image content"),
-        ])
+        ]
+        if await state.promptListHasChanged {
+            prompts.append(Prompt(name: "test_dynamic_prompt", description: "Added by the conformance list-change hook"))
+        }
+        return .init(prompts: prompts)
     }
 
     await server.withMethodHandler(GetPrompt.self) { params in
+        if params.name == "test_input_required_result_prompt" {
+            if params.inputResponses == nil {
+                return .init(
+                    messages: [],
+                    resultType: .inputRequired,
+                    inputRequests: ["user_context": inputRequest("elicitation/create", params: [
+                        "message": .string("What context should the prompt use?"),
+                        "requestedSchema": .object(["type": .string("object"), "properties": .object(["context": .object(["type": .string("string")])]), "required": .array([.string("context")])]),
+                    ])]
+                )
+            }
+            return GetPrompt.Result(description: "Prompt with supplied context", messages: [Prompt.Message.user(.text(text: "Context received"))])
+        }
         switch params.name {
         case "test_simple_prompt":
             return .init(description: "Simple prompt response", messages: [.user(.text(text: "This is a simple prompt for testing."))])
@@ -498,6 +639,7 @@ struct MCPHTTPServer {
                 AcceptHeaderValidator(mode: .sseRequired),
                 ContentTypeValidator(),
                 ProtocolVersionValidator(),
+                MCPRoutingHeaderValidator(),
                 SessionValidator(),
             ]),
             serverFactory: { sessionID, transport in

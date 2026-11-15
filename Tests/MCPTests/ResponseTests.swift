@@ -2,6 +2,7 @@ import Testing
 
 import class Foundation.JSONDecoder
 import class Foundation.JSONEncoder
+import class Foundation.JSONSerialization
 
 @testable import MCP
 
@@ -82,6 +83,16 @@ struct ResponseTests {
         } else {
             #expect(Bool(false), "Expected error result")
         }
+    }
+
+    @Test("Resource not found error uses modern invalid params shape")
+    func testResourceNotFoundErrorEncoding() throws {
+        let uri = "test://missing-resource"
+        let data = try JSONEncoder().encode(MCPError.resourceNotFound(uri: uri))
+        let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(object["code"] as? Int == -32602)
+        #expect((object["data"] as? [String: Any])?["uri"] as? String == uri)
+        #expect(try JSONDecoder().decode(MCPError.self, from: data) == .resourceNotFound(uri: uri))
     }
 
     @Test("Empty result response encoding")
