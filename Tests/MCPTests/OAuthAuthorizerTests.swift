@@ -141,6 +141,8 @@ final class MockAuthCodeFlow: OAuthAuthorizationCodeFlowing, @unchecked Sendable
         authorizationURL: URL,
         redirectURI: URL,
         state: String,
+        expectedIssuer: String?,
+        requireIssuer: Bool,
         delegate: (any OAuthAuthorizationDelegate)?,
         session: URLSession
     ) async throws -> String {

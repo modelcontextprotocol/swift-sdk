@@ -234,6 +234,24 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
 
         switch statusCode {
         case 401:
+            if tokenStorage.load() != nil {
+                let previousServer = selectedAuthorizationServer
+                protectedResourceMetadata = nil
+                authorizationServerMetadata = nil
+                cachedProtectedResourceMetadataURL = nil
+                selectedAuthorizationServer = nil
+                let currentMetadata = try await discoverProtectedResourceMetadata(
+                    endpoint: endpoint, challenge: challenge, session: session)
+                _ = try await resolveAuthorizationServerMetadata(
+                    metadata: currentMetadata, session: session)
+                if let previousServer, let currentServer = selectedAuthorizationServer,
+                   !authorizationServersMatch(previousServer, currentServer) {
+                    tokenStorage.clear()
+                    configuration.authentication = .none(clientID: "")
+                    clientRegistrationAttempted = false
+                    clientSecretExpiresAt = nil
+                }
+            }
             if let refreshToken = tokenStorage.load()?.refreshToken {
                 tokenStorage.clear()
                 let metadata = try await discoverProtectedResourceMetadata(
@@ -600,6 +618,9 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
             authorizationURL: authorizationURL,
             redirectURI: configuration.authorizationRedirectURI,
             state: state,
+            expectedIssuer: asMetadata.issuer?.absoluteString
+                ?? selectedAuthorizationServer?.absoluteString,
+            requireIssuer: asMetadata.authorizationResponseISSParameterSupported == true,
             delegate: configuration.authorizationDelegate,
             session: session
         )

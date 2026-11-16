@@ -88,6 +88,7 @@ struct OAuthClientRegistrar: Sendable {
 
         var registrationPayload: [String: Any] = [
             "client_name": configuration.clientName,
+            "application_type": configuration.applicationType.rawValue,
             "grant_types": grantTypes,
             "token_endpoint_auth_method": configuration.authentication.methodName,
         ]

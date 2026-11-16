@@ -175,4 +175,25 @@ struct OAuthAuthorizationCodeFlowTests {
         )
         #expect(code == "auth-code-123")
     }
+
+    @Test("Missing required issuer is rejected before the code is used")
+    func missingIssuer() {
+        let redirect = URL(string: "https://app.example.com/callback?code=abc&state=my-state")!
+        #expect(throws: OAuthAuthorizationError.self) {
+            try flow.extractCode(from: redirect, expectedRedirectURI: redirectURI,
+                expectedState: "my-state", expectedIssuer: "https://auth.example.com",
+                requireIssuer: true)
+        }
+    }
+
+    @Test("Issuer comparison keeps exact URL spelling")
+    func issuerMismatch() {
+        let redirect = URL(string:
+            "https://app.example.com/callback?code=abc&state=my-state&iss=https%3A%2F%2Fauth.example.com%2F")!
+        #expect(throws: OAuthAuthorizationError.self) {
+            try flow.extractCode(from: redirect, expectedRedirectURI: redirectURI,
+                expectedState: "my-state", expectedIssuer: "https://auth.example.com",
+                requireIssuer: false)
+        }
+    }
 }
