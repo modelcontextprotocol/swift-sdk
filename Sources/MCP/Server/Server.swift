@@ -108,6 +108,10 @@ public actor Server {
 
         /// Completions capabilities
         public var completions: Completions?
+        /// Experimental capabilities supported by the server
+        public var experimental: [String: Value]?
+        /// MCP extensions supported by the server
+        public var extensions: [String: Value]?
         /// Logging capabilities
         public var logging: Logging?
         /// Prompts capabilities
@@ -122,9 +126,13 @@ public actor Server {
             logging: Logging? = nil,
             prompts: Prompts? = nil,
             resources: Resources? = nil,
-            tools: Tools? = nil
+            tools: Tools? = nil,
+            experimental: [String: Value]? = nil,
+            extensions: [String: Value]? = nil
         ) {
             self.completions = completions
+            self.experimental = experimental
+            self.extensions = extensions
             self.logging = logging
             self.prompts = prompts
             self.resources = resources
