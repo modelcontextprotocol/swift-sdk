@@ -341,6 +341,49 @@ import Testing
             await transport.disconnect()
         }
 
+        @Test("Receive messages coalesced with heartbeats", .timeLimit(.minutes(1)), arguments: 0...13)
+        func testReceiveMessagesCoalescedWithHeartbeats(splitAt: Int) async throws {
+            let mockConnection = MockNetworkConnection()
+            let transport = NetworkTransport(
+                mockConnection,
+                heartbeatConfig: .disabled,
+                reconnectionConfig: .disabled
+            )
+            let heartbeat = NetworkTransport.Heartbeat(
+                timestamp: Date(timeIntervalSinceReferenceDate: 10)
+            ).data
+            let first = Data(#"{"jsonrpc":"2.0","id":1,"result":{}}"#.utf8)
+            let second = Data(#"{"jsonrpc":"2.0","id":2,"result":{}}"#.utf8)
+            let marker = Data(#"{"jsonrpc":"2.0","id":3,"result":{}}"#.utf8)
+            let newline = Data([0x0A])
+            let payload = heartbeat + first + newline + heartbeat + second + newline
+
+            // Zero delivers one coalesced chunk; the other cases split the first
+            // heartbeat's header/timestamp, or the start of the following JSON.
+            if splitAt > 0 {
+                mockConnection.queueDataForReceiving(Data(payload.prefix(splitAt)))
+            }
+            mockConnection.queueDataForReceiving(Data(payload.dropFirst(splitAt)))
+            // A separate marker lets the unfixed implementation finish the test
+            // even when it discards the preceding messages.
+            mockConnection.queueDataForReceiving(marker + newline)
+
+            try await transport.connect()
+            var received: [Data] = []
+            do {
+                for try await data in await transport.receive() {
+                    received.append(data)
+                    if data == marker { break }
+                }
+            } catch {
+                await transport.disconnect()
+                throw error
+            }
+            await transport.disconnect()
+
+            #expect(received == [first, second, marker])
+        }
+
         @Test("Heartbeat Send and Receive")
         func testNetworkTransportHeartbeat() async throws {
             let mockConnection = MockNetworkConnection()

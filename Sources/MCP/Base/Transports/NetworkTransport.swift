@@ -627,26 +627,27 @@ import Logging
                         continue
                     }
 
-                    // Check if this is a heartbeat message
-                    if Heartbeat.isHeartbeat(newData) {
-                        logger.trace("Received heartbeat from peer")
-
-                        // Extract timestamp if available
-                        if let heartbeat = Heartbeat.from(data: newData) {
-                            logger.trace("Heartbeat timestamp: \(heartbeat.timestamp)")
-                        }
-
-                        // Reset the counter since we got valid data
-                        consecutiveEmptyReads = 0
-                        continue  // Skip regular message processing for heartbeats
-                    }
-
                     // Reset counter on successful data read
                     consecutiveEmptyReads = 0
                     buffer.append(newData)
 
-                    // Process complete messages
-                    while let newlineIndex = buffer.firstIndex(of: UInt8(ascii: "\n")) {
+                    // TCP reads may contain multiple frames or only part of a frame.
+                    while !buffer.isEmpty {
+                        if Heartbeat.isHeartbeat(buffer) {
+                            // A heartbeat is four magic bytes followed by an eight-byte timestamp.
+                            let heartbeatSize = 12
+                            guard buffer.count >= heartbeatSize else { break }
+                            logger.trace("Received heartbeat from peer")
+                            if let heartbeat = Heartbeat.from(data: Data(buffer.prefix(heartbeatSize))) {
+                                logger.trace("Heartbeat timestamp: \(heartbeat.timestamp)")
+                            }
+                            buffer = buffer.dropFirst(heartbeatSize)
+                            continue
+                        }
+
+                        guard let newlineIndex = buffer.firstIndex(of: UInt8(ascii: "\n")) else {
+                            break
+                        }
                         let messageData = buffer[..<newlineIndex]
                         buffer = buffer[(newlineIndex + 1)...]
 
