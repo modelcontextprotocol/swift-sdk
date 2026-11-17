@@ -2,13 +2,16 @@ import struct Foundation.Data
 import class Foundation.JSONDecoder
 import class Foundation.JSONEncoder
 
-/// A codable value.
+/// A JSON value. Encoding `.data` produces a data-URL string; decoding that JSON
+/// produces `.string`, since an ordinary JSON string does not carry a binary type.
 public enum Value: Hashable, Sendable {
     case null
     case bool(Bool)
     case int(Int)
     case double(Double)
     case string(String)
+    /// Encodes as a data-URL string. Decoding that JSON produces `.string`.
+    /// Use `Data.parseDataURL(_:)` to recover the bytes when needed.
     case data(mimeType: String? = nil, Data)
     case array([Value])
     case object([String: Value])
@@ -120,13 +123,7 @@ extension Value: Codable {
         } else if let value = try? container.decode(Double.self) {
             self = .double(value)
         } else if let value = try? container.decode(String.self) {
-            if Data.isDataURL(string: value),
-                case let (mimeType, data)? = Data.parseDataURL(value)
-            {
-                self = .data(mimeType: mimeType, data)
-            } else {
-                self = .string(value)
-            }
+            self = .string(value)
         } else if let value = try? container.decode([Value].self) {
             self = .array(value)
         } else if let value = try? container.decode([String: Value].self) {
