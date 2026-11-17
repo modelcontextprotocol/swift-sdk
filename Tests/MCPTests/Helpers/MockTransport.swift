@@ -17,6 +17,7 @@ actor MockTransport: Transport {
     var isConnected = false
 
     private(set) var sentData: [Data] = []
+    private var firstSendWaiters: [CheckedContinuation<Data, Never>] = []
     var sentMessages: [String] {
         return sentData.compactMap { data in
             guard let string = String(data: data, encoding: .utf8) else {
@@ -57,6 +58,20 @@ actor MockTransport: Transport {
             throw MCPError.transportError(POSIXError(.EIO))
         }
         sentData.append(message)
+        let waiters = firstSendWaiters
+        firstSendWaiters.removeAll()
+        for waiter in waiters {
+            waiter.resume(returning: message)
+        }
+    }
+
+    func waitForFirstSentData() async -> Data {
+        if let data = sentData.first {
+            return data
+        }
+        return await withCheckedContinuation { continuation in
+            firstSendWaiters.append(continuation)
+        }
     }
 
     public func receive() -> AsyncThrowingStream<Data, Swift.Error> {
