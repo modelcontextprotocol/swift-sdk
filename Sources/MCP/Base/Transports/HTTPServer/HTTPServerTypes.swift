@@ -144,6 +144,8 @@ public enum HTTPResponse: Sendable {
 public enum HTTPHeaderName {
     public static let sessionID = "MCP-Session-Id"
     public static let protocolVersion = "MCP-Protocol-Version"
+    public static let method = "Mcp-Method"
+    public static let name = "Mcp-Name"
     public static let lastEventID = "Last-Event-ID"
     public static let accept = "Accept"
     public static let contentType = "Content-Type"
