@@ -288,26 +288,36 @@ public enum ListPrompts: Method {
     public struct Result: Hashable, Codable, Sendable {
         public let prompts: [Prompt]
         public let nextCursor: String?
+        /// Cache lifetime in milliseconds. Zero means immediately stale.
+        public let ttlMs: Int?
+        /// Whether this result may be reused across authorization contexts.
+        public let cacheScope: CacheScope?
         public var _meta: Metadata?
 
         public init(
             prompts: [Prompt],
             nextCursor: String? = nil,
+            ttlMs: Int? = nil,
+            cacheScope: CacheScope? = nil,
             _meta: Metadata? = nil
         ) {
             self.prompts = prompts
             self.nextCursor = nextCursor
+            self.ttlMs = ttlMs.map { max(0, $0) }
+            self.cacheScope = cacheScope
             self._meta = _meta
         }
 
         private enum CodingKeys: String, CodingKey, CaseIterable {
-            case prompts, nextCursor, _meta
+            case prompts, nextCursor, ttlMs, cacheScope, _meta
         }
 
         public func encode(to encoder: Encoder) throws {
             var container = encoder.container(keyedBy: CodingKeys.self)
             try container.encode(prompts, forKey: .prompts)
             try container.encodeIfPresent(nextCursor, forKey: .nextCursor)
+            try container.encodeIfPresent(ttlMs, forKey: .ttlMs)
+            try container.encodeIfPresent(cacheScope, forKey: .cacheScope)
             try container.encodeIfPresent(_meta, forKey: ._meta)
         }
 
@@ -315,6 +325,8 @@ public enum ListPrompts: Method {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             prompts = try container.decode([Prompt].self, forKey: .prompts)
             nextCursor = try container.decodeIfPresent(String.self, forKey: .nextCursor)
+            ttlMs = try container.decodeIfPresent(Int.self, forKey: .ttlMs).map { max(0, $0) }
+            cacheScope = try container.decodeIfPresent(CacheScope.self, forKey: .cacheScope)
             _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
         }
     }

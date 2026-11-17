@@ -267,26 +267,36 @@ public enum ListResources: Method {
     public struct Result: Hashable, Codable, Sendable {
         public let resources: [Resource]
         public let nextCursor: String?
+        /// Cache lifetime in milliseconds. Zero means immediately stale.
+        public let ttlMs: Int?
+        /// Whether this result may be reused across authorization contexts.
+        public let cacheScope: CacheScope?
         public var _meta: Metadata?
 
         public init(
             resources: [Resource],
             nextCursor: String? = nil,
+            ttlMs: Int? = nil,
+            cacheScope: CacheScope? = nil,
             _meta: Metadata? = nil
         ) {
             self.resources = resources
             self.nextCursor = nextCursor
+            self.ttlMs = ttlMs.map { max(0, $0) }
+            self.cacheScope = cacheScope
             self._meta = _meta
         }
 
         private enum CodingKeys: String, CodingKey, CaseIterable {
-            case resources, nextCursor, _meta
+            case resources, nextCursor, ttlMs, cacheScope, _meta
         }
 
         public func encode(to encoder: Encoder) throws {
             var container = encoder.container(keyedBy: CodingKeys.self)
             try container.encode(resources, forKey: .resources)
             try container.encodeIfPresent(nextCursor, forKey: .nextCursor)
+            try container.encodeIfPresent(ttlMs, forKey: .ttlMs)
+            try container.encodeIfPresent(cacheScope, forKey: .cacheScope)
             try container.encodeIfPresent(_meta, forKey: ._meta)
         }
 
@@ -294,6 +304,8 @@ public enum ListResources: Method {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             resources = try container.decode([Resource].self, forKey: .resources)
             nextCursor = try container.decodeIfPresent(String.self, forKey: .nextCursor)
+            ttlMs = try container.decodeIfPresent(Int.self, forKey: .ttlMs).map { max(0, $0) }
+            cacheScope = try container.decodeIfPresent(CacheScope.self, forKey: .cacheScope)
             _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
         }
     }
@@ -314,30 +326,42 @@ public enum ReadResource: Method {
 
     public struct Result: Hashable, Codable, Sendable {
         public let contents: [Resource.Content]
+        /// Cache lifetime in milliseconds. Zero means immediately stale.
+        public let ttlMs: Int?
+        /// Whether this result may be reused across authorization contexts.
+        public let cacheScope: CacheScope?
         /// Optional metadata about this result
         public var _meta: Metadata?
 
         public init(
             contents: [Resource.Content],
+            ttlMs: Int? = nil,
+            cacheScope: CacheScope? = nil,
             _meta: Metadata? = nil
         ) {
             self.contents = contents
+            self.ttlMs = ttlMs.map { max(0, $0) }
+            self.cacheScope = cacheScope
             self._meta = _meta
         }
 
         private enum CodingKeys: String, CodingKey, CaseIterable {
-            case contents, _meta
+            case contents, ttlMs, cacheScope, _meta
         }
 
         public func encode(to encoder: Encoder) throws {
             var container = encoder.container(keyedBy: CodingKeys.self)
             try container.encode(contents, forKey: .contents)
+            try container.encodeIfPresent(ttlMs, forKey: .ttlMs)
+            try container.encodeIfPresent(cacheScope, forKey: .cacheScope)
             try container.encodeIfPresent(_meta, forKey: ._meta)
         }
 
         public init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             contents = try container.decode([Resource.Content].self, forKey: .contents)
+            ttlMs = try container.decodeIfPresent(Int.self, forKey: .ttlMs).map { max(0, $0) }
+            cacheScope = try container.decodeIfPresent(CacheScope.self, forKey: .cacheScope)
             _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
         }
     }
@@ -363,22 +387,32 @@ public enum ListResourceTemplates: Method {
     public struct Result: Hashable, Codable, Sendable {
         public let templates: [Resource.Template]
         public let nextCursor: String?
+        /// Cache lifetime in milliseconds. Zero means immediately stale.
+        public let ttlMs: Int?
+        /// Whether this result may be reused across authorization contexts.
+        public let cacheScope: CacheScope?
         /// Optional metadata about this result
         public var _meta: Metadata?
 
         public init(
             templates: [Resource.Template],
             nextCursor: String? = nil,
+            ttlMs: Int? = nil,
+            cacheScope: CacheScope? = nil,
             _meta: Metadata? = nil
         ) {
             self.templates = templates
             self.nextCursor = nextCursor
+            self.ttlMs = ttlMs.map { max(0, $0) }
+            self.cacheScope = cacheScope
             self._meta = _meta
         }
 
         private enum CodingKeys: String, CodingKey, CaseIterable {
             case templates = "resourceTemplates"
             case nextCursor
+            case ttlMs
+            case cacheScope
             case _meta
         }
 
@@ -386,6 +420,8 @@ public enum ListResourceTemplates: Method {
             var container = encoder.container(keyedBy: CodingKeys.self)
             try container.encode(templates, forKey: .templates)
             try container.encodeIfPresent(nextCursor, forKey: .nextCursor)
+            try container.encodeIfPresent(ttlMs, forKey: .ttlMs)
+            try container.encodeIfPresent(cacheScope, forKey: .cacheScope)
             try container.encodeIfPresent(_meta, forKey: ._meta)
         }
 
@@ -393,6 +429,8 @@ public enum ListResourceTemplates: Method {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             templates = try container.decode([Resource.Template].self, forKey: .templates)
             nextCursor = try container.decodeIfPresent(String.self, forKey: .nextCursor)
+            ttlMs = try container.decodeIfPresent(Int.self, forKey: .ttlMs).map { max(0, $0) }
+            cacheScope = try container.decodeIfPresent(CacheScope.self, forKey: .cacheScope)
             _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
         }
     }
