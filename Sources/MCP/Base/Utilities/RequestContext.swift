@@ -23,7 +23,15 @@ public struct RequestContext<Output: Sendable & Decodable>: Sendable {
     /// ```
     public var value: Output {
         get async throws {
-            try await requestTask.value
+            // Cancelling the awaiting task cancels the request task, whose
+            // cancellation handler resumes the pending continuation (see
+            // `Client.send`). Awaiting `.value` alone would never forward
+            // cancellation to the unstructured request task.
+            try await withTaskCancellationHandler {
+                try await requestTask.value
+            } onCancel: {
+                requestTask.cancel()
+            }
         }
     }
 
