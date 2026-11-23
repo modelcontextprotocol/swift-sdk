@@ -103,9 +103,10 @@ Rules:
 ## Interop
 
 `scripts/run-interop.sh` runs the Swift SDK's clients and servers against pinned releases of the
-Go and Python SDKs (needs Go and `uv`). Run it after protocol or transport changes, and record a
-changed outcome with `--update-results`. `--check` fails when the results differ from
-`interop/RESULTS.md`; CI runs it that way. Details: [interop/README.md](interop/README.md).
+Go and Python SDKs (needs Go, `uv`, Node, `perl` and `python3`). Run it after protocol or
+transport changes, and record a changed outcome with `--update-results`. `--check` fails when the
+results differ from `interop/RESULTS.md`; CI runs it that way. Details:
+[interop/README.md](interop/README.md).
 
 ## CI and Linux
 

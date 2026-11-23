@@ -18,8 +18,8 @@
 # --check fails the run when the report's results differ from
 # interop/RESULTS.md (CI's gate; see interop/report.py).
 #
-# Needs: Swift, Go 1.25 or later, uv, Node 20 or later with npm, curl, sha256sum or shasum, and network
-# access on the first run. Behind a TLS-intercepting proxy, export UV_SYSTEM_CERTS=1.
+# Needs: Swift, Go 1.25 or later, uv, Node 20 or later with npm, curl, perl, python3, sha256sum or
+# shasum, and network access on the first run. Behind a TLS-intercepting proxy, export UV_SYSTEM_CERTS=1.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

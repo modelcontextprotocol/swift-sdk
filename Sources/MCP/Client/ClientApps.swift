@@ -53,6 +53,14 @@ public struct AppResourceContents: Hashable, Sendable {
     /// The content item as the server sent it.
     public var content: Resource.Content
 
+    /// Creates the contents of a view.
+    public init(uri: String, html: String, meta: UIResourceMeta? = nil, content: Resource.Content) {
+        self.uri = uri
+        self.html = html
+        self.meta = meta
+        self.content = content
+    }
+
     /// The Content Security Policy for the view, from ``meta``.
     public var contentSecurityPolicy: String {
         meta?.contentSecurityPolicy ?? UIResourceMeta.CSP.restrictiveDefault
@@ -72,7 +80,8 @@ extension Client {
     /// and so the restrictive default policy. Pass
     /// the `listing` entry when you have it. Without it, and when the content
     /// item has no `_meta.ui`, the client reads `resources/list` pages to
-    /// find the entry, at most 100.
+    /// find the entry, at most 100. When the listing cannot be read, the view
+    /// has no metadata.
     ///
     /// Render the view in a sandbox with ``AppResourceContents/contentSecurityPolicy``.
     ///
@@ -106,8 +115,20 @@ extension Client {
         // specification's `??`.
         var meta = content.ui
         if (content._meta?["ui"] ?? .null) == .null {
-            let entry: Resource? =
-                if let listing, listing.uri == uri { listing } else { try await listingEntry(for: uri) }
+            let entry: Resource?
+            if let listing, listing.uri == uri {
+                entry = listing
+            } else {
+                // The listing only adds metadata: without it, the view has
+                // the restrictive default policy.
+                do {
+                    entry = try await listingEntry(for: uri)
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    entry = nil
+                }
+            }
             meta = entry?.ui
         }
         return AppResourceContents(uri: uri, html: html, meta: meta, content: content)

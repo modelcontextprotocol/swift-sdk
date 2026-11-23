@@ -17,7 +17,8 @@ scripts/run-interop.sh --check           # fails when the results differ from RE
 ([../design/linux.md](../design/linux.md)).
 
 Needs Swift, Go 1.25 or later, `uv`, Node 20 or later with `npm`, `curl`,
-`sha256sum` or `shasum`, and network access on the first run. Nothing else is
+`perl`, `python3`, `sha256sum` or `shasum`, and network access on the first
+run. Nothing else is
 installed globally: Go modules go to the module cache, the Python SDK to
 `.build/interop/py-venv`, the TypeScript SDK to `.build/interop/ts`.
 Behind a TLS-intercepting proxy, `export UV_SYSTEM_CERTS=1`.

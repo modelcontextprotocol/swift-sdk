@@ -45,7 +45,8 @@ public struct UIExtensionSettings: Hashable, Codable, Sendable {
 
 extension Client.Capabilities {
     /// The MCP Apps extension settings in ``extensions``; `nil` when the
-    /// client does not declare the extension. Set it to declare the extension.
+    /// client does not declare the extension. Set it to declare the extension;
+    /// setting it replaces the extension's settings object.
     public var ui: UIExtensionSettings? {
         get { UIExtensionSettings(extensions) }
         set {
@@ -155,11 +156,13 @@ public struct UIResourceMeta: Hashable, Codable, Sendable {
         /// The Content Security Policy for these origins, as the
         /// specification constructs it.
         ///
-        /// The policy allows only the declared origins. An origin that
-        /// contains whitespace, a control character, `;`, `,`, `'` or `"` is
-        /// dropped, so that an origin cannot add a source keyword or a
-        /// directive. A host can make the policy more restrictive, but must
-        /// not allow more origins.
+        /// The policy uses the declared sources as given, except that a source
+        /// that contains whitespace, a control character, `;`, `,`, `'` or `"`
+        /// is dropped, so that it cannot add a source keyword or a directive.
+        /// A declared `*`, or a scheme such as `https:`, allows any origin: a
+        /// host that does not trust the server's declarations filters
+        /// ``connectDomains`` and the other lists first. A host can make the
+        /// policy more restrictive, but must not allow more origins.
         public func policy() -> String {
             func sources(_ domains: [String]?) -> String {
                 (domains ?? []).filter(Self.isSafeSource).joined(separator: " ")
@@ -400,7 +403,8 @@ extension Resource {
     /// when it has none.
     ///
     /// The setter writes the known fields of `_meta.ui` and keeps its other
-    /// keys. Setting `nil` removes `_meta.ui`.
+    /// top-level keys; `csp` and `permissions` are written as the SDK models
+    /// them. Setting `nil` removes `_meta.ui`.
     public var ui: UIResourceMeta? {
         get { UIMetaField.read(_meta) }
         set { UIMetaField.write(newValue, keys: UIResourceMeta.keys, into: &_meta) }
@@ -413,7 +417,8 @@ extension Resource.Content {
     /// `resources/list` entry's.
     ///
     /// The setter writes the known fields of `_meta.ui` and keeps its other
-    /// keys. Setting `nil` removes `_meta.ui`.
+    /// top-level keys; `csp` and `permissions` are written as the SDK models
+    /// them. Setting `nil` removes `_meta.ui`.
     public var ui: UIResourceMeta? {
         get { UIMetaField.read(_meta) }
         set { UIMetaField.write(newValue, keys: UIResourceMeta.keys, into: &_meta) }

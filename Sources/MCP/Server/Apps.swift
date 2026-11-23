@@ -143,7 +143,10 @@ extension Server {
     /// and the cursors are the server's own. Without it, hosts find the views
     /// only through the tools' ``Tool/ui``. A later view with the URI of an
     /// earlier one replaces it. A second call replaces the views; then send a
-    /// `ResourceListChangedNotification`.
+    /// `ResourceListChangedNotification`, and declare
+    /// `resources: .init(listChanged: true)` when you create the server: this
+    /// method declares `resources` without it, and listen streams carry the
+    /// notification only when it is declared.
     ///
     /// Give each tool that renders a view a ``Tool/ui`` with the view's URI,
     /// and results with meaningful `content` for hosts without views.

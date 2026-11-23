@@ -437,6 +437,25 @@ struct AppServerTests {
         let skill = try await result(wire, ReadResource.name, ["uri": "skill://pdf/SKILL.md"])
         #expect(skill.objectValue?["contents"]?.arrayValue?.count == 1)
     }
+
+    @Test("A second withAppResources replaces the views; the views stay before the skills", arguments: [true, false])
+    func replaced(listSecond: Bool) async throws {
+        let server = Server(name: "s", version: "1", capabilities: .init(tools: .init()))
+        await server.withAppResources([try view("ui://old")])
+        await server.withSkills(
+            InMemorySkillCatalog([
+                try SkillPackage(path: "pdf", files: ["SKILL.md": Data("---\nname: pdf\ndescription: d\n---\n".utf8)])
+            ]))
+        await server.withAppResources([try view("ui://new", html: "new")], listInResources: listSecond)
+        let wire = WireExchange(server: server)
+        try await wire.start()
+        defer { Task { await wire.stop() } }
+        let listed = try await result(wire, ListResources.name)
+        #expect(uris(listed) == (listSecond ? ["ui://new"] : []) + ["skill://pdf/SKILL.md"])
+        let read = try await result(wire, ReadResource.name, ["uri": "ui://new"])
+        #expect(read.objectValue?["contents"]?.arrayValue?.first?.objectValue?["text"] == "new")
+        #expect(try await errorCode(wire, ReadResource.name, ["uri": "ui://old"]) == -32602)
+    }
 }
 
 @Suite("Reading MCP Apps views")
@@ -509,6 +528,19 @@ struct AppClientTests {
         #expect(try await client.readAppResource(uri: "ui://v").meta == weatherMeta)
         let otherEntry = Resource(name: "o", uri: "ui://other", _meta: entry._meta)
         #expect(try await client.readAppResource(uri: "ui://v", listing: otherEntry).meta == weatherMeta)
+    }
+
+    @Test("A listing that fails gives the view no meta instead of failing the read")
+    func listingFails() async throws {
+        let (client, server) = try await connect { server in
+            await listingOnlyServer(server, listed: weatherMeta)
+            await server.withMethodHandler(ListResources.self) { _ in throw MCPError.internalError("no listing") }
+        }
+        defer { Task { await client.disconnect(); await server.stop() } }
+        let view = try await client.readAppResource(uri: "ui://v")
+        #expect(view.html == "<html></html>")
+        #expect(view.meta == nil)
+        #expect(view.contentSecurityPolicy == UIResourceMeta.CSP.restrictiveDefault)
     }
 
     @Test("A content item's _meta.ui that is not an object gives no meta; a null one, the listing's")
