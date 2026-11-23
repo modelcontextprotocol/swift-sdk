@@ -608,7 +608,9 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
         try await gate.run {
             // Read again: a refresh may have run while this one waited.
             guard let token = tokenStorage.load(), isDueForRenewal(token) else { return }
-            guard let asMeta = authorizationServerMetadata, asMeta.tokenEndpoint != nil else { return }
+            guard let asMeta = authorizationServerMetadata,
+                configuration.endpointOverrides.tokenEndpoint != nil || asMeta.tokenEndpoint != nil
+            else { return }
             guard let refreshToken = token.refreshToken else {
                 // Grants without user interaction get a new token before
                 // this one expires; a failure leaves the 401 path to recover.
@@ -619,6 +621,8 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
                 try? await acquireToken(
                     endpoint: endpoint, metadata: metadata,
                     requestedScopes: token.scopes.isEmpty ? nil : token.scopes, session: session)
+                // A cancelled attempt is not a try: the next request makes it.
+                if Task.isCancelled { proactivelyRenewedToken = nil }
                 return
             }
 
@@ -639,6 +643,7 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
                 asMetadata: asMeta,
                 session: session
             )
+            if Task.isCancelled { proactivelyRenewedToken = nil }
         }
     }
 
@@ -783,6 +788,13 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
         } else if let selected = selectedAuthorizationServer {
             candidates = [selected]
         } else {
+            // A jwt-bearer assertion goes to a server the MCP server names
+            // only after the opt-in: fail before any request to one.
+            if configuration.grantType == .jwtBearer, configuration.endpointOverrides.tokenEndpoint == nil,
+                !configuration.allowsDiscoveredAuthorizationServer
+            {
+                throw OAuthAuthorizationError.authorizationServerNotConfigured
+            }
             guard !metadata.authorizationServers.isEmpty else {
                 throw OAuthAuthorizationError.missingAuthorizationServer
             }

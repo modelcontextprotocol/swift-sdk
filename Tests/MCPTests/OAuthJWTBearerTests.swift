@@ -515,6 +515,7 @@ struct OAuthJWTBearerDestinationTests {
     @Test("Without a configured server or the opt-in, no assertion is made or sent")
     func unpinnedRefused() async throws {
         let calls = Recorder<Int>()
+        let discovery = MockDiscoveryClient()
         let tokenClient = MockTokenClient()
         let authorizer = jwtBearerAuthorizer(
             .init(
@@ -523,7 +524,7 @@ struct OAuthJWTBearerDestinationTests {
                     await calls.append(1)
                     return "jwt"
                 }),
-            tokenClient: tokenClient)
+            discovery: discovery, tokenClient: tokenClient)
         await #expect {
             _ = try await authorizer.handleChallenge(statusCode: 401, headers: headers401, endpoint: endpoint, session: .shared)
         } throws: { error in
@@ -532,6 +533,7 @@ struct OAuthJWTBearerDestinationTests {
         }
         #expect(await calls.values.isEmpty)
         #expect(tokenClient.requestCallCount == 0)
+        #expect(discovery.fetchAuthorizationServerMetadataCallCount == 0)
     }
 
     @Test("A discovered server gets only an assertion for its issuer or token endpoint")
@@ -617,6 +619,60 @@ struct OAuthJWTBearerDestinationTests {
         storage.save(aged(try #require(storage.load()), expiringIn: 40))
         try await authorizer.prepareAuthorization(for: endpoint, session: .shared)
         #expect(await calls.values.count == 2)
+        #expect(tokenClient.requestCallCount == 2)
+    }
+
+    @Test("A configured token endpoint renews a token whose server metadata has none")
+    func proactiveRenewalWithConfiguredTokenEndpoint() async throws {
+        let server = URL(string: "https://auth.example.com")!
+        let discovery = MockDiscoveryClient()
+        discovery.authorizationServerMetadataResult = (
+            server: server,
+            metadata: OAuthAuthorizationServerMetadata(
+                issuer: server, authorizationEndpoint: nil, tokenEndpoint: nil, registrationEndpoint: nil,
+                codeChallengeMethodsSupported: nil, tokenEndpointAuthMethodsSupported: nil,
+                clientIDMetadataDocumentSupported: nil)
+        )
+        let tokenClient = MockTokenClient()
+        let storage = InMemoryTokenStorage()
+        let authorizer = jwtBearerAuthorizer(
+            .init(
+                grantType: .jwtBearer, authentication: .none(clientID: ""),
+                endpointOverrides: .init(tokenEndpoint: URL(string: "https://auth.example.com/token")!),
+                assertionProvider: { _, _ in "jwt" }),
+            discovery: discovery, tokenClient: tokenClient, storage: storage)
+        #expect(try await authorizer.handleChallenge(statusCode: 401, headers: headers401, endpoint: endpoint, session: .shared))
+        storage.save(aged(try #require(storage.load()), expiringIn: 40))
+        try await authorizer.prepareAuthorization(for: endpoint, session: .shared)
+        #expect(tokenClient.requestCallCount == 2)
+    }
+
+    @Test("A cancelled renewal is tried again by the next request")
+    func cancelledRenewalTriedAgain() async throws {
+        let calls = Recorder<Int>()
+        let tokenClient = MockTokenClient()
+        let storage = InMemoryTokenStorage()
+        let authorizer = jwtBearerAuthorizer(
+            .init(
+                grantType: .jwtBearer, authentication: .none(clientID: ""),
+                endpointOverrides: .init(authorizationServerURL: URL(string: "https://auth.example.com")!),
+                assertionProvider: { _, _ in
+                    await calls.append(1)
+                    if await calls.values.count == 2 {
+                        // The request that renews is cancelled meanwhile.
+                        withUnsafeCurrentTask { $0?.cancel() }
+                        throw CancellationError()
+                    }
+                    return "jwt"
+                }),
+            tokenClient: tokenClient, storage: storage)
+        #expect(try await authorizer.handleChallenge(statusCode: 401, headers: headers401, endpoint: endpoint, session: .shared))
+        storage.save(aged(try #require(storage.load()), expiringIn: 40))
+        let cancelled = Task { try await authorizer.prepareAuthorization(for: endpoint, session: .shared) }
+        _ = await cancelled.result
+        #expect(tokenClient.requestCallCount == 1)
+        try await authorizer.prepareAuthorization(for: endpoint, session: .shared)
+        #expect(await calls.values.count == 3)
         #expect(tokenClient.requestCallCount == 2)
     }
 
