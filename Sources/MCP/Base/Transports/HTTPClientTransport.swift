@@ -887,9 +887,11 @@ public actor HTTPClientTransport: Transport {
             if httpResponse.statusCode == 405 {
                 self.streamingTask?.cancel()
             }
+            // The session ID stays: the next request carries it, gets the
+            // 404 the server must send for it, and reports the expiry to
+            // its caller.
             if httpResponse.statusCode == 404, sessionID != nil {
                 logger.warning("Session has expired")
-                sessionID = nil
                 throw statusError(httpResponse, isSessionExpired: true)
             }
             // The server no longer has the event to resume from: the next

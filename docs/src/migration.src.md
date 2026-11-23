@@ -163,6 +163,9 @@ compiles, but its values are ignored:
 `catch OAuthAuthorizationError.tokenRequestFailed(statusCode: 401, oauthError: nil)`
 now catches every failed token request, whatever its status. Compare
 `statusCode` or `oauthError` in a `where` clause instead.
+`HTTPClientTransport` throws it inside `MCPError.transportError(_:)`
+([HTTP client errors](#http-client-errors)), so around `connect` or a request,
+match `MCPError.transportError(let error as OAuthAuthorizationError)`.
 
 Before:
 
@@ -298,7 +301,10 @@ The descriptions changed, so match on the error rather than its text:
 - An authorizer error reads as the error's own description, without
   `Authorization flow failed: `.
 
-The error's `code` is -32001 instead of -32603; it is never sent on the wire.
+The error's `code` is -32001 instead of -32603. A server handler that calls
+another server through a `Client` and lets such an error propagate now answers
+its own caller with -32001 and `Transport error: …` instead of -32603; catch it
+and throw the error the caller should see.
 
 %include Examples/Snippets/Guides/Migration.swift migration-http-errors
 

@@ -331,6 +331,8 @@ struct ServerDefaultHandlerTests {
         let client = Client(name: "c", version: "1", configuration: .handshake)
         try await client.connect(transport: clientTransport)
         try await client.ping()
+        // The handler ran before the response: without it, next() returns nil.
+        pinged.continuation.finish()
         var iterator = pinged.stream.makeAsyncIterator()
         #expect(await iterator.next() != nil)
         await client.disconnect()

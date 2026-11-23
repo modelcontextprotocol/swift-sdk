@@ -502,7 +502,9 @@ struct HTTPClientConnectionLimitTests {
             await transport.disconnect()
         }
 
-        @Test("A 404 on the GET stream ends the session and the stream", .timeLimit(.minutes(1)))
+        @Test(
+            "A 404 on the GET stream stops the stream, and the next request reports the expiry",
+            .timeLimit(.minutes(1)))
         func getNotFoundExpiresSession() async throws {
             let (messages, sink) = AsyncStream<String>.makeStream()
             let logger = Logger(label: "mcp.test.reliability") { _ in StreamingLogHandler(sink: sink) }
@@ -510,10 +512,10 @@ struct HTTPClientConnectionLimitTests {
             let requests = RecordedRequests()
             await IsolatedMockURLProtocol.setHandler(key: key) { [response] request in
                 await requests.append(request)
-                if request.httpMethod == "POST" { return sse("data: \(response)\n\n") }
                 // The first GET ends at once; the server then forgets the session.
-                if await requests.gets.count == 1 { return sse("id: g1\nretry: 10\ndata: \n\n") }
-                return sse("", status: 404)
+                let forgotten = await requests.gets.count >= 2
+                if request.httpMethod == "POST" { return forgotten ? sse("", status: 404) : sse("data: \(response)\n\n") }
+                return forgotten ? sse("", status: 404) : sse("id: g1\nretry: 10\ndata: \n\n")
             }
             try await transport.connect()
             try await transport.send(request)
@@ -526,9 +528,16 @@ struct HTTPClientConnectionLimitTests {
             // Without the fix the GET is retried within about 20 ms.
             try await Task.sleep(for: .milliseconds(500))
             #expect(await requests.gets.count == 2)
+            // The next request carries the session and reports its expiry.
+            #expect(await transport.sessionID == "s1")
+            do {
+                try await transport.send(request)
+                Issue.record("Expected the session to have expired")
+            } catch MCPError.transportError(let status as HTTPStatusError) {
+                #expect(status.isSessionExpired)
+            }
+            #expect(await requests.all.last?.value(forHTTPHeaderField: "Mcp-Session-Id") == "s1")
             #expect(await transport.sessionID == nil)
-            try await transport.send(request)
-            #expect(await requests.all.last?.value(forHTTPHeaderField: "Mcp-Session-Id") == nil)
             await transport.disconnect()
         }
 

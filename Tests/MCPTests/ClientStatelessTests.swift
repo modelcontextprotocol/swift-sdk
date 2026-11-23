@@ -144,6 +144,22 @@ struct ClientStatelessTests {
         await setLevel(nil, on: client)
         #expect(try await client.listTools().tools.first?.name == "true|probe|-")
     }
+
+    @Test("A reconnect starts from configuration.logLevel")
+    func testReconnectResetsLogLevel() async throws {
+        let first = await makeStatelessServer()
+        let second = await makeStatelessServer()
+        let (client, _) = try await connectClient(first, mode: .automatic, logLevel: .warning)
+        defer { Task { await client.disconnect(); await first.stop(); await second.stop() } }
+        try await client.setLoggingLevel(.error)
+        #expect(try await client.listTools().tools.first?.name == "true|probe|error")
+
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+        try await second.start(transport: serverTransport)
+        try await client.connect(transport: clientTransport)
+        #expect(await client.logLevel == .warning)
+        #expect(try await client.listTools().tools.first?.name == "true|probe|warning")
+    }
 }
 
 /// Lists different tools on each call: `a` first, then `b`.

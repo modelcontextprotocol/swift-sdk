@@ -313,7 +313,8 @@ public actor Client {
     /// The lowest log level the server should send, carried in the `_meta` of
     /// every 2026-07-28 request: ``Configuration/logLevel``, until
     /// ``setLoggingLevel(_:)`` or a change of `configuration.logLevel`
-    /// changes it.
+    /// changes it. ``connect(transport:)`` starts from
+    /// `configuration.logLevel` again.
     public private(set) var logLevel: LogLevel?
     /// The server instructions
     private var instructions: String?
@@ -523,6 +524,7 @@ public actor Client {
         instructions = nil
         self.connection = transport
         toolHeaderParameters = [:]
+        logLevel = configuration.logLevel
         try await transport.connect()
         guard connectionGeneration == generation else {
             throw MCPError.internalError("Client disconnected")

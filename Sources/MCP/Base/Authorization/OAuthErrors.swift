@@ -8,17 +8,19 @@ import Foundation
 ///
 /// ``code`` says what failed; the other properties carry the details that code has. New codes
 /// can appear in a minor release, so a `switch` needs a `default`. A static member such as
-/// ``dpopRequired`` or ``tokenRequestFailed`` matches every error with its code:
+/// ``dpopRequired`` or ``tokenRequestFailed`` matches every error with its code.
+/// ``HTTPClientTransport`` throws it wrapped in ``MCPError/transportError(_:)``:
 ///
 /// ```swift
 /// do {
 ///     try await client.connect(transport: transport)
-/// } catch OAuthAuthorizationError.dpopRequired {
-///     // set OAuthConfiguration.dpop
-/// } catch let error as OAuthAuthorizationError where error.code == .tokenRequestFailed {
-///     print(error.statusCode ?? 0, error.oauthError ?? "")
-/// } catch OAuthAuthorizationError.privateIPAddressBlocked {
-///     // any blocked URL
+/// } catch MCPError.transportError(let error as OAuthAuthorizationError) {
+///     switch error {
+///     case .dpopRequired: break  // set OAuthConfiguration.dpop
+///     case .tokenRequestFailed: print(error.statusCode ?? 0, error.oauthError ?? "")
+///     case .privateIPAddressBlocked: break  // any blocked URL
+///     default: print(error.localizedDescription)
+///     }
 /// }
 /// ```
 public struct OAuthAuthorizationError: LocalizedError, Hashable, Sendable {
