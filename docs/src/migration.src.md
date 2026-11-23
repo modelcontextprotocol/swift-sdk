@@ -23,7 +23,7 @@ each change that breaks source code.
 | `GrantType`, `TokenEndpointAuthentication`, `PrivateKeyJWTSigningAlgorithm` | Structs, not enums; new grant type `.jwtBearer` | Add a `default` to `switch` statements; write `.ES256` instead of `init(rawValue:)` |
 | `BearerTokenValidationResult`, `Elicitation.Mode`, `ToolChoice.Mode` | Structs, not enums; `Mode(rawValue:)` is not optional | Add a `default` to `switch` statements; drop the optional binding |
 | Content blocks, `InputRequest`, `InputResponse`, `CreateElicitation.Parameters` | New case `.unknown` for kinds from a later revision | Add it, or a `default`, to `switch` statements |
-| `HTTPClientAuthorizer` | `authorizationHeader(for:)` became `authorizationHeaders(for:method:)`; new requirement `handleChallenge(statusCode:headers:endpoint:operationKey:sentAuthorization:session:)`, with a default | Update custom authorizers |
+| `HTTPClientAuthorizer` | `authorizationHeader(for:)` became `authorizationHeaders(for:method:)`; new requirement `handleChallenge(statusCode:headers:endpoint:operationKey:sentAuthorization:session:)`, returning `HTTPChallengeResult`, with a default that calls the Bool method | Update custom authorizers |
 | `Client` convenience methods | Return the result type, not a tuple; `startToolCall` replaces the `RequestContext` overload of `callTool`; `initialize()` is removed | Read the result's properties |
 | `Client.connect(transport:)` | Returns `Client.ConnectionInfo`, whose `serverInfo` is optional | Unwrap `serverInfo` |
 | `Version.latest` | Renamed `Version.latestHandshake`; the old name is deprecated | Rename |
@@ -336,11 +336,16 @@ the URL). Return `["Authorization": value]` where the old method returned
 
 The transport now calls the new requirement
 `handleChallenge(statusCode:headers:endpoint:operationKey:sentAuthorization:session:)`
-with the `Authorization` header the challenged request carried. Its default
-calls `handleChallenge(statusCode:headers:endpoint:operationKey:session:)`, so
-custom authorizers compile and behave as before. An authorizer that
-implements it can tell a challenge for a token another request has already
-replaced from one for the current token.
+with the `Authorization` header the challenged request carried. It returns an
+`HTTPChallengeResult`: `retry`, as the Bool method returns, and
+`isDPoPNonceRetry`, whether the retry only answers a DPoP `use_dpop_nonce`
+challenge, which the transport allows once per request without counting it
+against `maxAuthorizationAttempts`. Its default calls
+`handleChallenge(statusCode:headers:endpoint:operationKey:session:)` and reads
+the nonce challenge with `DefaultOAuthWWWAuthenticateParser`, so custom
+authorizers compile and behave as before. An authorizer that implements it can
+tell a challenge for a token another request has already replaced from one for
+the current token, and decide which challenge is a nonce retry.
 
 `OAuthAccessToken` has a new stored property, `keyThumbprint`, with a
 defaulted initializer parameter; tokens saved by the previous release decode

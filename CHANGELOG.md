@@ -62,7 +62,8 @@ Behavior that can break working code ([docs/migration.md](docs/migration.md#beha
 - `statelessRequestHook` on `Server.start`, `HTTPClientTransport.cancelRequest(_:)`,
   `BearerTokenValidationResult.tokenInfo`, and the `HTTPClientAuthorizer` requirement
   `handleChallenge(statusCode:headers:endpoint:operationKey:sentAuthorization:session:)`, with a
-  default, which receives the `Authorization` header of the challenged request.
+  default, which receives the `Authorization` header of the challenged request and returns an
+  `HTTPChallengeResult` that says whether the retry is a DPoP nonce retry.
 - The `Transport` requirement `send(_:additionalHeaders:)`, with a default that ignores the
   headers, through which the client hands the `Mcp-Param-*` headers of a `tools/call` to any
   transport. A custom Streamable HTTP transport sends them on the request's POST, and a wrapping
