@@ -317,6 +317,10 @@ public actor HTTPClientTransport: Transport {
 
     /// Sends data through an HTTP POST request with extra headers, such as
     /// the `Mcp-Param-*` headers of a `tools/call` (SEP-2243).
+    ///
+    /// A header named here replaces one the transport sets before it, such
+    /// as `Mcp-Method`; the `requestModifier` and the authorizer's headers
+    /// are applied after it.
     public func send(_ data: Data, additionalHeaders: [String: String]) async throws {
         let message = OutgoingMessage(data)
         if let id = message.requestID {
