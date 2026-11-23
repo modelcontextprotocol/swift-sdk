@@ -133,16 +133,16 @@ struct ToolNameWarningTests {
         #expect(clientWarnings(log).count == 2)
     }
 
-    @Test("A reconnected client and a restarted server warn again")
-    func reconnect() async throws {
+    @Test("A reconnected client and a restarted server warn again", arguments: [false, true])
+    func reconnect(handshake: Bool) async throws {
         let log = CapturingLogHandler()
         let server = Server(name: "s", version: "1", capabilities: .init(tools: .init()))
         let names = listed
         await server.withMethodHandler(ListTools.self) { _ in
             .init(tools: names.map { Tool(name: $0, description: nil, inputSchema: ["type": "object"]) })
         }
-        // At 2026-07-28: a restarted server does not serve a second `initialize`.
-        let client = Client(name: "c", version: "1")
+        // At 2026-07-28, or over a second `initialize` after the restart.
+        let client = Client(name: "c", version: "1", configuration: handshake ? .handshake : .default)
         for round in 1...2 {
             let (clientEnd, serverEnd) = await InMemoryTransport.createConnectedPair(
                 logger: Logger(label: "test") { _ in log })
