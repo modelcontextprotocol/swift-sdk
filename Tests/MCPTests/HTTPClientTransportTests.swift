@@ -2611,16 +2611,33 @@ import Testing
             #expect(result.error is MCPError)
         }
 
-        @Test("connect() after disconnect() sends with new sessions")
+        @Test("connect() after disconnect() throws instead of losing messages")
         func reconnect() async throws {
             let transport = await makeTransport { [self] _ in reply(202) }
             let notification = Data(#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#.utf8)
             try await transport.connect()
             try await transport.send(notification)
             await transport.disconnect()
+            await #expect(throws: MCPError.self) { try await transport.connect() }
+        }
+
+        @Test("disconnect() ends a notification's POST that waits for its response")
+        func disconnectEndsNotificationPost() async throws {
+            let gate = AuthorizerGate()
+            let (entered, enteredContinuation) = AsyncStream<Void>.makeStream()
+            let transport = await makeTransport { [self] _ in
+                enteredContinuation.yield()
+                await gate.wait()
+                return reply(202)
+            }
+            let notification = Data(#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#.utf8)
             try await transport.connect()
-            try await transport.send(notification)
+            let send = Task { try await transport.send(notification) }
+            for await _ in entered { break }
             await transport.disconnect()
+            let result = await outcome(within: .seconds(5)) { try await send.value }
+            await gate.open()
+            #expect(result.error != nil)
         }
 
         @Test("A response body requested from a cancelled task fails promptly")
@@ -2938,8 +2955,8 @@ import Testing
             #expect(message.map { String(decoding: $0, as: UTF8.self) } == notification)
 
             let reference = WeakTransport(transport)
+            // No further event: the release itself closes the stream.
             transport = nil
-            server.write("data: \(notification)\n\n")
 
             #expect(await reference.isReleased())
             #expect(await eventually { server.closedStreamCount == 1 })

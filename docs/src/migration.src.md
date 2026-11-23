@@ -592,10 +592,13 @@ session ended.
   reopened; the previous release kept reopening it with the expired session
   ID. The session ID is kept, so the next request carries it, receives the
   server's 404 and reports `isSessionExpired` to its caller.
-- A transport dropped without `disconnect()` is released, and stops its GET
-  stream by the next event, the end of the stream or the request's idle
-  timeout. The previous release never released it and, with
+- A transport dropped without `disconnect()` is released, and then stops its
+  GET stream. The previous release never released it and, with
   `streaming: true`, kept reconnecting the GET stream.
+- `connect()` after `disconnect()` throws `internalError`: create a new
+  transport to reconnect. The previous release raised an exception at the
+  next send on Apple platforms. `disconnect()` also ends a notification's
+  POST still waiting for its response.
 
 ### Authorization
 

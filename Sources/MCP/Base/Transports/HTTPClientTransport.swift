@@ -25,12 +25,15 @@ import Logging
 /// - Streaming HTTP with SSE (`streaming=true`): Enables server-to-client push messages
 ///
 /// ``disconnect()`` ends the connection at once. A transport dropped without
-/// it is still released, and stops its GET stream by the next event, the end
-/// of the stream, or the request's idle timeout.
+/// it is still released, and then stops its GET stream and the POSTs in
+/// flight and invalidates its URL sessions.
 ///
 /// It behaves the same on Apple platforms and Linux. Response bodies are read
 /// as they arrive: with `URLSession.bytes(for:)` on Apple platforms, and with a
 /// data delegate on swift-corelibs-foundation, which has no `bytes(for:)`.
+///
+/// An SSE line, or the data of one event, longer than 16 MiB fails the
+/// request with `internalError`; the stream is not resumed.
 ///
 /// ## Example Usage
 ///
@@ -57,8 +60,7 @@ import Logging
 public actor HTTPClientTransport: Transport {
     /// The server endpoint URL to connect to
     public let endpoint: URL
-    /// Built anew by ``connect()`` after ``disconnect()`` invalidated it.
-    private var session: URLSession
+    private let session: URLSession
 
     /// The session ID assigned by the server, used for maintaining state across requests
     public private(set) var sessionID: String?
@@ -69,7 +71,7 @@ public actor HTTPClientTransport: Transport {
     private let streaming: Bool
     private var streamingTask: Task<Void, Never>?
     /// Streams response bodies on swift-corelibs-foundation.
-    private(set) var streamingSession: StreamingSession
+    let streamingSession: StreamingSession
 
     /// Logger instance for transport-related events
     public nonisolated let logger: Logger
@@ -102,6 +104,9 @@ public actor HTTPClientTransport: Transport {
     /// The POSTs of requests in flight, by JSON-RPC ID. Cancelled by
     /// ``disconnect()`` and by an outgoing `notifications/cancelled`.
     private var inFlightPosts: [String: Task<Void, Swift.Error>] = [:]
+    /// The other POSTs in flight: notifications, and responses to server
+    /// requests. Cancelled by ``disconnect()``.
+    private var otherPosts: [UUID: Task<Void, Swift.Error>] = [:]
 
     /// The authorizer calls of requests in flight, by JSON-RPC ID. See
     /// ``authorizationEnd(of:)``.
@@ -313,18 +318,18 @@ public actor HTTPClientTransport: Transport {
     /// With `streaming`, this starts the standalone GET stream; it opens
     /// once the server has assigned a session ID, or after
     /// ``sseInitializationTimeout``. Call ``disconnect()`` to end the
-    /// connection. A transport dropped without it is still released: it
-    /// stops its GET stream by the next event, the end of the stream, or the
-    /// request's idle timeout.
+    /// connection. A transport dropped without it is still released, and its
+    /// GET stream stops then.
+    ///
+    /// - Throws: `MCPError.internalError` after ``disconnect()``: the
+    ///   transport serves one connection; use a new one to reconnect.
     public func connect() async throws {
         guard !isConnected else { return }
-        isConnected = true
-
-        // An invalidated session cannot create tasks.
-        if streamingSession.lifetime.isInvalidated {
-            session = URLSession(configuration: session.configuration)
-            streamingSession = StreamingSession(configuration: session.configuration)
+        // disconnect() finished the stream receive() returns.
+        guard !streamingSession.lifetime.isInvalidated else {
+            throw MCPError.internalError("Transport disconnected; create a new transport to reconnect")
         }
+        isConnected = true
 
         sessionIDSignal = SessionIDSignal()
 
@@ -357,7 +362,8 @@ public actor HTTPClientTransport: Transport {
     ///
     /// This ends the connection at once: it stops the GET stream, cancels
     /// the POSTs in flight, invalidates the URL sessions and finishes the
-    /// stream ``receive()`` returns. ``connect()`` may be called again.
+    /// stream ``receive()`` returns. The transport cannot connect again; use
+    /// a new one to reconnect.
     public func disconnect() async {
         guard isConnected else { return }
         isConnected = false
@@ -369,6 +375,10 @@ public actor HTTPClientTransport: Transport {
         // resume, end now instead of sleeping on a server-chosen delay.
         for task in inFlightPosts.values { task.cancel() }
         inFlightPosts.removeAll()
+        // On Apple platforms a request keeps the sessions valid until its
+        // response headers arrive, so end the other POSTs too.
+        for task in otherPosts.values { task.cancel() }
+        otherPosts.removeAll()
         cancelledBeforeSend.removeAll()
 
         // A request that is creating its task keeps the sessions valid
@@ -400,7 +410,8 @@ public actor HTTPClientTransport: Transport {
     ///
     /// A request's POST, including the resumption of its response stream,
     /// runs until its response arrives, ``disconnect()`` is called, or the
-    /// client sends `notifications/cancelled` for it.
+    /// client sends `notifications/cancelled` for it. Any other POST, such as
+    /// a notification's, ends when its response arrives or at ``disconnect()``.
     public func send(_ data: Data) async throws {
         try await send(data, additionalHeaders: [:])
     }
@@ -438,7 +449,16 @@ public actor HTTPClientTransport: Transport {
         if let cancelled = message.cancelledRequestID {
             inFlightPosts[cancelled]?.cancel()
         }
-        try await post(message, additionalHeaders: additionalHeaders)
+        // In a task of its own, so that disconnect() can end it.
+        let key = UUID()
+        let task = Task { try await self.post(message, additionalHeaders: additionalHeaders) }
+        otherPosts[key] = task
+        defer { otherPosts[key] = nil }
+        try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+        }
     }
 
     /// The idle timeout of `subscriptions/listen` POSTs. A server may send
