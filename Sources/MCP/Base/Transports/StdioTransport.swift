@@ -67,6 +67,9 @@ import struct Foundation.Data
         }
         private var inputState: DescriptorState?
         private var outputState: DescriptorState?
+        /// The bytes the read buffer's storage spans after the last read was parsed: the
+        /// unparsed remainder, plus any consumed prefix still held. Tests check it stays bounded.
+        private(set) var receiveBufferSpan = 0
 
         /// Creates a new stdio transport with the specified file descriptors
         ///
@@ -200,6 +203,12 @@ import struct Foundation.Data
                             messageContinuation.yield(Data(messageData))
                         }
                     }
+                    // Slicing only moves startIndex, and the next append grows the same
+                    // storage, so drop the consumed prefix.
+                    if pendingData.startIndex != 0 {
+                        pendingData = pendingData.isEmpty ? Data() : Data(pendingData)
+                    }
+                    receiveBufferSpan = pendingData.endIndex
                 } catch let error where MCPError.isResourceTemporarilyUnavailable(error) {
                     try? await Task.sleep(for: .milliseconds(10))
                     continue

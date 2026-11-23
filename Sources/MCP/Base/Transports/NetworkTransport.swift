@@ -241,6 +241,9 @@ import Logging
         private var lastHeartbeatTime: Date?
         private let messageStream: AsyncThrowingStream<Data, Swift.Error>
         private let messageContinuation: AsyncThrowingStream<Data, Swift.Error>.Continuation
+        /// The bytes the receive buffer's storage spans after the last read was parsed: the
+        /// unparsed remainder, plus any consumed prefix still held. Tests check it stays bounded.
+        private(set) var receiveBufferSpan = 0
 
         // Connection is marked nonisolated(unsafe) to allow access from closures
         private nonisolated(unsafe) var connection: NetworkConnectionProtocol
@@ -656,6 +659,12 @@ import Logging
                             messageContinuation.yield(Data(messageData))
                         }
                     }
+                    // Slicing only moves startIndex, and the next append grows the same
+                    // storage, so drop the consumed prefix.
+                    if buffer.startIndex != 0 {
+                        buffer = buffer.isEmpty ? Data() : Data(buffer)
+                    }
+                    receiveBufferSpan = buffer.endIndex
                 } catch let error as NWError {
                     if !Task.isCancelled && !isStopping {
                         logger.error("Network error occurred", metadata: ["error": "\(error)"])
