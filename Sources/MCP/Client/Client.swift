@@ -2199,9 +2199,7 @@ public actor Client {
     /// Logs a notice the first time a server declares a capability the
     /// specification deprecates (SEP-2577).
     private func logDeprecationNotices(_ capabilities: Server.Capabilities) async {
-        for notice in DeprecationNotices.current.notices(forServer: capabilities) {
-            await logger?.notice("\(notice)")
-        }
+        DeprecationNotices.current.log(forServer: capabilities, to: await logger)
     }
 
     /// Records a `server/discover` result as the connection state.

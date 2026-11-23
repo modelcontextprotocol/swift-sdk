@@ -1,4 +1,5 @@
 import Foundation
+import Logging
 
 /// The deprecated features of the specification that a peer declared,
 /// each logged once for each process.
@@ -7,12 +8,28 @@ import Foundation
 /// warn when such a capability is negotiated. A notice for each server
 /// instance would repeat for every session of a stateful HTTP server, which
 /// creates a server for each session, so the SDK logs each notice once.
+/// Only a logger that emits `.notice` uses a notice up, so that an instance
+/// with the default no-op logger does not silence later ones.
 final class DeprecationNotices: @unchecked Sendable {
     /// The notices of the process. Tests run with their own instance.
     @TaskLocal static var current = DeprecationNotices()
 
     private let lock = NSLock()
     private var logged: Set<String> = []
+
+    /// Logs the notices for the deprecated capabilities a client declared,
+    /// unless they were logged before or `logger` does not emit `.notice`.
+    func log(forClient capabilities: Client.Capabilities, to logger: Logger?) {
+        guard let logger, logger.logLevel <= .notice else { return }
+        for notice in notices(forClient: capabilities) { logger.notice("\(notice)") }
+    }
+
+    /// Logs the notices for the deprecated capabilities a server declared,
+    /// unless they were logged before or `logger` does not emit `.notice`.
+    func log(forServer capabilities: Server.Capabilities, to logger: Logger?) {
+        guard let logger, logger.logLevel <= .notice else { return }
+        for notice in notices(forServer: capabilities) { logger.notice("\(notice)") }
+    }
 
     /// The notices for the deprecated capabilities a client declared, the
     /// first time only.

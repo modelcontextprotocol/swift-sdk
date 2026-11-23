@@ -2385,9 +2385,7 @@ public actor Server {
                     }
 
                     if let declared = handlerContext.clientCapabilities {
-                        for notice in DeprecationNotices.current.notices(forClient: declared) {
-                            await self.logger?.notice("\(notice)")
-                        }
+                        DeprecationNotices.current.log(forClient: declared, to: await self.logger)
                     }
 
                     var context = handlerContext
@@ -2781,6 +2779,9 @@ public actor Server {
             if let hook = initializeHook {
                 try await hook(params.clientInfo, params.capabilities)
             }
+            // The request context has no client capabilities yet; behind a
+            // sessionless transport it never has them (SEP-2577).
+            DeprecationNotices.current.log(forClient: params.capabilities, to: await self.logger)
 
             let clientRequestedVersion = params.protocolVersion
             let negotiatedProtocolVersion =

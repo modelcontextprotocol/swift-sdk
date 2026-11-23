@@ -14,22 +14,25 @@ struct DeprecationNoticeTests {
         log.messages.filter { $0.contains("deprecated by the specification (SEP-2577)") }
     }
 
-    /// Connects `count` client and server pairs and calls a tool on each.
+    /// Connects `count` client and server pairs and, with `call`, calls a
+    /// tool on each. With `quietFirst`, the first pair has the transports'
+    /// default no-op logger.
     private func run(
-        count: Int = 1, mode: Client.ProtocolMode, client capabilities: Client.Capabilities,
-        server serverCapabilities: Server.Capabilities, log: CapturingLogHandler
+        count: Int = 1, mode: Client.ProtocolMode, call: Bool = true, quietFirst: Bool = false,
+        client capabilities: Client.Capabilities, server serverCapabilities: Server.Capabilities,
+        log: CapturingLogHandler
     ) async throws {
         try await DeprecationNotices.$current.withValue(DeprecationNotices()) {
-            for _ in 0..<count {
-                let (clientEnd, serverEnd) = await InMemoryTransport.createConnectedPair(
-                    logger: Logger(label: "test") { _ in log })
+            for index in 0..<count {
+                let logger = quietFirst && index == 0 ? nil : Logger(label: "test") { _ in log }
+                let (clientEnd, serverEnd) = await InMemoryTransport.createConnectedPair(logger: logger)
                 let server = Server(name: "s", version: "1", capabilities: serverCapabilities)
                 await server.withMethodHandler(CallTool.self) { _ in .init(content: []) }
                 try await server.start(transport: serverEnd)
                 let client = Client(
                     name: "c", version: "1", capabilities: capabilities, configuration: .init(protocolMode: mode))
                 try await client.connect(transport: clientEnd)
-                _ = try await client.callTool(name: "t")
+                if call { _ = try await client.callTool(name: "t") }
                 await client.disconnect()
                 await server.stop()
             }
@@ -70,5 +73,24 @@ struct DeprecationNoticeTests {
         let warnings = CapturingLogHandler()
         try await run(mode: .automatic, client: .init(sampling: .init()), server: .init(logging: .init(), tools: .init()), log: warnings)
         #expect(notices(warnings).isEmpty)
+    }
+
+    @Test("A handshake client's capabilities are noticed during initialize, without another request")
+    func duringInitialize() async throws {
+        let log = CapturingLogHandler(minimumLevel: .notice)
+        try await run(
+            mode: .handshake, call: false, client: .init(sampling: .init(), roots: .init()),
+            server: .init(tools: .init()), log: log)
+        #expect(notices(log).count == 2)
+    }
+
+    @Test("An instance whose logger drops notices does not use them up")
+    func quietInstanceFirst() async throws {
+        let log = CapturingLogHandler(minimumLevel: .notice)
+        try await run(
+            count: 2, mode: .automatic, quietFirst: true, client: .init(sampling: .init(), roots: .init()),
+            server: .init(logging: .init(), tools: .init()), log: log)
+        // Roots and sampling from the server, logging from the client.
+        #expect(notices(log).count == 3)
     }
 }
