@@ -14,7 +14,7 @@ struct ClientTests {
 
         // Set up a task to handle the initialize response
         let initTask = Task {
-            try await Task.sleep(for: .milliseconds(10))
+            try await transport.waitForSentMessages()
             if let lastMessage = await transport.sentMessages.last,
                 let data = lastMessage.data(using: .utf8),
                 let request = try? JSONDecoder().decode(Request<Initialize>.self, from: data)
@@ -124,7 +124,7 @@ struct ClientTests {
 
         // Set up a task to handle the initialize response
         let initTask = Task {
-            try await Task.sleep(for: .milliseconds(10))
+            try await transport.waitForSentMessages()
             if let lastMessage = await transport.sentMessages.last,
                 let data = lastMessage.data(using: .utf8),
                 let request = try? JSONDecoder().decode(Request<Initialize>.self, from: data)
@@ -174,7 +174,7 @@ struct ClientTests {
 
         // Set up a task to handle the initialize response
         let initTask = Task {
-            try await Task.sleep(for: .milliseconds(10))
+            try await transport.waitForSentMessages()
             if let lastMessage = await transport.sentMessages.last,
                 let data = lastMessage.data(using: .utf8),
                 let request = try? JSONDecoder().decode(Request<Initialize>.self, from: data)
@@ -230,7 +230,7 @@ struct ClientTests {
 
         // Set up a task to handle the initialize response
         let initTask = Task {
-            try await Task.sleep(for: .milliseconds(10))
+            try await transport.waitForSentMessages()
             if let lastMessage = await transport.sentMessages.last,
                 let data = lastMessage.data(using: .utf8),
                 let request = try? JSONDecoder().decode(Request<Initialize>.self, from: data)
@@ -321,7 +321,7 @@ struct ClientTests {
 
         // Set up a task to handle the initialize response
         let initTask = Task {
-            try await Task.sleep(for: .milliseconds(10))
+            try await transport.waitForSentMessages()
             if let lastMessage = await transport.sentMessages.last,
                 let data = lastMessage.data(using: .utf8),
                 let request = try? JSONDecoder().decode(Request<Initialize>.self, from: data)
@@ -401,7 +401,7 @@ struct ClientTests {
 
         // Set up a task to handle the initialize response
         let initTask = Task {
-            try await Task.sleep(for: .milliseconds(10))
+            try await transport.waitForSentMessages()
             if let lastMessage = await transport.sentMessages.last,
                 let data = lastMessage.data(using: .utf8),
                 let request = try? JSONDecoder().decode(Request<Initialize>.self, from: data)
@@ -481,7 +481,7 @@ struct ClientTests {
 
         // Set up a task to handle the initialize response
         let initTask = Task {
-            try await Task.sleep(for: .milliseconds(10))
+            try await transport.waitForSentMessages()
             if let lastMessage = await transport.sentMessages.last,
                 let data = lastMessage.data(using: .utf8),
                 let request = try? JSONDecoder().decode(Request<Initialize>.self, from: data)
@@ -521,7 +521,7 @@ struct ClientTests {
 
         // Set up a task to handle the initialize response
         let initTask = Task {
-            try await Task.sleep(for: .milliseconds(10))
+            try await transport.waitForSentMessages()
             if let lastMessage = await transport.sentMessages.last,
                 let data = lastMessage.data(using: .utf8),
                 let request = try? JSONDecoder().decode(Request<Initialize>.self, from: data)
@@ -656,7 +656,7 @@ struct ClientTests {
 
         // Set up a task to handle the initialize response
         let initTask = Task {
-            try await Task.sleep(for: .milliseconds(10))
+            try await transport.waitForSentMessages()
             if let lastMessage = await transport.sentMessages.last,
                 let data = lastMessage.data(using: .utf8),
                 let request = try? JSONDecoder().decode(Request<Initialize>.self, from: data)
@@ -717,7 +717,7 @@ struct ClientTests {
 
         // Set up a task to handle the initialize response
         let initTask = Task {
-            try await Task.sleep(for: .milliseconds(10))
+            try await transport.waitForSentMessages()
             if let lastMessage = await transport.sentMessages.last,
                 let data = lastMessage.data(using: .utf8),
                 let request = try? JSONDecoder().decode(Request<Initialize>.self, from: data)

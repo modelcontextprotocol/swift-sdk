@@ -39,7 +39,7 @@ struct ServerTests {
         try await server.start(transport: transport)
 
         // Wait for message processing and response
-        try await Task.sleep(for: .milliseconds(200))
+        try await transport.waitForSentMessages()
 
         #expect(await transport.sentMessages.count == 1)
 
@@ -139,7 +139,7 @@ struct ServerTests {
             ))
 
         // Wait for message processing and hook execution
-        try await Task.sleep(for: .milliseconds(500))
+        try await transport.waitForSentMessages()
 
         #expect(await state.wasHookCalled() == true)
         #expect(await transport.sentMessages.count >= 1)
@@ -179,7 +179,7 @@ struct ServerTests {
             ))
 
         // Wait for message processing
-        try await Task.sleep(for: .milliseconds(200))
+        try await transport.waitForSentMessages()
 
         #expect(await transport.sentMessages.count >= 1)
 

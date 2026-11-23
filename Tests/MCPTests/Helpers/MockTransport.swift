@@ -125,6 +125,18 @@ actor MockTransport: Transport {
         }
     }
 
+    struct WaitTimedOut: Swift.Error {}
+
+    /// Waits until at least `count` messages were sent. Tests use it instead
+    /// of a fixed sleep, which is too short on a slow machine.
+    func waitForSentMessages(count: Int = 1, timeout: Duration = .seconds(30)) async throws {
+        let deadline = ContinuousClock.now + timeout
+        while sentData.count < count {
+            guard ContinuousClock.now < deadline else { throw WaitTimedOut() }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+    }
+
     func clearMessages() {
         sentData.removeAll()
         dataToReceive.removeAll()
