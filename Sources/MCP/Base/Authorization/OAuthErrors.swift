@@ -120,7 +120,8 @@ public enum OAuthAuthorizationError: LocalizedError {
     /// - Parameter advertisedMethods: The methods listed in the server metadata.
     case pkceS256NotSupported(advertisedMethods: [String])
 
-    /// PKCE S256 challenge generation is unavailable because CryptoKit is not present on this platform.
+    /// PKCE S256 challenge generation is unavailable. Not thrown: SHA-256
+    /// comes from swift-crypto on every platform.
     case pkceS256Unavailable
 
     /// The `issuer` field in the Authorization Server Metadata does not match the URL used to
