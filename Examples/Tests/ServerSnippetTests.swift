@@ -335,6 +335,32 @@ struct ServerSnippetTests {
         }
     }
 
+    @Test("RootsCache keeps no roots fetched before an invalidation")
+    func rootsCacheInvalidation() async throws {
+        let server = Server(name: "cleaner", version: "1.0", capabilities: .init(tools: .init()))
+        let cache = RootsCache()
+        let fetches = Inbox<Bool>()
+        let release = Inbox<Bool>()
+        let client = try await connect(server, mode: .handshake, capabilities: .init(roots: .init())) { client in
+            await client.withRootsHandler {
+                await fetches.add(true)
+                // The first fetch waits until the cache was invalidated.
+                if await fetches.items.count == 1 {
+                    _ = await eventually { await !release.items.isEmpty }
+                }
+                return [Root(uri: "file:///work", name: "work")]
+            }
+        }
+        defer { Task { await client.disconnect(); await server.stop() } }
+        let first = Task { try await cache.roots(of: server) }
+        #expect(await eventually { await fetches.items.count == 1 })
+        await cache.invalidate()
+        await release.add(true)
+        _ = try await first.value
+        _ = try await cache.roots(of: server)
+        #expect(await fetches.items.count == 2)
+    }
+
     @Test("Cacheable results: configuration and handler hints")
     func caching() async throws {
         for mode in eras {

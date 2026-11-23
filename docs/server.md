@@ -1008,15 +1008,21 @@ func registerCleanTool(on server: Server, roots: RootsCache) async {
 /// again after the client says they changed.
 actor RootsCache {
     private var cached: [Root]?
+    /// Changed by `invalidate()`: roots fetched before it are not kept.
+    private var generation = 0
 
     /// Marks the roots stale: the next handler fetches them.
-    func invalidate() { cached = nil }
+    func invalidate() {
+        cached = nil
+        generation += 1
+    }
 
     /// The roots. Call it from a handler.
     func roots(of server: Server) async throws -> [Root] {
         if let cached { return cached }
+        let started = generation
         let roots = try await server.listRoots()
-        cached = roots
+        if generation == started { cached = roots }
         return roots
     }
 }

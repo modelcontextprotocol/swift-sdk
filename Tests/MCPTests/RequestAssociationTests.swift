@@ -26,8 +26,8 @@ private actor Gate {
 }
 
 private actor Results {
-    private(set) var count = 0
-    func add() { count += 1 }
+    private(set) var models: [String?] = []
+    func add(_ model: String?) { models.append(model) }
 }
 
 /// A connected server and handshake client, sharing a logger that captures
@@ -75,8 +75,8 @@ private struct Connection {
                 // handler returned.
                 Task {
                     await gate.wait()
-                    _ = try? await server.requestSampling(messages: [.user("Hi")], maxTokens: 10)
-                    await late.add()
+                    let result = try? await server.requestSampling(messages: [.user("Hi")], maxTokens: 10)
+                    await late.add(result?.model)
                 }
             default:
                 break
@@ -134,10 +134,10 @@ struct RequestAssociationTests {
         _ = try await connection.client.callTool(name: "later")
         await connection.gate.open()
         let deadline = ContinuousClock.now + .seconds(5)
-        while await connection.late.count == 0, ContinuousClock.now < deadline {
+        while await connection.late.models.isEmpty, ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(10))
         }
-        #expect(await connection.late.count == 1)
+        #expect(await connection.late.models == ["m"])
         #expect(connection.warnings.count == 1)
     }
 }
