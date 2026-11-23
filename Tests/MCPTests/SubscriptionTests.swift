@@ -273,7 +273,7 @@ struct SubscriptionTests {
         #expect(await client.subscribedResourceURIs == ["test://b"])
         #expect(await eventually { await server.openSubscriptionCount == 1 })
 
-        // A stream the server ends is forgotten, so subscribing reopens it.
+        // A stream the server ends is forgotten; subscribing reopens it before the retry does.
         await server.closeSubscriptions()
         #expect(await eventually { await client.subscribedResourceURIs.isEmpty })
         try await client.subscribeToResource(uri: "test://b")
@@ -344,6 +344,46 @@ struct SubscriptionTests {
         let reopened = try await transport.message(3, timeout: .seconds(3))
         #expect(reopened["method"] == "subscriptions/listen")
         #expect(reopened["id"] != listen["id"])
+    }
+
+    @Test("A background stream the server ends with its result is reopened after a delay")
+    func testGracefullyClosedStreamReopens() async throws {
+        let transport = ListenScript()
+        let client = try await connect(transport, capabilities: #"{"tools":{"listChanged":true}}"#)
+        defer { Task { await client.disconnect() } }
+
+        await client.onNotification(ToolListChangedNotification.self) { _ in }
+        let listen = try await transport.message(2)
+        #expect(listen["method"] == "subscriptions/listen")
+        try await transport.acknowledge(listen)
+        // The server stops for a restart: the stream ends with its result.
+        try await transport.reply(to: listen, #""result":{"resultType":"complete"}"#)
+
+        let reopened = try await transport.message(3, timeout: .seconds(3))
+        #expect(reopened["method"] == "subscriptions/listen")
+        #expect(reopened["id"] != listen["id"])
+        #expect(await client.notificationStreamFailures == 1)
+    }
+
+    @Test("Cancelling subscribeToResource before the acknowledgement ends the call and drops the URI")
+    func testSubscribeCancelled() async throws {
+        let transport = ListenScript()
+        let client = try await connect(transport, capabilities: #"{"resources":{"subscribe":true}}"#)
+        defer { Task { await client.disconnect() } }
+
+        let subscribing = Task { try await client.subscribeToResource(uri: "test://a") }
+        let listen = try await transport.message(2)
+        #expect(listen["method"] == "subscriptions/listen")
+        subscribing.cancel()
+        await #expect(throws: CancellationError.self) {
+            try await within(.seconds(2)) { try await subscribing.value }
+        }
+
+        // Nothing wants the stream any more: its late acknowledgement closes it.
+        try await transport.acknowledge(listen, #"{"resourceSubscriptions":["test://a"]}"#)
+        let cancel = try await transport.message(3)
+        #expect(cancel["method"] == "notifications/cancelled")
+        #expect(await client.subscribedResourceURIs.isEmpty)
     }
 
     @Test("The reopen delay keeps growing while acknowledged streams fail at once")

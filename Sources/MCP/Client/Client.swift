@@ -1,6 +1,7 @@
 import Logging
 
 import struct Foundation.Data
+import struct Foundation.UUID
 import struct Foundation.Date
 import class Foundation.JSONDecoder
 import class Foundation.JSONEncoder
@@ -263,7 +264,7 @@ public actor Client {
     /// Resource URIs subscribed at 2026-07-28, in subscription order.
     private var subscribedResources: [String] = []
     /// `subscribeToResource` calls waiting for a stream that names their URI.
-    private var resourceWaiters: [(uri: String, continuation: CheckedContinuation<Void, Swift.Error>)] = []
+    private var resourceWaiters: [(id: UUID, uri: String, continuation: CheckedContinuation<Void, Swift.Error>)] = []
     /// Waiters for `subscriptions/listen` acknowledgements, by request id.
     private var listenAcknowledgements:
         [ID: AsyncStream<Result<SubscriptionFilter, Swift.Error>>.Continuation] = [:]
@@ -677,8 +678,8 @@ public actor Client {
             resourceSubscriptions: subscribedResources.isEmpty ? nil : subscribedResources)
     }
 
-    /// The first delay before a failed background stream is reopened; it
-    /// doubles after each further failure, up to ``notificationStreamMaxDelay``.
+    /// The first delay before a background stream that ended is reopened; it
+    /// doubles while streams keep ending, up to ``notificationStreamMaxDelay``.
     static let notificationStreamBaseDelay: Duration = .seconds(1)
     static let notificationStreamMaxDelay: Duration = .seconds(60)
 
@@ -742,14 +743,8 @@ public actor Client {
         if let previous { retire(previous) }
         resolveResourceWaiters(requested: wanted, honored: opened.notifications)
         Task {
-            let failed: Bool
-            do {
-                try await opened.finished()
-                failed = false
-            } catch {
-                failed = !(error is CancellationError)
-            }
-            self.notificationStreamEnded(id: opened.id, failed: failed)
+            _ = try? await opened.finished()
+            self.notificationStreamEnded(id: opened.id)
         }
     }
 
@@ -767,20 +762,19 @@ public actor Client {
         retiredNotificationStreams.remove(id)
     }
 
-    /// Forgets a background stream that ended. One that failed is reopened
-    /// after a delay; one the server closed with its result is reopened by
-    /// the next refresh. The delay keeps growing while streams fail sooner
+    /// Forgets a background stream that ended and reopens it after a delay,
+    /// also when the server ended it with its result, as it does when it
+    /// stops for a restart. The delay keeps growing while streams end sooner
     /// than ``notificationStreamMaxDelay`` after opening.
-    private func notificationStreamEnded(id: ID, failed: Bool) {
+    private func notificationStreamEnded(id: ID) {
         guard notificationStream?.id == id else { return }
         notificationStream = nil
         notificationStreamRequest = nil
         notificationStreamFilter = nil
-        if !failed || notificationStreamSince.map({ .now - $0 >= Self.notificationStreamMaxDelay }) == true {
+        if notificationStreamSince.map({ .now - $0 >= Self.notificationStreamMaxDelay }) == true {
             notificationStreamFailures = 0
         }
         notificationStreamSince = nil
-        guard failed else { return }
         notificationStreamFailures += 1
         scheduleNotificationStreamRetry()
     }
@@ -823,7 +817,7 @@ public actor Client {
                 notificationStreamFilter = wantedNotifications
             }
         }
-        var waiting: [(uri: String, continuation: CheckedContinuation<Void, Swift.Error>)] = []
+        var waiting: [(id: UUID, uri: String, continuation: CheckedContinuation<Void, Swift.Error>)] = []
         for waiter in resourceWaiters {
             if served.contains(waiter.uri) {
                 waiter.continuation.resume()
@@ -847,7 +841,7 @@ public actor Client {
             .subtracting(served)
         guard !failed.isEmpty else { return }
         subscribedResources.removeAll { failed.contains($0) }
-        var waiting: [(uri: String, continuation: CheckedContinuation<Void, Swift.Error>)] = []
+        var waiting: [(id: UUID, uri: String, continuation: CheckedContinuation<Void, Swift.Error>)] = []
         for waiter in resourceWaiters {
             if failed.contains(waiter.uri) {
                 waiter.continuation.resume(throwing: error)
@@ -1364,7 +1358,8 @@ public actor Client {
     /// 2026-07-28 the URI joins the background `subscriptions/listen`
     /// stream, which is replaced by one that names it; this returns once the
     /// server acknowledges that stream. Subscribing again to a subscribed URI
-    /// does nothing.
+    /// does nothing. Cancelling the calling task ends the wait with
+    /// `CancellationError` and drops the URI again when this call added it.
     ///
     /// - Throws: ``MCPError/invalidRequest(_:)`` when the server does not
     ///   send updates for `uri`, or the error that kept the stream from
@@ -1382,13 +1377,42 @@ public actor Client {
                 "Resource subscriptions at 2026-07-28 need streamed responses, which HTTPClientTransport does not read on Linux")
         }
         if subscribedResourceURIs.contains(uri) { return }
-        if !subscribedResources.contains(uri) {
-            subscribedResources.append(uri)
+        let added = !subscribedResources.contains(uri)
+        if added { subscribedResources.append(uri) }
+        let waiter = UUID()
+        try await withTaskCancellationHandler { () async throws -> Void in
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Swift.Error>) in
+                addResourceWaiter(waiter, uri: uri, continuation: continuation)
+            }
+        } onCancel: {
+            Task { await self.abandonResourceWaiter(waiter, uri: uri, added: added) }
         }
-        try await withCheckedThrowingContinuation { continuation in
-            resourceWaiters.append((uri, continuation))
-            refreshNotificationStream()
+    }
+
+    /// Records a `subscribeToResource` call and reopens the stream for it.
+    private func addResourceWaiter(
+        _ id: UUID, uri: String, continuation: CheckedContinuation<Void, Swift.Error>
+    ) {
+        if Task.isCancelled {
+            continuation.resume(throwing: CancellationError())
+        } else {
+            resourceWaiters.append((id: id, uri: uri, continuation: continuation))
         }
+        refreshNotificationStream()
+    }
+
+    /// Ends a `subscribeToResource` call whose task was cancelled. A URI that
+    /// call added is dropped unless the stream serves it or another call
+    /// waits for it.
+    private func abandonResourceWaiter(_ id: UUID, uri: String, added: Bool) {
+        if let index = resourceWaiters.firstIndex(where: { $0.id == id }) {
+            resourceWaiters.remove(at: index).continuation.resume(throwing: CancellationError())
+        }
+        guard added, subscribedResources.contains(uri), !subscribedResourceURIs.contains(uri),
+            !resourceWaiters.contains(where: { $0.uri == uri })
+        else { return }
+        subscribedResources.removeAll { $0 == uri }
+        refreshNotificationStream()
     }
 
     /// Stops `notifications/resources/updated` for the resource at `uri`.
@@ -1406,7 +1430,7 @@ public actor Client {
         }
         guard subscribedResources.contains(uri) else { return }
         subscribedResources.removeAll { $0 == uri }
-        var waiting: [(uri: String, continuation: CheckedContinuation<Void, Swift.Error>)] = []
+        var waiting: [(id: UUID, uri: String, continuation: CheckedContinuation<Void, Swift.Error>)] = []
         for waiter in resourceWaiters {
             if waiter.uri == uri {
                 waiter.continuation.resume(throwing: CancellationError())
