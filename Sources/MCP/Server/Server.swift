@@ -513,6 +513,11 @@ public actor Server {
     /// ``closeSubscriptions()``, and `stop()` waits until those results are
     /// sent before it closes the transport. A stream that is still being
     /// authorized is refused.
+    ///
+    /// The server can be started again with
+    /// ``start(transport:initializeHook:statelessRequestHook:)``; the next
+    /// connection starts from a fresh handshake, with no client info,
+    /// capabilities or negotiated protocol version from the previous one.
     public func stop() async {
         isStopping = true
         defer { isStopping = false }
@@ -541,6 +546,14 @@ public actor Server {
         for (_, request) in pendingRequestsToCancel {
             request.resume(throwing: MCPError.internalError("Server disconnected"))
         }
+
+        // The handshake belongs to the connection: after a restart the next
+        // client sends its own `initialize`.
+        isInitialized = false
+        clientInfo = nil
+        clientCapabilities = nil
+        protocolVersion = nil
+        servedStatelessRequest = false
 
         if let connection = connection {
             await connection.disconnect()

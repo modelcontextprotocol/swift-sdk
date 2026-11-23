@@ -447,6 +447,39 @@ struct ServerLifecycleTests {
         #expect(cancelled)
         await peer.stop()
     }
+
+    @Test("a restarted server serves a new handshake client")
+    func restartServesNewHandshake() async throws {
+        let server = Server(name: "s", version: "1", capabilities: .init(tools: .init()))
+        let (contexts, sink) = AsyncStream<Server.HandlerContext?>.makeStream()
+        await server.withMethodHandler(ListTools.self) { _ in
+            sink.yield(Server.currentHandlerContext)
+            return .init(tools: [])
+        }
+        var seen = contexts.makeAsyncIterator()
+        let first = Client(
+            name: "first", version: "1", capabilities: .init(sampling: .init()), configuration: .handshake)
+        let second = Client(
+            name: "second", version: "2", capabilities: .init(roots: .init(listChanged: true)),
+            configuration: .handshake)
+        for client in [first, second] {
+            let isSecond = client === second
+            let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+            try await server.start(transport: serverTransport)
+            // Before the fix the second `initialize` got -32600 "Server is
+            // already initialized".
+            let connection = try await client.connect(transport: clientTransport)
+            #expect(!connection.isStateless)
+            _ = try await client.listTools()
+            let context = try #require(await seen.next() ?? nil)
+            #expect(context.clientInfo?.name == (isSecond ? "second" : "first"))
+            #expect((context.clientCapabilities?.roots != nil) == isSecond)
+            #expect((context.clientCapabilities?.sampling != nil) == !isSecond)
+            #expect(context.protocolVersion == connection.protocolVersion)
+            await client.disconnect()
+            await server.stop()
+        }
+    }
 }
 
 /// Collects the messages logged through every logger it backs.
