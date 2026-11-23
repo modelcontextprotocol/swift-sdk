@@ -1047,7 +1047,7 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
             dpop: dpopSigner,
             session: session
         )
-        storeTokenResponse(decoded, requestedScopes: requestedScopes)
+        try storeTokenResponse(decoded, requestedScopes: requestedScopes)
     }
 
     /// The `aud` claim of a JWT (the strings of an array), or `nil` when
@@ -1085,7 +1085,7 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
             dpop: dpopSigner,
             session: session
         )
-        storeTokenResponse(decoded, requestedScopes: requestedScopes)
+        try storeTokenResponse(decoded, requestedScopes: requestedScopes)
     }
 
     private func acquireTokenViaAuthorizationCode(
@@ -1158,7 +1158,7 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
             dpop: dpopSigner,
             session: session
         )
-        storeTokenResponse(decoded, requestedScopes: requestedScopes)
+        try storeTokenResponse(decoded, requestedScopes: requestedScopes)
     }
 
     /// RFC 9449 §5.1, §5.2: the resource may require DPoP, and the
@@ -1227,7 +1227,7 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
                 dpop: dpopSigner,
                 session: session
             )
-            storeTokenResponse(decoded, requestedScopes: requestedScopes, refreshing: token)
+            try storeTokenResponse(decoded, requestedScopes: requestedScopes, refreshing: token)
             refreshedTokenValue = decoded.accessToken
             return true
         } catch let error as OAuthAuthorizationError {
@@ -1300,12 +1300,22 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
 
     // MARK: - State Helpers
 
-    /// Saves a token response. `previous` is the token a refresh replaces.
+    /// Stores a token response. `previous` is the token a refresh replaces.
+    /// A Bearer token for a resource whose metadata requires DPoP-bound tokens
+    /// is refused with `dpopRequired`, as the resource would reject it.
     private func storeTokenResponse(
         _ decoded: OAuthTokenResponse,
         requestedScopes: Set<String>?,
         refreshing previous: OAuthAccessToken? = nil
-    ) {
+    ) throws {
+        // A Bearer answer to a DPoP request is a downgrade (RFC 9449 §5): use it as Bearer.
+        let boundKey =
+            decoded.tokenType.caseInsensitiveCompare(OAuthTokenType.dpop) == .orderedSame
+            ? dpopSigner?.thumbprint : nil
+        // RFC 9728 §2: such a resource always requires DPoP-bound tokens.
+        if boundKey == nil, protectedResourceMetadata?.dpopBoundAccessTokensRequired == true {
+            throw OAuthAuthorizationError.dpopRequired
+        }
         let scopeSet: Set<String>
         if let scope = decoded.scope {
             scopeSet = scopeSelector.parseScopeString(scope)
@@ -1318,10 +1328,6 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
         storedTokenLifetime = decoded.expiresIn.map { (decoded.accessToken, TimeInterval($0)) }
         // A stored token is new, even with the value of the one tried.
         proactivelyRenewedToken = nil
-        // A Bearer answer to a DPoP request is a downgrade (RFC 9449 §5): use it as Bearer.
-        let boundKey =
-            decoded.tokenType.caseInsensitiveCompare(OAuthTokenType.dpop) == .orderedSame
-            ? dpopSigner?.thumbprint : nil
         tokenStorage.save(OAuthAccessToken(
             value: decoded.accessToken,
             tokenType: boundKey == nil ? OAuthTokenType.bearer : OAuthTokenType.dpop,

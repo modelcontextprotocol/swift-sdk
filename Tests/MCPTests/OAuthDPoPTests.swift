@@ -292,6 +292,25 @@ struct DPoPAuthorizerTests {
         #expect(headers == [HTTPHeaderName.authorization: "Bearer mock-access-token"])
     }
 
+    @Test("A Bearer answer for a resource that requires DPoP fails with dpopRequired")
+    func bearerForDPoPResource() async {
+        let discovery = MockDiscoveryClient()
+        discovery.protectedResourceMetadataResult.dpopBoundAccessTokensRequired = true
+        let storage = InMemoryTokenStorage()
+        let tokenClient = MockTokenClient()
+        let authorizer = dpopAuthorizer(tokenStorage: storage, discovery: discovery, tokenClient: tokenClient)
+        let error = await authorizationError {
+            _ = try await authorizer.handleChallenge(
+                statusCode: 401, headers: headers401, endpoint: endpoint, session: .shared)
+        }
+        guard case .dpopRequired = error else {
+            Issue.record("Expected dpopRequired, got \(String(describing: error))")
+            return
+        }
+        #expect(tokenClient.requestCallCount == 1)
+        #expect(storage.load() == nil)
+    }
+
     @Test("A stored token bound to another key is discarded")
     func otherKey() throws {
         let storage = InMemoryTokenStorage()
