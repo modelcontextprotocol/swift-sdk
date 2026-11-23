@@ -1228,7 +1228,9 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
             return true
         } catch let error as OAuthAuthorizationError {
             if error.code == .tokenRequestFailed, let statusCode = error.statusCode,
-                (400..<500).contains(statusCode)
+                (400..<500).contains(statusCode),
+                // Timed out or rate limited: the refresh token may still be good.
+                statusCode != 408, statusCode != 429
             {
                 return false
             }
