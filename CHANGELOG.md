@@ -30,6 +30,8 @@ fixes merged to `main` after it (up to `727175f`), with before and after code:
 - `HTTPClientAuthorizer.authorizationHeader(for:)` is `authorizationHeaders(for:method:)`.
 - Clients connect with `ProtocolMode.automatic`: `server/discover` at 2026-07-28, then
   `initialize` for older servers. Servers serve both eras by default.
+- `Version.supported` lists 2026-07-28; `Version.handshake` lists the `initialize` revisions
+  ([details](docs/migration.md#clients-connect-at-2026-07-28)).
 - Swift 6.1 tools are required.
 
 Behavior that can break working code ([docs/migration.md](docs/migration.md#behavior-changes)):
