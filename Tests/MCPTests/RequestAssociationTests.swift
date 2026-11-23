@@ -39,11 +39,13 @@ private struct Connection {
     let gate = Gate()
     let late = Results()
 
-    static func make() async throws -> Connection {
-        let log = CapturingLogHandler()
+    /// Connects a new client, to a new server or, after `previous` was
+    /// closed, to its server started again with the same log.
+    static func make(restarting previous: Connection? = nil) async throws -> Connection {
+        let log = previous?.log ?? CapturingLogHandler()
         let (clientEnd, serverEnd) = await InMemoryTransport.createConnectedPair(
             logger: Logger(label: "test") { _ in log })
-        let server = Server(name: "s", version: "1", capabilities: .init(tools: .init()))
+        let server = previous?.server ?? Server(name: "s", version: "1", capabilities: .init(tools: .init()))
         let connection = Connection(
             server: server,
             client: Client(
@@ -125,6 +127,20 @@ struct RequestAssociationTests {
         #expect(answer.action == .decline)
         #expect(connection.warnings.count == 2)
         #expect(connection.warnings.last?.hasPrefix("elicitation/create was sent") == true)
+    }
+
+    @Test("A restarted server warns again for a new client")
+    func restart() async throws {
+        let first = try await Connection.make()
+        _ = try await first.server.requestSampling(messages: [.user("Hi")], maxTokens: 10)
+        #expect(first.warnings.count == 1)
+        await first.close()
+
+        let second = try await Connection.make(restarting: first)
+        defer { Task { await second.close() } }
+        let result = try await second.server.requestSampling(messages: [.user("Hi")], maxTokens: 10)
+        #expect(result.model == "m")
+        #expect(second.warnings.count == 2)
     }
 
     @Test("A request after the handler returned is sent, with a warning")

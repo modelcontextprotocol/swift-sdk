@@ -329,7 +329,7 @@ public actor Server {
     /// whether `notifications/cancelled` arrived for them meanwhile.
     private var startingRequests: [ID: Bool] = [:]
     /// The methods of requests sent while no client request was handled,
-    /// each logged once (SEP-2260).
+    /// each logged once per connection (SEP-2260).
     private var unassociatedRequestMethods: Set<String> = []
 
     /// Runs and keeps tasks; set by ``withTasks(_:)``.
@@ -599,6 +599,7 @@ public actor Server {
         notifiedTasks = [:]
         task?.cancel()
         task = nil
+        unassociatedRequestMethods = []
         clientLogLevel = nil
 
         // Their responses can no longer be sent. The requests of this
