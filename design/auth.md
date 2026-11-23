@@ -44,9 +44,11 @@ stream: `validateEndpointSecurity`, `prepareAuthorization` (errors ignored), the
 `requestModifier`, sets the headers from `authorizationHeaders` for the final URL and method
 (DPoP proofs sign both). It passes the headers of every response, with the request URL, to
 `didReceiveResponse` (default: nothing). On 401 or 403 it calls `handleChallenge` and retries
-while the result is `true` and fewer than `maxAuthorizationAttempts` attempts were made; a
-`use_dpop_nonce` challenge does not count, and a second one fails the request without calling
-`handleChallenge`. An error from `handleChallenge` fails the request as
+while the result's `retry` is `true` and fewer than `maxAuthorizationAttempts` attempts were
+made; a retry the result marks `isDPoPNonceRetry` (a `use_dpop_nonce` challenge) does not count,
+and a second one fails the request. The authorizer classifies the challenge, not the transport:
+the default of the `sentAuthorization` variant reads it with `DefaultOAuthWWWAuthenticateParser`.
+An error from `handleChallenge` fails the request as
 `MCPError.transportError(error)`, and a 401 or 403 that is not retried as
 `transportError(HTTPStatusError)`.
 
