@@ -132,4 +132,27 @@ struct ToolNameWarningTests {
         // The client checks the format only.
         #expect(clientWarnings(log).count == 2)
     }
+
+    @Test("A reconnected client and a restarted server warn again")
+    func reconnect() async throws {
+        let log = CapturingLogHandler()
+        let server = Server(name: "s", version: "1", capabilities: .init(tools: .init()))
+        let names = listed
+        await server.withMethodHandler(ListTools.self) { _ in
+            .init(tools: names.map { Tool(name: $0, description: nil, inputSchema: ["type": "object"]) })
+        }
+        // At 2026-07-28: a restarted server does not serve a second `initialize`.
+        let client = Client(name: "c", version: "1")
+        for round in 1...2 {
+            let (clientEnd, serverEnd) = await InMemoryTransport.createConnectedPair(
+                logger: Logger(label: "test") { _ in log })
+            try await server.start(transport: serverEnd)
+            try await client.connect(transport: clientEnd)
+            _ = try await client.listTools()
+            #expect(serverWarnings(log).count == 4 * round)
+            #expect(clientWarnings(log).count == 2 * round)
+            await client.disconnect()
+            await server.stop()
+        }
+    }
 }

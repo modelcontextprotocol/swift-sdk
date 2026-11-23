@@ -603,6 +603,7 @@ public actor Server {
         task = nil
         unassociatedRequestMethods = []
         clientLogLevel = nil
+        toolNameWarnings = ToolNameWarnings()
 
         // Their responses can no longer be sent. The requests of this
         // connection are not answered from here on, and those whose handler
@@ -2582,8 +2583,6 @@ public actor Server {
 
     private static let maxToolListPages = 100
 
-    /// Removes tools with invalid `x-mcp-header` annotations from a
-    /// `tools/list` result: clients must ignore them (SEP-2243).
     /// Logs the names in a `tools/list` result that do not have the format
     /// the specification recommends, or that appear more than once in it
     /// (SEP-986), each once. The result is sent unchanged.
@@ -2599,6 +2598,8 @@ public actor Server {
         }
     }
 
+    /// Removes tools with invalid `x-mcp-header` annotations from a
+    /// `tools/list` result: clients must ignore them (SEP-2243).
     private func droppingInvalidHeaderTools(_ response: Response<AnyMethod>) async
         -> Response<AnyMethod>
     {

@@ -691,6 +691,7 @@ public actor Client {
         self.connection = transport
         toolHeaderParameters = [:]
         logLevel = configuration.logLevel
+        toolNameWarnings = ToolNameWarnings()
         try await transport.connect()
         guard connectionGeneration == generation else {
             throw MCPError.internalError("Client disconnected")
