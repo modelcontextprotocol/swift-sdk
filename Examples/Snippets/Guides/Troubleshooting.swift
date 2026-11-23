@@ -46,6 +46,12 @@ actor WireLog: Transport {
         try await base.send(data, relatedRequestID: relatedRequestID)
     }
 
+    /// Forwards the `Mcp-Param-*` headers of a `tools/call` at 2026-07-28.
+    func send(_ data: Data, additionalHeaders: [String: String]) async throws {
+        record("send", data)
+        try await base.send(data, additionalHeaders: additionalHeaders)
+    }
+
     func receive() -> AsyncThrowingStream<Data, Swift.Error> {
         let base = self.base
         return AsyncThrowingStream { continuation in

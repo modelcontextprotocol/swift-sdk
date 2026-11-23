@@ -64,7 +64,7 @@ numbers, arrays and objects have no header form.
 | Standard headers | `HTTPClientTransport.post` | When `Version.profile(for: version).usesStandardHeaders`, set `Mcp-Method` and, where defined, `Mcp-Name` (encoded). The version comes from the message's `_meta`. |
 | Schema cache | `Client.dispatch` → `recordTools` | Every `tools/list` result on a stateless connection fills `toolHeaderParameters[tool.name]`. Tools with invalid annotations are removed from the result returned to the caller, and their cache entry is cleared. A warning is logged. |
 | Parameter headers | `Client.dispatch` | For `tools/call` on a stateless connection, `MCPRequestHeaders.parameterHeaders` builds `Mcp-Param-*` from the cached parameters and the call's arguments. Absent, `null` and non-primitive arguments send no header. |
-| Sending | `HTTPClientTransport.send(_:additionalHeaders:)` | Used only when there are headers and the transport is an `HTTPClientTransport`. |
+| Sending | `Transport.send(_:additionalHeaders:)` | Used only when there are headers. `HTTPClientTransport` sends them on the request's POST. The default implementation ignores them and calls `send(_:)`, so a custom or wrapping transport implements the method to receive or forward them. |
 
 The cache is filled only by `tools/list` results the client has received. A `tools/call` for a
 tool that was never listed sends no `Mcp-Param-*` headers.

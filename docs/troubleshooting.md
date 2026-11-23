@@ -75,6 +75,12 @@ actor WireLog: Transport {
         try await base.send(data, relatedRequestID: relatedRequestID)
     }
 
+    /// Forwards the `Mcp-Param-*` headers of a `tools/call` at 2026-07-28.
+    func send(_ data: Data, additionalHeaders: [String: String]) async throws {
+        record("send", data)
+        try await base.send(data, additionalHeaders: additionalHeaders)
+    }
+
     func receive() -> AsyncThrowingStream<Data, Swift.Error> {
         let base = self.base
         return AsyncThrowingStream { continuation in
@@ -218,6 +224,9 @@ schemas it read before.
 
 `Client` with `HTTPClientTransport` sends these headers itself. A mismatch
 usually means a proxy changed or removed headers, or a hand-built request.
+A custom or wrapping transport receives the `Mcp-Param-*` headers through
+`send(_:additionalHeaders:)`; one that keeps the default implementation drops
+them.
 Values that are not printable ASCII are sent as `=?base64?<Base64>?=`; build
 them with `MCPRequestHeaders.encode(_:)`.
 

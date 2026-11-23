@@ -307,7 +307,7 @@ It seals `requestState` with AES-GCM.
 | Sealed request state | `Server.init(requestStateProtection:)`, `RequestStateProtection`, `AESGCMRequestStateCodec`, `RequestStateCodec` | [server.md](server.md#protecting-requeststate) |
 | Cache hints | `CacheableResult`, `ttlMs`, `cacheScope`, `CacheHint`, `Server.Configuration.cacheHints` | [server.md](server.md#cacheable-results) |
 | Result type | `ResultType`, `resultType` on the three input-capable results | [server.md](server.md#multi-round-trip-requests) |
-| Request headers (SEP-2243) | `MCPRequestHeaders`, `Tool.headerParameters()`, `HTTPClientTransport.send(_:additionalHeaders:)` | [protocol.md](protocol.md#request-headers-sep-2243) |
+| Request headers (SEP-2243) | `MCPRequestHeaders`, `Tool.headerParameters()`, `Transport.send(_:additionalHeaders:)`, with a default, and `HTTPClientTransport.send(_:additionalHeaders:)` | [protocol.md](protocol.md#request-headers-sep-2243), [custom transports](protocol.md#custom-transports) |
 | HTTP routing | `HTTPRequest.statelessProtocolVersion` | [protocol.md](protocol.md#routing-both-eras-on-one-endpoint) |
 | Per-request transport streams | `Transport.send(_:relatedRequestID:)`, with a default | [protocol.md](protocol.md#custom-transports) |
 | Capability extensions | `extensions` on both capability structs | [server.md](server.md#capabilities-and-extensions) |

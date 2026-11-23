@@ -139,6 +139,9 @@ schemas it read before.
 
 `Client` with `HTTPClientTransport` sends these headers itself. A mismatch
 usually means a proxy changed or removed headers, or a hand-built request.
+A custom or wrapping transport receives the `Mcp-Param-*` headers through
+`send(_:additionalHeaders:)`; one that keeps the default implementation drops
+them.
 Values that are not printable ASCII are sent as `=?base64?<Base64>?=`; build
 them with `MCPRequestHeaders.encode(_:)`.
 

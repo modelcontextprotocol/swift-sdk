@@ -468,7 +468,7 @@ At 2026-07-28 the HTTP transports mirror parts of the body in headers so that pr
 | `Mcp-Name` | `params.name` (`tools/call`, `prompts/get`) or `params.uri` (`resources/read`) | those methods |
 | `Mcp-Param-<Name>` | a `tools/call` argument whose input schema property has `"x-mcp-header": "<Name>"` | `tools/call` |
 
-The client adds `Mcp-Method` and `Mcp-Name` in `HTTPClientTransport` when `Version.profile(for:).usesStandardHeaders` is `true`. It adds `Mcp-Param-*` from the schemas it saw in `tools/list` results; call `listTools()` before `callTool` to get them. Values that are empty, contain characters outside printable ASCII, have a leading or trailing space, or look like an encoded value are sent as `=?base64?<base64 of UTF-8>?=`. Annotated properties must be `string`, `integer` or `boolean`, reached only through `properties`, with header names made of token characters and unique without regard to case. At 2026-07-28 a tool with an invalid annotation is dropped from `tools/list` results, by the server before it sends them and by the client when it receives them, with a logged warning.
+The client adds `Mcp-Method` and `Mcp-Name` in `HTTPClientTransport` when `Version.profile(for:).usesStandardHeaders` is `true`. It adds `Mcp-Param-*` from the schemas it saw in `tools/list` results, and passes them to the transport's `send(_:additionalHeaders:)` (see [custom transports](#custom-transports)); call `listTools()` before `callTool` to get them. Values that are empty, contain characters outside printable ASCII, have a leading or trailing space, or look like an encoded value are sent as `=?base64?<base64 of UTF-8>?=`. Annotated properties must be `string`, `integer` or `boolean`, reached only through `properties`, with header names made of token characters and unique without regard to case. At 2026-07-28 a tool with an invalid annotation is dropped from `tools/list` results, by the server before it sends them and by the client when it receives them, with a logged warning.
 
 `MCPRequestHeaders` exposes the codec for custom transports and gateways:
 
@@ -532,6 +532,8 @@ actor StreamTransport: Transport {
 ```
 
 `send(_:relatedRequestID:)` has a default implementation that calls `send(_:)`. The server passes the id of the request whose handler produced a notification or a server-to-client request. Override it when your transport has a stream per request, as the HTTP server transports do. To expose HTTP details to handlers, also conform to `HTTPContextProviding` and return the `HTTPRequest` for a request id.
+
+`send(_:additionalHeaders:)` also has a default implementation, which ignores the headers and calls `send(_:)`. At 2026-07-28 the client passes the `Mcp-Param-*` headers of a `tools/call` to it (see [request headers](#request-headers-sep-2243)), and only when there are headers to send. A Streamable HTTP transport sends them on the request's POST, as `HTTPClientTransport` does; a transport that wraps another one forwards them. A server that serves 2026-07-28 answers a call without its headers with -32020.
 
 ### Concurrency
 
