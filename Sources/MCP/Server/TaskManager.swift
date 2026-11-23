@@ -155,6 +155,11 @@ public protocol TaskStore: Sendable {
 }
 
 /// A ``TaskStore`` that keeps tasks in memory for the life of the process.
+///
+/// It keeps finished tasks, with their results, until their lifetime ends.
+/// A server open to untrusted clients bounds its memory with a shorter
+/// ``TaskManager/Configuration/maximumTTL``, or with a store that limits what
+/// it keeps.
 public actor InMemoryTaskStore: TaskStore {
     private var tasks: [String: TaskRecord] = [:]
 
@@ -226,6 +231,10 @@ public actor TaskManager {
         public var pollInterval: Duration
         /// The most tasks running at once. When it is reached, a request that
         /// must run as a task fails with -32603 and any other runs inline.
+        ///
+        /// Finished tasks do not count: they stay in the store, with their
+        /// results, until their lifetime ends, so ``maximumTTL`` bounds how
+        /// long ``InMemoryTaskStore`` keeps them.
         public var maxActiveTasks: Int
         /// The most tasks one principal may run at once; applies only when
         /// tasks are bound to principals.
@@ -680,9 +689,18 @@ public actor TaskManager {
     /// Records the client's responses: keys the task does not wait for are
     /// ignored. A call that has all its responses resumes.
     ///
-    /// - Throws: -32602 when a response does not fit its request.
+    /// - Throws: -32602 when a response does not fit its request; -32603 for
+    ///   an unfinished task that runs in another process.
     func submit(_ id: String, _ responses: [String: InputResponse]) async throws {
-        guard var record = active[id], !record.status.isTerminal else { return }
+        guard var record = active[id] else {
+            // Stored by another process: its work, and the calls that wait
+            // for input, are not here.
+            if let stored = try await store.record(id: id), !stored.status.isTerminal {
+                throw MCPError.internalError("The task does not run in this process; its input cannot be delivered")
+            }
+            return
+        }
+        guard !record.status.isTerminal else { return }
         var accepted: [String: InputResponse] = [:]
         for (key, response) in responses {
             guard let request = record.inputRequests[key] else { continue }

@@ -1,4 +1,5 @@
 import Foundation
+import Logging
 import Testing
 
 @testable import MCP
@@ -1508,6 +1509,22 @@ struct TaskNotificationTests {
         #expect(params["_meta"]?.objectValue?[MetaKey.relatedTask] == nil)
     }
 
+    @Test("2025-11-25: a task that expired before it finished is no longer tracked for notifications")
+    func expiredTaskForgotten() async throws {
+        let server = try await HandshakeTaskServer(
+            manager: TaskManager(configuration: .init(pollInterval: .milliseconds(10))))
+        defer { Task { await server.stop() } }
+        let created = Date()
+        _ = try await server.create("slow", ["seconds": 2], ttl: 50)
+        #expect(await server.wire.server.trackedTaskCount() == 1)
+        // The first task expires while it still works, so it sends no last change.
+        while Date().timeIntervalSince(created) < 0.25 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        _ = try await server.create("slow", ["seconds": 2])
+        #expect(await server.wire.server.trackedTaskCount() == 1)
+    }
+
     @Test("2025-11-25: status notifications can be turned off")
     func statusNotificationsOff() async throws {
         let server = try await HandshakeTaskServer()
@@ -1826,6 +1843,21 @@ struct TaskLifecycleEdgeTests {
         #expect(await store.reads <= 40)
     }
 
+    @Test("tasks/update fails for an unfinished task that runs in another process")
+    func foreignTaskUpdateFails() async throws {
+        let store = InMemoryTaskStore()
+        await store.insert(
+            TaskRecord(
+                id: "foreign", owner: nil, protocolVersion: Version.v2026_07_28, method: CallTool.name,
+                status: .inputRequired, createdAt: Date(), ttlMs: nil, pollIntervalMs: 100,
+                inputRequests: ["k": .elicitation(message: "Name?", requestedSchema: .init())]))
+        let server = try await TaskServer(manager: TaskManager(store: store))
+        defer { Task { await server.stop() } }
+        let code = try await server.errorCode(
+            UpdateTask.name, ["taskId": "foreign", "inputResponses": ["k": ["action": "decline"]]])
+        #expect(code == -32603)
+    }
+
     @Test("Input cut off by a broken connection is sent again by the next tasks/result")
     func inputSurvivesBrokenConnection() async throws {
         let manager = TaskManager(configuration: .init(pollInterval: .milliseconds(10), sendsStatusNotifications: false))
@@ -1900,8 +1932,67 @@ struct TaskLifecycleEdgeTests {
     }
 }
 
+/// Fails the next send of a method once armed, as a dropped connection does.
+private actor FlakyTransport: Transport {
+    nonisolated let logger = Logger(label: "test.flaky")
+    private let base: any Transport
+    private var failing: String?
+
+    init(_ base: any Transport) { self.base = base }
+
+    func failNext(_ method: String) { failing = method }
+
+    func connect() async throws { try await base.connect() }
+    func disconnect() async { await base.disconnect() }
+    func send(_ data: Data) async throws {
+        if let failing, (try? JSONDecoder().decode(Value.self, from: data))?.objectValue?["method"] == .string(failing) {
+            self.failing = nil
+            throw MCPError.transportError(POSIXError(.ECONNRESET))
+        }
+        try await base.send(data)
+    }
+    func receive() -> AsyncThrowingStream<Data, Swift.Error> {
+        let base = self.base
+        return AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    for try await data in await base.receive() { continuation.yield(data) }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+}
+
 @Suite("Client task edges")
 struct ClientTaskEdgeTests {
+    @Test("A transport error while polling leaves the task running")
+    func transportErrorKeepsTask() async throws {
+        let manager = TaskManager(configuration: .init(pollInterval: .milliseconds(10)))
+        let server = await makeTaskServer(manager: manager)
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+        try await server.start(transport: serverTransport)
+        let transport = FlakyTransport(clientTransport)
+        let client = Client(
+            name: "c", version: "1",
+            configuration: .init(
+                protocolMode: .stateless(Version.v2026_07_28), tasks: .init(minimumPollInterval: .milliseconds(5))))
+        try await client.connect(transport: transport)
+        defer { Task { await client.disconnect(); await server.stop() } }
+
+        let task = try #require(try await client.startToolCall(name: "slow", arguments: ["seconds": 1]).value.task)
+        await transport.failNext(GetTask.name)
+        do {
+            _ = try await client.task(task).result()
+            Issue.record("Expected the poll to fail")
+        } catch MCPError.transportError {}
+        // Without the fix, the client cancels the task, and this throws TaskCancelledError.
+        #expect(text(try await client.task(id: task.taskId).result()) == "task")
+        #expect(try await manager.record(id: task.taskId)?.status == .completed)
+    }
     @Test("A task created already finished is read with tasks/get for its outcome")
     func createdFinished() async throws {
         let server = Server(name: "s", version: "1", capabilities: .init(tools: .init()))

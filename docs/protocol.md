@@ -489,7 +489,7 @@ print(headers)  // ["Mcp-Param-Region": "eu-west"]
 print(MCPRequestHeaders.encode("Zürich"))  // =?base64?WsO8cmljaA==?=
 ```
 
-On the server, `StatelessHTTPServerTransport` checks `Mcp-Method` and `Mcp-Name` (see the table above). `Server` checks `Mcp-Param-*` for stateless `tools/call` requests that arrive over HTTP: it reads the input schemas from the `tools/list` handler, called for each such request with that request's context (up to 100 pages, nothing kept between calls, so per-caller lists work), and compares each header with the decoded argument. Headers for a tool it cannot find a schema for, including when the server has no `tools/list` handler, and calls to a tool with an invalid annotation, are refused. A missing, extra or different value fails with -32020 `MCPError.headerMismatch`, HTTP 400. Handshake requests carry none of these headers and are not checked.
+On the server, `StatelessHTTPServerTransport` checks `Mcp-Method` and `Mcp-Name` (see the table above). `Server` checks `Mcp-Param-*` for stateless `tools/call` requests that arrive over HTTP: it reads the input schemas from the `tools/list` handler, called for each such request with that request's context (up to 100 pages, nothing kept between calls, so per-caller lists work), and compares each header with the decoded argument. Headers for a tool it cannot find a schema for, including when the server has no `tools/list` handler, and calls with arguments or headers to a tool with an invalid annotation, are refused. A missing, extra or different value fails with -32020 `MCPError.headerMismatch`, HTTP 400. Handshake requests carry none of these headers and are not checked.
 
 ### In-memory
 

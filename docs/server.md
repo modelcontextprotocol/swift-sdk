@@ -271,7 +271,7 @@ What the SDK does at 2026-07-28:
 
 - On `tools/list`, it drops tools whose annotations are invalid and logs a warning. Handshake clients receive them unchanged. `Tool.headerParameters()` throws `MCPRequestHeaders.InvalidAnnotation` for the same tools, so check your tools at startup.
 - On `tools/call` over an HTTP transport, it compares each `Mcp-Param-*` header with the argument and answers -32020 (HTTP 400) on a mismatch: a missing header, a header for an absent argument, invalid Base64, or a different value. To find the schemas, each call that needs them runs your `tools/list` handler through all its pages, up to 100, after the `statelessRequestHook`, with the call's `Server.currentHandlerContext`: a list that differs per caller is read as that caller sees it. Nothing is kept between calls, so keep the handler cheap. A call without arguments and without `Mcp-Param-*` headers skips the lookup.
-- The check fails closed: a call with `Mcp-Param-*` headers gets -32020 when the tool is not in the listing or the listing cannot be read (the handler throws, or there are more than 100 pages), and a call to a tool dropped for an invalid annotation always gets -32020.
+- The check fails closed: a call with `Mcp-Param-*` headers gets -32020 when the tool is not in the listing or the listing cannot be read (the handler throws, or there are more than 100 pages), and a call with arguments or `Mcp-Param-*` headers to a tool dropped for an invalid annotation gets -32020. A call with neither has nothing to check and runs.
 - `StatelessHTTPServerTransport` checks `Mcp-Method` and `Mcp-Name` against the body and also answers -32020.
 
 ## Prompts

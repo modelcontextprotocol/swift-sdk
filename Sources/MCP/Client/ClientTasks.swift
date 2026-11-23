@@ -59,7 +59,10 @@ public struct TaskHandle: Sendable {
     /// bounds of ``Client/Configuration/Tasks``, and answers its input
     /// requests with the client's registered handlers. When a handler
     /// throws, the task is cancelled and the error rethrown; cancelling the
-    /// calling Swift task also cancels the task on the server.
+    /// calling Swift task also cancels the task on the server. A
+    /// ``MCPError/connectionClosed`` or ``MCPError/transportError(_:)`` is
+    /// rethrown without cancelling the task, so ``Client/task(id:)`` can
+    /// drive it again.
     ///
     /// - Returns: The result of the tool call, which may report a tool error
     ///   (`isError`).
@@ -169,12 +172,10 @@ extension Client {
                             }
                             throw error
                         }
-                        let id = handle.id
-                        Task { try? await self.cancelTask(id) }
+                        abandon(handle.id, after: error)
                         throw error
                     } catch {
-                        let id = handle.id
-                        Task { try? await self.cancelTask(id) }
+                        abandon(handle.id, after: error)
                         throw error
                     }
                 default:
@@ -184,8 +185,7 @@ extension Client {
                     try await waitForTask(handle.id, timeout: options.pollInterval(suggested: snapshot.pollIntervalMs))
                     snapshot = try await getTask(handle.id)
                 } catch {
-                    let id = handle.id
-                    Task { try? await self.cancelTask(id) }
+                    abandon(handle.id, after: error)
                     throw error
                 }
                 continue
@@ -221,11 +221,19 @@ extension Client {
                 }
                 snapshot = try await getTask(handle.id)
             } catch {
-                // The client gives up on the task: tell the server, best effort.
-                let id = handle.id
-                Task { try? await self.cancelTask(id) }
+                abandon(handle.id, after: error)
                 throw error
             }
+        }
+    }
+
+    /// Tells the server, best effort, that the client gives up on a task. A
+    /// failed connection leaves the task running, for ``task(id:)`` to drive
+    /// again.
+    private func abandon(_ id: String, after error: any Error) {
+        switch error as? MCPError {
+        case .connectionClosed?, .transportError?: return
+        default: Task { try? await self.cancelTask(id) }
         }
     }
 }

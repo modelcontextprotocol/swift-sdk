@@ -335,8 +335,8 @@ public actor Server {
     private var taskObserver: Int?
     private var observingTasks = false
     /// The 2025-11-25 tasks this server created, by the status last sent in
-    /// `notifications/tasks/status`.
-    private var notifiedTasks: [String: TaskStatus] = [:]
+    /// `notifications/tasks/status`, with when each task expires.
+    private var notifiedTasks: [String: (status: TaskStatus, expiresAt: Date?)] = [:]
 
     /// Pending requests sent to the client, awaiting responses
     private var pendingRequests: [ID: AnyPendingRequest] = [:]
@@ -1009,8 +1009,17 @@ public actor Server {
     /// Records a 2025-11-25 task this server created, for status notifications.
     private func trackTask(_ record: TaskRecord) async {
         guard let manager = taskManager else { return }
-        notifiedTasks[record.id] = record.snapshot(detailed: false).status
+        // A task that expired before it finished sends no last change:
+        // forget it here.
+        let now = Date()
+        notifiedTasks = notifiedTasks.filter { $0.value.expiresAt.map { $0 > now } ?? true }
+        notifiedTasks[record.id] = (record.snapshot(detailed: false).status, record.expiresAt)
         await observeTasks(manager)
+    }
+
+    /// The number of 2025-11-25 tasks tracked for status notifications.
+    func trackedTaskCount() -> Int {
+        notifiedTasks.count
     }
 
     /// Sends a task's change: `notifications/tasks/status` on the connection
@@ -1019,10 +1028,10 @@ public actor Server {
     private func taskChanged(_ record: TaskRecord) async {
         switch record.generation {
         case .v1:
-            guard let last = notifiedTasks[record.id] else { return }
+            guard let last = notifiedTasks[record.id]?.status else { return }
             let snapshot = record.snapshot(detailed: false)
             guard snapshot.status != last else { return }
-            notifiedTasks[record.id] = snapshot.status.isTerminal ? nil : snapshot.status
+            notifiedTasks[record.id] = snapshot.status.isTerminal ? nil : (snapshot.status, record.expiresAt)
             guard isInitialized, let connection,
                 let data = try? encoder.encode(TaskStatusNotification.message(snapshot))
             else { return }
@@ -2240,8 +2249,9 @@ public actor Server {
     /// arguments, using the input schemas of the `tools/list` handler.
     ///
     /// Fails closed: a call that carries `Mcp-Param-*` headers is refused
-    /// with -32020 when the tool's schema cannot be found, and a call to a
-    /// tool hidden for an invalid annotation is always refused.
+    /// with -32020 when the tool's schema cannot be found, and a call with
+    /// arguments or headers to a tool hidden for an invalid annotation is
+    /// refused. A call with neither has nothing to check and is let through.
     private func parameterHeaderError(
         _ request: Request<AnyMethod>, http: HTTPRequest, context: HandlerContext, listing: inout ToolListing?
     ) async throws -> MCPError? {

@@ -218,7 +218,8 @@ At 2026-07-28, HTTP requests repeat parts of the body in headers (SEP-2243).
 `Server` answers -32020 when the `Mcp-Param-*` headers of a `tools/call` do not
 match the arguments that the tool's schema marks with `x-mcp-header`, when a
 call carries `Mcp-Param-*` headers for a tool it does not list, and for a call
-to a tool with an invalid annotation. The schemas come from your `tools/list`
+with arguments or `Mcp-Param-*` headers to a tool with an invalid annotation.
+The schemas come from your `tools/list`
 handler, called for each such `tools/call` with the caller's context: a tool
 missing from the list that caller sees is refused when headers are sent.
 
