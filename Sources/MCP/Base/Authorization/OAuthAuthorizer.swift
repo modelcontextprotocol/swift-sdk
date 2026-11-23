@@ -70,8 +70,15 @@ public protocol HTTPClientAuthorizer: AnyObject, Sendable {
     /// ``HTTPClientTransport`` calls this method. With the sent value, an
     /// implementation can tell a challenge for a token that another request
     /// has already replaced from a challenge for the current token. The
-    /// default implementation calls
-    /// ``handleChallenge(statusCode:headers:endpoint:operationKey:session:)``.
+    /// result also says whether the retry only answers a DPoP `use_dpop_nonce`
+    /// challenge (RFC 9449 §9), which the transport allows once per request
+    /// without counting it against ``maxAuthorizationAttempts``.
+    ///
+    /// The default implementation calls
+    /// ``handleChallenge(statusCode:headers:endpoint:operationKey:session:)``
+    /// and reports a DPoP nonce retry when it returns `true` for a `401`
+    /// whose `DPoP` challenge, read with ``DefaultOAuthWWWAuthenticateParser``,
+    /// has the error `use_dpop_nonce`, and that carries a `DPoP-Nonce` header.
     ///
     /// - Parameters:
     ///   - statusCode: The HTTP status code (401 or 403).
@@ -81,8 +88,8 @@ public protocol HTTPClientAuthorizer: AnyObject, Sendable {
     ///   - sentAuthorization: The `Authorization` header of the challenged request,
     ///     or `nil` when it had none.
     ///   - session: The `URLSession` to use for discovery and token requests.
-    /// - Returns: `true` if the original request should be retried; `false` if the
-    ///   challenge cannot be handled.
+    /// - Returns: Whether to retry the original request, and whether that
+    ///   retry is a DPoP nonce retry.
     func handleChallenge(
         statusCode: Int,
         headers: [String: String],
@@ -90,7 +97,7 @@ public protocol HTTPClientAuthorizer: AnyObject, Sendable {
         operationKey: String?,
         sentAuthorization: String?,
         session: URLSession
-    ) async throws -> Bool
+    ) async throws -> HTTPChallengeResult
 
     /// Proactively refreshes the access token if it is close to expiry.
     ///
@@ -120,7 +127,8 @@ extension HTTPClientAuthorizer {
     public func prepareAuthorization(for endpoint: URL, session: URLSession) async throws {}
 
     /// Calls ``handleChallenge(statusCode:headers:endpoint:operationKey:session:)``,
-    /// ignoring `sentAuthorization`.
+    /// ignoring `sentAuthorization`, and reports a DPoP nonce retry for a
+    /// retried `401` `use_dpop_nonce` challenge with a `DPoP-Nonce` header.
     public func handleChallenge(
         statusCode: Int,
         headers: [String: String],
@@ -128,10 +136,14 @@ extension HTTPClientAuthorizer {
         operationKey: String?,
         sentAuthorization: String?,
         session: URLSession
-    ) async throws -> Bool {
-        try await handleChallenge(
+    ) async throws -> HTTPChallengeResult {
+        let retry = try await handleChallenge(
             statusCode: statusCode, headers: headers, endpoint: endpoint, operationKey: operationKey,
             session: session)
+        return HTTPChallengeResult(
+            retry: retry,
+            isDPoPNonceRetry: retry
+                && HTTPChallengeResult.isDPoPNonceChallenge(statusCode: statusCode, headers: headers))
     }
 
     public func didReceiveResponse(headers: [String: String], for url: URL) {}
@@ -414,12 +426,18 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
         // for a challenge in progress.
         try await handleChallenge(
             statusCode: statusCode, headers: headers, endpoint: endpoint, operationKey: operationKey,
-            sentToken: tokenStorage.load()?.value, session: session)
+            sentToken: tokenStorage.load()?.value, session: session
+        ).retry
     }
 
     /// Handles a challenge for the request that carried `sentAuthorization`.
     /// A challenge for a token that another challenge has already replaced
     /// retries with the new token.
+    ///
+    /// The result is a DPoP nonce retry when the challenge, read with the
+    /// authorizer's `challengeParser`, is a `401` with a `use_dpop_nonce`
+    /// error and a `DPoP-Nonce` header, and a valid DPoP-bound token is
+    /// stored (RFC 9449 §9).
     public func handleChallenge(
         statusCode: Int,
         headers: [String: String],
@@ -427,7 +445,7 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
         operationKey: String? = nil,
         sentAuthorization: String?,
         session: URLSession
-    ) async throws -> Bool {
+    ) async throws -> HTTPChallengeResult {
         // The credentials after the scheme ("Bearer <token>").
         let sentToken = sentAuthorization.map { value in
             let trimmed = value.trimmingCharacters(in: .whitespaces)
@@ -446,7 +464,7 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
         operationKey: String?,
         sentToken: String?,
         session: URLSession
-    ) async throws -> Bool {
+    ) async throws -> HTTPChallengeResult {
         try validateEndpointSecurity(for: endpoint)
         let completedBefore = lastChallenge.count
         return try await gate.run {
@@ -483,7 +501,7 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
         operationKey: String?,
         sentToken: String?,
         session: URLSession
-    ) async throws -> Bool {
+    ) async throws -> HTTPChallengeResult {
         let dpopChallenge = challengeParser.parseChallenge(scheme: OAuthTokenType.dpop, from: headers)
         let challenge = challengeParser.parseBearer(from: headers) ?? dpopChallenge
 
@@ -493,10 +511,26 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
             if statusCode == 401, dpopChallenge?.error == OAuthErrorCode.useDPoPNonce, nonce != nil,
                 let token = tokenStorage.load(), token.isDPoPBound, !token.isExpired()
             {
-                return true
+                return HTTPChallengeResult(retry: true, isDPoPNonceRetry: true)
             }
         }
 
+        return HTTPChallengeResult(
+            retry: try await answerChallenge(
+                statusCode: statusCode, challenge: challenge, endpoint: endpoint, operationKey: operationKey,
+                sentToken: sentToken, session: session))
+    }
+
+    /// Answers a challenge that a DPoP nonce alone does not: returns whether
+    /// to retry with a new or refreshed token.
+    private func answerChallenge(
+        statusCode: Int,
+        challenge: OAuthBearerChallenge?,
+        endpoint: URL,
+        operationKey: String?,
+        sentToken: String?,
+        session: URLSession
+    ) async throws -> Bool {
         switch statusCode {
         case 401:
             // Another challenge replaced the token meanwhile: retry with it.

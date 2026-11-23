@@ -106,7 +106,8 @@ cancelled. A cancelled challenge is not counted.
 0. With DPoP, a `DPoP-Nonce` header is stored for the MCP server's origin (`didReceiveResponse`
    stores it for the origin each request went to). A `DPoP` challenge
    with `error="use_dpop_nonce"` while a valid DPoP token is stored retries with the nonce and
-   keeps the token. The transport retries a request once for such a challenge; a second one
+   keeps the token; the result's `isDPoPNonceRetry` says so, read with `challengeParser`. The
+   transport retries a request once for such a challenge without counting it; a second one
    fails the request.
 1. If the stored token has a refresh token, the challenge names no other PRM URL, the token is
    not the one the last refresh returned, and AS metadata is cached: refresh at that AS.

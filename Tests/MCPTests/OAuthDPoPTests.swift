@@ -221,6 +221,38 @@ struct DPoPProofTests {
     }
 }
 
+/// Reads a vendor `vendor_nonce` error as `use_dpop_nonce`, and `use_dpop_nonce`
+/// as `invalid_token`.
+private struct VendorNonceParser: OAuthWWWAuthenticateParsing {
+    func parseBearer(from headers: [String: String]) -> OAuthBearerChallenge? {
+        DefaultOAuthWWWAuthenticateParser().parseBearer(from: headers)
+    }
+
+    func parseChallenge(scheme: String, from headers: [String: String]) -> OAuthBearerChallenge? {
+        guard let challenge = DefaultOAuthWWWAuthenticateParser().parseChallenge(scheme: scheme, from: headers)
+        else { return nil }
+        var parameters = challenge.parameters
+        switch challenge.error {
+        case "vendor_nonce": parameters["error"] = OAuthErrorCode.useDPoPNonce
+        case OAuthErrorCode.useDPoPNonce: parameters["error"] = "invalid_token"
+        default: break
+        }
+        return OAuthBearerChallenge(parameters: parameters)
+    }
+}
+
+private func vendorNonceAuthorizer(
+    maxAuthorizationAttempts: Int = 3, tokenClient: MockTokenClient
+) -> OAuthAuthorizer {
+    OAuthAuthorizer(
+        configuration: .init(
+            authentication: .none(clientID: "client"),
+            retryPolicy: .init(maxAuthorizationAttempts: maxAuthorizationAttempts), dpop: .init()),
+        challengeParser: VendorNonceParser(), urlValidator: MockURLValidator(),
+        discoveryClient: MockDiscoveryClient(), tokenEndpointClient: tokenClient,
+        clientRegistrar: MockClientRegistrar(), authCodeFlow: MockAuthCodeFlow())
+}
+
 @Suite("DPoP authorizer")
 struct DPoPAuthorizerTests {
     @Test("A DPoP token is presented with the DPoP scheme and a proof for the request")
@@ -400,6 +432,39 @@ struct DPoPAuthorizerTests {
         let proof = try DecodedProof(
             try #require(try authorizer.authorizationHeaders(for: endpoint, method: "POST")[HTTPHeaderName.dpop]))
         #expect(proof.claims["nonce"] as? String == "rs-nonce-1")
+    }
+
+    @Test("Whether a challenge is a nonce retry is read with the authorizer's challenge parser")
+    func nonceRetryUsesChallengeParser() async throws {
+        let tokenClient = dpopTokenClient()
+        let authorizer = vendorNonceAuthorizer(tokenClient: tokenClient)
+        _ = try await authorizer.handleChallenge(
+            statusCode: 401, headers: headers401, endpoint: endpoint, session: .shared)
+        #expect(tokenClient.requestCallCount == 1)
+
+        func challenge(_ error: String) async throws -> HTTPChallengeResult {
+            try await authorizer.handleChallenge(
+                statusCode: 401,
+                headers: ["WWW-Authenticate": "DPoP error=\"\(error)\"", "DPoP-Nonce": "rs-nonce-1"],
+                endpoint: endpoint, operationKey: nil, sentAuthorization: "DPoP dpop-token", session: .shared)
+        }
+        #expect(try await challenge("vendor_nonce") == HTTPChallengeResult(retry: true, isDPoPNonceRetry: true))
+        #expect(tokenClient.requestCallCount == 1)
+        // The parser reads it as invalid_token: the token is replaced.
+        #expect(try await challenge("use_dpop_nonce") == HTTPChallengeResult(retry: true, isDPoPNonceRetry: false))
+        #expect(tokenClient.requestCallCount == 2)
+    }
+
+    @Test("use_dpop_nonce without a token is not a nonce retry")
+    func resourceNonceWithoutTokenIsNotNonceRetry() async throws {
+        let tokenClient = dpopTokenClient()
+        let authorizer = dpopAuthorizer(tokenClient: tokenClient)
+        let result = try await authorizer.handleChallenge(
+            statusCode: 401,
+            headers: ["WWW-Authenticate": #"DPoP error="use_dpop_nonce""#, "DPoP-Nonce": "rs-nonce-1"],
+            endpoint: endpoint, operationKey: nil, sentAuthorization: nil, session: .shared)
+        #expect(result == HTTPChallengeResult(retry: true, isDPoPNonceRetry: false))
+        #expect(tokenClient.requestCallCount == 1)
     }
 
     @Test("A resource that requires DPoP fails without it")
@@ -592,6 +657,32 @@ struct DPoPAuthorizerTests {
         }
     }
 
+    /// Retries every challenge, and reports each retry as a DPoP nonce retry
+    /// or not, whatever the challenge says.
+    private final class ClassifyingAuthorizer: HTTPClientAuthorizer, Sendable {
+        let maxAuthorizationAttempts = 1
+        let nonceRetry: Bool
+
+        init(nonceRetry: Bool) {
+            self.nonceRetry = nonceRetry
+        }
+
+        func validateEndpointSecurity(for endpoint: URL) throws {}
+        func authorizationHeaders(for url: URL, method: String) throws -> [String: String] {
+            ["Authorization": "DPoP t", "DPoP": "proof"]
+        }
+        func handleChallenge(
+            statusCode: Int, headers: [String: String], endpoint: URL, operationKey: String?,
+            session: URLSession
+        ) async throws -> Bool { true }
+        func handleChallenge(
+            statusCode: Int, headers: [String: String], endpoint: URL, operationKey: String?,
+            sentAuthorization: String?, session: URLSession
+        ) async throws -> HTTPChallengeResult {
+            HTTPChallengeResult(retry: true, isDPoPNonceRetry: nonceRetry)
+        }
+    }
+
     private func mockSession(
         _ respond: @escaping @Sendable (URLRequest, Int) async -> HTTPURLResponse
     ) async -> (URLSessionConfiguration, Recorder<URLRequest>) {
@@ -636,8 +727,9 @@ struct DPoPAuthorizerTests {
                     Data(#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#.utf8))
             }
             #expect(await sent.values.count == 2)
-            // The second nonce challenge fails the request without the authorizer.
-            #expect(authorizer.challenges == 1)
+            // The authorizer retries the second nonce challenge too, but it
+            // fails the request.
+            #expect(authorizer.challenges == 2)
             #expect(authorizer.responses.count == 2)
             await transport.disconnect()
         }
@@ -660,6 +752,88 @@ struct DPoPAuthorizerTests {
             }
             #expect(await sent.values.count == 1)
             #expect(authorizer.challenges == 1)
+            await transport.disconnect()
+        }
+
+        @Test("By default, a retried use_dpop_nonce with a DPoP-Nonce header is a nonce retry")
+        func defaultNonceClassification() async throws {
+            let authorizer = NonceAuthorizer()
+            func result(_ status: Int, _ headers: [String: String]) async throws -> HTTPChallengeResult {
+                try await authorizer.handleChallenge(
+                    statusCode: status, headers: headers, endpoint: endpoint, operationKey: nil,
+                    sentAuthorization: "DPoP t", session: .shared)
+            }
+            let nonce = #"DPoP error="use_dpop_nonce""#
+            #expect(
+                try await result(401, ["WWW-Authenticate": nonce, "DPoP-Nonce": "n"])
+                    == HTTPChallengeResult(retry: true, isDPoPNonceRetry: true))
+            #expect(
+                try await result(401, ["WWW-Authenticate": nonce])
+                    == HTTPChallengeResult(retry: true, isDPoPNonceRetry: false))
+            #expect(
+                try await result(403, ["WWW-Authenticate": nonce, "DPoP-Nonce": "n"])
+                    == HTTPChallengeResult(retry: true, isDPoPNonceRetry: false))
+        }
+
+        @Test("A retry the authorizer reports as a nonce retry does not use up an authorization attempt")
+        func authorizerReportsNonceRetry() async throws {
+            let (configuration, sent) = await mockSession { request, count in
+                HTTPURLResponse(
+                    url: request.url!, statusCode: count == 1 ? 401 : 202, httpVersion: "HTTP/1.1",
+                    headerFields: count == 1 ? ["WWW-Authenticate": #"Bearer error="invalid_token""#] : [:])!
+            }
+            let transport = HTTPClientTransport(
+                endpoint: endpoint, configuration: configuration, streaming: false,
+                authorizer: ClassifyingAuthorizer(nonceRetry: true))
+            try await transport.connect()
+            try await transport.send(Data(#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#.utf8))
+            #expect(await sent.values.count == 2)
+            await transport.disconnect()
+        }
+
+        @Test("A use_dpop_nonce the authorizer does not report as a nonce retry uses up an attempt")
+        func authorizerReportsOrdinaryRetry() async throws {
+            let (configuration, sent) = await mockSession { request, count in
+                HTTPURLResponse(
+                    url: request.url!, statusCode: count == 1 ? 401 : 202, httpVersion: "HTTP/1.1",
+                    headerFields: count == 1
+                        ? ["WWW-Authenticate": #"DPoP error="use_dpop_nonce""#, "DPoP-Nonce": "n"] : [:])!
+            }
+            let transport = HTTPClientTransport(
+                endpoint: endpoint, configuration: configuration, streaming: false,
+                authorizer: ClassifyingAuthorizer(nonceRetry: false))
+            try await transport.connect()
+            await #expect(throws: (any Error).self) {
+                try await transport.send(
+                    Data(#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#.utf8))
+            }
+            #expect(await sent.values.count == 1)
+            await transport.disconnect()
+        }
+
+        @Test("OAuthAuthorizer's challenge parser decides which challenge is a nonce retry")
+        func oauthAuthorizerParserDecidesNonceRetry() async throws {
+            let (configuration, sent) = await mockSession { request, count in
+                HTTPURLResponse(
+                    url: request.url!, statusCode: count == 1 ? 401 : 202, httpVersion: "HTTP/1.1",
+                    headerFields: count == 1
+                        ? ["WWW-Authenticate": #"DPoP error="vendor_nonce""#, "DPoP-Nonce": "vendor-n"] : [:])!
+            }
+            let tokenClient = dpopTokenClient()
+            let authorizer = vendorNonceAuthorizer(maxAuthorizationAttempts: 1, tokenClient: tokenClient)
+            _ = try await authorizer.handleChallenge(
+                statusCode: 401, headers: headers401, endpoint: endpoint, session: .shared)
+            let transport = HTTPClientTransport(
+                endpoint: endpoint, configuration: configuration, streaming: false,
+                authorizer: authorizer)
+            try await transport.connect()
+            try await transport.send(Data(#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#.utf8))
+            let requests = await sent.values
+            #expect(requests.count == 2)
+            let proof = try DecodedProof(
+                try #require(requests.last?.value(forHTTPHeaderField: HTTPHeaderName.dpop)))
+            #expect(proof.claims["nonce"] as? String == "vendor-n")
+            #expect(tokenClient.requestCallCount == 1)
             await transport.disconnect()
         }
 

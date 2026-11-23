@@ -143,11 +143,12 @@ struct HTTPClientConnectionLimitTests {
         func handleChallenge(
             statusCode: Int, headers: [String: String], endpoint: URL, operationKey: String?,
             sentAuthorization: String?, session: URLSession
-        ) async throws -> Bool {
+        ) async throws -> HTTPChallengeResult {
             lock.withLock { sent.append(sentAuthorization) }
-            return try await handleChallenge(
-                statusCode: statusCode, headers: headers, endpoint: endpoint, operationKey: operationKey,
-                session: session)
+            return HTTPChallengeResult(
+                retry: try await handleChallenge(
+                    statusCode: statusCode, headers: headers, endpoint: endpoint, operationKey: operationKey,
+                    session: session))
         }
     }
 

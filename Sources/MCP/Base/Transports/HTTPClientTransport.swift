@@ -461,13 +461,7 @@ public actor HTTPClientTransport: Transport {
                     throw mapAuthenticationChallengeError(authError)
                 }
 
-                // RFC 9449 §9: a DPoP nonce challenge is retried once per request.
-                let isNonceChallenge = Self.isDPoPNonceChallenge(authError)
-                if isNonceChallenge, retriedNonce {
-                    throw mapAuthenticationChallengeError(authError)
-                }
-
-                let handled: Bool
+                let handled: HTTPChallengeResult
                 do {
                     handled = try await authorizer.handleChallenge(
                         statusCode: authError.statusCode,
@@ -482,13 +476,18 @@ public actor HTTPClientTransport: Transport {
                         "Authorization flow failed: \(error.localizedDescription)")
                 }
 
-                if isNonceChallenge {
+                // RFC 9449 §9: the authorizer says whether the retry only
+                // answers a DPoP nonce challenge, retried once per request.
+                if handled.isDPoPNonceRetry {
+                    if retriedNonce {
+                        throw mapAuthenticationChallengeError(authError)
+                    }
                     retriedNonce = true
                 } else {
                     attempts += 1
                 }
 
-                if handled, attempts < authorizer.maxAuthorizationAttempts {
+                if handled.retry, attempts < authorizer.maxAuthorizationAttempts {
                     continue
                 }
 

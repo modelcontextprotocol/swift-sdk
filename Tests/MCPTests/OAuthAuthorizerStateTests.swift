@@ -212,7 +212,8 @@ struct OAuthAuthorizerStateTests {
     ) async throws -> Bool {
         try await authorizer.handleChallenge(
             statusCode: status, headers: headers ?? challenge, endpoint: endpoint, operationKey: "tools/call",
-            sentAuthorization: sent, session: .shared)
+            sentAuthorization: sent, session: .shared
+        ).retry
     }
 
     @Test("A 401 for a token another challenge already refreshed retries with the new token")
