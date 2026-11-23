@@ -1109,6 +1109,32 @@ struct DPoPAuthorizerTests {
             await transport.disconnect()
         }
 
+        @Test("A GET stream's retry the authorizer reports as a nonce retry does not use up an attempt")
+        func getStreamAuthorizerReportsNonceRetry() async throws {
+            let (configuration, gets) = await mockSession { request, count in
+                count == 1
+                    ? HTTPURLResponse(
+                        url: request.url!, statusCode: 401, httpVersion: "HTTP/1.1",
+                        headerFields: ["WWW-Authenticate": #"Bearer error="invalid_token""#])!
+                    : HTTPURLResponse(
+                        url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1",
+                        headerFields: ["Content-Type": "text/event-stream"])!
+            }
+            let transport = HTTPClientTransport(
+                endpoint: endpoint, configuration: configuration, streaming: true,
+                sseInitializationTimeout: 0.01, authorizer: ClassifyingAuthorizer(nonceRetry: true))
+            try await transport.connect()
+            // Without the retry the stream would open only on the next
+            // reconnection, after the default 3 s retry interval.
+            let deadline = ContinuousClock.now + .seconds(2)
+            while await gets.values.count < 2, ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            #expect(await gets.values.count >= 2)
+            #expect(await gets.values.prefix(2).allSatisfy { $0.httpMethod == "GET" })
+            await transport.disconnect()
+        }
+
         @Test("Authorization headers are set after requestModifier, for the final URL and method")
         func afterRequestModifier() async throws {
             let key = UUID().uuidString

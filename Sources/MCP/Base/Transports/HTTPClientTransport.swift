@@ -778,21 +778,6 @@ public actor HTTPClientTransport: Transport {
             StatusMessage.streamingUnsupported].contains(detail)
     }
 
-    /// Whether a challenge is a resource server's `use_dpop_nonce` with the
-    /// `DPoP-Nonce` header it requires (RFC 9449 §9). Without the header the
-    /// authorizer cannot retry with a nonce, so the challenge counts as an
-    /// ordinary attempt.
-    private static func isDPoPNonceChallenge(_ challenge: HTTPAuthenticationChallengeError) -> Bool {
-        challenge.statusCode == 401
-            && DefaultOAuthWWWAuthenticateParser()
-                .parseChallenge(scheme: OAuthTokenType.dpop, from: challenge.headers)?.error
-                == OAuthErrorCode.useDPoPNonce
-            && challenge.headers.contains {
-                $0.key.caseInsensitiveCompare(HTTPHeaderName.dpopNonce) == .orderedSame
-                    && !$0.value.trimmingCharacters(in: .whitespaces).isEmpty
-            }
-    }
-
     /// Error details for HTTP status replies.
     enum StatusMessage {
         static let badRequest = "Bad request"
@@ -991,12 +976,7 @@ public actor HTTPClientTransport: Transport {
             stream.cancel()
             let challenge = HTTPAuthenticationChallengeError(
                 statusCode: httpResponse.statusCode, headers: responseHeaders(from: httpResponse))
-            // RFC 9449 §9: a DPoP nonce challenge is retried once per GET, as for a POST.
-            let isNonceChallenge = Self.isDPoPNonceChallenge(challenge)
-            if isNonceChallenge, retriedNonce {
-                throw mapAuthenticationChallengeError(challenge)
-            }
-            let handled: Bool
+            let handled: HTTPChallengeResult
             do {
                 handled = try await authorizer.handleChallenge(
                     statusCode: httpResponse.statusCode,
@@ -1009,12 +989,16 @@ public actor HTTPClientTransport: Transport {
             } catch {
                 throw MCPError.internalError("Authorization flow failed: \(error.localizedDescription)")
             }
-            if isNonceChallenge {
+            // RFC 9449 §9: a DPoP nonce retry is allowed once per GET, as for a POST.
+            if handled.isDPoPNonceRetry {
+                if retriedNonce {
+                    throw mapAuthenticationChallengeError(challenge)
+                }
                 retriedNonce = true
             } else {
                 attempts += 1
             }
-            guard handled, attempts < authorizer.maxAuthorizationAttempts else {
+            guard handled.retry, attempts < authorizer.maxAuthorizationAttempts else {
                 throw mapAuthenticationChallengeError(challenge)
             }
         }
