@@ -112,6 +112,53 @@ struct OAuthAuthorizationCodeFlowTests {
         #expect(code == "auth-code-123")
     }
 
+    @Test("extractCode rejects an issuer mismatch even when the server did not advertise iss")
+    func testExtractCodeRejectsUnexpectedIssuer() {
+        let redirectURL = URL(
+            string: "https://app.example.com/callback?code=auth-code-123&state=my-state&iss=https%3A%2F%2Fevil.example.com"
+        )!
+        #expect(throws: OAuthAuthorizationError.self) {
+            try flow.extractCode(
+                from: redirectURL,
+                expectedRedirectURI: redirectURI,
+                expectedState: "my-state",
+                expectedIssuer: "https://auth.example.com",
+                issuerRequired: false
+            )
+        }
+    }
+
+    @Test("extractCode requires iss when authorization server metadata advertises support")
+    func testExtractCodeRequiresAdvertisedIssuer() {
+        let redirectURL = URL(
+            string: "https://app.example.com/callback?code=auth-code-123&state=my-state"
+        )!
+        #expect(throws: OAuthAuthorizationError.self) {
+            try flow.extractCode(
+                from: redirectURL,
+                expectedRedirectURI: redirectURI,
+                expectedState: "my-state",
+                expectedIssuer: "https://auth.example.com",
+                issuerRequired: true
+            )
+        }
+    }
+
+    @Test("extractCode accepts an exact matching issuer")
+    func testExtractCodeAcceptsMatchingIssuer() throws {
+        let redirectURL = URL(
+            string: "https://app.example.com/callback?code=auth-code-123&state=my-state&iss=https%3A%2F%2Fauth.example.com"
+        )!
+        let code = try flow.extractCode(
+            from: redirectURL,
+            expectedRedirectURI: redirectURI,
+            expectedState: "my-state",
+            expectedIssuer: "https://auth.example.com",
+            issuerRequired: true
+        )
+        #expect(code == "auth-code-123")
+    }
+
     @Test("extractCode throws state mismatch")
     func testExtractCodeThrowsStateMismatch() {
         let redirectURL = URL(string:

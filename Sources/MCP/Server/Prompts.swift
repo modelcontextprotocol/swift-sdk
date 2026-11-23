@@ -329,14 +329,31 @@ public enum GetPrompt: Method {
     public struct Parameters: Hashable, Codable, Sendable {
         public let name: String
         public let arguments: [String: String]?
+        public let inputResponses: [String: Value]?
+        public let requestState: String?
 
-        public init(name: String, arguments: [String: String]? = nil) {
+        public init(name: String, arguments: [String: String]? = nil, inputResponses: [String: Value]? = nil, requestState: String? = nil) {
             self.name = name
             self.arguments = arguments
+            self.inputResponses = inputResponses
+            self.requestState = requestState
+        }
+
+        private enum CodingKeys: String, CodingKey { case name, arguments, inputResponses, requestState }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            name = try container.decode(String.self, forKey: .name)
+            arguments = try container.decodeIfPresent([String: String].self, forKey: .arguments)
+            inputResponses = try container.decodeIfPresent([String: Value].self, forKey: .inputResponses)
+            requestState = try container.decodeIfPresent(String.self, forKey: .requestState)
         }
     }
 
     public struct Result: Hashable, Codable, Sendable {
+        public let resultType: ResultType?
+        public let inputRequests: [String: Value]?
+        public let requestState: String?
         public let description: String?
         public let messages: [Prompt.Message]
         /// Optional metadata about this result
@@ -345,15 +362,21 @@ public enum GetPrompt: Method {
         public init(
             description: String? = nil,
             messages: [Prompt.Message],
-            _meta: Metadata? = nil
+            _meta: Metadata? = nil,
+            resultType: ResultType? = nil,
+            inputRequests: [String: Value]? = nil,
+            requestState: String? = nil
         ) {
             self.description = description
             self.messages = messages
             self._meta = _meta
+            self.resultType = resultType
+            self.inputRequests = inputRequests
+            self.requestState = requestState
         }
 
         private enum CodingKeys: String, CodingKey, CaseIterable {
-            case description, messages, _meta
+            case resultType, inputRequests, requestState, description, messages, _meta
         }
 
         public func encode(to encoder: Encoder) throws {
@@ -361,6 +384,9 @@ public enum GetPrompt: Method {
             try container.encodeIfPresent(description, forKey: .description)
             try container.encode(messages, forKey: .messages)
             try container.encodeIfPresent(_meta, forKey: ._meta)
+            try container.encodeIfPresent(resultType, forKey: .resultType)
+            try container.encodeIfPresent(inputRequests, forKey: .inputRequests)
+            try container.encodeIfPresent(requestState, forKey: .requestState)
         }
 
         public init(from decoder: Decoder) throws {
@@ -368,6 +394,9 @@ public enum GetPrompt: Method {
             description = try container.decodeIfPresent(String.self, forKey: .description)
             messages = try container.decode([Prompt.Message].self, forKey: .messages)
             _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
+            resultType = try container.decodeIfPresent(ResultType.self, forKey: .resultType)
+            inputRequests = try container.decodeIfPresent([String: Value].self, forKey: .inputRequests)
+            requestState = try container.decodeIfPresent(String.self, forKey: .requestState)
         }
     }
 }

@@ -14,6 +14,17 @@ public enum ID: Hashable, Sendable {
     }
 }
 
+extension ID {
+    /// Unambiguous key for transport bookkeeping. JSON-RPC string and numeric
+    /// ids share their textual description, so maps must retain the id kind.
+    package var transportKey: String {
+        switch self {
+        case .string(let value): "string:\(value)"
+        case .number(let value): "number:\(value)"
+        }
+    }
+}
+
 // MARK: - ExpressibleByStringLiteral
 
 extension ID: ExpressibleByStringLiteral {

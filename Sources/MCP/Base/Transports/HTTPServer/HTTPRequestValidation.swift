@@ -1,3 +1,4 @@
+import CoreFoundation
 import Foundation
 
 // MARK: - Validation Protocol
@@ -38,18 +39,39 @@ public struct HTTPValidationContext: Sendable {
     /// Whether the request body contains an `initialize` JSON-RPC request.
     public let isInitializationRequest: Bool
 
+    /// Whether the request is a modern `server/discover` call.
+    public let isDiscoverRequest: Bool
+
+    /// Whether the request declares a modern (2026-07-28+) protocol version.
+    public let isModernRequest: Bool
+
+    /// Protocol version from `params._meta.io.modelcontextprotocol/protocolVersion`, if present.
+    /// When set, this is authoritative for modern requests and must agree with the HTTP header.
+    public let bodyProtocolVersion: String?
+
     /// The set of protocol versions this server supports.
     public let supportedProtocolVersions: Set<String>
+
+    /// Requests that do not require a legacy MCP session id.
+    public var isSessionExempt: Bool {
+        isInitializationRequest || isDiscoverRequest || isModernRequest
+    }
 
     public init(
         httpMethod: String,
         sessionID: String? = nil,
         isInitializationRequest: Bool = false,
+        isDiscoverRequest: Bool = false,
+        isModernRequest: Bool = false,
+        bodyProtocolVersion: String? = nil,
         supportedProtocolVersions: Set<String> = Version.supported
     ) {
         self.httpMethod = httpMethod
         self.sessionID = sessionID
         self.isInitializationRequest = isInitializationRequest
+        self.isDiscoverRequest = isDiscoverRequest
+        self.isModernRequest = isModernRequest
+        self.bodyProtocolVersion = bodyProtocolVersion
         self.supportedProtocolVersions = supportedProtocolVersions
     }
 }
@@ -143,7 +165,7 @@ public struct ContentTypeValidator: HTTPRequestValidator {
         guard mainType == ContentType.json else {
             return .error(
                 statusCode: 415,
-                .invalidRequest(
+                .invalidParams(
                     "Unsupported Media Type: Content-Type must be application/json"
                 ),
                 sessionID: context.sessionID
@@ -156,38 +178,369 @@ public struct ContentTypeValidator: HTTPRequestValidator {
 
 // MARK: - Protocol Version Validator
 
-/// Validates the `MCP-Protocol-Version` header against supported versions.
+/// Validates protocol version from the `MCP-Protocol-Version` header and/or body `_meta`.
 ///
-/// Per spec:
-/// - If the header is absent, the server assumes the default negotiated version
-/// - If the header is present but unsupported, the server returns 400 Bad Request
-/// - Initialization requests are exempt (protocol version comes from the request body)
+/// Per MCP 2026-07-28:
+/// - Body `_meta` version is authoritative for modern requests
+/// - Header and body MUST agree when both are present
+/// - Unsupported versions return HTTP 400 with ``MCPError/unsupportedProtocolVersion(requested:supported:)`` (-32022)
+/// - Legacy: if neither is present, assume the negotiated version
+/// - Initialization requests are exempt (version is negotiated in the initialize body)
 public struct ProtocolVersionValidator: HTTPRequestValidator {
     public init() {}
 
     public func validate(_ request: HTTPRequest, context: HTTPValidationContext) -> HTTPResponse? {
-        // Skip for initialization requests (version is in the body, not the header)
+        // Skip for initialization requests (version is in the initialize body)
         guard !context.isInitializationRequest else { return nil }
 
-        // Skip for non-POST methods (GET/DELETE don't carry protocol version)
-        // Actually, per spec, all subsequent requests should include it
-        guard let version = request.header(HTTPHeaderName.protocolVersion) else {
-            // Per spec: if not received, assume default version
-            return nil
-        }
+        let headerVersion = request.header(HTTPHeaderName.protocolVersion)
+        let bodyVersion = context.bodyProtocolVersion
+        let supported = Array(Array(context.supportedProtocolVersions).sorted().reversed())
 
-        guard context.supportedProtocolVersions.contains(version) else {
-            let supported = context.supportedProtocolVersions.sorted().joined(separator: ", ")
+        if let bodyVersion, let headerVersion, headerVersion != bodyVersion {
+            // Both values may be supported — this is disagreement, not "unsupported".
             return .error(
                 statusCode: 400,
-                .invalidRequest(
-                    "Bad Request: Unsupported protocol version: \(version). Supported: \(supported)"
+                .serverError(
+                    code: -32020,
+                    message: "MCP-Protocol-Version header (\(headerVersion)) disagrees with params._meta.\(ProtocolMetaKey.protocolVersion) (\(bodyVersion))"
                 ),
                 sessionID: context.sessionID
             )
         }
 
+        // A modern header without body `_meta.protocolVersion` would otherwise be
+        // accepted here and then mishandled as legacy by the server. Only JSON-RPC
+        // *requests* need `_meta`; responses/notifications and GET/DELETE do not.
+        if context.httpMethod == "POST",
+            let headerVersion, Version.isModern(headerVersion), bodyVersion == nil,
+            Self.isJSONRPCRequest(request.body)
+        {
+            return .error(
+                statusCode: 400,
+                .invalidParams(
+                    "Modern MCP-Protocol-Version requires params._meta.\(ProtocolMetaKey.protocolVersion)"
+                ),
+                sessionID: context.sessionID
+            )
+        }
+
+        let version = bodyVersion ?? headerVersion
+        guard let version else {
+            // Modern-classified POSTs (discover/listen / modern body) require a version.
+            if context.httpMethod == "POST",
+                context.isModernRequest,
+                Self.isJSONRPCRequest(request.body)
+            {
+                return .error(
+                    statusCode: 400,
+                    .invalidParams(
+                        "Modern requests require params._meta.\(ProtocolMetaKey.protocolVersion)"
+                    ),
+                    sessionID: context.sessionID
+                )
+            }
+            // Legacy: if not received, assume default version.
+            return nil
+        }
+
+        guard context.supportedProtocolVersions.contains(version) else {
+            return .error(
+                statusCode: 400,
+                .unsupportedProtocolVersion(requested: version, supported: supported),
+                sessionID: context.sessionID
+            )
+        }
+
         return nil
+    }
+
+    private static func isJSONRPCRequest(_ body: Data?) -> Bool {
+        guard let body,
+            let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+            json["method"] is String,
+            json["id"] != nil
+        else { return false }
+        return true
+    }
+}
+
+/// Validates SEP-2243 routing headers on modern Streamable HTTP POST requests.
+public struct MCPRoutingHeaderValidator: HTTPRequestValidator {
+    public init() {}
+
+    public func validate(_ request: HTTPRequest, context: HTTPValidationContext) -> HTTPResponse? {
+        guard context.httpMethod == "POST", context.isModernRequest,
+            let body = request.body,
+            let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+            let method = json["method"] as? String
+        else { return nil }
+
+        guard let methodHeader = request.header(HTTPHeaderName.mcpMethod)?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !methodHeader.isEmpty
+        else {
+            return mismatch("Missing \(HTTPHeaderName.mcpMethod) header")
+        }
+        guard methodHeader == method else {
+            return mismatch("\(HTTPHeaderName.mcpMethod) header does not match the JSON-RPC method")
+        }
+
+        guard let params = json["params"] as? [String: Any],
+            let nameField = Self.nameField(for: method),
+            let expectedName = params[nameField] as? String
+        else { return nil }
+        guard let nameHeader = request.header(HTTPHeaderName.mcpName)?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !nameHeader.isEmpty
+        else {
+            return mismatch("Missing \(HTTPHeaderName.mcpName) header")
+        }
+        guard nameHeader == expectedName else {
+            return mismatch("\(HTTPHeaderName.mcpName) header does not match params.\(nameField)")
+        }
+        return nil
+    }
+
+    private static func nameField(for method: String) -> String? {
+        switch method {
+        case "tools/call", "prompts/get": return "name"
+        case "resources/read": return "uri"
+        case "tasks/get", "tasks/update", "tasks/cancel": return "taskId"
+        default: return nil
+        }
+    }
+
+    private func mismatch(_ message: String) -> HTTPResponse {
+        .error(statusCode: 400, .serverError(code: -32020, message: message))
+    }
+}
+
+/// Shared SEP-2243 helpers for schema-driven `Mcp-Param-*` headers.
+package struct MCPToolHeaderMapping {
+    package let path: [String]
+    package let suffix: String
+    package let requiredPath: [Bool]
+}
+
+/// Per-caller tool schema cache shared by HTTP server transport profiles.
+package struct MCPToolSchemaRegistry {
+    private static let maximumCallerCount = 256
+    private var schemasByCaller: [String: [String: Any]] = [:]
+    private var callerInsertionOrder: [String] = []
+    private var completeCallers = Set<String>()
+
+    package init() {}
+
+    package mutating func record(responseData: Data, for request: HTTPRequest) {
+        guard let schemas = MCPToolHeaderSupport.schemaMap(from: responseData) else { return }
+        let key = request.toolSchemaCacheKey
+        let hadEntry = schemasByCaller[key] != nil
+        let isToolsListRequest = Self.isToolsListRequest(request)
+        let hasNextCursor = Self.hasNextCursor(in: responseData)
+        if schemasByCaller[key] == nil {
+            if callerInsertionOrder.count == Self.maximumCallerCount {
+                let evictedKey = callerInsertionOrder.removeFirst()
+                schemasByCaller.removeValue(forKey: evictedKey)
+                completeCallers.remove(evictedKey)
+            }
+            callerInsertionOrder.append(key)
+            schemasByCaller[key] = schemas
+        } else if request.startsToolListAtFirstPage {
+            schemasByCaller[key] = schemas
+        } else {
+            schemasByCaller[key, default: [:]].merge(schemas) { _, new in new }
+        }
+
+        if request.startsToolListAtFirstPage {
+            if hasNextCursor {
+                completeCallers.remove(key)
+            } else {
+                completeCallers.insert(key)
+            }
+        } else if isToolsListRequest && hasNextCursor {
+            completeCallers.remove(key)
+        } else if isToolsListRequest {
+            if hadEntry { completeCallers.insert(key) }
+        } else {
+            // The server-side provider returns one response containing every page.
+            completeCallers.insert(key)
+        }
+    }
+
+    package func schemas(for request: HTTPRequest) -> [String: Any] {
+        schemasByCaller[request.toolSchemaCacheKey] ?? [:]
+    }
+
+    package func isComplete(for request: HTTPRequest) -> Bool {
+        completeCallers.contains(request.toolSchemaCacheKey)
+    }
+
+    package mutating func invalidateAll() {
+        schemasByCaller.removeAll(keepingCapacity: true)
+        callerInsertionOrder.removeAll(keepingCapacity: true)
+        completeCallers.removeAll(keepingCapacity: true)
+    }
+
+    private static func isToolsListRequest(_ request: HTTPRequest) -> Bool {
+        guard let body = request.body,
+            let root = try? JSONSerialization.jsonObject(with: body) as? [String: Any]
+        else { return false }
+        return root["method"] as? String == ListTools.name
+    }
+
+    private static func hasNextCursor(in responseData: Data) -> Bool {
+        guard let root = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any],
+            let result = root["result"] as? [String: Any]
+        else { return false }
+        return result["nextCursor"] is String
+    }
+}
+
+package enum MCPToolHeaderSupport {
+    package static func toolName(in body: Data) -> String? {
+        guard let root = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+            let params = root["params"] as? [String: Any]
+        else { return nil }
+        return params["name"] as? String
+    }
+
+    package static func schemaMap(from responseData: Data) -> [String: Any]? {
+        guard let root = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any],
+            let result = root["result"] as? [String: Any],
+            let tools = result["tools"] as? [[String: Any]]
+        else { return nil }
+        return tools.reduce(into: [String: Any]()) { result, tool in
+            guard let name = tool["name"] as? String,
+                let schema = tool["inputSchema"], result[name] == nil
+            else { return }
+            result[name] = schema
+        }
+    }
+
+    package static func validateCall(
+        body: Data, request: HTTPRequest, schemas: [String: Any]
+    ) -> String? {
+        guard let root = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+            let params = root["params"] as? [String: Any],
+            let name = params["name"] as? String,
+            let schema = schemas[name] as? [String: Any]
+        else { return nil }
+        let args = params["arguments"] as? [String: Any] ?? [:]
+        guard let mappings = validatedMappings(in: schema) else {
+            return "Tool \(name) declares invalid x-mcp-header annotations"
+        }
+        for mapping in mappings {
+            let value = lookupValue(at: mapping.path, in: args)
+            let parameter = mapping.path.joined(separator: ".")
+            let headerName = "Mcp-Param-\(mapping.suffix)"
+            let headerValue = request.header(headerName)
+            if value == nil || value is NSNull {
+                if headerValue != nil {
+                    return "\(headerName) must be omitted when \(parameter) is null or omitted"
+                }
+                let parentExists = lookupValue(at: Array(mapping.path.dropLast()), in: args) != nil
+                if mapping.requiredPath.allSatisfy({ $0 })
+                    || (parentExists && mapping.requiredPath.last == true)
+                { return "Required parameter \(parameter) is missing" }
+                continue
+            }
+            guard let expected = primitiveString(value!), let headerValue else {
+                return "Missing or invalid \(headerName) header"
+            }
+            guard let decoded = decodeHeaderValue(headerValue), decoded == expected else {
+                return "\(headerName) does not match params.arguments.\(parameter)"
+            }
+        }
+        return nil
+    }
+
+    package static func validatedMappings(in schema: [String: Any]) -> [MCPToolHeaderMapping]? {
+        var suffixes = Set<String>()
+        func collect(_ schema: [String: Any], path: [String], requiredPath: [Bool]) -> [MCPToolHeaderMapping]? {
+            guard let properties = schema["properties"] as? [String: Any] else { return [] }
+            let required = Set(schema["required"] as? [String] ?? [])
+            var mappings: [MCPToolHeaderMapping] = []
+            for (name, raw) in properties {
+                guard let definition = raw as? [String: Any] else { continue }
+                let propertyPath = path + [name]
+                let propertyRequired = required.contains(name)
+                if let annotation = definition["x-mcp-header"] {
+                    guard let suffix = annotation as? String,
+                        isValidSuffix(suffix),
+                        suffixes.insert(suffix.lowercased()).inserted,
+                        let type = definition["type"] as? String,
+                        ["string", "integer", "boolean"].contains(type)
+                    else { return nil }
+                    mappings.append(MCPToolHeaderMapping(
+                        path: propertyPath,
+                        suffix: suffix,
+                        requiredPath: requiredPath + [propertyRequired]
+                    ))
+                } else if let nestedMappings = collect(
+                    definition,
+                    path: propertyPath,
+                    requiredPath: requiredPath + [propertyRequired]
+                ) {
+                    mappings.append(contentsOf: nestedMappings)
+                } else {
+                    return nil
+                }
+            }
+            return mappings
+        }
+        return collect(schema, path: [], requiredPath: [])
+    }
+
+    package static func lookupValue(at path: [String], in root: [String: Any]) -> Any? {
+        var current: Any = root
+        for component in path {
+            guard let object = current as? [String: Any], let next = object[component] else { return nil }
+            current = next
+        }
+        return current
+    }
+
+    package static func primitiveString(_ value: Any) -> String? {
+        if let value = value as? String { return value }
+        if let value = value as? NSNumber {
+            if CFGetTypeID(value) == CFBooleanGetTypeID() { return value.boolValue ? "true" : "false" }
+            let number = value.doubleValue
+            guard number.isFinite, number.rounded() == number, abs(number) <= 9_007_199_254_740_991 else {
+                return nil
+            }
+            return value.stringValue
+        }
+        return nil
+    }
+
+    package static func encodeHeaderValue(_ value: String) -> String {
+        let bytes = Array(value.utf8)
+        let safe = bytes.allSatisfy { (0x20...0x7e).contains($0) }
+            && value == value.trimmingCharacters(in: .whitespacesAndNewlines)
+            && !hasBase64Sentinel(value)
+        guard !safe else { return value }
+        return "=?base64?\(Data(bytes).base64EncodedString())?="
+    }
+
+    package static func decodeHeaderValue(_ value: String) -> String? {
+        guard hasBase64Sentinel(value) else { return value }
+        let encoded = String(value.dropFirst(9).dropLast(2))
+        guard let data = Data(base64Encoded: encoded, options: []),
+            data.base64EncodedString() == encoded,
+            let decoded = String(data: data, encoding: .utf8)
+        else { return nil }
+        return decoded
+    }
+
+    private static func hasBase64Sentinel(_ value: String) -> Bool {
+        value.hasPrefix("=?base64?") && value.hasSuffix("?=")
+    }
+
+    package static func isValidSuffix(_ value: String) -> Bool {
+        let punctuation = Set("!#$%&'*+-.^_`|~".utf8)
+        return !value.isEmpty && value.utf8.allSatisfy {
+            (0x30...0x39).contains($0) || (0x41...0x5a).contains($0)
+                || (0x61...0x7a).contains($0) || punctuation.contains($0)
+        }
     }
 }
 
@@ -202,8 +555,8 @@ public struct SessionValidator: HTTPRequestValidator {
     public init() {}
 
     public func validate(_ request: HTTPRequest, context: HTTPValidationContext) -> HTTPResponse? {
-        // Skip validation for initialization requests
-        guard !context.isInitializationRequest else { return nil }
+        // Skip validation for initialize, discover, and modern per-request profile.
+        guard !context.isSessionExempt else { return nil }
 
         // Non-initialization requests require an established session.
         guard let expectedSessionID = context.sessionID else {

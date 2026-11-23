@@ -108,6 +108,7 @@ public enum OAuthAuthorizationError: LocalizedError {
 
     /// The authorization response redirect URL is missing the `code` parameter.
     case authorizationResponseMissingCode
+    case authorizationResponseMissingIssuer
 
     /// The authorization server metadata does not include `code_challenge_methods_supported`,
     /// which is required for PKCE (RFC 7636).
@@ -185,6 +186,8 @@ public enum OAuthAuthorizationError: LocalizedError {
             return "Authorization response state mismatch. Expected \(expected), got \(actual)"
         case .authorizationResponseMissingCode:
             return "Authorization response is missing the authorization code"
+        case .authorizationResponseMissingIssuer:
+            return "Authorization response is missing the required issuer (iss) parameter"
         case .pkceCodeChallengeMethodsMissing:
             return
                 "Authorization server metadata must include code_challenge_methods_supported for PKCE"

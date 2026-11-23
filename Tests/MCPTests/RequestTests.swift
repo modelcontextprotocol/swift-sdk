@@ -202,7 +202,7 @@ struct RequestTests {
             """
         let decoded = try decoder.decode(
             Request<Initialize>.self, from: emptyParams.data(using: .utf8)!)
-        #expect(decoded.params.protocolVersion == Version.latest)
+        #expect(decoded.params.protocolVersion == Version.latestLegacy)
         #expect(decoded.params.clientInfo.name == "unknown")
     }
 

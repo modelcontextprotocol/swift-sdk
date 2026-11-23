@@ -25,7 +25,7 @@ struct ServerTests {
         try await transport.queue(
             request: Initialize.request(
                 .init(
-                    protocolVersion: Version.latest,
+                    protocolVersion: Version.latestLegacy,
                     capabilities: .init(),
                     clientInfo: .init(name: "TestClient", version: "1.0")
                 )
@@ -132,7 +132,7 @@ struct ServerTests {
         try await transport.queue(
             request: Initialize.request(
                 .init(
-                    protocolVersion: Version.latest,
+                    protocolVersion: Version.latestLegacy,
                     capabilities: .init(),
                     clientInfo: .init(name: "TestClient", version: "1.0")
                 )
@@ -172,7 +172,7 @@ struct ServerTests {
         try await transport.queue(
             request: Initialize.request(
                 .init(
-                    protocolVersion: Version.latest,
+                    protocolVersion: Version.latestLegacy,
                     capabilities: .init(),
                     clientInfo: .init(name: "BlockedClient", version: "1.0")
                 )
@@ -223,7 +223,7 @@ struct ServerTests {
         // Initialize the server first
         let initRequest = Initialize.request(
             .init(
-                protocolVersion: Version.latest,
+                protocolVersion: Version.latestLegacy,
                 capabilities: .init(),
                 clientInfo: .init(name: "TestClient", version: "1.0")
             )

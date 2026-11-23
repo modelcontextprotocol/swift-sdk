@@ -183,13 +183,14 @@ import Testing
                 registrationEndpoint: nil,
                 codeChallengeMethodsSupported: ["S256"],
                 tokenEndpointAuthMethodsSupported: nil,
-                clientIDMetadataDocumentSupported: nil)
+                clientIDMetadataDocumentSupported: nil,
+                authorizationResponseIssParameterSupported: nil)
             #expect(server == expectedServer)
             #expect(metadata == expectedMetadata)
         }
 
-        @Test("Uses metadata issuer as server identity when it differs from candidate URL")
-        func testFetchAuthorizationServerMetadataUsesMetadataIssuer() async throws {
+        @Test("Rejects authorization metadata whose issuer differs from its discovery URL")
+        func testFetchAuthorizationServerMetadataRejectsIssuerMismatch() async throws {
             let metadataIssuer = "https://other.example.com"
             let body = try makeASMetadataBody(issuer: metadataIssuer)
             let (session, key) = makeIsolatedSession()
@@ -200,11 +201,34 @@ import Testing
                 return (response, body)
             }
 
-            let (server, _) = try await makeClient().fetchAuthorizationServerMetadata(
-                candidates: [URL(string: "https://auth.example.com")!],
-                session: session
-            )
-            #expect(server == URL(string: metadataIssuer)!)
+            await #expect(throws: OAuthAuthorizationError.self) {
+                try await makeClient().fetchAuthorizationServerMetadata(
+                    candidates: [URL(string: "https://auth.example.com")!],
+                    session: session
+                )
+            }
+        }
+
+        @Test("Rejects authorization metadata with no issuer")
+        func testFetchAuthorizationServerMetadataRejectsMissingIssuer() async throws {
+            let body = try JSONSerialization.data(withJSONObject: [
+                "token_endpoint": "https://auth.example.com/token",
+                "code_challenge_methods_supported": ["S256"],
+            ])
+            let (session, key) = makeIsolatedSession()
+            await IsolatedMockURLProtocol.setHandler(key: key) { _ in
+                let response = HTTPURLResponse(
+                    url: URL(string: "https://auth.example.com")!,
+                    statusCode: 200, httpVersion: nil, headerFields: nil)!
+                return (response, body)
+            }
+
+            await #expect(throws: OAuthAuthorizationError.self) {
+                try await makeClient().fetchAuthorizationServerMetadata(
+                    candidates: [URL(string: "https://auth.example.com")!],
+                    session: session
+                )
+            }
         }
 
         @Test("Skips private IP candidates without making HTTP calls")
