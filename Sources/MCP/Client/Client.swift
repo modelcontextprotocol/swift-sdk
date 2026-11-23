@@ -514,7 +514,6 @@ public actor Client {
             }
         }
         let requestData = try encoder.encode(request)
-        let http = headers.isEmpty ? nil : connection as? HTTPClientTransport
         let firstToolPage = (request.params as? ListTools.Parameters).map { $0.cursor == nil } ?? false
 
         let requestTask = Task<M.Result, Error> {
@@ -529,8 +528,8 @@ public actor Client {
 
                     // Send the request data
                     do {
-                        if let http {
-                            try await http.send(requestData, additionalHeaders: headers)
+                        if !headers.isEmpty {
+                            try await connection.send(requestData, additionalHeaders: headers)
                         } else {
                             try await connection.send(requestData)
                         }

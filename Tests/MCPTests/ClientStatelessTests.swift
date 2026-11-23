@@ -1,4 +1,5 @@
 @preconcurrency import Foundation
+import Logging
 import Testing
 
 @testable import MCP
@@ -165,6 +166,83 @@ struct ClientToolHeaderCacheTests {
         await client.disconnect()
         #expect(await client.toolHeaderParameters.isEmpty)
         await server.stop()
+    }
+}
+
+/// A transport that wraps another one and records the headers the client
+/// passes to `send(_:additionalHeaders:)`, by method.
+private actor HeaderForwardingTransport: Transport {
+    nonisolated let logger = Logger(label: "test.header-forwarding")
+    private let base: any Transport
+    private(set) var headers: [String: [String: String]] = [:]
+
+    init(_ base: any Transport) {
+        self.base = base
+    }
+
+    func connect() async throws { try await base.connect() }
+    func disconnect() async { await base.disconnect() }
+    func send(_ data: Data) async throws { try await base.send(data) }
+
+    func send(_ data: Data, additionalHeaders: [String: String]) async throws {
+        let method = try JSONDecoder().decode(Value.self, from: data).objectValue?["method"]?.stringValue
+        headers[method ?? ""] = additionalHeaders
+        try await base.send(data, additionalHeaders: additionalHeaders)
+    }
+
+    func receive() -> AsyncThrowingStream<Data, Swift.Error> {
+        let base = self.base
+        return AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    for try await data in await base.receive() { continuation.yield(data) }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+}
+
+@Suite("Client request headers on custom transports")
+struct ClientCustomTransportHeaderTests {
+    @Test("A wrapping transport receives the Mcp-Param headers of a stateless tools/call")
+    func wrapperReceivesParameterHeaders() async throws {
+        let server = Server(
+            name: "headers", version: "1", capabilities: .init(tools: .init()),
+            configuration: .init(protocolVersions: Version.stateless + Version.handshake))
+        await server.withMethodHandler(ListTools.self) { _ in
+            .init(tools: [
+                Tool(
+                    name: "route", description: nil,
+                    inputSchema: [
+                        "type": "object",
+                        "properties": [
+                            "region": ["type": "string", "x-mcp-header": "Region"],
+                            "count": ["type": "integer", "x-mcp-header": "Count"],
+                            "note": ["type": "string"],
+                        ],
+                    ])
+            ])
+        }
+        await server.withMethodHandler(CallTool.self) { _ in .init(content: []) }
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+        try await server.start(transport: serverTransport)
+        let transport = HeaderForwardingTransport(clientTransport)
+        let client = Client(name: "probe", version: "1.0", configuration: .init(protocolMode: .automatic))
+        try await client.connect(transport: transport)
+        #expect(await client.isStateless)
+
+        _ = try await client.listTools()
+        _ = try await client.callTool(name: "route", arguments: ["region": "Zürich", "count": 3, "note": "n"])
+        await client.disconnect()
+        await server.stop()
+
+        let call = try #require(await transport.headers["tools/call"])
+        #expect(call == ["Mcp-Param-Region": "=?base64?WsO8cmljaA==?=", "Mcp-Param-Count": "3"])
+        #expect(await transport.headers["tools/list"] == nil)
     }
 }
 
