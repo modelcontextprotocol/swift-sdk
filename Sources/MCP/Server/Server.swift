@@ -626,12 +626,26 @@ public actor Server {
                 do {
                     let verified = try boundary.unseal(
                         token, method: M.name, binding: binding, context: context)
-                    if let consume = boundary.protection.consume,
-                        await !consume(verified.tokenID, verified.expiry)
-                    {
-                        throw InvalidRequestState("replayed")
+                    if let consume = boundary.protection.consume {
+                        let fresh: Bool
+                        do {
+                            fresh = try await consume(verified.tokenID, verified.expiry)
+                        } catch let error as CancellationError {
+                            throw error
+                        } catch {
+                            // Not a replay: the check could not be made.
+                            await logger?.error(
+                                "requestState replay check failed",
+                                metadata: ["method": "\(M.name)", "error": "\(error)"])
+                            throw MCPError.internalError("Could not check requestState")
+                        }
+                        if !fresh { throw InvalidRequestState("replayed") }
                     }
                     params = params.retrying(inputResponses: params.inputResponses, requestState: verified.state)
+                } catch let error as MCPError {
+                    throw error
+                } catch let error as CancellationError {
+                    throw error
                 } catch {
                     await logger?.warning(
                         "requestState rejected",
@@ -656,7 +670,8 @@ public actor Server {
                     "Server bug: result has both content and inputRequests or requestState")
             }
             guard asking.isInputRequired else { return result }
-            if asking.inputRequests == nil, asking.requestState == nil {
+            // An empty `inputRequests` asks for nothing, so the retry would be the same request.
+            if asking.inputRequests?.isEmpty != false, asking.requestState == nil {
                 throw MCPError.internalError("Server bug: input-required result without inputRequests or requestState")
             }
 

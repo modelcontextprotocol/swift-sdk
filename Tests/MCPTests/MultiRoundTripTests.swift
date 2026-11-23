@@ -40,6 +40,8 @@ private func makeRoundTripServer(
             return result
         case "forever":
             return .inputRequired(requestState: "again")
+        case "empty":
+            return .inputRequired([:])
         default:
             throw MCPError.invalidParams("Unknown tool \(params.name)")
         }
@@ -380,6 +382,23 @@ struct MultiRoundTripTests {
         }
     }
 
+    @Test(
+        "An input-required result with nothing to answer is a server error",
+        arguments: [Client.ProtocolMode.automatic, .handshake])
+    func testEmptyInputRequests(mode: Client.ProtocolMode) async throws {
+        let calls = Counter()
+        let server = await makeRoundTripServer(calls: calls)
+        let client = try await connect(server, mode: mode) { await answerEverything($0) }
+        defer { Task { await client.disconnect(); await server.stop() } }
+        await #expect {
+            _ = try await client.callTool(name: "empty")
+        } throws: { error in
+            (error as? MCPError)?.code == -32603
+        }
+        // Refused at once: no round is retried.
+        #expect(await calls.value == 1)
+    }
+
     @Test("The client gives up after the configured rounds")
     func testMaxRounds() async throws {
         let calls = Counter()
@@ -463,6 +482,27 @@ struct MultiRoundTripTests {
             ).value
         } throws: { error in
             (error as? MCPError)?.code == -32602
+        }
+    }
+
+    @Test("A consume hook that throws fails the round with -32603, not as a replay")
+    func testConsumeFailure() async throws {
+        struct StoreDown: Error {}
+        let protection = try RequestStateProtection(
+            keys: [Data(repeating: 7, count: 32)], consume: { _, _ in throw StoreDown() })
+        let server = await makeRoundTripServer(protection: protection)
+        let client = try await connect(server, multiRoundTrip: .init(isEnabled: false))
+        defer { Task { await client.disconnect(); await server.stop() } }
+
+        let first = try await client.send(CallTool.request(.init(name: "confirm"))).value
+        let state = try #require(first.requestState)
+        let answer: [String: InputResponse] = ["confirm": .elicitation(.init(action: .accept))]
+        await #expect {
+            _ = try await client.send(
+                CallTool.request(.init(name: "confirm", inputResponses: answer, requestState: state))
+            ).value
+        } throws: { error in
+            (error as? MCPError)?.code == -32603
         }
     }
 

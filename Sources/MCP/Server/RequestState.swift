@@ -145,21 +145,25 @@ public struct RequestStateProtection: Sendable {
     /// The audience claim. `nil` uses the server name.
     public var audience: String?
     /// The identity to bind state to, such as the authenticated user.
-    /// State sealed for one principal fails for another. `nil` binds nothing.
+    /// State sealed for one principal fails for another. `nil` binds nothing:
+    /// on a server with several users, a client that sends the same request
+    /// and arguments can echo another user's state until it expires.
     public var principal: (@Sendable (Server.HandlerContext) -> String?)?
     /// Records a verified token's unique id until its expiry and returns
     /// whether it was new. `false` rejects the token as replayed. Back it
     /// with a store shared by every instance that holds the keys. A client
     /// that retries a round after a lost response then has to start the
-    /// request again. `nil` accepts replays until expiry.
-    public var consume: (@Sendable (_ tokenID: String, _ expiry: Date) async -> Bool)?
+    /// request again. A throw, such as a store that cannot be reached, fails
+    /// the round with -32603 instead of reporting a replay. `nil` accepts
+    /// replays until expiry.
+    public var consume: (@Sendable (_ tokenID: String, _ expiry: Date) async throws -> Bool)?
 
     public init(
         codec: any RequestStateCodec,
         timeToLive: Duration = .seconds(600),
         audience: String? = nil,
         principal: (@Sendable (Server.HandlerContext) -> String?)? = nil,
-        consume: (@Sendable (_ tokenID: String, _ expiry: Date) async -> Bool)? = nil
+        consume: (@Sendable (_ tokenID: String, _ expiry: Date) async throws -> Bool)? = nil
     ) {
         self.codec = codec
         self.timeToLive = timeToLive
@@ -176,7 +180,7 @@ public struct RequestStateProtection: Sendable {
         timeToLive: Duration = .seconds(600),
         audience: String? = nil,
         principal: (@Sendable (Server.HandlerContext) -> String?)? = nil,
-        consume: (@Sendable (_ tokenID: String, _ expiry: Date) async -> Bool)? = nil
+        consume: (@Sendable (_ tokenID: String, _ expiry: Date) async throws -> Bool)? = nil
     ) throws {
         self.init(
             codec: try AESGCMRequestStateCodec(keys: keys), timeToLive: timeToLive, audience: audience,
