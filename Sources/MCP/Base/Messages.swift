@@ -186,10 +186,15 @@ final class TypedRequestHandler<M: Method>: RequestHandlerBox, @unchecked Sendab
 
         // Create a concrete request from the type-erased one
         let data = try encoder.encode(request)
-        let request = try decoder.decode(Request<M>.self, from: data)
+        let typedRequest: Request<M>
+        do {
+            typedRequest = try decoder.decode(Request<M>.self, from: data)
+        } catch is DecodingError {
+            throw MCPError.invalidParams("Invalid parameters for \(request.method)")
+        }
 
         // Handle with concrete type
-        let response = try await _handle(request)
+        let response = try await _handle(typedRequest)
 
         // Convert result to AnyMethod response
         switch response.result {

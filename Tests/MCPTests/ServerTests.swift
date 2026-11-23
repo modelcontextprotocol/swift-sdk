@@ -5,6 +5,32 @@ import Testing
 
 @Suite("Server Tests")
 struct ServerTests {
+    @Test("Invalid tool call parameters return a JSON-RPC invalid params error", arguments: [
+        #"{}"#, #"{"name":"echo","arguments":[]}"#,
+    ])
+    func testInvalidToolCallParameters(_ params: String) async throws {
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+        let server = Server(name: "TestServer", version: "1.0", capabilities: .init(tools: .init()))
+        await server.withMethodHandler(CallTool.self) { _ in
+            Issue.record("Malformed parameters reached the tool handler")
+            return .init(content: [])
+        }
+
+        try await server.start(transport: serverTransport)
+        try await clientTransport.connect()
+        var replies = await clientTransport.receive().makeAsyncIterator()
+        let request = #"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":\#(params)}"#
+        try await clientTransport.send(Data(request.utf8))
+
+        let data = try #require(try await replies.next())
+        let response = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(response["id"] as? Int == 7)
+        #expect((response["error"] as? [String: Any])?["code"] as? Int == -32602)
+
+        await clientTransport.disconnect()
+        await server.stop()
+    }
+
     @Test("Start and stop server")
     func testServerStartAndStop() async throws {
         let transport = MockTransport()
