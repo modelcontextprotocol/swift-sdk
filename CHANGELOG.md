@@ -63,6 +63,10 @@ Behavior that can break working code ([docs/migration.md](docs/migration.md#beha
   `BearerTokenValidationResult.tokenInfo`, and the `HTTPClientAuthorizer` requirement
   `handleChallenge(statusCode:headers:endpoint:operationKey:sentAuthorization:session:)`, with a
   default, which receives the `Authorization` header of the challenged request.
+- The `Transport` requirement `send(_:additionalHeaders:)`, with a default that ignores the
+  headers, through which the client hands the `Mcp-Param-*` headers of a `tools/call` to any
+  transport. A custom Streamable HTTP transport sends them on the request's POST, and a wrapping
+  transport forwards them; `HTTPClientTransport` implements it.
 - From `main` after 0.12.1: `Server.init` takes `description`, `websiteUrl` and `icons`, sent in
   `serverInfo` and, at 2026-07-28, in the `_meta` server info of every result, with `data:` icon
   URLs as written (#258); `Value.numberValue` reads `.int` and `.double` as `Double` (#226); `Value.init(_:)`
