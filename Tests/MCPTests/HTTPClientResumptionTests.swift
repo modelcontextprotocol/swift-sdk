@@ -165,6 +165,44 @@ import Testing
             await transport.disconnect()
         }
 
+        @Test("Resumptions that deliver messages do not use up the most resumptions", .timeLimit(.minutes(1)))
+        func resumesPastMaxWhileMessagesArrive() async throws {
+            let (transport, key) = makeTransport()
+            let requests = Requests()
+            let max = HTTPClientTransport.maxStreamResumptions
+            await IsolatedMockURLProtocol.setHandler(key: key) { [log, response] request in
+                await requests.append(request)
+                if request.httpMethod == "POST" { return sse("id: e0\nretry: 10\ndata: \n\n") }
+                // Each stream delivers a notification and ends, as a polling server's do.
+                let gets = await requests.gets.count
+                if gets <= max + 1 { return sse("id: g\(gets)\nretry: 10\ndata: \(log)\n\n") }
+                return sse("data: \(response)\n\n")
+            }
+            try await transport.connect()
+            try await transport.send(request)
+            let delivered = try await messages(transport, max + 2)
+            #expect(delivered.last == response)
+            #expect(await requests.gets.count == max + 2)
+            await transport.disconnect()
+        }
+
+        @Test("A resumption GET that fails to connect is retried")
+        func resumesAfterFailedGET() async throws {
+            let (transport, key) = makeTransport()
+            let requests = Requests()
+            await IsolatedMockURLProtocol.setHandler(key: key) { [response] request in
+                await requests.append(request)
+                if request.httpMethod == "POST" { return sse("id: e1\nretry: 10\ndata: \n\n") }
+                if await requests.gets.count == 1 { throw URLError(.networkConnectionLost) }
+                return sse("data: \(response)\n\n")
+            }
+            try await transport.connect()
+            try await transport.send(request)
+            #expect(try await messages(transport, 1) == [response])
+            #expect(await requests.gets.map { $0.value(forHTTPHeaderField: "Last-Event-ID") } == ["e1", "e1"])
+            await transport.disconnect()
+        }
+
         @Test("A stream cut in the middle of an event resumes from the event before it")
         func resumesBeforeCutEvent() async throws {
             let (transport, key) = makeTransport()

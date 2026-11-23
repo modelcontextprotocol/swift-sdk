@@ -1020,7 +1020,8 @@ public actor HTTPClientTransport: Transport {
         }
     }
 
-    /// The most GET resumptions of one POST stream before its request fails.
+    /// The most GET resumptions of one POST stream in a row without a
+    /// message before its request fails.
     static let maxStreamResumptions = 10
 
     /// Resumes a POST stream that ended before its response (2025-11-25
@@ -1048,8 +1049,17 @@ public actor HTTPClientTransport: Transport {
             logger.debug(
                 "Resuming a response stream", metadata: ["lastEventID": "\(resumeFrom)", "attempt": "\(attempts)"])
 
-            let (stream, httpResponse) = try await openEventStream(
-                lastEventID: resumeFrom, protocolVersion: version)
+            let stream: ResponseBody
+            let httpResponse: HTTPURLResponse
+            do {
+                (stream, httpResponse) = try await openEventStream(lastEventID: resumeFrom, protocolVersion: version)
+            } catch where !Task.isCancelled && !(error is MCPError) && !(error is CancellationError) {
+                // A dropped connection is when resuming matters. Refusals,
+                // authorization failures and a closed transport are MCPErrors
+                // and still fail the request.
+                logger.debug("Resuming a response stream failed", metadata: ["error": "\(error)"])
+                continue
+            }
             guard httpResponse.statusCode == 200 else {
                 stream.cancel()
                 logger.warning(
@@ -1058,11 +1068,13 @@ public actor HTTPClientTransport: Transport {
                 break
             }
             var responded = false
+            var delivered = false
             do {
                 try await processSSE(
                     stream, until: id,
                     onEventID: { lastEventID = $0.isEmpty ? nil : $0 },
                     onRetry: { retry = Self.clampedRetryInterval($0) },
+                    onMessage: { delivered = true },
                     onResponse: { if $0 == id { responded = true } })
             } catch {
                 if Task.isCancelled { return }
@@ -1071,6 +1083,10 @@ public actor HTTPClientTransport: Transport {
                 logger.debug("Resumed response stream failed", metadata: ["error": "\(error)"])
             }
             if responded { return }
+            // A server that polls (SEP-1699) closes streams that delivered
+            // messages: only resumptions in a row without one count. A new
+            // event ID alone is no progress, as each resumption is primed.
+            if delivered { attempts = 0 }
         }
         // A cancelled read can end the last attempt's stream without an
         // error: a cancelled request or a closed transport is no loss.
@@ -1109,7 +1125,8 @@ public actor HTTPClientTransport: Transport {
 
     /// Reads SSE events and yields their messages. `onEventID` and
     /// `onRetry` see each event's `id` (empty when the event resets it) and
-    /// `retry`, `onResponse` the ID of each response. With `until`, reading
+    /// `retry`, `onMessage` each message, `onResponse` the ID of each
+    /// response. With `until`, reading
     /// stops once that response is delivered. Messages are only parsed for
     /// their ID when `until` or `onResponse` needs it. Returns whether any
     /// event arrived. A line or event over the parser's limits throws
@@ -1120,6 +1137,7 @@ public actor HTTPClientTransport: Transport {
         until responseID: String? = nil,
         onEventID: (String) -> Void = { _ in },
         onRetry: (Int) -> Void = { _ in },
+        onMessage: () -> Void = {},
         onResponse: ((String) -> Void)? = nil
     ) async throws -> Bool {
         logger.debug("📥 Starting SSE event processing")
@@ -1156,6 +1174,7 @@ public actor HTTPClientTransport: Transport {
 
                 if !event.data.isEmpty, let data = event.data.data(using: .utf8) {
                     hadDataEvent = true
+                    onMessage()
                     var delivered: String?
                     if responseID != nil || onResponse != nil,
                         case .response(let id) = JSONRPCMessageKind(data: data)
