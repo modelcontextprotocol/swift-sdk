@@ -826,4 +826,17 @@ struct ClientUndecodableResponseTests {
         _ = try await context.value
         await client.disconnect()
     }
+
+    @Test("A malformed message with a method reusing a pending id does not fail the pending request")
+    func malformedRequestReusingPendingID() async throws {
+        let transport = MockTransport()
+        let client = try await connect(transport)
+        let request = Ping.request()
+        let context = try await client.send(request)
+        await transport.queue(
+            data: Data(#"{"jsonrpc":"1.0","id":"\#(request.id)","method":"ping"}"#.utf8))
+        try await transport.queue(response: Ping.response(id: request.id))
+        _ = try await context.value
+        await client.disconnect()
+    }
 }

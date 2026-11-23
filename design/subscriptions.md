@@ -76,7 +76,8 @@ Stream end:
 
 | Trigger | Path | Client sees |
 |---|---|---|
-| `server.closeSubscriptions()` or `server.stop()` | event streams finish; handler returns; `handleRequest` sends the result, then `notifications/cancelled` for the listen id except on `StatelessHTTPServerTransport` | the result, then (stdio and other message streams) the cancellation; `Subscription.finished()` returns |
+| `server.closeSubscriptions()` | event streams finish; handler returns; `handleRequest` sends the result, then `notifications/cancelled` for the listen id except on `StatelessHTTPServerTransport` | the result, then (stdio and other message streams) the cancellation; `Subscription.finished()` returns |
+| `server.stop()` | event streams finish, handler tasks are cancelled, and the transport disconnects | no result (connection closes) |
 | `notifications/cancelled` for the listen id | handler task cancelled; `for await` ends; `checkCancellation` throws | no result |
 | HTTP client closes the response | `StatelessHTTPServerTransport` SSE `onTermination(.cancelled)` → `abandon` yields `notifications/cancelled` for the internal id | stream closed by the client itself |
 

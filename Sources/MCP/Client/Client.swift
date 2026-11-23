@@ -791,9 +791,9 @@ public actor Client {
                             }
                         } else {
                             // An answer that does not decode (an error whose
-                            // code is a string, both `result` and `error`, no
-                            // `jsonrpc`) fails the request it names, which
-                            // would otherwise wait for its timeout.
+                            // code is missing or a string, neither `result`
+                            // nor `error`, no `jsonrpc`) fails the request it
+                            // names, which would otherwise wait for its timeout.
                             if let id = Self.responseID(of: data), pendingRequests[id] != nil {
                                 await deliver(
                                     AnyMethod.response(

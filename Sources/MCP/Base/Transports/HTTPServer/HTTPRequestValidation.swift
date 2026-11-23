@@ -196,15 +196,17 @@ public struct ProtocolVersionValidator: HTTPRequestValidator {
         // field lines or joined with commas (RFC 9110 §5.3); at revisions
         // that define HeaderMismatch it is a header failure, not an
         // unsupported version.
-        let copies = request.headerValues(HTTPHeaderName.protocolVersion)
-            .flatMap { $0.split(separator: ",") }
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-        if copies.count > 1, copies.contains(where: { Version.profile(for: $0).usesStandardHeaders }) {
-            return .error(
-                statusCode: 400,
-                .headerMismatch("\(HTTPHeaderName.protocolVersion) appears more than once"),
-                sessionID: context.sessionID
-            )
+        if request.isRepeated(HTTPHeaderName.protocolVersion) {
+            let versions = request.headerValues(HTTPHeaderName.protocolVersion)
+                .flatMap { $0.split(separator: ",", omittingEmptySubsequences: false) }
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+            if versions.contains(where: { Version.profile(for: $0).usesStandardHeaders }) {
+                return .error(
+                    statusCode: 400,
+                    .headerMismatch("\(HTTPHeaderName.protocolVersion) appears more than once"),
+                    sessionID: context.sessionID
+                )
+            }
         }
 
         guard context.supportedProtocolVersions.contains(version) else {

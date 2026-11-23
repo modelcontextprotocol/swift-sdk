@@ -222,37 +222,6 @@ extension Request {
 /// A type-erased request for request/response handling
 typealias AnyRequest = Request<AnyMethod>
 
-/// A message with a string `method` that is not a valid request or
-/// notification: its `id` is not a string or an integer, or its `jsonrpc`
-/// is not `"2.0"`. `reason` is `nil` for any other message.
-struct InvalidRequestShape: Decodable {
-    /// The id to answer with, when it is a string or an integer.
-    let id: ID?
-    /// Why the message is invalid, for the -32600 answer.
-    let reason: String?
-
-    private enum CodingKeys: String, CodingKey {
-        case jsonrpc, id, method
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        // `ID` reads `null` as `""`.
-        let isNull = (try? container.decodeNil(forKey: .id)) == true
-        let id = isNull ? nil : try? container.decode(ID.self, forKey: .id)
-        if (try? container.decode(String.self, forKey: .method)) == nil {
-            (self.id, reason) = (nil, nil)
-        } else if (try? container.decode(String.self, forKey: .jsonrpc)) != jsonrpc {
-            (self.id, reason) = (id, InvalidRequestReason.jsonrpc)
-        } else if container.contains(.id), id == nil {
-            // A number too large to decode as a `Value` is `nil` here.
-            (self.id, reason) = (nil, InvalidRequestReason.id(try? container.decode(Value.self, forKey: .id)))
-        } else {
-            (self.id, reason) = (nil, nil)
-        }
-    }
-}
-
 extension AnyRequest {
     init<T: Method>(_ request: Request<T>) throws {
         let encoder = JSONEncoder()

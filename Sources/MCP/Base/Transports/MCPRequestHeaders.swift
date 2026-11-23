@@ -123,7 +123,7 @@ public enum MCPRequestHeaders {
     public static let maxAnnotations = 64
 
     /// The deepest `properties` nesting searched for annotations, and the
-    /// deepest subschema nesting searched for misplaced ones.
+    /// deepest subschema nesting inspected for misplaced ones.
     public static let maxSchemaDepth = 32
 
     /// The mirrored arguments of a tool input schema.
@@ -139,10 +139,9 @@ public enum MCPRequestHeaders {
     ///   HTTP token, or duplicated (case-insensitively), when the property
     ///   type is not `string`, `integer` or `boolean`, when an annotation is
     ///   not statically reachable through `properties`, when the schema has
-    ///   more than ``maxAnnotations`` annotations, or when `properties` or
-    ///   other subschemas nest deeper than ``maxSchemaDepth``. Descriptions
-    ///   name the property path, escaped and truncated, never the annotation
-    ///   itself.
+    ///   more than ``maxAnnotations`` annotations, or when `properties` nest
+    ///   deeper than ``maxSchemaDepth``. Descriptions name the property path,
+    ///   escaped and truncated, never the annotation itself.
     /// - SeeAlso: https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#schema-extension
     public static func parameters(in schema: Value) throws -> [Parameter] {
         var found: [Parameter] = []
@@ -202,13 +201,11 @@ public enum MCPRequestHeaders {
     private static func rejectUnreachableAnnotations(in schema: Value) throws {
         func visit(_ schema: Value, path: [String], depth: Int, onChain: Bool) throws {
             guard let object = schema.objectValue else { return }
-            guard depth <= maxSchemaDepth else {
-                throw InvalidAnnotation(description: "\(describe(path)): subschemas nested deeper than \(maxSchemaDepth)")
-            }
             if object[schemaKeyword] != nil, !onChain || path.isEmpty {
                 throw InvalidAnnotation(
                     description: "\(describe(path)): \(schemaKeyword) is not statically reachable through properties")
             }
+            guard depth < maxSchemaDepth else { return }
             for key in object.keys.sorted() {
                 guard let value = object[key] else { continue }
                 switch value {

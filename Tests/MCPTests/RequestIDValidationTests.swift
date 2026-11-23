@@ -108,6 +108,23 @@ struct StreamRequestIDTests {
             try JSONDecoder().decode(Message<InitializedNotification>.self, from: data)
         }
     }
+
+    @Test("A batch with invalid items answers valid requests alongside per-item -32600")
+    func batchInvalidItemsKeepValidReplies() async throws {
+        let batch =
+            #"[{"jsonrpc":"2.0","id":null,"method":"tools/list"},{"jsonrpc":"1.0","id":7,"method":"tools/list"},1,{"jsonrpc":"2.0","id":2,"method":"tools/list"}]"#
+        let replies = try await replies(to: batch)
+        let items = try #require(replies.first?.arrayValue)
+        #expect(items.count == 4)
+        #expect(items[0].objectValue?["id"] == .null)
+        #expect(items[0].objectValue?["error"]?.objectValue?["code"] == -32600)
+        #expect(items[1].objectValue?["id"] == 7)
+        #expect(items[1].objectValue?["error"]?.objectValue?["code"] == -32600)
+        #expect(items[2].objectValue?["id"] == .null)
+        #expect(items[2].objectValue?["error"]?.objectValue?["code"] == -32600)
+        #expect(items[3].objectValue?["id"] == 2)
+        #expect(items[3].objectValue?["result"] != nil)
+    }
 }
 
 @Suite("Request ids over the stateless HTTP transport", .timeLimit(.minutes(1)))
@@ -187,6 +204,22 @@ struct StatefulHTTPRequestIDTests {
         #expect(response.statusCode == 400)
         let body = try decode(response.bodyData)
         #expect(body.objectValue?["id"] == .null)
+        #expect(body.objectValue?["error"]?.objectValue?["code"] == -32600)
+        await transport.disconnect()
+    }
+
+    @Test("An invalid jsonrpc gets 400 and -32600 with the request's id", arguments: invalidVersions)
+    func invalidVersion(_ line: String) async throws {
+        let transport = StatefulHTTPServerTransport(validationPipeline: StandardValidationPipeline(validators: []))
+        try await transport.connect()
+        let response = await transport.handleRequest(
+            HTTPRequest(
+                method: "POST",
+                headers: ["Content-Type": "application/json", "Accept": "application/json, text/event-stream"],
+                body: Data(line.utf8)))
+        #expect(response.statusCode == 400)
+        let body = try decode(response.bodyData)
+        #expect(body.objectValue?["id"] == 1)
         #expect(body.objectValue?["error"]?.objectValue?["code"] == -32600)
         await transport.disconnect()
     }

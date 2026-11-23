@@ -228,7 +228,7 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
                     JSONRPCMessageFields.replacingSubscriptionID(
                         in: data, internalID: related, with: exchange.clientID)))
 
-        case .invalid(let method, _):
+        case .invalid(let method, _, _):
             logger.warning("Invalid outgoing message dropped", metadata: ["method": "\(method)"])
         }
     }
@@ -292,8 +292,8 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
         // one re-serialized form, which has none, so the headers are checked
         // against the values the server reads.
         guard let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
-            let messageKind = JSONRPCMessageKind(json: json),
-            let normalized = try? JSONSerialization.data(withJSONObject: json, options: [.withoutEscapingSlashes])
+            let normalized = try? JSONSerialization.data(withJSONObject: json, options: [.withoutEscapingSlashes]),
+            let messageKind = JSONRPCMessageKind(data: normalized)
         else {
             return .error(statusCode: 400, .parseError("Invalid JSON-RPC message"))
         }
@@ -302,7 +302,8 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
         let fields = JSONRPCMessageFields.requestFields(in: normalized)
         var requestID: ID?
         switch messageKind {
-        case .request, .invalid: requestID = fields.id
+        case .request: requestID = fields.id
+        case .invalid(_, let id, _): requestID = id
         case .notification, .response: break
         }
 
@@ -319,22 +320,16 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
             return errorResponse.withRequestID(requestID)
         }
 
-        // JSON-RPC 2.0 §5: a request whose `id` cannot be read is answered
-        // with -32600 and `"id": null`, not treated as a notification.
-        if case .invalid(_, let reason) = messageKind {
-            return .error(statusCode: 400, .invalidRequest(reason), id: requestID)
-        }
-
-        if let mismatch = Self.standardHeaderError(request, fields: fields) {
-            return .error(statusCode: 400, mismatch, id: requestID)
-        }
-
         switch messageKind {
-        case .invalid(_, let reason):
-            // Answered above, before the headers are checked.
+        case .invalid(_, _, let reason):
+            // JSON-RPC 2.0 §5: a request whose `id` or `jsonrpc` is invalid is
+            // answered with -32600 before the headers are checked, not 202.
             return .error(statusCode: 400, .invalidRequest(reason), id: requestID)
 
         case .notification(let method) where method == CancelledNotification.name:
+            if let mismatch = Self.standardHeaderError(request, fields: fields) {
+                return .error(statusCode: 400, mismatch)
+            }
             if let cancellation = cancellation(normalized, request: request) {
                 incomingContinuation.yield(cancellation)
             } else {
@@ -343,6 +338,9 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
             return .accepted()
 
         case .notification, .response:
+            if let mismatch = Self.standardHeaderError(request, fields: fields) {
+                return .error(statusCode: 400, mismatch)
+            }
             // Forwarded as received unless the headers were checked against it.
             incomingContinuation.yield(Self.usesStandardHeaders(request) ? normalized : body)
             return .accepted()
@@ -350,6 +348,9 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
         case .request:
             guard let requestID else {
                 return .error(statusCode: 400, .invalidRequest("Invalid JSON-RPC id"))
+            }
+            if let mismatch = Self.standardHeaderError(request, fields: fields) {
+                return .error(statusCode: 400, mismatch, id: requestID)
             }
             if let mismatch = Self.versionHeaderError(request, metaVersion: fields.metaProtocolVersion) {
                 return .error(statusCode: 400, mismatch, id: requestID)

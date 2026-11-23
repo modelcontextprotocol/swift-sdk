@@ -385,48 +385,59 @@ public protocol HTTPContextProviding: Sendable {
 /// Used by transports to determine where to route outgoing messages:
 /// - Responses are routed to the originating request's stream
 /// - Notifications and server requests are routed to the standalone GET stream
-package enum JSONRPCMessageKind {
+package enum JSONRPCMessageKind: Decodable {
     case request(id: String, method: String)
     case notification(method: String)
     case response(id: String)
     /// A message with a string `method` that is neither a valid request
     /// nor a valid notification: its `id` is not a string or an integer, or
-    /// its `jsonrpc` is not `"2.0"`. It must be answered with -32600.
-    case invalid(method: String, reason: String)
+    /// its `jsonrpc` is not `"2.0"`. It must be answered with -32600, using
+    /// `id` when it is a string or an integer and `null` otherwise.
+    case invalid(method: String, id: ID?, reason: String)
+
+    private enum CodingKeys: String, CodingKey {
+        case jsonrpc, id, method, result, error
+    }
 
     /// Attempts to classify raw JSON-RPC data.
     /// Returns `nil` if the data cannot be parsed or classified.
     package init?(data: Data) {
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+        guard let decoded = try? JSONDecoder().decode(Self.self, from: data) else {
             return nil
         }
-        self.init(json: json)
+        self = decoded
     }
 
-    /// Classifies a message already parsed with `JSONSerialization`.
+    /// Classifies a JSON-RPC object.
     ///
     /// A message with a string `method` is a request when it has an `id`
     /// member and a notification when it has none, whatever the type of
     /// the `id`: an `id` that is not a string or an integer makes it
-    /// ``invalid(method:reason:)``, not a notification (JSON-RPC 2.0 §5).
-    package init?(json: [String: Any]) {
-        let id = Self.extractID(from: json)
+    /// ``invalid(method:id:reason:)``, not a notification (JSON-RPC 2.0 §5).
+    package init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        // `ID` reads `null` as `""`.
+        let isNull = (try? container.decodeNil(forKey: .id)) == true
+        let id = isNull ? nil : try? container.decode(ID.self, forKey: .id)
 
-        if let method = json["method"] as? String {
-            if json["jsonrpc"] as? String != "2.0" {
-                self = .invalid(method: method, reason: InvalidRequestReason.jsonrpc)
-            } else if !json.keys.contains("id") {
+        if let method = try? container.decode(String.self, forKey: .method) {
+            if (try? container.decode(String.self, forKey: .jsonrpc)) != "2.0" {
+                self = .invalid(method: method, id: id, reason: InvalidRequestReason.jsonrpc)
+            } else if !container.contains(.id) {
                 self = .notification(method: method)
             } else if let id {
-                self = .request(id: id, method: method)
+                self = .request(id: id.description, method: method)
             } else {
-                self = .invalid(method: method, reason: InvalidRequestReason.id(json["id"]))
+                // A number too large to decode as a `Value` is `nil` here.
+                let reason = InvalidRequestReason.id(try? container.decode(Value.self, forKey: .id))
+                self = .invalid(method: method, id: nil, reason: reason)
             }
-        } else if json["result"] != nil || json["error"] != nil {
-            guard let id else { return nil }
-            self = .response(id: id)
+        } else if container.contains(.result) || container.contains(.error), let id {
+            self = .response(id: id.description)
         } else {
-            return nil
+            throw DecodingError.dataCorrupted(
+                DecodingError.Context(
+                    codingPath: container.codingPath, debugDescription: "Not a JSON-RPC message"))
         }
     }
 
@@ -479,20 +490,6 @@ package enum JSONRPCMessageKind {
 enum InvalidRequestReason {
     /// `jsonrpc` is missing or not `"2.0"`.
     static let jsonrpc = "jsonrpc must be \"2.0\""
-
-    /// The problem with an `id` that is not a string or an integer, as
-    /// parsed by `JSONSerialization`; `nil` is a number it could not read.
-    static func id(_ value: Any?) -> String {
-        switch value {
-        case is NSNull:
-            return null
-        case let number as NSNumber where !JSONRPCMessageKind.isBoolean(number):
-            let double = number.doubleValue
-            return double.isFinite && double.rounded() == double ? outOfRange : type
-        default:
-            return type
-        }
-    }
 
     /// The problem with an `id` that is not a string or an integer, as
     /// decoded into a ``Value``; `nil` is a number too large to decode.

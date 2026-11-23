@@ -168,6 +168,30 @@ struct RequestHeadersTests {
         }
     }
 
+    @Test("Subschemas nested deeper than maxSchemaDepth without annotations stay in stateless tools/list")
+    func testDeepSubschemaWithoutAnnotations() async throws {
+        var subschema: Value = ["type": "string"]
+        for step in 0..<40 {
+            subschema = step.isMultiple(of: 2)
+                ? ["type": "array", "items": subschema]
+                : ["anyOf": [subschema, ["type": "null"]]]
+        }
+        let schema: Value = ["type": "object", "properties": ["nested": subschema]]
+        #expect(try MCPRequestHeaders.parameters(in: schema).isEmpty)
+
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+        let server = Server(name: "deep", version: "1", capabilities: .init(tools: .init()))
+        await server.withMethodHandler(ListTools.self) { _ in
+            .init(tools: [Tool(name: "deep", description: nil, inputSchema: schema)])
+        }
+        try await server.start(transport: serverTransport)
+        let client = Client(name: "c", version: "1")
+        _ = try await client.connect(transport: clientTransport)
+        #expect(try await client.listTools().tools.map(\.name) == ["deep"])
+        await client.disconnect()
+        await server.stop()
+    }
+
     @Test("Errors name the property path, escaped and truncated, not the annotation")
     func testErrorDescriptions() {
         let forged = "X\r\nInjected: yes"
