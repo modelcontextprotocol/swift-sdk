@@ -96,9 +96,16 @@ fi
 # MARK: Servers
 
 # Live background processes: servers and the session cells' clients. A PID
-# leaves the list once reaped, so cleanup never signals a reused PID.
+# leaves the list once reaped, so cleanup never signals a reused PID. A
+# session cell's PID is its subshell: its child, the limit, gets TERM too and
+# stops the client's process group and tree.
 PIDS=()
-cleanup() { for pid in ${PIDS[@]+"${PIDS[@]}"}; do kill "$pid" 2>/dev/null || true; done; }
+cleanup() {
+    for pid in ${PIDS[@]+"${PIDS[@]}"}; do
+        pkill -TERM -P "$pid" 2>/dev/null || true
+        kill "$pid" 2>/dev/null || true
+    done
+}
 trap cleanup EXIT
 
 track() { PIDS+=("$1"); }

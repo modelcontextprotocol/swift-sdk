@@ -124,6 +124,8 @@ not exchange 2026-07-28 messages with it. Three outcomes pass: an
 unsupported-version error at connect (Swift: `-32022`), a fallback to the
 handshake (Go: `ProtocolVersion` is a preference), or a clear rejection of the
 first request (Python: a pinned mode adopts the version without a probe).
+An error counts only when it is `-32022` or says the protocol version is
+unsupported or not supported.
 
 The `-32022` retry, where a client proposes a version the server rejects and
 retries with one from the error's `supported` list, cannot be reached: each
@@ -139,7 +141,7 @@ restarts the server and writes `go`. The client's session ID is now unknown
 
 | Check | Passes when |
 |---|---|
-| `session-expired` | the next call fails with an error, or recovers, within 10 s; a hang fails |
+| `session-expired` | the next call recovers, or fails with an error saying the session was not found, expired or terminated, within 10 s; another error or a hang fails |
 | `session-reconnect` | a new client connects and calls a tool |
 
 No client re-initializes on its own after a 404; each reports an error.

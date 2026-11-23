@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import sys
 from collections import Counter
 from contextlib import AsyncExitStack
@@ -38,6 +39,15 @@ def emit(obj: dict[str, Any]) -> None:
 
 class CheckFailed(Exception):
     pass
+
+
+def rejects_protocol_version(text: str) -> bool:
+    """-32022, or a message that says the protocol version is unsupported (not, say, a media type)."""
+    lower = text.lower()
+    return "-32022" in text or ("protocol version" in lower and ("unsupported" in lower or "not supported" in lower))
+
+
+LOST_SESSION = re.compile(r"session (not found|expired|terminated)", re.IGNORECASE)
 
 
 class Skip(Exception):
@@ -636,7 +646,10 @@ async def run_session(battery: Battery, options: argparse.Namespace, target: Any
         except TimeoutError:
             raise CheckFailed("timed out after 10 s") from None
         except Exception as error:  # noqa: BLE001 - a prompt error is the expected outcome
-            return f"error: {type(error).__name__}: {error}"
+            text = f"{type(error).__name__}: {error}"
+            if not LOST_SESSION.search(text):
+                raise CheckFailed(f"unexpected error: {text}") from None
+            return f"error: {text}"
         return f"recovered: {texts(r.content)}"
 
     await battery.check("session-expired", expired)
@@ -704,7 +717,7 @@ async def main() -> int:
                     emit({"check": "connect", "status": "fail", "detail": f"{version} accepted, expected unsupported"})
                 except Exception as error:  # noqa: BLE001
                     text = f"{type(error).__name__}: {error}"
-                    ok = "-32022" in text or "not supported" in text.lower() or "unsupported" in text.lower()
+                    ok = rejects_protocol_version(text)
                     emit({"check": "connect", "status": "pass" if ok else "fail",
                           "detail": f"first request rejected: {text}"})
                 finished = True
@@ -742,7 +755,7 @@ async def main() -> int:
             emit({"meta": {"client": "python", "era": options.era}})
             detail = f"{type(error).__name__}: {error}"
             if options.expect_era == "unsupported":
-                ok = "-32022" in detail or "unsupported" in detail.lower()
+                ok = rejects_protocol_version(detail)
                 emit({"check": "connect", "status": "pass" if ok else "fail", "detail": detail})
                 return 0
             emit({"check": "connect", "status": "fail", "detail": detail})

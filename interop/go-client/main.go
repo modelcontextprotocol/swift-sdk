@@ -76,6 +76,24 @@ func emit(v map[string]any) {
 	fmt.Println(string(b))
 }
 
+// rejectsProtocolVersion reports whether err rejects the protocol version:
+// -32022, or a message that says the protocol version is unsupported (not,
+// say, a media type).
+func rejectsProtocolVersion(err error) bool {
+	text := err.Error()
+	lower := strings.ToLower(text)
+	return strings.Contains(text, "-32022") ||
+		(strings.Contains(lower, "protocol version") &&
+			(strings.Contains(lower, "unsupported") || strings.Contains(lower, "not supported")))
+}
+
+// lostSession reports whether err says the server no longer knows the session.
+func lostSession(err error) bool {
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "session not found") || strings.Contains(lower, "session expired") ||
+		strings.Contains(lower, "session terminated")
+}
+
 type battery struct {
 	cs     *mcp.ClientSession
 	era    string
@@ -868,7 +886,7 @@ func main() {
 		emit(map[string]any{"meta": map[string]any{"client": "go", "era": *eraFlag}})
 		if *expectEra == "unsupported" {
 			status := "fail"
-			if strings.Contains(err.Error(), "-32022") || strings.Contains(strings.ToLower(err.Error()), "unsupported") {
+			if rejectsProtocolVersion(err) {
 				status = "pass"
 			}
 			emit(map[string]any{"check": "connect", "status": status, "detail": err.Error()})
@@ -903,8 +921,7 @@ func main() {
 		status, detail := "fail", init.ProtocolVersion+" accepted, expected unsupported"
 		if err != nil {
 			detail = "first request rejected: " + err.Error()
-			if strings.Contains(err.Error(), "-32022") || strings.Contains(strings.ToLower(err.Error()), "not supported") ||
-				strings.Contains(strings.ToLower(err.Error()), "unsupported") {
+			if rejectsProtocolVersion(err) {
 				status = "pass"
 			}
 		}
@@ -959,6 +976,9 @@ func main() {
 				return "", errors.New("timed out after 10 s")
 			}
 			if err != nil {
+				if !lostSession(err) {
+					return "", fmt.Errorf("unexpected error: %w", err)
+				}
 				return "error: " + err.Error(), nil
 			}
 			return "recovered: " + texts(res.Content), nil

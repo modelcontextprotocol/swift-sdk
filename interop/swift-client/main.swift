@@ -85,6 +85,21 @@ struct Failure: Error, CustomStringConvertible {
     init(_ description: String) { self.description = description }
 }
 
+/// Whether `error` rejects the protocol version: -32022, or a message that
+/// says the protocol version is unsupported (not, say, a media type).
+func rejectsProtocolVersion(_ error: Error) -> Bool {
+    let text = "\(error)"
+    let lower = text.lowercased()
+    return text.contains("-32022")
+        || (lower.contains("protocol version") && (lower.contains("unsupported") || lower.contains("not supported")))
+}
+
+/// Whether `error` says the server no longer knows the session.
+func reportsLostSession(_ error: Error) -> Bool {
+    "\(error)".range(of: "session (not found|expired|terminated)", options: [.regularExpression, .caseInsensitive])
+        != nil
+}
+
 /// A check that does not apply to this server; reported as `skip`.
 struct Skip: Error {
     let reason: String
@@ -687,8 +702,7 @@ func run() async throws -> Int32 {
     } catch {
         emit(["meta": ["client": "swift", "era": options.era] as [String: Any]])
         if options.expectEra == "unsupported" {
-            let unsupported = "\(error)".contains("-32022") || "\(error)".lowercased().contains("unsupported")
-            emit(["check": "connect", "status": unsupported ? "pass" : "fail", "detail": "\(error)"])
+            emit(["check": "connect", "status": rejectsProtocolVersion(error) ? "pass" : "fail", "detail": "\(error)"])
             return 0
         }
         emit(["check": "connect", "status": "fail", "detail": "\(error)"])
@@ -713,10 +727,8 @@ func run() async throws -> Int32 {
                 _ = try await withTimeout(options.timeout) { try await client.listTools() }
                 emit(["check": "connect", "status": "fail", "detail": "\(version) accepted, expected unsupported"])
             } catch {
-                let unsupported = "\(error)".contains("-32022") || "\(error)".lowercased().contains("not supported")
-                    || "\(error)".lowercased().contains("unsupported")
                 emit([
-                    "check": "connect", "status": unsupported ? "pass" : "fail",
+                    "check": "connect", "status": rejectsProtocolVersion(error) ? "pass" : "fail",
                     "detail": "first request rejected: \(error)",
                 ])
             }
@@ -758,6 +770,7 @@ func run() async throws -> Int32 {
             } catch let failure as Failure {
                 throw failure
             } catch {
+                guard reportsLostSession(error) else { throw Failure("unexpected error: \(error)") }
                 return "error: \(error)"
             }
         }
