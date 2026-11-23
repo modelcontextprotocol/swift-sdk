@@ -67,6 +67,9 @@ func connectOverHTTP(endpoint: URL) async throws -> Client {
 
 // snippet: transport-stateful-sessions
 /// One `Server` and one `StatefulHTTPServerTransport` per `Mcp-Session-Id`.
+/// A sketch: it has no session limit and no idle reaper, and starts a server
+/// for any request without a session; `Examples/http-server/main.swift` has
+/// the guards a deployed router needs.
 actor SessionRouter {
     private var sessions: [String: (server: Server, transport: StatefulHTTPServerTransport)] = [:]
 
@@ -93,7 +96,7 @@ actor SessionRouter {
         let response = await transport.handleRequest(request)
         // A refused `initialize` (an initialize hook threw) carries the header
         // too: the transport refuses later requests with its ID, and the entry
-        // stays until the router closes idle sessions.
+        // stays until the session is deleted.
         if let id = response.headers[HTTPHeaderName.sessionID] {
             sessions[id] = (server, transport)
         } else {

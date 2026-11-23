@@ -317,10 +317,13 @@ Requests whose `MCP-Protocol-Version` is a stateless revision get 400 with -3202
 
 The default validation pipeline is `OriginValidator.localhost()`, `AcceptHeaderValidator(mode: .sseRequired)`, `ContentTypeValidator()`, `ProtocolVersionValidator()`, `SessionValidator()`. Pass `validationPipeline:` to replace it, for example to add authentication or allow other hosts. `sessionIDGenerator:` replaces the UUID generator; IDs must be visible ASCII (0x21-0x7E) or the transport answers 500. `retryInterval:` sets the SSE `retry:` field of the priming event; priming events are sent at 2025-03-26 through 2025-11-25.
 
-Your HTTP layer keeps one transport and one `Server` per session and routes by `Mcp-Session-Id`:
+Your HTTP layer keeps one transport and one `Server` per session and routes by `Mcp-Session-Id`. The snippet leaves out what a deployed router needs: create a session only for a POST `initialize`, cap the number of sessions, and close idle ones, as [`Examples/http-server/main.swift`](../Examples/http-server/main.swift) does:
 
 ```swift
 /// One `Server` and one `StatefulHTTPServerTransport` per `Mcp-Session-Id`.
+/// A sketch: it has no session limit and no idle reaper, and starts a server
+/// for any request without a session; `Examples/http-server/main.swift` has
+/// the guards a deployed router needs.
 actor SessionRouter {
     private var sessions: [String: (server: Server, transport: StatefulHTTPServerTransport)] = [:]
 
@@ -347,7 +350,7 @@ actor SessionRouter {
         let response = await transport.handleRequest(request)
         // A refused `initialize` (an initialize hook threw) carries the header
         // too: the transport refuses later requests with its ID, and the entry
-        // stays until the router closes idle sessions.
+        // stays until the session is deleted.
         if let id = response.headers[HTTPHeaderName.sessionID] {
             sessions[id] = (server, transport)
         } else {

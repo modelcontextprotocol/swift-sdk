@@ -226,7 +226,7 @@ Requests whose `MCP-Protocol-Version` is a stateless revision get 400 with -3202
 
 The default validation pipeline is `OriginValidator.localhost()`, `AcceptHeaderValidator(mode: .sseRequired)`, `ContentTypeValidator()`, `ProtocolVersionValidator()`, `SessionValidator()`. Pass `validationPipeline:` to replace it, for example to add authentication or allow other hosts. `sessionIDGenerator:` replaces the UUID generator; IDs must be visible ASCII (0x21-0x7E) or the transport answers 500. `retryInterval:` sets the SSE `retry:` field of the priming event; priming events are sent at 2025-03-26 through 2025-11-25.
 
-Your HTTP layer keeps one transport and one `Server` per session and routes by `Mcp-Session-Id`:
+Your HTTP layer keeps one transport and one `Server` per session and routes by `Mcp-Session-Id`. The snippet leaves out what a deployed router needs: create a session only for a POST `initialize`, cap the number of sessions, and close idle ones, as [`Examples/http-server/main.swift`](../Examples/http-server/main.swift) does:
 
 %include Examples/Snippets/Protocol/Transports.swift transport-stateful-sessions
 
