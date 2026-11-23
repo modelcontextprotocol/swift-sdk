@@ -99,6 +99,25 @@ struct MCPErrorWireTests {
         }
     }
 
+    @Test("-32021 without readable requiredCapabilities keeps its data")
+    func testMissingCapabilitiesWithoutPayload() throws {
+        let bare = try decode(MCPError.self, ["code": -32021, "message": "Needs sampling"])
+        #expect(bare == .serverError(code: -32021, message: "Needs sampling"))
+        #expect(bare.code == -32021)
+
+        let malformed = try decode(
+            MCPError.self,
+            ["code": -32021, "message": "Needs sampling", "data": ["requiredCapabilities": "sampling"]])
+        #expect(
+            malformed
+                == .serverError(code: -32021, message: "Needs sampling", data: ["requiredCapabilities": "sampling"]))
+
+        let readable = try decode(
+            MCPError.self,
+            ["code": -32021, "message": "Needs sampling", "data": ["requiredCapabilities": ["sampling": [String: Any]()]]])
+        #expect(readable == .missingRequiredClientCapabilities(.init(sampling: .init()), message: "Needs sampling"))
+    }
+
     @Test("URL elicitation required round-trips")
     func testURLElicitationRequired() throws {
         let error = MCPError.urlElicitationRequired(

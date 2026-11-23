@@ -296,12 +296,16 @@ extension MCPError: Codable {
         case -32020:
             self = .headerMismatch(detailOrMessage("Header mismatch"))
         case -32021:
-            let required = fields?["requiredCapabilities"].flatMap {
+            // Without a readable `requiredCapabilities`, the error keeps its
+            // data: an empty set would read as nothing to declare.
+            if let required = fields?["requiredCapabilities"].flatMap({
                 try? JSONDecoder().decode(Client.Capabilities.self, from: JSONEncoder().encode($0))
+            }) {
+                self = .missingRequiredClientCapabilities(
+                    required, message: customMessage("Missing required client capabilities"))
+            } else {
+                self = .serverError(code: code, message: message, data: serverData)
             }
-            self = .missingRequiredClientCapabilities(
-                required ?? .init(),
-                message: customMessage("Missing required client capabilities"))
         case -32022:
             let supported = fields?["supported"]?.arrayValue?.compactMap(\.stringValue) ?? []
             self = .unsupportedProtocolVersion(
