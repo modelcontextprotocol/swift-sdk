@@ -165,8 +165,7 @@ struct ProtocolSnippetTests {
             headers: ["Content-Type": "application/json", "Accept": "application/json, text/event-stream"],
             body: Data("{}".utf8), path: "/mcp")
         let context = HTTPValidationContext(
-            httpMethod: "POST", sessionID: nil, isInitializationRequest: true,
-            supportedProtocolVersions: Version.supported)
+            httpMethod: "POST", sessionID: nil, isInitializationRequest: true)
         let challenge = try #require(pipeline.validate(post, context: context))
         #expect(challenge.statusCode == 401)
         #expect(challenge.headers[HTTPHeaderName.wwwAuthenticate]?.contains("resource_metadata=") == true)
@@ -180,8 +179,7 @@ struct ProtocolSnippetTests {
 
         let get = HTTPRequest(method: "GET", path: "/.well-known/oauth-protected-resource")
         let getContext = HTTPValidationContext(
-            httpMethod: "GET", sessionID: nil, isInitializationRequest: false,
-            supportedProtocolVersions: Version.supported)
+            httpMethod: "GET", sessionID: nil, isInitializationRequest: false)
         #expect(pipeline.validate(get, context: getContext)?.statusCode == 200)
     }
 }
