@@ -86,6 +86,7 @@ struct ServerCardFormatTests {
         ("version", "^1.2.3", false), ("version", "~1.2.3", false), ("version", ">=1.2.3", false),
         ("version", "1.x", false), ("version", "1.*", false), ("version", "2.1.0-alpha", true),
         ("version", "2026.10.28", true), ("version", String(repeating: "1", count: 256), false),
+        ("version", "1.0.0+build.x", true), ("version", "1.0.0-alpha.x", true), ("version", "1.x.0-beta", false),
         ("description", "", false), ("description", String(repeating: "d", count: 101), false),
         ("description", String(repeating: "d", count: 100), true),
         ("url", "https://example.com/mcp", true), ("url", "{base}/mcp", true), ("url", "ftp://example.com", false),
@@ -156,6 +157,14 @@ struct ServerCardFormatTests {
         #expect { _ = try undeclared.url(resolving: ["base": "javascript:"]) } throws: {
             ($0 as? ServerCardError)?.reason == .invalidCard
         }
+        // The message names the template, not a value, which can be a secret.
+        #expect { _ = try undeclared.url(resolving: ["base": "javascript:s3cret"]) } throws: {
+            guard let error = $0 as? ServerCardError else { return false }
+            return error.reason == .invalidCard && error.message.contains("{base}/mcp")
+                && !error.message.contains("s3cret") && !error.localizedDescription.contains("s3cret")
+        }
+        // `localizedDescription` is the message.
+        #expect((ServerCardError(.tooLarge, "too large") as any Error).localizedDescription == "too large")
     }
 
     @Test("A value cannot change the host, path or query of the URL")
@@ -167,7 +176,7 @@ struct ServerCardFormatTests {
                 #expect(resolved.host?.hasSuffix(".example.com") == true, "\(tenant): \(resolved)")
                 #expect(resolved.path == "/mcp/a" && resolved.query == nil && resolved.user == nil, "\(resolved)")
             } catch {
-                #expect(error.reason == .invalidCard)
+                #expect((error as? ServerCardError)?.reason == .invalidCard)
             }
         }
         let resolved = try remote.url(resolving: ["tenant": "acme", "path": "a/b?c=d#e"])

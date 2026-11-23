@@ -40,7 +40,7 @@ public struct ServerCardValidator: HTTPRequestValidator {
     ///   - maxAge: How long clients and caches may keep the card, in seconds.
     /// - Throws: ``ServerCardError`` when the card does not follow the format,
     ///   or does not encode as JSON (a non-finite number in `_meta`).
-    public init(card: ServerCard, endpointPath: String = "/mcp", maxAge: Int = 3600) throws(ServerCardError) {
+    public init(card: ServerCard, endpointPath: String = "/mcp", maxAge: Int = 3600) throws {
         try card.validate()
         var base = endpointPath
         while base.hasSuffix("/") { base.removeLast() }

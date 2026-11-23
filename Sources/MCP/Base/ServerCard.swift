@@ -180,10 +180,15 @@ extension ServerCard {
         /// URL, such as `{base}/mcp`, is the scheme and host and is inserted
         /// as given.
         ///
+        /// The result can be `http` on any host: a card may list a plaintext
+        /// endpoint, and the `https` rule of ``ServerCard/fetch(from:session:)``
+        /// covers the card, not its remotes. Check the scheme before you
+        /// connect when the connection needs TLS.
+        ///
         /// - Throws: ``ServerCardError`` with ``ServerCardError/Reason/missingVariable``
         ///   or ``ServerCardError/Reason/invalidCard`` when the result is not an
         ///   `http` or `https` URL.
-        public func url(resolving values: [String: String] = [:]) throws(ServerCardError) -> URL {
+        public func url(resolving values: [String: String] = [:]) throws -> URL {
             var result = ""
             var rest = Substring(url)
             while let open = rest.firstIndex(of: "{") {
@@ -205,7 +210,8 @@ extension ServerCard {
                 let scheme = resolved.scheme?.lowercased(), scheme == "http" || scheme == "https",
                 resolved.host?.isEmpty == false
             else {
-                throw ServerCardError(.invalidCard, "The remote URL is not an http or https URL: \(result)")
+                // The template, not the result: values can be secrets.
+                throw ServerCardError(.invalidCard, "The remote URL is not an http or https URL: \(url)")
             }
             return resolved
         }
@@ -321,7 +327,7 @@ extension ServerCard {
 // MARK: - Errors
 
 /// A Server Card that cannot be fetched or does not follow the format.
-public struct ServerCardError: Swift.Error, Hashable, Sendable, CustomStringConvertible {
+public struct ServerCardError: LocalizedError, Hashable, Sendable, CustomStringConvertible {
     /// Why the card was refused.
     public struct Reason: Hashable, Sendable, CustomStringConvertible {
         /// The reason's identifier.
@@ -359,6 +365,9 @@ public struct ServerCardError: Swift.Error, Hashable, Sendable, CustomStringConv
     }
 
     public var description: String { message }
+
+    /// The message, for `localizedDescription`.
+    public var errorDescription: String? { message }
 }
 
 // MARK: - Validation
@@ -368,7 +377,7 @@ extension ServerCard {
     ///
     /// - Throws: ``ServerCardError`` with ``ServerCardError/Reason/invalidCard``
     ///   and the first problem.
-    public func validate() throws(ServerCardError) {
+    public func validate() throws {
         if let problem = problems().first {
             throw ServerCardError(.invalidCard, problem)
         }
@@ -416,10 +425,12 @@ extension ServerCard {
             && parts[1].unicodeScalars.allSatisfy { isAlphanumeric($0) || $0 == "." || $0 == "_" || $0 == "-" }
     }
 
-    /// Ranges such as `^1.2.3`, `~1.2.3`, `>=1.2.3`, `1.x` and `1.*`.
+    /// Ranges such as `^1.2.3`, `~1.2.3`, `>=1.2.3`, `1.x` and `1.*`. An `x`
+    /// counts only before the pre-release or build part, as in `1.0.0-alpha.x`.
     private static func isVersionRange(_ version: String) -> Bool {
         if version.unicodeScalars.contains(where: { "^~<>=*| ".unicodeScalars.contains($0) }) { return true }
-        return version.split(separator: ".").contains { $0 == "x" || $0 == "X" }
+        let core = version.prefix { $0 != "-" && $0 != "+" }
+        return core.split(separator: ".").contains { $0 == "x" || $0 == "X" }
     }
 
     /// `^(https?://[^\s]+|\{[a-zA-Z_][a-zA-Z0-9_]*\}[^\s]*)$`
