@@ -8,6 +8,11 @@
 #               newest release tag `X.Y.Z` (X >= 1) that is an ancestor of
 #               HEAD. Without one the job passes and says so.
 #
+# The default baseline is the newest release whatever major version HEAD
+# develops: a pull request that starts the next major version sets the job's
+# line in scripts/ci/jobs to `api-breakage gate api-breakage none` (or a
+# ref), and the release that tags X.0.0 restores it.
+#
 # Runs `swift package diagnose-api-breaking-changes`, which builds the
 # baseline in a temporary copy. Needs the history and the tags: a shallow
 # clone fetches them, and the job fails when it cannot. Outside a git
@@ -35,7 +40,7 @@ if [[ -z "$baseline" ]]; then
     baseline="$(git tag --merged HEAD --list '[0-9]*.[0-9]*.[0-9]*' --sort=-version:refname \
         | grep -E '^[1-9][0-9]*\.[0-9]+\.[0-9]+$' | head -1 || true)"
     if [[ -z "$baseline" ]]; then
-        echo "api-breakage: no 1.x release tag before HEAD; nothing to compare with"
+        echo "api-breakage: no release tag X.Y.Z (X >= 1) before HEAD; nothing to compare with"
         exit 0
     fi
 fi

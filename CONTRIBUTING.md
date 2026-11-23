@@ -165,7 +165,8 @@ server transports. The HTTP targets also check that each input's server is relea
 ships only with the Linux toolchain, so run it in the container:
 
 ```sh
-scripts/ci-linux.sh fuzz 300                  # five minutes per target
+scripts/ci-linux.sh fuzz                      # the CI job: 60 seconds per target
+scripts/ci-linux.sh -- scripts/ci/fuzz.sh 300 # five minutes per target
 ```
 
 An input that crashes is saved in `.build/linux/<image>-<arch>/fuzz/artifacts/`; add it to

@@ -28,8 +28,9 @@ swift build --product mcp-everything-server
 swift package generate-documentation --target MCP --warnings-as-errors
 swift scripts/doc-coverage.swift
 
-# libFuzzer targets in fuzz/ (Linux only)
-scripts/ci-linux.sh fuzz 60
+# libFuzzer targets in fuzz/ (Linux only), 60 s per target; for longer runs:
+# scripts/ci-linux.sh -- scripts/ci/fuzz.sh <seconds per target>
+scripts/ci-linux.sh fuzz
 ```
 
 `Package.swift` requires Swift 6.1 tools, the minimum for 1.x; there is no second manifest.
