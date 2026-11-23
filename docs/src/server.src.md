@@ -430,7 +430,7 @@ Creating a package checks the skill and throws `SkillPackage.ValidationError` fo
 
 The package computes the entry: every file with the SHA-256 and length of its bytes, `SKILL.md` first, and the frontmatter as JSON. The frontmatter is read as YAML 1.2 with the core schema, as the other implementations read it: `yes` and `2024-01-01` stay strings. Read from a directory, files whose names start with `.` and links that lead out of the directory are skipped. Files are sent as `text` when they are UTF-8 with a textual MIME type, chosen from the extension, and as `blob` otherwise.
 
-`InMemorySkillCatalog` serves packages, 100 to a page, and reads every directory of the namespace: each skill's root and subdirectories, and the prefixes of the paths, such as `skill://acme`. Of packages with the same skill URI, the last one is served. A cursor it did not issue, or past the end, is -32602. After `setSkills(_:)`, send a `ResourceListChangedNotification`.
+`InMemorySkillCatalog` serves packages, 100 to a page, and reads every directory of the namespace: each skill's root and subdirectories, and the prefixes of the paths, such as `skill://acme`. Of packages with the same skill URI, the last one is served. A cursor it did not issue, or past the end, is -32602. After `setSkills(_:)`, send a `ResourceListChangedNotification`, and declare `resources: .init(listChanged: true)`, as the snippet above does: `withSkills` declares `resources` without it, and listen streams carry the notification only when it is declared.
 
 ### Custom catalogs
 

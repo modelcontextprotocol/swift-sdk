@@ -22,7 +22,7 @@ Notes:
 - swift-crypto was added in 1.0.0 for `requestState` sealing
   ([design/mrtr.md](design/mrtr.md)). Its range spans majors 3 and 4; the APIs used (`AES.GCM`,
   `HKDF`, `SHA256`, `SymmetricKey`, `P256.Signing`) exist in both. CI resolves 4.x. OAuth uses
-  it for PKCE and `private_key_jwt`, so those work on Linux too.
+  it for PKCE, `private_key_jwt` and DPoP proofs, so those work on Linux too.
 - Yams was added in 1.0.0 for skills: a `SKILL.md` starts with YAML frontmatter, which a server
   turns into the JSON of a skill entry and a client compares with that entry before it loads the
   skill ([design/skills.md](design/skills.md)). Foundation has no YAML parser. Yams (MIT,

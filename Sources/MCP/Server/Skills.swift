@@ -316,7 +316,9 @@ public struct SkillPackage: Sendable {
 /// Every directory of the skills' namespace is a directory resource: each
 /// skill's root and subdirectories, and the prefixes of skill paths, such
 /// as `skill://acme` for `acme/billing/refunds`. After ``setSkills(_:)``
-/// changes the catalog, send a `ResourceListChangedNotification`.
+/// changes the catalog, send a `ResourceListChangedNotification`, and declare
+/// `resources: .init(listChanged: true)` when you create the server:
+/// ``Server/withSkills(_:listInResources:)`` declares `resources` without it.
 public actor InMemorySkillCatalog: SkillCatalog {
     /// Directory reads are answered.
     public nonisolated var supportsDirectoryRead: Bool { true }

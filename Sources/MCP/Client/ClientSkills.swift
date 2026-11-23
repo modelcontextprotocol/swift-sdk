@@ -32,7 +32,8 @@ public struct SkillVerificationError: Swift.Error, Hashable, Sendable, CustomStr
         /// The entry is not loadable: its `resources` is neither a manifest nor
         /// `dynamic`, its manifest does not list its `SKILL.md`, lists a file
         /// outside the skill's root or a negative size, or its URI is not a
-        /// `SKILL.md`.
+        /// `SKILL.md` below a skill path (a root with an empty, `.` or `..`
+        /// segment, or an encoded `/`, is not one).
         public static let invalidEntry = Reason("invalidEntry")
         /// The entry's `resources` is `dynamic`, which offers no integrity, and
         /// ``Client/SkillLoading/allowsDynamic`` is off.
@@ -104,7 +105,8 @@ public actor LoadedSkill {
         return nil
     }
 
-    /// The URI of `path`, relative to the skill's root (`references/FORMS.md`).
+    /// The URI of `path`, relative to the skill's root (`references/FORMS.md`):
+    /// the URI the entry lists for it, when it lists the file.
     ///
     /// - Throws: ``SkillVerificationError`` with
     ///   ``SkillVerificationError/Reason/unlistedFile`` for a path that leaves
@@ -114,7 +116,22 @@ public actor LoadedSkill {
         guard !components.isEmpty else {
             throw SkillVerificationError(.unlistedFile, uri: path, message: "\(path) is not a file of the skill")
         }
+        // Servers percent-encode differently: keep the manifest's spelling.
+        if let listed = listed(components) { return listed.uri }
         return rootURI + "/" + components.map(SkillPackage.percentEncoded).joined(separator: "/")
+    }
+
+    /// The manifest entry whose URI decodes to `components` below the root.
+    private nonisolated func listed(_ components: [String]) -> SkillResource? {
+        files?.first { relativeComponents(of: $0.uri) == components }
+    }
+
+    /// The percent-decoded segments of `uri` below the root; `nil` outside it.
+    private nonisolated func relativeComponents(of uri: String) -> [String]? {
+        guard Client.isInside(uri, root: rootURI) else { return nil }
+        return uri.dropFirst(rootURI.count + 1).split(separator: "/").map {
+            $0.removingPercentEncoding ?? String($0)
+        }
     }
 
     /// The components of `path` below the root, after `.` and `..`; empty
@@ -149,7 +166,8 @@ public actor LoadedSkill {
     public func read(uri: String) async throws -> Data {
         switch skill.resources {
         case .manifest(let files):
-            guard let file = files.first(where: { $0.uri == uri }) else {
+            guard let file = files.first(where: { $0.uri == uri }) ?? relativeComponents(of: uri).flatMap(listed)
+            else {
                 throw SkillVerificationError(
                     .unlistedFile, uri: uri, message: "\(uri) is not listed in the entry of \(skill.uri)")
             }
@@ -176,15 +194,16 @@ public actor LoadedSkill {
     public nonisolated func directory(_ path: String = "") throws -> (files: [SkillResource], directories: [String]) {
         guard let files else { return ([], []) }
         let components = try Self.components(of: path)
-        let prefix = ([rootURI] + components.map(SkillPackage.percentEncoded)).joined(separator: "/") + "/"
         var children: [SkillResource] = []
         var directories = Set<String>()
-        for file in files where file.uri.hasPrefix(prefix) {
-            let rest = file.uri.dropFirst(prefix.count)
-            if let slash = rest.firstIndex(of: "/") {
-                directories.insert(String(rest[..<slash]).removingPercentEncoding ?? String(rest[..<slash]))
-            } else {
+        for file in files {
+            guard let rest = relativeComponents(of: file.uri), rest.count > components.count,
+                rest.starts(with: components)
+            else { continue }
+            if rest.count == components.count + 1 {
                 children.append(file)
+            } else {
+                directories.insert(rest[components.count])
             }
         }
         return (children, directories.sorted())
@@ -236,18 +255,25 @@ extension Client {
     }
 
     /// Lists every skill, following `nextCursor` until the last page. Stops
-    /// at a cursor seen before.
+    /// at a cursor seen before, or after 1000 pages: the listing is then
+    /// partial, as any listing may be. Page with ``listSkills(cursor:)`` to
+    /// read a larger catalog.
     public func listAllSkills() async throws -> [Skill] {
         var skills: [Skill] = []
         var cursor: String?
         var seen = Set<String>()
+        var pages = 0
         repeat {
             let page = try await listSkills(cursor: cursor)
+            pages += 1
             skills += page.skills
             cursor = page.nextCursor.flatMap { $0.isEmpty || !seen.insert($0).inserted ? nil : $0 }
-        } while cursor != nil
+        } while cursor != nil && pages < Self.maximumSkillPages
         return skills
     }
+
+    /// The most pages ``listAllSkills()`` reads.
+    static let maximumSkillPages = 1_000
 
     /// Gets the entry of the skill whose `SKILL.md` is at `uri`
     /// (`skills/get`), listed or not.
@@ -292,7 +318,7 @@ extension Client {
     /// - Throws: ``SkillVerificationError`` when the content is not the
     ///   entry's or the entry cannot be loaded; the error of the read.
     public func loadSkill(_ skill: Skill, options: SkillLoading = .init()) async throws -> LoadedSkill {
-        guard let rootURI = skill.rootURI else {
+        guard let rootURI = skill.rootURI, Self.isSkillRoot(rootURI) else {
             throw SkillVerificationError(
                 .invalidEntry, uri: skill.uri, message: "\(skill.uri) is not the URI of a \(Skill.manifestFileName)")
         }
@@ -392,6 +418,13 @@ extension Client {
             guard !$0.isEmpty, let decoded = $0.removingPercentEncoding else { return false }
             return !decoded.contains("/") && decoded != "." && decoded != ".."
         }
+    }
+
+    /// Whether `root` is a scheme, `://` and a skill path whose segments
+    /// ``isInside(_:root:)`` accepts.
+    static func isSkillRoot(_ root: String) -> Bool {
+        guard let separator = root.range(of: "://"), separator.lowerBound > root.startIndex else { return false }
+        return isInside(root, root: String(root[..<separator.lowerBound]) + ":/")
     }
 
     /// The bytes of `file`, after its size, then its digest, match the entry.

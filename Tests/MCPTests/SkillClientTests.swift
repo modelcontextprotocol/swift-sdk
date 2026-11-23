@@ -226,6 +226,60 @@ struct SkillClientTests {
         #expect(await reason(listing([("skill://pdf/../other/x", 1)])) == .invalidEntry)
         #expect(await reason(listing([("skill://pdf/%2E%2E/other/x", 1)])) == .invalidEntry)
         #expect(await reason(listing([("skill://pdfx/y", 1)])) == .invalidEntry)
+        // The root itself is a skill path.
+        for root in ["skill://pdf/../other", "skill://pdf/%2e%2e/other", "skill://pdf//other", "skill:///pdf", "skill://"] {
+            var escaping = skill
+            escaping.uri = root + "/SKILL.md"
+            escaping.resources = .manifest([SkillResource(uri: escaping.uri, digest: "sha256:00", size: 1)])
+            #expect(await reason(escaping) == .invalidEntry, "\(root)")
+            escaping.resources = .dynamic
+            #expect(await reason(escaping, .init(allowsDynamic: true)) == .invalidEntry, "\(root)")
+        }
+    }
+
+    @Test("A manifest encoded differently is read and listed by path")
+    func otherEncoding() async throws {
+        let package = try SkillPackage(
+            path: "pdf", files: ["SKILL.md": pdfManifest, "references/foo (1).md": data("foo")])
+        let sdkURI = "skill://pdf/references/foo%20%281%29.md"
+        let listedURI = "skill://pdf/references/foo%20(1).md"
+        let catalog = AlteredCatalog(
+            base: InMemorySkillCatalog([package]),
+            alter: { skill in
+                var skill = skill
+                guard case .manifest(let files) = skill.resources else { return skill }
+                skill.resources = .manifest(
+                    files.map { file in
+                        var file = file
+                        if file.uri == sdkURI { file.uri = listedURI }
+                        return file
+                    })
+                return skill
+            })
+        let (client, server) = try await connect(catalog)
+        defer { Task { await client.disconnect(); await server.stop() } }
+        let loaded = try await client.loadSkill(try #require(try await client.listSkills().skills.first))
+        #expect(try loaded.uri(of: "references/foo (1).md") == listedURI)
+        #expect(try await loaded.read("references/foo (1).md") == data("foo"))
+        #expect(try await loaded.read(uri: sdkURI) == data("foo"))
+        #expect(await catalog.recorder.reads == ["skill://pdf/SKILL.md", listedURI, listedURI])
+        #expect(try loaded.directory("references").files.map(\.uri) == [listedURI])
+    }
+
+    @Test("listAllSkills stops after its page limit when every cursor is new")
+    func endlessListing() async throws {
+        struct Endless: SkillCatalog {
+            let skill: Skill
+            func listSkills(cursor: String?) async throws -> ListSkills.Result {
+                .init(skills: [skill], nextCursor: String((Int(cursor ?? "0") ?? 0) + 1))
+            }
+            func skill(uri: String) async throws -> Skill? { nil }
+            func readResource(uri: String) async throws -> ReadResource.Result? { nil }
+        }
+        let skill = try #require(try await InMemorySkillCatalog([try pdfPackage()]).listSkills(cursor: nil).skills.first)
+        let (client, server) = try await connect(Endless(skill: skill))
+        defer { Task { await client.disconnect(); await server.stop() } }
+        #expect(try await client.listAllSkills().count == Client.maximumSkillPages)
     }
 
     @Test("A dynamic skill reads nothing outside its root, dot segments included")
