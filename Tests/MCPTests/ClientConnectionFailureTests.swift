@@ -468,7 +468,7 @@ struct OutgoingMessageTests {
         }
     }
 
-    @Suite("Discovery timeout over HTTP")
+    @Suite("Discovery timeout over HTTP", .timeLimit(.minutes(1)))
     struct DiscoveryTimeoutHTTPTests {
         @Test("A timed-out server/discover closes its POST")
         func closesTimedOutDiscover() async throws {
@@ -494,21 +494,23 @@ struct OutgoingMessageTests {
         // be asked to sign in again, nor be moved to the handshake.
         @Test("Signing in does not count against the discovery timeout")
         func signInOutlastsDiscoveryTimeout() async throws {
-            let authorizer = SlowSignInAuthorizer(signIn: .milliseconds(500))
+            let host = "\(UUID().uuidString).answering.test"
+            let authorizer = SlowSignInAuthorizer(signIn: .seconds(2))
             let client = Client(
                 name: "probe", version: "1.0",
-                configuration: .init(protocolMode: .automatic, discoveryTimeout: .milliseconds(100)))
+                configuration: .init(protocolMode: .automatic, discoveryTimeout: .seconds(1)))
 
             let result = try await client.connect(
-                transport: ChallengedDiscoverProtocol.transport(host: "answering.test", authorizer: authorizer))
+                transport: ChallengedDiscoverProtocol.transport(host: host, authorizer: authorizer))
             #expect(result.protocolVersion == Version.v2026_07_28)
             #expect(authorizer.challenges == 1)
-            #expect(ChallengedDiscoverProtocol.state.methods(of: "answering.test") == [ServerDiscover.name])
+            #expect(ChallengedDiscoverProtocol.state.methods(of: host) == [ServerDiscover.name])
             await client.disconnect()
         }
 
         @Test("The discovery timeout starts again after signing in")
         func timeoutAfterSignIn() async throws {
+            let host = "\(UUID().uuidString).silent.test"
             let authorizer = SlowSignInAuthorizer(signIn: .milliseconds(300))
             let client = Client(
                 name: "probe", version: "1.0",
@@ -516,22 +518,84 @@ struct OutgoingMessageTests {
 
             // The server never answers the authorized server/discover.
             let result = try await client.connect(
-                transport: ChallengedDiscoverProtocol.transport(host: "silent.test", authorizer: authorizer))
+                transport: ChallengedDiscoverProtocol.transport(host: host, authorizer: authorizer))
             #expect(result.protocolVersion == Version.v2025_11_25)
             #expect(authorizer.challenges == 1)
+            await client.disconnect()
+        }
+
+        @Test("A sign-in that fails after the deadline fails connect without falling back to initialize")
+        func failedSignInAfterDeadlineThrows() async throws {
+            let host = "\(UUID().uuidString).answering.test"
+            let authorizer = SlowSignInAuthorizer(signIn: .milliseconds(300), succeeds: false)
+            let client = Client(
+                name: "probe", version: "1.0",
+                configuration: .init(protocolMode: .automatic, discoveryTimeout: .milliseconds(100)))
+
+            await #expect(throws: (any Swift.Error).self) {
+                try await client.connect(
+                    transport: ChallengedDiscoverProtocol.transport(host: host, authorizer: authorizer))
+            }
+            #expect(authorizer.challenges == 1)
+            #expect(ChallengedDiscoverProtocol.state.methods(of: host).isEmpty)
+            await client.disconnect()
+        }
+
+        @Test("Cancelling connect during sign-in stops waiting promptly")
+        func cancellingConnectDuringSignIn() async throws {
+            let host = "\(UUID().uuidString).answering.test"
+            let authorizer = SlowSignInAuthorizer(signIn: .seconds(30))
+            let client = Client(
+                name: "probe", version: "1.0",
+                configuration: .init(protocolMode: .automatic, discoveryTimeout: .milliseconds(50)))
+
+            let connecting = Task {
+                try await client.connect(
+                    transport: ChallengedDiscoverProtocol.transport(host: host, authorizer: authorizer))
+            }
+            let deadline = ContinuousClock.now + .seconds(5)
+            while authorizer.challenges == 0, ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            // Let the discovery timer pass its first deadline and park on authorizationEnd.
+            try await Task.sleep(for: .milliseconds(100))
+            connecting.cancel()
+
+            let finished = await withTaskGroup(of: Bool.self) { group in
+                group.addTask {
+                    _ = try? await connecting.value
+                    return true
+                }
+                group.addTask {
+                    try? await Task.sleep(for: .seconds(5))
+                    return false
+                }
+                let first = await group.next() ?? false
+                group.cancelAll()
+                return first
+            }
+            #expect(finished)
             await client.disconnect()
         }
     }
 
     /// Signs in on a 401 after `signIn`, like a user at a browser, then
-    /// authorizes every request.
+    /// authorizes every request when `succeeds` is `true`.
     private final class SlowSignInAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
+        private struct SignInDenied: LocalizedError {
+            var errorDescription: String? { "User cancelled sign-in" }
+        }
+
         private let lock = NSLock()
         private let signIn: Duration
+        private let succeeds: Bool
         private var signedIn = false
         private var challengeCount = 0
 
-        init(signIn: Duration) { self.signIn = signIn }
+        init(signIn: Duration, succeeds: Bool = true) {
+            self.signIn = signIn
+            self.succeeds = succeeds
+        }
 
         var challenges: Int { lock.withLock { challengeCount } }
         var maxAuthorizationAttempts: Int { 2 }
@@ -548,14 +612,15 @@ struct OutgoingMessageTests {
         ) async throws -> Bool {
             lock.withLock { challengeCount += 1 }
             try await Task.sleep(for: signIn)
+            guard succeeds else { throw SignInDenied() }
             lock.withLock { signedIn = true }
             return true
         }
     }
 
-    /// Answers 401 to a request without credentials. With them, the host
-    /// `answering.test` serves 2026-07-28 and `silent.test` never answers
-    /// `server/discover`; both answer `initialize`.
+    /// Answers 401 to a request without credentials. With them, hosts ending
+    /// in `.silent.test` never answer `server/discover`; others serve
+    /// 2026-07-28, and all answer `initialize`.
     private final class ChallengedDiscoverProtocol: URLProtocol, @unchecked Sendable {
         final class State: @unchecked Sendable {
             private let lock = NSLock()
@@ -587,7 +652,7 @@ struct OutgoingMessageTests {
             let id = message["id"] as? String ?? ""
             Self.state.record(method, host: host)
             switch method {
-            case ServerDiscover.name where host == "silent.test":
+            case ServerDiscover.name where host.hasSuffix(".silent.test"):
                 return
             case ServerDiscover.name:
                 reply(

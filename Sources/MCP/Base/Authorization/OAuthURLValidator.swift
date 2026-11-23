@@ -19,6 +19,25 @@ protocol OAuthURLValidating: Sendable {
     func isPrivateIPHost(_ host: String) -> Bool
 }
 
+extension OAuthURLValidating {
+    /// Throws ``OAuthAuthorizationError/privateIPAddressBlocked(context:url:)``
+    /// when `url` has a private or reserved IP literal host.
+    func rejectPrivateIP(_ url: URL, context: String) throws {
+        if let host = URLComponents(url: url, resolvingAgainstBaseURL: false)?.host?.lowercased(),
+            isPrivateIPHost(host)
+        {
+            throw OAuthAuthorizationError.privateIPAddressBlocked(
+                context: context, url: url.absoluteString)
+        }
+    }
+
+    /// Validates an authorization server URL and rejects private IP literal hosts.
+    func validateAuthorizationServerAndHost(_ url: URL, context: String) throws {
+        try validateAuthorizationServer(url, context: context)
+        try rejectPrivateIP(url, context: context)
+    }
+}
+
 /// URL security rules for OAuth endpoints.
 ///
 /// Validates that URLs used in the OAuth flow satisfy HTTPS requirements and SSRF protections.

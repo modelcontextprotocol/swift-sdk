@@ -74,7 +74,7 @@ private func dpopAuthorizer(
     dpop: OAuthConfiguration.DPoP? = .init(),
     tokenStorage: TokenStorage = InMemoryTokenStorage(),
     discovery: MockDiscoveryClient = MockDiscoveryClient(),
-    tokenClient: MockTokenClient = MockTokenClient()
+    tokenClient: any OAuthTokenRequesting = MockTokenClient()
 ) -> OAuthAuthorizer {
     OAuthAuthorizer(
         configuration: .init(authentication: .none(clientID: "client"), dpop: dpop),
@@ -308,6 +308,60 @@ struct DPoPAuthorizerTests {
             return
         }
         #expect(tokenClient.requestCallCount == 1)
+        #expect(storage.load() == nil)
+    }
+
+    @Test("A refresh that returns Bearer for a DPoP-required resource falls back to a full grant")
+    func refreshBearerForDPoPResourceFallsBackToFullGrant() async throws {
+        final class RefreshThenGrantClient: OAuthTokenRequesting, @unchecked Sendable {
+            private let lock = NSLock()
+            private(set) var grants: [String] = []
+            var grantTokenType = "DPoP"
+
+            func request(
+                parameters: inout [String: String], endpoint: URL,
+                authentication: OAuthConfiguration.TokenEndpointAuthentication, dpop: DPoPProofSigner?,
+                session: URLSession
+            ) async throws -> OAuthTokenResponse {
+                let grant = parameters["grant_type"] ?? ""
+                lock.withLock { grants.append(grant) }
+                let type = grant == "refresh_token" ? "Bearer" : grantTokenType
+                return OAuthTokenResponse(
+                    accessToken: "token-\(grant)", tokenType: type, expiresIn: 3600, scope: nil, refreshToken: nil)
+            }
+        }
+
+        let discovery = MockDiscoveryClient()
+        discovery.protectedResourceMetadataResult.dpopBoundAccessTokensRequired = true
+        let dpop = OAuthConfiguration.DPoP()
+        let storage = InMemoryTokenStorage()
+        storage.save(
+            OAuthAccessToken(
+                value: "stale", tokenType: "DPoP", expiresAt: nil, scopes: [],
+                authorizationServer: URL(string: "https://auth.example.com")!, refreshToken: "rt-1",
+                keyThumbprint: dpop.keyThumbprint))
+        let tokenClient = RefreshThenGrantClient()
+        let authorizer = dpopAuthorizer(dpop: dpop, tokenStorage: storage, discovery: discovery, tokenClient: tokenClient)
+
+        let retried = try await authorizer.handleChallenge(
+            statusCode: 401, headers: headers401, endpoint: endpoint, session: .shared)
+        #expect(retried)
+        #expect(tokenClient.grants == ["refresh_token", "client_credentials"])
+        #expect(storage.load()?.value == "token-client_credentials")
+        #expect(storage.load()?.isDPoPBound == true)
+
+        // When the full grant also returns Bearer, the stale refresh token is still cleared.
+        storage.save(
+            OAuthAccessToken(
+                value: "stale-2", tokenType: "DPoP", expiresAt: nil, scopes: [],
+                authorizationServer: URL(string: "https://auth.example.com")!, refreshToken: "rt-2",
+                keyThumbprint: dpop.keyThumbprint))
+        tokenClient.grantTokenType = "Bearer"
+        let error = await authorizationError {
+            _ = try await authorizer.handleChallenge(
+                statusCode: 401, headers: headers401, endpoint: endpoint, session: .shared)
+        }
+        #expect(error?.errorDescription == OAuthAuthorizationError.dpopRequired.errorDescription)
         #expect(storage.load() == nil)
     }
 

@@ -184,6 +184,7 @@ Registration runs only when `authentication` is `.none(clientID:)`, once per AS:
 | `clientID` is an `https` URL with a path and the AS supports CIMD | no registration; the URL is the client id |
 | `clientID` is not empty and not a URL | no registration; a pre-registered public client |
 | no `registration_endpoint`, `clientID` is a CIMD URL | `cimdNotSupported` |
+| no `registration_endpoint`, `clientID` is empty | `registrationInformationRequired` |
 | no `registration_endpoint` otherwise | no registration |
 | `registration_endpoint` present | DCR |
 

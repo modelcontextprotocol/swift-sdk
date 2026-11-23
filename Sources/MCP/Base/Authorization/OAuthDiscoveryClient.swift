@@ -9,6 +9,7 @@ protocol OAuthDiscoveryFetching: Sendable {
     var metadataDiscovery: any OAuthMetadataDiscovering { get }
     func fetchProtectedResourceMetadata(candidates: [URL], fallbackIssuer: URL?, session: URLSession) async throws -> OAuthProtectedResourceMetadata
     func fetchAuthorizationServerMetadata(candidates: [URL], trustedIssuer: URL?, session: URLSession) async throws -> (server: URL, metadata: OAuthAuthorizationServerMetadata)
+    func fetchAuthorizationServerMetadata(candidates: [URL], trustedIssuer: URL?, reportRefused: Bool, session: URLSession) async throws -> (server: URL, metadata: OAuthAuthorizationServerMetadata)
 }
 
 extension OAuthDiscoveryFetching {
@@ -16,6 +17,13 @@ extension OAuthDiscoveryFetching {
         candidates: [URL], session: URLSession
     ) async throws -> (server: URL, metadata: OAuthAuthorizationServerMetadata) {
         try await fetchAuthorizationServerMetadata(candidates: candidates, trustedIssuer: nil, session: session)
+    }
+
+    func fetchAuthorizationServerMetadata(
+        candidates: [URL], trustedIssuer: URL?, reportRefused: Bool, session: URLSession
+    ) async throws -> (server: URL, metadata: OAuthAuthorizationServerMetadata) {
+        try await fetchAuthorizationServerMetadata(
+            candidates: candidates, trustedIssuer: trustedIssuer, session: session)
     }
 }
 
@@ -158,6 +166,16 @@ struct OAuthDiscoveryClient: Sendable {
         trustedIssuer: URL?,
         session: URLSession
     ) async throws -> (server: URL, metadata: OAuthAuthorizationServerMetadata) {
+        try await fetchAuthorizationServerMetadata(
+            candidates: candidates, trustedIssuer: trustedIssuer, reportRefused: true, session: session)
+    }
+
+    func fetchAuthorizationServerMetadata(
+        candidates: [URL],
+        trustedIssuer: URL?,
+        reportRefused: Bool,
+        session: URLSession
+    ) async throws -> (server: URL, metadata: OAuthAuthorizationServerMetadata) {
         let decoder = JSONDecoder()
         var mismatch: (expected: String, actual: String)?
         var unavailable: OAuthMetadataUnavailable?
@@ -166,18 +184,10 @@ struct OAuthDiscoveryClient: Sendable {
 
         for candidateServer in candidates {
             do {
-                try urlValidator.validateAuthorizationServer(candidateServer, context: "Authorization server issuer")
+                try urlValidator.validateAuthorizationServerAndHost(
+                    candidateServer, context: "Authorization server issuer")
             } catch {
                 refused = refused ?? error
-                continue
-            }
-            if let host = URLComponents(url: candidateServer, resolvingAgainstBaseURL: false)?
-                .host?.lowercased(), urlValidator.isPrivateIPHost(host)
-            {
-                refused =
-                    refused
-                    ?? OAuthAuthorizationError.privateIPAddressBlocked(
-                        context: "Authorization server issuer", url: candidateServer.absoluteString)
                 continue
             }
             fetched = true
@@ -211,8 +221,9 @@ struct OAuthDiscoveryClient: Sendable {
                 expected: mismatch.expected, actual: mismatch.actual)
         }
         if let unavailable { throw unavailable }
-        // No candidate was even fetched: say why, not that metadata is absent.
-        if !fetched, let refused { throw refused }
+        // No candidate was even fetched: say why, unless the caller falls back
+        // to 2025-03-26 default endpoints for a synthesized origin.
+        if reportRefused, !fetched, let refused { throw refused }
         throw OAuthAuthorizationError.authorizationServerMetadataDiscoveryFailed
     }
 }

@@ -112,6 +112,12 @@ public actor HTTPClientTransport: Transport {
         var lastEnded: ContinuousClock.Instant?
         /// Callers of ``HTTPClientTransport/authorizationEnd(of:)`` waiting for `active` to reach 0.
         var waiters: [(id: UUID, continuation: CheckedContinuation<Void, Never>)] = []
+
+        mutating func resumeWaiters() {
+            let pending = waiters
+            waiters.removeAll()
+            for waiter in pending { waiter.continuation.resume() }
+        }
     }
 
     /// Requests passed to ``cancelRequest(_:)`` before their POST started,
@@ -353,9 +359,8 @@ public actor HTTPClientTransport: Transport {
             inFlightPosts[id] = task
             defer {
                 inFlightPosts[id] = nil
-                for waiter in authorizations.removeValue(forKey: id)?.waiters ?? [] {
-                    waiter.continuation.resume()
-                }
+                var ended = authorizations.removeValue(forKey: id)
+                ended?.resumeWaiters()
             }
             try await withTaskCancellationHandler {
                 try await task.value
@@ -445,8 +450,7 @@ public actor HTTPClientTransport: Transport {
                 state.active -= 1
                 state.lastEnded = .now
                 if state.active == 0 {
-                    for waiter in state.waiters { waiter.continuation.resume() }
-                    state.waiters.removeAll()
+                    state.resumeWaiters()
                 }
                 authorizations[id] = state
             }
