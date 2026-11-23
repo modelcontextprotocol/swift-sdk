@@ -132,6 +132,19 @@ private func makeStatelessTransport() -> StatelessHTTPServerTransport {
     )
 }
 
+private let invalidMessageBodies: [(String, Int)] = [
+    (#"{"not_a_valid_request": true}"#, -32600),
+    (#"{"jsonrpc":"2.0","id":7}"#, -32600),
+    ("[]", -32600),
+    ("[1,2,3]", -32600),
+    ("null", -32600),
+    ("true", -32600),
+    ("42", -32600),
+    (#""text""#, -32600),
+    ("not valid json{", -32700),
+    (#"{"jsonrpc":"2.0","id":7"#, -32700),
+]
+
 /// Drains an SSE stream, collecting raw SSE chunks.
 private actor ChunkCollector {
     var chunks: [Data] = []
@@ -644,17 +657,25 @@ struct StatefulHTTPServerTransportTests {
         await transport.disconnect()
     }
 
-    @Test("Invalid JSON body returns 400")
-    func testInvalidJSONReturns400() async throws {
+    @Test("Invalid bodies return the appropriate JSON-RPC error", arguments: invalidMessageBodies)
+    func testInvalidBodyErrorCode(body: String, expectedCode: Int) async throws {
         let transport = makeStatefulTransport()
         let sessionID = try await initializeSession(transport: transport)
 
         let response = await transport.handleRequest(
-            makeStatefulPOSTRequest(body: Data("not json".utf8), sessionID: sessionID)
+            makeStatefulPOSTRequest(body: Data(body.utf8), sessionID: sessionID)
         )
+        await transport.disconnect()
 
         #expect(response.statusCode == 400)
-        await transport.disconnect()
+        #expect(response.headers[HTTPHeaderName.sessionID] == sessionID)
+        #expect(response.headers[HTTPHeaderName.contentType] == "application/json")
+        let data = try #require(response.bodyData)
+        let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let error = try #require(json["error"] as? [String: Any])
+        #expect(error["code"] as? Int == expectedCode)
+        #expect(json["jsonrpc"] as? String == "2.0")
+        #expect(json["id"] is NSNull)
     }
 
     // MARK: - OAuth Bearer Validation
@@ -1000,17 +1021,25 @@ struct StatelessHTTPServerTransportTests {
         await transport.disconnect()
     }
 
-    @Test("Invalid JSON body returns 400")
-    func testInvalidJSONReturns400() async throws {
+    @Test("Invalid bodies return the appropriate JSON-RPC error", arguments: invalidMessageBodies)
+    func testInvalidBodyErrorCode(body: String, expectedCode: Int) async throws {
         let transport = makeStatelessTransport()
         try await transport.connect()
 
         let response = await transport.handleRequest(
-            makeStatelessPOSTRequest(body: Data("not json".utf8))
+            makeStatelessPOSTRequest(body: Data(body.utf8))
         )
+        await transport.disconnect()
 
         #expect(response.statusCode == 400)
-        await transport.disconnect()
+        #expect(response.headers[HTTPHeaderName.sessionID] == nil)
+        #expect(response.headers[HTTPHeaderName.contentType] == "application/json")
+        let data = try #require(response.bodyData)
+        let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let error = try #require(json["error"] as? [String: Any])
+        #expect(error["code"] as? Int == expectedCode)
+        #expect(json["jsonrpc"] as? String == "2.0")
+        #expect(json["id"] is NSNull)
     }
 
     // MARK: - Terminated State

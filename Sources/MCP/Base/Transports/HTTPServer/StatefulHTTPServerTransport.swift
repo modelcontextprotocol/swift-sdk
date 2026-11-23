@@ -205,10 +205,13 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
             )
         }
 
-        guard let messageKind = JSONRPCMessageKind(data: body) else {
+        let messageKind: JSONRPCMessageKind
+        do {
+            messageKind = try JSONRPCMessageKind(parsing: body)
+        } catch {
             return .error(
                 statusCode: 400,
-                .parseError("Invalid JSON-RPC message"),
+                error,
                 sessionID: sessionID
             )
         }

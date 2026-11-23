@@ -240,8 +240,22 @@ package enum JSONRPCMessageKind {
     /// Attempts to classify raw JSON-RPC data.
     /// Returns `nil` if the data cannot be parsed or classified.
     package init?(data: Data) {
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return nil
+        guard let kind = try? Self(parsing: data) else { return nil }
+        self = kind
+    }
+
+    /// Parses JSON and classifies the message for routing.
+    /// - Throws: `parseError` for malformed JSON, or `invalidRequest` if valid JSON
+    ///   cannot be classified as a request, notification, or response.
+    init(parsing data: Data) throws(MCPError) {
+        let object: Any
+        do {
+            object = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
+        } catch {
+            throw .parseError("Invalid JSON-RPC message")
+        }
+        guard let json = object as? [String: Any] else {
+            throw .invalidRequest("Invalid JSON-RPC message")
         }
 
         let id = Self.extractID(from: json)
@@ -253,10 +267,10 @@ package enum JSONRPCMessageKind {
                 self = .notification(method: method)
             }
         } else if json["result"] != nil || json["error"] != nil {
-            guard let id else { return nil }
+            guard let id else { throw .invalidRequest("Invalid JSON-RPC message") }
             self = .response(id: id)
         } else {
-            return nil
+            throw .invalidRequest("Invalid JSON-RPC message")
         }
     }
 
