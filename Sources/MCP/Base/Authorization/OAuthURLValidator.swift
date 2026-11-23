@@ -135,6 +135,12 @@ public struct OAuthURLValidator: Sendable {
     ///
     /// **Limitation**: only literal IP addresses are checked. DNS rebinding is not prevented here.
     public func isPrivateIPHost(_ host: String) -> Bool {
+        isPrivateIPHost(host, includingLoopback: false)
+    }
+
+    /// ``isPrivateIPHost(_:)``; with `includingLoopback`, `127.0.0.0/8` and
+    /// `::1`, also embedded in IPv6 as above, count as private too.
+    func isPrivateIPHost(_ host: String, includingLoopback loopback: Bool) -> Bool {
         var literal = host.lowercased()
         if literal.hasPrefix("[") || literal.hasSuffix("]") {
             // `URLComponents.host` keeps the brackets of an IPv6 literal; they
@@ -155,13 +161,13 @@ public struct OAuthURLValidator: Sendable {
                 return true
             }
             guard let bytes = Self.parse(literal, family: AF_INET6, size: 16) else { return true }
-            return Self.isPrivateIPv6(bytes)
+            return Self.isPrivateIPv6(bytes, loopback: loopback)
         }
         if let bytes = Self.parse(literal, family: AF_INET, size: 4) {
             // `012.0.0.1` parses as 12.0.0.1 here and as 10.0.0.1 (octal) in
             // resolvers: a non-canonical spelling is blocked.
             guard literal == bytes.map(String.init).joined(separator: ".") else { return true }
-            return Self.isPrivateIPv4(bytes)
+            return Self.isPrivateIPv4(bytes, loopback: loopback)
         }
         return Self.isNumericIPv4(literal)
     }
@@ -179,9 +185,10 @@ public struct OAuthURLValidator: Sendable {
         return text == bytes.map(String.init).joined(separator: ".")
     }
 
-    private static func isPrivateIPv4(_ octets: [UInt8]) -> Bool {
+    private static func isPrivateIPv4(_ octets: [UInt8], loopback: Bool) -> Bool {
         let (a, b, c) = (octets[0], octets[1], octets[2])
         return a == 0  // 0.0.0.0/8
+            || (loopback && a == 127)  // 127.0.0.0/8, when asked
             || a == 10  // 10.0.0.0/8
             || (a == 100 && (64...127).contains(b))  // 100.64.0.0/10 (CGNAT)
             || (a == 169 && b == 254)  // 169.254.0.0/16 (link-local, cloud metadata)
@@ -192,26 +199,26 @@ public struct OAuthURLValidator: Sendable {
             || a >= 224  // 224.0.0.0/4 (multicast), 240.0.0.0/4 (reserved)
     }
 
-    private static func isPrivateIPv6(_ bytes: [UInt8]) -> Bool {
+    private static func isPrivateIPv6(_ bytes: [UInt8], loopback: Bool) -> Bool {
         let prefix96 = bytes.prefix(12)
         let embedded = Array(bytes.suffix(4))
         if bytes.allSatisfy({ $0 == 0 }) { return true }  // ::
         if prefix96.elementsEqual([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff]) {
-            return isPrivateIPv4(embedded)  // ::ffff:0:0/96 (IPv4-mapped)
+            return isPrivateIPv4(embedded, loopback: loopback)  // ::ffff:0:0/96 (IPv4-mapped)
         }
         if prefix96.allSatisfy({ $0 == 0 }) {
-            if embedded == [0, 0, 0, 1] { return false }  // ::1 (loopback)
-            return isPrivateIPv4(embedded)  // ::/96 (IPv4-compatible)
+            if embedded == [0, 0, 0, 1] { return loopback }  // ::1 (loopback)
+            return isPrivateIPv4(embedded, loopback: loopback)  // ::/96 (IPv4-compatible)
         }
         if prefix96.elementsEqual([0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 0, 0]) {
-            return isPrivateIPv4(embedded)  // ::ffff:0:0:0/96 (IPv4-translated)
+            return isPrivateIPv4(embedded, loopback: loopback)  // ::ffff:0:0:0/96 (IPv4-translated)
         }
         if prefix96.elementsEqual([0x00, 0x64, 0xff, 0x9b, 0, 0, 0, 0, 0, 0, 0, 0]) {
-            return isPrivateIPv4(embedded)  // 64:ff9b::/96 (NAT64)
+            return isPrivateIPv4(embedded, loopback: loopback)  // 64:ff9b::/96 (NAT64)
         }
         let (first, second) = (bytes[0], bytes[1])
         if first == 0x20 && second == 0x02 {
-            return isPrivateIPv4(Array(bytes[2..<6]))  // 2002::/16 (6to4)
+            return isPrivateIPv4(Array(bytes[2..<6]), loopback: loopback)  // 2002::/16 (6to4)
         }
         return first & 0xfe == 0xfc  // fc00::/7 (ULA)
             || (first == 0xfe && second & 0xc0 == 0x80)  // fe80::/10 (link-local)

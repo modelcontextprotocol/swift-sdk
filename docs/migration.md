@@ -374,7 +374,8 @@ session ended.
   pre-registered: no dynamic registration happens. Pass `.none(clientID: "")`
   to register. The previous release registered and replaced the ID;
 - check the registration endpoint for private addresses, follow discovery
-  redirects only to `https` hosts that are not private addresses, and follow
+  redirects only to `https` hosts that are not private addresses, and to a
+  loopback host only from a loopback host, and follow
   no redirect for token and registration requests;
 - no longer block host names that begin with `fc`, `fd` or `fe8` through
   `fe8b`: only IP literals are checked;

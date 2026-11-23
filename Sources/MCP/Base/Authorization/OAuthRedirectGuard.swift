@@ -7,9 +7,9 @@ import Foundation
 /// Checks the HTTP redirects of OAuth requests (SSRF protection).
 ///
 /// Discovery requests may follow a redirect to an `https` URL (or a loopback
-/// `http` URL, when the request itself was loopback `http`) whose host is not
-/// a private IP literal. Token and registration requests carry credentials
-/// and follow no redirects.
+/// `http` URL, when the previous hop was loopback `http`) whose host is not
+/// a private IP literal, and to a loopback host only from a loopback host.
+/// Token and registration requests carry credentials and follow no redirects.
 final class OAuthRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     enum Policy: Sendable {
         /// Follow redirects that pass the URL checks.
@@ -33,7 +33,9 @@ final class OAuthRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Sen
         newRequest request: URLRequest,
         completionHandler: @escaping (URLRequest?) -> Void
     ) {
-        completionHandler(allows(from: task.originalRequest?.url, to: request.url) ? request : nil)
+        // The previous hop, not the first URL of the chain.
+        let source = response.url ?? task.currentRequest?.url
+        completionHandler(allows(from: source, to: request.url) ? request : nil)
     }
 
     /// Whether a redirect from `source` to `target` may be followed.
@@ -44,10 +46,24 @@ final class OAuthRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Sen
             let host = components.host?.lowercased(), !host.isEmpty
         else { return false }
         if validator.isPrivateIPHost(host) { return false }
+        let sourceComponents = source.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false) }
+        // A remote server must not send the client to services on this machine.
+        if isLoopback(host), !(sourceComponents?.host.map { isLoopback($0.lowercased()) } ?? false) {
+            return false
+        }
         if scheme == OAuthURLScheme.https { return true }
-        let sourceScheme = source.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false)?.scheme }
-        return scheme == OAuthURLScheme.http && sourceScheme?.lowercased() == OAuthURLScheme.http
+        return scheme == OAuthURLScheme.http && sourceComponents?.scheme?.lowercased() == OAuthURLScheme.http
             && OAuthLoopbackHost.isLoopback(host)
+    }
+
+    /// Whether `host` names this machine: `localhost`, a name under
+    /// `.localhost` (RFC 6761 §6.3), `127.0.0.0/8` or `::1`.
+    private func isLoopback(_ host: String) -> Bool {
+        let name = host.hasSuffix(".") ? String(host.dropLast()) : host
+        if name == OAuthLoopbackHost.localhost || name.hasSuffix(".\(OAuthLoopbackHost.localhost)") {
+            return true
+        }
+        return validator.isPrivateIPHost(host, includingLoopback: true) && !validator.isPrivateIPHost(host)
     }
 }
 

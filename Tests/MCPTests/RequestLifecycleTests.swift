@@ -291,8 +291,11 @@ struct RequestLifecycleTests {
         let context: RequestContext<CallTool.Result> = try await client.callTool(name: "slow")
         let call = try JSONDecoder().decode(Value.self, from: try #require(await incoming.next()))
         let waiter = Task { try await context.value }
+        // The request is shared: another task that awaits it fails too.
+        let other = Task { try await context.value }
         waiter.cancel()
         await #expect(throws: CancellationError.self) { _ = try await waiter.value }
+        await #expect(throws: CancellationError.self) { _ = try await other.value }
         let cancel = try JSONDecoder().decode(Value.self, from: try #require(await incoming.next()))
         #expect(cancel.objectValue?["method"] == "notifications/cancelled")
         #expect(cancel.objectValue?["params"]?.objectValue?["requestId"] == call.objectValue?["id"])
@@ -306,10 +309,18 @@ struct ServerToClientLimitTests {
     private func connected(
         configuration: Client.Configuration = .handshake, capabilities: Client.Capabilities = .init(roots: .init())
     ) async throws -> (Client, InMemoryTransport, AsyncThrowingStream<Data, Swift.Error>.Iterator) {
+        let client = Client(name: "c", version: "1", capabilities: capabilities, configuration: configuration)
+        let (serverEnd, incoming) = try await connect(client)
+        return (client, serverEnd, incoming)
+    }
+
+    /// Connects `client`, again if it is connected, to a new raw server end.
+    private func connect(
+        _ client: Client
+    ) async throws -> (InMemoryTransport, AsyncThrowingStream<Data, Swift.Error>.Iterator) {
         let (clientEnd, serverEnd) = await InMemoryTransport.createConnectedPair()
         try await serverEnd.connect()
         var incoming = await serverEnd.receive().makeAsyncIterator()
-        let client = Client(name: "c", version: "1", capabilities: capabilities, configuration: configuration)
         let connecting = Task { try await client.connect(transport: clientEnd) }
         let initialize = try JSONDecoder().decode(Value.self, from: try #require(await incoming.next()))
         let id = try #require(initialize.objectValue?["id"])
@@ -319,7 +330,7 @@ struct ServerToClientLimitTests {
         try await serverEnd.send(try JSONEncoder().encode(["jsonrpc": "2.0", "id": id, "result": try Value(result)] as Value))
         _ = try await connecting.value
         _ = try await incoming.next()  // notifications/initialized
-        return (client, serverEnd, incoming)
+        return (serverEnd, incoming)
     }
 
     @Test("At most the configured number of handlers run at once; the rest wait")
@@ -374,6 +385,36 @@ struct ServerToClientLimitTests {
         try await serverEnd.send(
             Data(#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"a"}}"#.utf8))
         try await serverEnd.send(Data(#"{"jsonrpc":"2.0","id":"b","method":"roots/list"}"#.utf8))
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(await running.value == 1)
+        open.yield()
+        open.yield()
+        let answered = try JSONDecoder().decode(Value.self, from: try #require(await replies.next()))
+        #expect(answered.objectValue?["id"] == "b")
+        #expect(await running.value == 2)
+        await client.disconnect()
+    }
+
+    @Test("A handler still running after a reconnect keeps its slot")
+    func reconnectKeepsDrainingSlot() async throws {
+        var configuration = Client.Configuration.handshake
+        configuration.maxConcurrentServerRequests = 1
+        let (client, firstEnd, _) = try await connected(configuration: configuration)
+        let running = Counter()
+        let (release, open) = AsyncStream<Void>.makeStream()
+        await client.withRootsHandler {
+            await running.increment()
+            // Ignores cancellation until released.
+            await Task { for await _ in release { break } }.value
+            return []
+        }
+        try await firstEnd.send(Data(#"{"jsonrpc":"2.0","id":"a","method":"roots/list"}"#.utf8))
+        #expect(await eventually { await running.value == 1 })
+
+        // The new connection cancels the old handler, which keeps running.
+        let (secondEnd, incoming) = try await connect(client)
+        var replies = incoming
+        try await secondEnd.send(Data(#"{"jsonrpc":"2.0","id":"b","method":"roots/list"}"#.utf8))
         try await Task.sleep(for: .milliseconds(100))
         #expect(await running.value == 1)
         open.yield()

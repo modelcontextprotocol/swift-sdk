@@ -350,6 +350,24 @@ struct OAuthURLValidatorTests {
             from: https, to: URL(string: "https://[::ffff:0:10.0.0.1]/metadata")!))
     }
 
+    @Test("Discovery redirects reach a loopback host only from a loopback host")
+    func testRedirectGuardLoopback() {
+        let guardDelegate = OAuthRedirectGuard(policy: .validated, validator: OAuthURLValidator())
+        let https = URL(string: "https://mcp.example.com/.well-known/oauth-protected-resource")!
+        for target in [
+            "https://127.0.0.1:8443/metadata", "https://127.0.0.2/metadata", "https://localhost/metadata",
+            "https://a.localhost/metadata", "https://localhost./metadata", "https://[::1]/metadata",
+            "https://[::ffff:127.0.0.1]/metadata", "https://[::127.0.0.1]/metadata",
+        ] {
+            #expect(!guardDelegate.allows(from: https, to: URL(string: target)!), "\(target)")
+        }
+        let loopback = URL(string: "https://localhost:8443/.well-known/oauth-protected-resource")!
+        #expect(guardDelegate.allows(from: loopback, to: URL(string: "https://127.0.0.1:8443/metadata")!))
+        #expect(guardDelegate.allows(from: loopback, to: URL(string: "https://[::1]:8443/metadata")!))
+        // The previous hop decides: a public https hop does not reach loopback http.
+        #expect(!guardDelegate.allows(from: https, to: URL(string: "http://127.0.0.1:3000/metadata")!))
+    }
+
     @Test("Token and registration requests follow no redirect")
     func testRedirectGuardNone() {
         let guardDelegate = OAuthRedirectGuard(policy: .none, validator: OAuthURLValidator())

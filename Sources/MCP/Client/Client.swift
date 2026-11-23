@@ -681,8 +681,9 @@ public actor Client {
         for handler in incomingRequests.values where handler.token != caller {
             handler.task.cancel()
         }
+        // They keep their slots until they return, also on the next connection.
+        drainingIncomingRequests.formUnion(incomingRequests.values.map(\.token))
         incomingRequests = [:]
-        drainingIncomingRequests = []
         queuedIncomingRequests = []
         immediateResponses = []
         progressTokens = [:]
