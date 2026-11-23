@@ -1153,7 +1153,7 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
                 dpop: dpopSigner,
                 session: session
             )
-            storeTokenResponse(decoded, requestedScopes: requestedScopes)
+            storeTokenResponse(decoded, requestedScopes: requestedScopes, refreshing: token)
             refreshedTokenValue = decoded.accessToken
             return true
         } catch let error as OAuthAuthorizationError {
@@ -1226,15 +1226,19 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
 
     // MARK: - State Helpers
 
+    /// Saves a token response. `previous` is the token a refresh replaces.
     private func storeTokenResponse(
         _ decoded: OAuthTokenResponse,
-        requestedScopes: Set<String>?
+        requestedScopes: Set<String>?,
+        refreshing previous: OAuthAccessToken? = nil
     ) {
         let scopeSet: Set<String>
         if let scope = decoded.scope {
             scopeSet = scopeSelector.parseScopeString(scope)
         } else {
-            scopeSet = requestedScopes ?? []
+            // RFC 6749 §5.1, §6: an omitted scope is the one requested, or
+            // the one granted before when the refresh named none.
+            scopeSet = requestedScopes ?? previous?.scopes ?? []
         }
         let expiresAt = decoded.expiresIn.map { Date().addingTimeInterval(TimeInterval($0)) }
         storedTokenLifetime = decoded.expiresIn.map { (decoded.accessToken, TimeInterval($0)) }
@@ -1250,7 +1254,8 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
             expiresAt: expiresAt,
             scopes: scopeSet,
             authorizationServer: selectedAuthorizationServer,
-            refreshToken: decoded.refreshToken,
+            // RFC 6749 §6: without a new refresh token, the old one stays valid.
+            refreshToken: decoded.refreshToken ?? previous?.refreshToken,
             clientID: nonEmptyClientID(),
             keyThumbprint: boundKey
         ))

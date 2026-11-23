@@ -26,6 +26,8 @@ final class RecordingTokenClient: OAuthTokenRequesting, @unchecked Sendable {
     var refusedGrants: Set<String> = []
     var expiresIn = 3600
     var delay: Duration = .zero
+    /// Answers without `refresh_token`, as RFC 6749 §6 allows.
+    var omitsRefreshToken = false
 
     var calls: [Call] { lock.withLock { recorded } }
 
@@ -51,7 +53,7 @@ final class RecordingTokenClient: OAuthTokenRequesting, @unchecked Sendable {
         }
         return OAuthTokenResponse(
             accessToken: "token-\(number)", tokenType: "Bearer", expiresIn: expiresIn, scope: nil,
-            refreshToken: "refresh-\(number)")
+            refreshToken: omitsRefreshToken ? nil : "refresh-\(number)")
     }
 }
 
@@ -243,6 +245,23 @@ struct OAuthAuthorizerStateTests {
         #expect(tokens.calls.map(\.grantType) == ["client_credentials", "refresh_token", "refresh_token"])
         #expect(tokens.calls.last?.refreshToken == "refresh-2")
         #expect(storage.load()?.value == "token-3")
+    }
+
+    @Test("A refresh response without a refresh token keeps the previous one (RFC 6749 section 6)")
+    func refreshWithoutRefreshTokenKeepsIt() async throws {
+        let storage = InMemoryTokenStorage()
+        let tokens = RecordingTokenClient()
+        let authorizer = makeAuthorizer(discovery: discovery(listing: serverA), tokens: tokens, storage: storage)
+        #expect(try await challenge(authorizer, sent: nil))
+        tokens.omitsRefreshToken = true
+        #expect(try await challenge(authorizer, sent: "Bearer token-1"))  // refresh
+        #expect(storage.load()?.value == "token-2")
+        #expect(storage.load()?.refreshToken == "refresh-1")
+
+        // The kept refresh token refreshes again instead of a new grant.
+        #expect(try await challenge(authorizer, sent: "Bearer token-2"))
+        #expect(tokens.calls.map(\.grantType) == ["client_credentials", "refresh_token", "refresh_token"])
+        #expect(tokens.calls.last?.refreshToken == "refresh-1")
     }
 
     @Test("A transient failure to read the authorization server metadata keeps the stored tokens")
