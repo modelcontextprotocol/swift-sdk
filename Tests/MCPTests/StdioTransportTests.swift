@@ -28,6 +28,40 @@ struct StdioTransportTests {
         await transport.disconnect()
     }
 
+    @Test("Connect and exchange messages over a socketpair, as used by Node clients")
+    func testStdioTransportOverSocketPair() async throws {
+        // Node's child_process.spawn uses socketpairs for stdio pipes. On Darwin,
+        // fstat() on a socket reports st_dev == -1, which used to trap when
+        // converted with UInt64(st_dev) during connect().
+        var fds: [Int32] = [0, 0]
+        // Glibc imports SOCK_STREAM as a C enum; Darwin and Musl expose it as Int32.
+        #if canImport(Glibc)
+            let streamSocketType = Int32(SOCK_STREAM.rawValue)
+        #else
+            let streamSocketType = SOCK_STREAM
+        #endif
+        #expect(socketpair(AF_UNIX, streamSocketType, 0, &fds) == 0)
+        let input = FileDescriptor(rawValue: fds[0])
+        let output = FileDescriptor(rawValue: fds[1])
+        defer {
+            try? input.close()
+            try? output.close()
+        }
+
+        let transport = StdioTransport(input: input, output: output, logger: nil)
+        try await transport.connect()
+
+        let message = #"{"key":"value"}"#
+        try await transport.send(message.data(using: .utf8)!)
+
+        let stream: AsyncThrowingStream<Data, Swift.Error> = await transport.receive()
+        var iterator = stream.makeAsyncIterator()
+        let received = try await iterator.next()
+        #expect(received == message.data(using: .utf8)!)
+
+        await transport.disconnect()
+    }
+
     @Test("Disconnect restores file descriptor blocking mode")
     func testDisconnectRestoresBlockingMode() async throws {
         let (input, writer) = try FileDescriptor.pipe()

@@ -143,8 +143,13 @@ import struct Foundation.Data
                 guard result >= 0 else {
                     throw MCPError.transportError(Errno(rawValue: CInt(errno)))
                 }
+                // Convert by bit pattern: `st_dev` is signed on Darwin, where sockets
+                // report -1, and `UInt64(status.st_dev)` would trap. The values are
+                // only compared for identity, so the exact conversion doesn't matter.
                 return DescriptorState(
-                    flags: flags, device: UInt64(status.st_dev), inode: UInt64(status.st_ino))
+                    flags: flags,
+                    device: UInt64(truncatingIfNeeded: status.st_dev),
+                    inode: UInt64(truncatingIfNeeded: status.st_ino))
             #else
                 // For platforms where non-blocking operations aren't supported
                 throw MCPError.internalError(
@@ -156,8 +161,8 @@ import struct Foundation.Data
             guard state.flags & O_NONBLOCK == 0 else { return }
             var status = stat()
             guard fstat(fileDescriptor.rawValue, &status) == 0,
-                UInt64(status.st_dev) == state.device,
-                UInt64(status.st_ino) == state.inode
+                UInt64(truncatingIfNeeded: status.st_dev) == state.device,
+                UInt64(truncatingIfNeeded: status.st_ino) == state.inode
             else { return }
             let currentFlags = fcntl(fileDescriptor.rawValue, F_GETFL)
             guard currentFlags >= 0 else { return }
