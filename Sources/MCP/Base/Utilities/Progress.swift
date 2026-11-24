@@ -56,7 +56,9 @@ public struct ProgressNotification: Notification {
 ///
 /// Frozen: no case is added in 1.x (a progress token is a string or an integer).
 public enum ProgressToken: Hashable, Codable, Sendable {
+    /// A string token.
     case string(String)
+    /// An integer token.
     case integer(Int)
 
     public init(from decoder: Decoder) throws {

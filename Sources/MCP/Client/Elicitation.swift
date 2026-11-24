@@ -11,6 +11,7 @@ public enum Elicitation {
         ///
         /// Frozen: no case is added in 1.x (the root of a requested schema is an object).
         public enum SchemaType: String, Hashable, Codable, Sendable {
+            /// A JSON object whose properties are the requested fields.
             case object
         }
 
@@ -142,8 +143,11 @@ public enum CreateElicitation: Method {
         ///
         /// Frozen: no case is added in 1.x (unchanged since 2025-06-18).
         public enum Action: String, Hashable, Codable, Sendable {
+            /// The user accepted the request: for a form, with the requested content.
             case accept
+            /// The user explicitly declined the request.
             case decline
+            /// The user dismissed the request without choosing.
             case cancel
         }
 

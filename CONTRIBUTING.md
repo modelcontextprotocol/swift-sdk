@@ -192,7 +192,7 @@ An input that crashes is saved in `.build/linux/<image>-<arch>/fuzz/artifacts/`;
   `protocol.md`, `server.md` or `client.md` is not linked from `docs/README.md`.
 - CI builds DocC with `--warnings-as-errors`. A broken symbol link fails the build.
 - CI runs `swift scripts/doc-coverage.swift`, which lists every public declaration in
-  `Sources/MCP` without a `///` comment.
+  `Sources/MCP` without a `///` comment, including the cases of public enums.
 - A change in behavior updates the guide, the design note and, for breaking changes,
   [docs/migration.md](docs/migration.md).
 

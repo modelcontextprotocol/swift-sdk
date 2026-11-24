@@ -4,9 +4,12 @@
 import Foundation
 import MCP
 
+private let decoder = JSONDecoder()
+private let encoder = JSONEncoder()
+
 private func probe<T: Codable>(_: T.Type, _ data: Data) {
-    guard let value = try? JSONDecoder().decode(T.self, from: data) else { return }
-    _ = try? JSONEncoder().encode(value)
+    guard let value = try? decoder.decode(T.self, from: data) else { return }
+    _ = try? encoder.encode(value)
 }
 
 @_cdecl("LLVMFuzzerTestOneInput")

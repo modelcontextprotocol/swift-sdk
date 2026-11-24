@@ -183,6 +183,7 @@ public struct OAuthConfiguration: Sendable {
     ///
     /// Frozen: no case is added in 1.x (the two ways the helper can fail).
     public enum PrivateKeyJWTAssertionError: LocalizedError, Sendable {
+        /// The requested lifetime, in seconds, is not greater than zero.
         case invalidLifetime(TimeInterval)
         /// Not thrown: signing uses swift-crypto on every platform.
         case cryptographyUnavailable

@@ -32,12 +32,19 @@ public struct URLElicitationInfo: Codable, Hashable, Sendable {
 /// including a code a later revision adds, is a ``serverError(code:message:data:)``;
 /// ``errorCode`` and the constants of ``Code`` identify it.
 public enum MCPError: Swift.Error, Sendable {
-    // Standard JSON-RPC 2.0 errors (-32700 to -32603)
-    case parseError(String?)  // -32700
-    case invalidRequest(String?)  // -32600
-    case methodNotFound(String?)  // -32601
-    case invalidParams(String?)  // -32602
-    case internalError(String?)  // -32603
+    // Standard JSON-RPC 2.0 errors (-32700 to -32603). The string, if any,
+    // is sent as `data.detail`.
+
+    /// The message is not valid JSON: -32700.
+    case parseError(String?)
+    /// The message is not a valid request: -32600.
+    case invalidRequest(String?)
+    /// The method does not exist or is not available: -32601.
+    case methodNotFound(String?)
+    /// The parameters of the request are not valid: -32602.
+    case invalidParams(String?)
+    /// The receiver failed to handle the request: -32603.
+    case internalError(String?)
 
     /// An error with an implementation-defined or unrecognized code.
     case serverError(code: Int, message: String, data: Value? = nil)
@@ -56,7 +63,10 @@ public enum MCPError: Swift.Error, Sendable {
     case urlElicitationRequired(message: String, elicitations: [URLElicitationInfo])
 
     // Transport specific errors
+
+    /// The connection is closed: -32000.
     case connectionClosed
+    /// The transport failed with this error: -32001, with its description as `data.error`.
     case transportError(Swift.Error)
 
     /// The JSON-RPC 2.0 error code

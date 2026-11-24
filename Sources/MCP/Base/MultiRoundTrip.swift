@@ -135,8 +135,11 @@ extension InputRequest: Codable {
 ///
 /// No other case is added in 1.x: a kind from a later revision is ``unknown(_:)``.
 public enum InputResponse: Hashable, Sendable {
+    /// The result of `elicitation/create`.
     case elicitation(CreateElicitation.Result)
+    /// The result of `sampling/createMessage`.
     case sampling(CreateSamplingMessage.Result)
+    /// The result of `roots/list`.
     case roots(ListRoots.Result)
     /// The result of a request the SDK does not know, as received.
     case unknown(Value)
