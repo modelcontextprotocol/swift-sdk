@@ -324,8 +324,8 @@ public struct OriginValidator: HTTPRequestValidator {
     /// Matches a value against a pattern that may contain a port wildcard `:*`.
     ///
     /// Examples:
-    /// - `"localhost:*"` matches `"localhost:8080"`, `"localhost:3000"`
-    /// - `"http://localhost:*"` matches `"http://localhost:8080"`
+    /// - `"localhost:*"` matches `"localhost:8080"`, `"localhost:3000"`, and `"localhost"`
+    /// - `"http://localhost:*"` matches `"http://localhost:8080"` and `"http://localhost"`
     /// - `"localhost:8080"` matches only `"localhost:8080"` exactly
     private func matchesPattern(_ value: String, pattern: String) -> Bool {
         guard pattern.hasSuffix(":*") else {
@@ -333,6 +333,9 @@ public struct OriginValidator: HTTPRequestValidator {
         }
 
         let prefix = String(pattern.dropLast(2))
+        // A value without a port uses the scheme's default port (RFC 9110, section 7.2),
+        // which the wildcard covers.
+        if value == prefix { return true }
         guard value.hasPrefix(prefix + ":") else { return false }
 
         let portPart = value.dropFirst(prefix.count + 1)
