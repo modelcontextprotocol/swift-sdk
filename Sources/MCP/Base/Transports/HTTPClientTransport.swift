@@ -319,8 +319,9 @@ public actor HTTPClientTransport: Transport {
     /// the `Mcp-Param-*` headers of a `tools/call` (SEP-2243).
     ///
     /// A header named here replaces one the transport sets before it, such
-    /// as `Mcp-Method`; the `requestModifier` and the authorizer's headers
-    /// are applied after it.
+    /// as `Mcp-Method`. Applied after it are `Mcp-Session-Id`, which the
+    /// transport adds on a connection with a session, the authorizer's
+    /// headers and the `requestModifier`.
     public func send(_ data: Data, additionalHeaders: [String: String]) async throws {
         let message = OutgoingMessage(data)
         if let id = message.requestID {

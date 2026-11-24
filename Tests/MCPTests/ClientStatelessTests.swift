@@ -138,6 +138,47 @@ private actor ToolListing {
     }
 }
 
+/// Waits until the client has sent `count` messages and returns the last one.
+private func sent(_ transport: MockTransport, count: Int) async throws -> [String: Value] {
+    for _ in 0..<200 where await transport.sentData.count < count {
+        try await Task.sleep(for: .milliseconds(5))
+    }
+    let data = try #require(await transport.sentData.dropFirst(count - 1).first)
+    return try #require(try JSONDecoder().decode(Value.self, from: data).objectValue)
+}
+
+private func reply(_ transport: MockTransport, to message: [String: Value], _ body: String) async throws {
+    let id = try #require(message["id"])
+    let idJSON = String(decoding: try JSONEncoder().encode(id), as: UTF8.self)
+    await transport.queue(data: Data(#"{"jsonrpc":"2.0","id":\#(idJSON),\#(body)}"#.utf8))
+}
+
+private let discoverResult =
+    #""result":{"supportedVersions":["2026-07-28"],"capabilities":{"tools":{}},"resultType":"complete","_meta":{"io.modelcontextprotocol/serverInfo":{"name":"mock","version":"1"}}}"#
+
+/// Reports the tools in the client's header record each time the client
+/// warns about a tool with an invalid annotation. The warning is logged on
+/// the client's actor, so the record is read as the client left it.
+private struct HeaderRecordLogHandler: LogHandler {
+    let client: Client
+    let sink: AsyncStream<[String]>.Continuation
+    var metadata: Logger.Metadata = [:]
+    var logLevel: Logger.Level = .trace
+
+    subscript(metadataKey key: String) -> Logger.Metadata.Value? {
+        get { metadata[key] }
+        set { metadata[key] = newValue }
+    }
+
+    func log(
+        level: Logger.Level, message: Logger.Message, metadata: Logger.Metadata?,
+        source: String, file: String, function: String, line: UInt
+    ) {
+        guard message.description.contains("invalid x-mcp-header") else { return }
+        sink.yield(client.assumeIsolated { $0.toolHeaderParameters.keys.sorted() })
+    }
+}
+
 @Suite("Client tool header cache")
 struct ClientToolHeaderCacheTests {
     private func server(_ listing: ToolListing) async -> Server {
@@ -166,6 +207,33 @@ struct ClientToolHeaderCacheTests {
         await client.disconnect()
         #expect(await client.toolHeaderParameters.isEmpty)
         await server.stop()
+    }
+
+    @Test("Every valid tool of a page is recorded before an invalid one is reported")
+    func recordedBeforeWarning() async throws {
+        let client = Client(name: "probe", version: "1.0", configuration: .init(protocolMode: .automatic))
+        let (records, sink) = AsyncStream<[String]>.makeStream()
+        let transport = MockTransport(
+            logger: Logger(label: "test.header-record") { _ in HeaderRecordLogHandler(client: client, sink: sink) })
+        let connecting = Task { try await client.connect(transport: transport) }
+        try await reply(transport, to: try await sent(transport, count: 1), discoverResult)
+        _ = try await connecting.value
+
+        let listing = Task { try await client.listTools() }
+        // `bad` comes first, so `good` is unrecorded while it is reported
+        // unless the record is replaced before the warning.
+        try await reply(
+            transport, to: try await sent(transport, count: 2),
+            #""result":{"tools":[{"name":"bad","inputSchema":{"type":"object","properties":{"x":{"type":"array","x-mcp-header":"X"}}}},{"name":"good","inputSchema":{"type":"object","properties":{"r":{"type":"string","x-mcp-header":"R"}}}}]}"#
+        )
+        _ = try await listing.value
+        #expect(await client.toolHeaderParameters.keys.sorted() == ["good"])
+        await client.disconnect()
+        sink.finish()
+
+        var reported: [[String]] = []
+        for await record in records { reported.append(record) }
+        #expect(reported == [["good"]])
     }
 }
 
@@ -248,24 +316,6 @@ struct ClientCustomTransportHeaderTests {
 
 @Suite("Client Discovery Negotiation Tests")
 struct ClientDiscoveryNegotiationTests {
-    /// Waits until the client has sent `count` messages and returns the last one.
-    private func sent(_ transport: MockTransport, count: Int) async throws -> [String: Value] {
-        for _ in 0..<200 where await transport.sentData.count < count {
-            try await Task.sleep(for: .milliseconds(5))
-        }
-        let data = try #require(await transport.sentData.dropFirst(count - 1).first)
-        return try #require(try JSONDecoder().decode(Value.self, from: data).objectValue)
-    }
-
-    private func reply(_ transport: MockTransport, to message: [String: Value], _ body: String) async throws {
-        let id = try #require(message["id"])
-        let idJSON = String(decoding: try JSONEncoder().encode(id), as: UTF8.self)
-        await transport.queue(data: Data(#"{"jsonrpc":"2.0","id":\#(idJSON),\#(body)}"#.utf8))
-    }
-
-    private let discoverResult =
-        #""result":{"supportedVersions":["2026-07-28"],"capabilities":{"tools":{}},"resultType":"complete","_meta":{"io.modelcontextprotocol/serverInfo":{"name":"mock","version":"1"}}}"#
-
     @Test("-32022 is retried once with a listed stateless version")
     func testRetryOnUnsupportedVersion() async throws {
         let transport = MockTransport()

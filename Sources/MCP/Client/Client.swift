@@ -785,26 +785,34 @@ public actor Client {
         return result
     }
 
-    /// On stateless connections, records the `x-mcp-header` arguments of each
-    /// listed tool and drops tools with invalid annotations (SEP-2243).
-    /// Returns `nil` on handshake connections.
-    /// Records the `x-mcp-header` parameters of listed tools and drops
-    /// tools with invalid annotations. A first page (no cursor) replaces
-    /// what earlier listings recorded.
+    /// Records the `x-mcp-header` arguments of each listed tool and drops
+    /// tools with invalid annotations, at revisions that define
+    /// `Mcp-Param-*` headers (SEP-2243). Returns `nil` at other revisions.
+    /// A first page (no cursor) replaces what earlier listings recorded.
+    ///
+    /// The record is replaced in one step before the warnings are logged:
+    /// logging awaits the transport's logger, and a `tools/call` sent
+    /// meanwhile must find every tool of the page.
     private func recordTools(_ result: ListTools.Result, firstPage: Bool) async -> ListTools.Result? {
-        guard isStateless else { return nil }
-        if firstPage { toolHeaderParameters = [:] }
+        guard let version = negotiatedProtocolVersion, Version.profile(for: version).usesStandardHeaders
+        else { return nil }
+        var recorded = firstPage ? [:] : toolHeaderParameters
         var valid: [Tool] = []
+        var rejected: [(tool: String, error: String)] = []
         for tool in result.tools {
             do {
-                toolHeaderParameters[tool.name] = try tool.headerParameters()
+                recorded[tool.name] = try tool.headerParameters()
                 valid.append(tool)
             } catch {
-                toolHeaderParameters[tool.name] = nil
-                await logger?.warning(
-                    "Ignoring tool with an invalid x-mcp-header annotation",
-                    metadata: ["tool": "\(MCPRequestHeaders.sanitized(tool.name))", "error": "\(error)"])
+                recorded[tool.name] = nil
+                rejected.append((MCPRequestHeaders.sanitized(tool.name), "\(error)"))
             }
+        }
+        toolHeaderParameters = recorded
+        for (tool, error) in rejected {
+            await logger?.warning(
+                "Ignoring tool with an invalid x-mcp-header annotation",
+                metadata: ["tool": "\(tool)", "error": "\(error)"])
         }
         guard valid.count != result.tools.count else { return result }
         return ListTools.Result(
