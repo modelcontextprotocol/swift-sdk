@@ -369,7 +369,9 @@ public actor Client {
 
     /// Handlers of server-to-client requests that are still running.
     private var incomingRequests: [ID: IncomingHandler] = [:]
-    /// Cancelled handlers that have not returned yet. They keep their slot.
+    /// Handlers that were cancelled, or whose connection closed, and have not
+    /// returned yet. They keep their slot: a handler that reconnects is not
+    /// cancelled, but it still runs.
     private var drainingIncomingRequests: Set<UUID> = []
     /// Server-to-client requests waiting for a free handler slot.
     private var queuedIncomingRequests: [Request<AnyMethod>] = []
@@ -562,9 +564,10 @@ public actor Client {
         case .handshake:
             result = try await _initialize()
         case .automatic:
-            result = try await discoverOrInitialize(Version.stateless[0], fallback: true)
+            result = try await discoverOrInitialize(
+                Version.stateless[0], fallback: true, generation: generation)
         case .stateless(let version):
-            result = try await discoverOrInitialize(version, fallback: false)
+            result = try await discoverOrInitialize(version, fallback: false, generation: generation)
         }
         refreshNotificationStream()
         return result
@@ -980,7 +983,7 @@ public actor Client {
                     if isInitialize {
                         await self.forgetRequest(id)
                     } else {
-                        try? await self.cancelRequest(id, reason: "Cancelled")
+                        await self.cancelCancelledTask(id)
                     }
                 }
             }
@@ -1382,6 +1385,14 @@ public actor Client {
         try await notify(notification)
     }
 
+    /// Cancels the request of a cancelled task, unless it already ended.
+    /// ``cancelRequest(_:reason:)`` of an exchange cancels the task of the
+    /// round it cancels, and that round must not be cancelled twice.
+    private func cancelCancelledTask(_ id: ID) async {
+        guard pendingRequests[id] != nil else { return }
+        try? await cancelRequest(id, reason: "Cancelled")
+    }
+
 
     /// Stops tracking a request without telling the server.
     private func forgetRequest(_ id: ID) {
@@ -1768,12 +1779,25 @@ public actor Client {
     ///   revision in common, an HTTP 400/404/405 refusal or no answer within
     ///   ``Configuration/discoveryTimeout``. Other transport errors are
     ///   rethrown. `false` for `.stateless(_:)`: only `preferred` is accepted.
-    private func discoverOrInitialize(_ preferred: String, fallback: Bool) async throws
+    /// - Parameter generation: The connection generation of the
+    ///   `connect(transport:)` call. Once another connect or a disconnect
+    ///   replaced it, this throws instead of acting on the new connection.
+    private func discoverOrInitialize(_ preferred: String, fallback: Bool, generation: Int) async throws
         -> Initialize.Result
     {
+        func ensureCurrent() throws {
+            guard connectionGeneration == generation else {
+                throw MCPError.internalError("Client disconnected")
+            }
+        }
+        func initialize() async throws -> Initialize.Result {
+            try ensureCurrent()
+            return try await _initialize()
+        }
         var version = preferred
         var retried = false
         while true {
+            try ensureCurrent()
             let request = ServerDiscover.request(
                 .init(), _meta: requestMeta(version: version, merging: nil))
             // Only discovery runs inside the do: an error from the
@@ -1791,7 +1815,7 @@ public actor Client {
                     continue
                 }
                 if fallback, supported.isEmpty || supported.contains(where: Version.handshake.contains) {
-                    return try await _initialize()
+                    return try await initialize()
                 }
                 throw MCPError.unsupportedProtocolVersion(supported: supported, requested: requested)
             } catch let failure as SendFailure {
@@ -1801,27 +1825,29 @@ public actor Client {
                 await logger?.info(
                     "server/discover refused; falling back to initialize",
                     metadata: ["error": "\(failure.error)"])
-                return try await _initialize()
+                return try await initialize()
             } catch is DiscoverTimeout {
                 await logger?.info("server/discover timed out; falling back to initialize")
-                return try await _initialize()
+                return try await initialize()
             } catch let error as MCPError where fallback && connection != nil {
                 // The peer answered with a JSON-RPC error. On a closed
                 // connection the error is rethrown: there is nothing to fall back on.
+                try ensureCurrent()
                 await logger?.info(
                     "server/discover failed; falling back to initialize",
                     metadata: ["error": "\(error)"])
-                return try await _initialize()
+                return try await initialize()
             }
             let served =
                 result.supportedVersions.contains(version)
                 ? version
                 : fallback ? result.supportedVersions.first(where: Version.stateless.contains) : nil
             guard let served else {
-                if fallback { return try await _initialize() }
+                if fallback { return try await initialize() }
                 throw MCPError.unsupportedProtocolVersion(
                     supported: result.supportedVersions, requested: version)
             }
+            try ensureCurrent()
             return await adopt(result, version: served)
         }
     }

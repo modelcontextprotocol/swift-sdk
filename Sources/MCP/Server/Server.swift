@@ -837,6 +837,9 @@ public actor Server {
     ///
     /// On an `initialize` session the notification is also sent on the
     /// connection, as ``notify(_:)`` does: that session has one client.
+    /// Behind ``StatelessHTTPServerTransport`` a handler of a handshake
+    /// request sends it on its request's stream only when `recipients`
+    /// accepts that request's context.
     public func notify<N: Notification>(
         _ notification: Message<N>, to recipients: @escaping @Sendable (HandlerContext) -> Bool
     ) async throws {
@@ -855,9 +858,11 @@ public actor Server {
         if let event = SubscriptionEvent(notification) {
             publish(event, to: recipients)
             // A handshake handler behind a sessionless transport sends it
-            // on its own request's stream.
+            // on its own request's stream, when `recipients` accepts that
+            // caller: one server serves every client there.
             let sessionlessHandshake =
-                isSessionless && Server.currentHandlerContext.map { !$0.isStateless } == true
+                isSessionless
+                && Server.currentHandlerContext.map { !$0.isStateless && (recipients?($0) ?? true) } == true
             guard isInitialized || sessionlessHandshake else { return }
         }
         try await connection.send(

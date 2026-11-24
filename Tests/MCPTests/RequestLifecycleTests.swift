@@ -301,6 +301,71 @@ struct RequestLifecycleTests {
         #expect(cancel.objectValue?["params"]?.objectValue?["requestId"] == call.objectValue?["id"])
         await client.disconnect()
     }
+
+    @Test("cancelRequest during a later round of an exchange sends one notifications/cancelled")
+    func cancelRoundOnce() async throws {
+        let server = Server(name: "s", version: "1", capabilities: .init(tools: .init()))
+        let retried = Flag()
+        let retryCancelled = Flag()
+        await server.withMethodHandler(CallTool.self) { params in
+            guard params.inputResponses != nil else {
+                return .inputRequired(["ok": .elicitation(message: "Proceed?")])
+            }
+            await retried.set()
+            do {
+                try await Task.sleep(for: .seconds(30))
+            } catch {
+                await retryCancelled.set()
+                throw error
+            }
+            return .init(content: [])
+        }
+        let (clientEnd, serverEnd) = await InMemoryTransport.createConnectedPair()
+        try await server.start(transport: serverEnd)
+        let recorder = RecordingTransport(clientEnd)
+        let client = Client(name: "c", version: "1", capabilities: .init(elicitation: .init()))
+        await client.withElicitationHandler { _ in .init(action: .accept, content: [:]) }
+        try await client.connect(transport: recorder)
+        #expect(await client.isStateless)
+
+        let context = try await client.send(CallTool.request(.init(name: "slow")))
+        #expect(await eventually { await retried.isSet })
+        try await client.cancelRequest(context.requestID)
+        await #expect(throws: (any Error).self) { _ = try await context.value }
+        #expect(await eventually { await retryCancelled.isSet })
+        // A second cancellation would go out before this later request.
+        try await client.ping()
+        let cancellations = await recorder.sent.filter {
+            $0.objectValue?["method"]?.stringValue == CancelledNotification.name
+        }
+        #expect(cancellations.count == 1)
+        await client.disconnect()
+        await server.stop()
+    }
+
+    @Test("A connect replaced during discovery does not initialize the new connection")
+    func connectReplacedDuringDiscovery() async throws {
+        let (firstEnd, silentEnd) = await InMemoryTransport.createConnectedPair()
+        try await silentEnd.connect()
+        var probes = await silentEnd.receive().makeAsyncIterator()
+        let client = Client(name: "c", version: "1")
+        let connecting = Task { try await client.connect(transport: firstEnd) }
+        let discover = try JSONDecoder().decode(Value.self, from: try #require(await probes.next()))
+        #expect(discover.objectValue?["method"] == "server/discover")
+
+        // The first discovery fails with the release of its connection.
+        let server = await makeServer()
+        let (secondEnd, serverEnd) = await InMemoryTransport.createConnectedPair()
+        try await server.start(transport: serverEnd)
+        let recorder = RecordingTransport(secondEnd)
+        try await client.connect(transport: recorder)
+        await #expect(throws: MCPError.internalError("Client disconnected")) { try await connecting.value }
+        #expect(await client.isStateless)
+        #expect(await !recorder.methods.contains(Initialize.name))
+        await client.disconnect()
+        await server.stop()
+        await silentEnd.disconnect()
+    }
 }
 
 @Suite("Server-to-client request limits", .timeLimit(.minutes(1)))

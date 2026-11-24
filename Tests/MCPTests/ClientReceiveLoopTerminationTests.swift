@@ -151,13 +151,15 @@ struct ClientReceiveLoopTerminationTests {
         let client = try await connectedClient(first)
 
         let (reconnected, reconnectedContinuation) = AsyncStream<Void>.makeStream()
-        _ = await client.withMethodHandler(Ping.self) { _ in
+        // Not a ping: a ping runs outside the handler slots, while the
+        // reconnect must spare the handler in its slot that called it.
+        _ = await client.withMethodHandler(ListRoots.self) { _ in
             try await client.connect(transport: second)
             reconnectedContinuation.yield()
-            return Empty()
+            return .init(roots: [])
         }
 
-        let request = Ping.request()
+        let request = ListRoots.request()
         await first.deliverFromServer(try JSONEncoder().encode(request))
 
         let result = await outcome(within: .seconds(2)) {

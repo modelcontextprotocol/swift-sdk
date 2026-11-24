@@ -367,7 +367,7 @@ On the server there is nothing to register: every `Server` has a built-in listen
 
 %include Examples/Snippets/Protocol/Streams.swift listen-notify
 
-`notify` publishes list-changed and resource-updated notifications to every matching listen stream, of every caller; `notify(_:to:)` reaches only the streams whose caller's `HandlerContext` the closure accepts. It also sends them on the connection, but only after an `initialize` handshake; at 2026-07-28 they go only to listen streams. Over `StatelessHTTPServerTransport` the transport rewrites the internal request id in `subscriptionId` back to the client's id.
+`notify` publishes list-changed and resource-updated notifications to every matching listen stream, of every caller; `notify(_:to:)` reaches only the streams whose caller's `HandlerContext` the closure accepts. It also sends them on the connection, but only after an `initialize` handshake; at 2026-07-28 they go only to listen streams. Behind `StatelessHTTPServerTransport`, a handler of a handshake request sends them on its request's stream; `notify(_:to:)` does so only when the closure accepts that request's context. Over `StatelessHTTPServerTransport` the transport rewrites the internal request id in `subscriptionId` back to the client's id.
 
 By default any caller may listen to any list change and resource URI. To restrict streams per caller, set an authorizer: it runs before the acknowledgement with the requested filter and the caller's `HandlerContext` (including `httpContext`), and returns the filter to serve or throws an `MCPError` to refuse the stream:
 

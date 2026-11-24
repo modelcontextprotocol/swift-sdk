@@ -523,6 +523,37 @@ struct StatelessHTTPTests {
         #expect(body.objectValue?["result"] != nil)
     }
 
+    @Test("notify(_:to:) asks recipients about the handshake request whose stream it would use")
+    func testSessionlessListChangedRecipients() async throws {
+        let server = await makeServer()
+        await server.withMethodHandler(CallTool.self) { [weak server] _ in
+            try await server?.notify(ToolListChangedNotification.message()) {
+                $0.httpContext?.header("X-Tenant") == "a"
+            }
+            return .init(content: [.text(text: "done", annotations: nil, _meta: nil)])
+        }
+        let transport = try await start(server)
+        defer { Task { await server.stop() } }
+
+        func call(tenant: String) async throws -> String {
+            let response = await transport.handleRequest(
+                statelessRequest(
+                    #"{"jsonrpc":"2.0","id":"h","method":"tools/call","params":{"name":"echo"}}"#,
+                    version: "2025-11-25", extraHeaders: ["X-Tenant": tenant]))
+            guard case .stream(let stream, _) = response else {
+                return String(decoding: try #require(response.bodyData), as: UTF8.self)
+            }
+            var text = ""
+            for try await chunk in stream { text += String(decoding: chunk, as: UTF8.self) }
+            return text
+        }
+        let accepted = try await call(tenant: "a")
+        #expect(accepted.contains("notifications/tools/list_changed"))
+        let refused = try await call(tenant: "b")
+        #expect(!refused.contains("notifications/tools/list_changed"))
+        #expect(refused.contains(#""id":"h""#))
+    }
+
     @Test("Concurrent requests with the same id do not collide")
     func testDuplicateClientIDs() async throws {
         let server = await makeServer()
