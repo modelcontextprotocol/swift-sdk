@@ -825,6 +825,9 @@ public actor HTTPClientTransport: Transport {
                 }
                 if responded { return }
             }
+            // A cancelled read can end the last attempt's stream without an
+            // error: a cancelled request or a closed transport is no loss.
+            guard isConnected, !Task.isCancelled else { return }
             deliverStreamLoss(for: requestData, resumable: eventID != nil)
         }
 

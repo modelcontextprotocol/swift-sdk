@@ -1,4 +1,5 @@
 @preconcurrency import Foundation
+import Logging
 import Testing
 
 @testable import MCP
@@ -162,6 +163,56 @@ import Testing
             #expect(delivered[0].contains("could not be resumed"))
             #expect(await requests.gets.count == HTTPClientTransport.maxStreamResumptions)
             await transport.disconnect()
+        }
+
+        @Test("A request cancelled during its last resumption does not fail", .timeLimit(.minutes(1)))
+        func cancelledDuringLastResumption() async throws {
+            let key = UUID().uuidString
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [IsolatedMockURLProtocol.self]
+            configuration.httpAdditionalHeaders = [IsolatedMockURLProtocol.sessionKeyHeader: key]
+            let logger = Logger(label: "mcp.test.resumption") { _ in CancelOnEventIDLogHandler(eventID: "last") }
+            let transport = HTTPClientTransport(
+                endpoint: endpoint, configuration: configuration, streaming: false, logger: logger)
+            let requests = Requests()
+            await IsolatedMockURLProtocol.setHandler(key: key) { request in
+                await requests.append(request)
+                let gets = await requests.gets.count
+                guard gets == HTTPClientTransport.maxStreamResumptions else {
+                    return sse("id: e\(gets)\nretry: 10\ndata: \n\n")
+                }
+                // The request is cancelled at the first event, and the read
+                // ends at the next one without an error.
+                return sse("id: last\ndata: \n\nid: after\ndata: \n\n")
+            }
+            try await transport.connect()
+            try? await transport.send(request)
+            #expect(await requests.gets.count == HTTPClientTransport.maxStreamResumptions)
+            await transport.disconnect()
+            var delivered: [String] = []
+            for try await data in await transport.receive() { delivered.append(String(decoding: data, as: UTF8.self)) }
+            #expect(delivered.isEmpty)
+        }
+    }
+
+    /// Cancels the task that logs an event's ID when it is `eventID`, as a
+    /// `notifications/cancelled` sent while that event is read would.
+    private struct CancelOnEventIDLogHandler: LogHandler {
+        let eventID: String
+        var metadata: Logger.Metadata = [:]
+        var logLevel: Logger.Level = .debug
+
+        subscript(metadataKey key: String) -> Logger.Metadata.Value? {
+            get { metadata[key] }
+            set { metadata[key] = newValue }
+        }
+
+        func log(
+            level: Logger.Level, message: Logger.Message, metadata: Logger.Metadata?,
+            source: String, file: String, function: String, line: UInt
+        ) {
+            guard metadata?["eventID"] == .string(eventID) else { return }
+            withUnsafeCurrentTask { $0?.cancel() }
         }
     }
 
