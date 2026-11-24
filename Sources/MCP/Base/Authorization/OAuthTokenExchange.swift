@@ -174,10 +174,14 @@ public enum OAuthTokenExchange {
     ///
     /// - Throws: ``OAuthAuthorizationError/insecureAuthorizationServerEndpoint(context:url:)``
     ///   or ``OAuthAuthorizationError/privateIPAddressBlocked(context:url:)`` when `issuer` is
-    ///   refused, ``OAuthAuthorizationError/authorizationServerIssuerMismatch(expected:actual:)``
-    ///   when its metadata names another issuer,
-    ///   ``OAuthAuthorizationError/authorizationServerMetadataDiscoveryFailed`` when no metadata
-    ///   is found, and ``OAuthAuthorizationError/tokenEndpointMissing`` when it has no token
+    ///   refused, before any request;
+    ///   ``OAuthAuthorizationError/authorizationServerIssuerMismatch(expected:actual:)``
+    ///   when its metadata names another issuer;
+    ///   ``OAuthAuthorizationError/authorizationServerMetadataDiscoveryFailed`` when every
+    ///   metadata URL answers 404 or 410; an error naming the URL and the reason when a
+    ///   metadata request fails otherwise (a network error, another status, or a body that is
+    ///   not metadata); `CancellationError` when cancelled; and
+    ///   ``OAuthAuthorizationError/tokenEndpointMissing`` when the metadata has no token
     ///   endpoint.
     public static func tokenEndpoint(
         issuer: URL,

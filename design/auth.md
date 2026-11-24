@@ -153,7 +153,11 @@ URI, else `protectedResourceMismatch`. A new challenge URL drops the cached PRM,
 AS metadata.
 
 AS candidates: `endpointOverrides.authorizationServerURL`, else the selected AS, else the PRM's
-`authorization_servers` in order. Candidates that fail validation or are private IPs are skipped.
+`authorization_servers` in order. Candidates that fail validation or are private IPs are skipped
+without a request. When every candidate is skipped, discovery throws the first refusal
+(`insecureAuthorizationServerEndpoint` or `privateIPAddressBlocked`), not
+`authorizationServerMetadataDiscoveryFailed`, except for the origin of the
+[2025-03-26 fallback](#2025-03-26-fallback).
 Metadata URLs per candidate:
 
 | Issuer | URLs, in order |
@@ -192,7 +196,9 @@ The DCR body has `client_name`, `application_type`, `grant_types`, `token_endpoi
 and for the authorization code grant `response_types: ["code"]` and `redirect_uris`. The returned
 `client_id` replaces the configured one. A `client_secret_expires_at` in the past triggers a new
 registration with an empty client ID. A registration that throws resets the attempt, so the next flow
-registers again; a server without a registration endpoint is not asked again.
+registers again. That includes `cimdNotSupported` and `registrationInformationRequired`, which are
+thrown without a request: the next flow checks the metadata again. A server without a registration
+endpoint whose client needs none is not asked again.
 
 `application_type` (SEP-837): `OAuthConfiguration.applicationType` when set. Otherwise `web` for
 the authorization code grant with an `https` redirect URI on a non-loopback host, and `native` in
@@ -268,7 +274,9 @@ nonces, keyed by kind (authorization server or resource server) and origin, behi
   is off, expired or not; such a token's refresh token is never sent (RFC 9449 §5).
 - Metadata: with DPoP, AS `dpop_signing_alg_values_supported` without `ES256` throws
   `dpopAlgorithmUnsupported`; without DPoP, PRM `dpop_bound_access_tokens_required: true`
-  throws `dpopRequired`. Both are checked before registration and the grant.
+  throws `dpopRequired`. Both are checked before registration and the grant. With DPoP, a `Bearer`
+  answer for such a resource is not stored, since the resource would reject it: a grant throws
+  `dpopRequired`, and a refresh returns `false`, so the challenge goes on to a full grant.
 - The parser reads any scheme (`parseChallenge(scheme:from:)`); `handleChallenge` uses the
   challenge of the scheme the request was sent with (RFC 9449 §7.2), `Bearer` when it carried
   no token, else the other one, for `resource_metadata`, `scope` and `error`. A
@@ -309,8 +317,10 @@ Comparison: the Python and Go SDKs declare the DPoP metadata fields only.
 ### 2025-03-26 fallback
 
 When every PRM candidate is absent, the synthetic PRM is `isFallback`. If every AS metadata URL
-is then absent too (404 or 410) and no AS override is set, `OAuthAuthorizationServerMetadata.defaultEndpoints(issuer:)`
-supplies `/authorize`, `/token` and `/register` at the origin, with S256.
+is then absent too (404 or 410), or the origin is refused as an AS candidate (loopback `http`, a
+private IP), and no AS override is set and the grant is not `.jwtBearer`, `OAuthAuthorizationServerMetadata.defaultEndpoints(issuer:)`
+supplies `/authorize`, `/token` and `/register` at the origin, with S256. Each endpoint is
+validated when it is used, so a refused origin still works with a `tokenEndpoint` override.
 
 ### URL safety
 

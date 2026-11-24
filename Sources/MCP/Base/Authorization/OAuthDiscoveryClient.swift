@@ -8,7 +8,6 @@ import Foundation
 protocol OAuthDiscoveryFetching: Sendable {
     var metadataDiscovery: any OAuthMetadataDiscovering { get }
     func fetchProtectedResourceMetadata(candidates: [URL], fallbackIssuer: URL?, session: URLSession) async throws -> OAuthProtectedResourceMetadata
-    func fetchAuthorizationServerMetadata(candidates: [URL], trustedIssuer: URL?, session: URLSession) async throws -> (server: URL, metadata: OAuthAuthorizationServerMetadata)
     func fetchAuthorizationServerMetadata(candidates: [URL], trustedIssuer: URL?, reportRefused: Bool, session: URLSession) async throws -> (server: URL, metadata: OAuthAuthorizationServerMetadata)
 }
 
@@ -20,10 +19,10 @@ extension OAuthDiscoveryFetching {
     }
 
     func fetchAuthorizationServerMetadata(
-        candidates: [URL], trustedIssuer: URL?, reportRefused: Bool, session: URLSession
+        candidates: [URL], trustedIssuer: URL?, session: URLSession
     ) async throws -> (server: URL, metadata: OAuthAuthorizationServerMetadata) {
         try await fetchAuthorizationServerMetadata(
-            candidates: candidates, trustedIssuer: trustedIssuer, session: session)
+            candidates: candidates, trustedIssuer: trustedIssuer, reportRefused: true, session: session)
     }
 }
 
@@ -160,16 +159,10 @@ struct OAuthDiscoveryClient: Sendable {
     ///   the first candidate, such as
     ///   ``OAuthAuthorizationError/insecureAuthorizationServerEndpoint(context:url:)``
     ///   or ``OAuthAuthorizationError/privateIPAddressBlocked(context:url:)``,
-    ///   when every candidate was refused before a request.
-    func fetchAuthorizationServerMetadata(
-        candidates: [URL],
-        trustedIssuer: URL?,
-        session: URLSession
-    ) async throws -> (server: URL, metadata: OAuthAuthorizationServerMetadata) {
-        try await fetchAuthorizationServerMetadata(
-            candidates: candidates, trustedIssuer: trustedIssuer, reportRefused: true, session: session)
-    }
-
+    ///   when every candidate was refused before a request and
+    ///   `reportRefused` is set. Without it, such candidates end in
+    ///   `authorizationServerMetadataDiscoveryFailed`, for a caller that
+    ///   falls back to 2025-03-26 default endpoints.
     func fetchAuthorizationServerMetadata(
         candidates: [URL],
         trustedIssuer: URL?,

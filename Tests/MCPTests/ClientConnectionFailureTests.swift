@@ -511,10 +511,10 @@ struct OutgoingMessageTests {
         @Test("The discovery timeout starts again after signing in")
         func timeoutAfterSignIn() async throws {
             let host = "\(UUID().uuidString).silent.test"
-            let authorizer = SlowSignInAuthorizer(signIn: .milliseconds(300))
+            let authorizer = SlowSignInAuthorizer(signIn: .seconds(2))
             let client = Client(
                 name: "probe", version: "1.0",
-                configuration: .init(protocolMode: .automatic, discoveryTimeout: .milliseconds(100)))
+                configuration: .init(protocolMode: .automatic, discoveryTimeout: .seconds(1)))
 
             // The server never answers the authorized server/discover.
             let result = try await client.connect(
@@ -527,10 +527,10 @@ struct OutgoingMessageTests {
         @Test("A sign-in that fails after the deadline fails connect without falling back to initialize")
         func failedSignInAfterDeadlineThrows() async throws {
             let host = "\(UUID().uuidString).answering.test"
-            let authorizer = SlowSignInAuthorizer(signIn: .milliseconds(300), succeeds: false)
+            let authorizer = SlowSignInAuthorizer(signIn: .seconds(2), succeeds: false)
             let client = Client(
                 name: "probe", version: "1.0",
-                configuration: .init(protocolMode: .automatic, discoveryTimeout: .milliseconds(100)))
+                configuration: .init(protocolMode: .automatic, discoveryTimeout: .seconds(1)))
 
             await #expect(throws: (any Swift.Error).self) {
                 try await client.connect(
@@ -541,24 +541,24 @@ struct OutgoingMessageTests {
             await client.disconnect()
         }
 
+        // The sign-in ignores cancellation, so only the discovery timer's
+        // cancellation handler can end its wait.
         @Test("Cancelling connect during sign-in stops waiting promptly")
         func cancellingConnectDuringSignIn() async throws {
             let host = "\(UUID().uuidString).answering.test"
-            let authorizer = SlowSignInAuthorizer(signIn: .seconds(30))
+            let authorizer = SlowSignInAuthorizer(untilReleased: true)
+            let transport = ChallengedDiscoverProtocol.transport(host: host, authorizer: authorizer)
             let client = Client(
                 name: "probe", version: "1.0",
-                configuration: .init(protocolMode: .automatic, discoveryTimeout: .milliseconds(50)))
+                configuration: .init(protocolMode: .automatic, discoveryTimeout: .seconds(1)))
 
-            let connecting = Task {
-                try await client.connect(
-                    transport: ChallengedDiscoverProtocol.transport(host: host, authorizer: authorizer))
-            }
-            let deadline = ContinuousClock.now + .seconds(5)
-            while authorizer.challenges == 0, ContinuousClock.now < deadline {
+            let connecting = Task { try await client.connect(transport: transport) }
+            // The discovery timer passes its deadline and waits for the sign-in.
+            var deadline = ContinuousClock.now + .seconds(10)
+            while await transport.authorizationWaiterCount == 0, ContinuousClock.now < deadline {
                 try await Task.sleep(for: .milliseconds(10))
             }
-            // Let the discovery timer pass its first deadline and park on authorizationEnd.
-            try await Task.sleep(for: .milliseconds(100))
+            #expect(await transport.authorizationWaiterCount == 1)
             connecting.cancel()
 
             let finished = await withTaskGroup(of: Bool.self) { group in
@@ -575,12 +575,21 @@ struct OutgoingMessageTests {
                 return first
             }
             #expect(finished)
+            deadline = ContinuousClock.now + .seconds(5)
+            while await transport.authorizationWaiterCount > 0, ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            #expect(await transport.authorizationWaiterCount == 0)
+            #expect(authorizer.signInsEnded == 0)
+            authorizer.release()
             await client.disconnect()
         }
     }
 
     /// Signs in on a 401 after `signIn`, like a user at a browser, then
-    /// authorizes every request when `succeeds` is `true`.
+    /// authorizes every request when `succeeds` is `true`. With
+    /// `untilReleased`, the sign-in ignores cancellation and lasts until
+    /// ``release()``.
     private final class SlowSignInAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
         private struct SignInDenied: LocalizedError {
             var errorDescription: String? { "User cancelled sign-in" }
@@ -589,16 +598,33 @@ struct OutgoingMessageTests {
         private let lock = NSLock()
         private let signIn: Duration
         private let succeeds: Bool
+        private let untilReleased: Bool
         private var signedIn = false
         private var challengeCount = 0
+        private var endedCount = 0
+        private var released = false
+        private var pendingRelease: CheckedContinuation<Void, Never>?
 
-        init(signIn: Duration, succeeds: Bool = true) {
+        init(signIn: Duration = .zero, succeeds: Bool = true, untilReleased: Bool = false) {
             self.signIn = signIn
             self.succeeds = succeeds
+            self.untilReleased = untilReleased
         }
 
         var challenges: Int { lock.withLock { challengeCount } }
+        /// Sign-ins that returned or threw.
+        var signInsEnded: Int { lock.withLock { endedCount } }
         var maxAuthorizationAttempts: Int { 2 }
+
+        /// Ends a sign-in of `untilReleased`.
+        func release() {
+            let pending = lock.withLock {
+                released = true
+                defer { pendingRelease = nil }
+                return pendingRelease
+            }
+            pending?.resume()
+        }
 
         func validateEndpointSecurity(for endpoint: URL) throws {}
 
@@ -611,7 +637,18 @@ struct OutgoingMessageTests {
             session: URLSession
         ) async throws -> Bool {
             lock.withLock { challengeCount += 1 }
-            try await Task.sleep(for: signIn)
+            defer { lock.withLock { endedCount += 1 } }
+            if untilReleased {
+                await withCheckedContinuation { continuation in
+                    let now = lock.withLock {
+                        if !released { pendingRelease = continuation }
+                        return released
+                    }
+                    if now { continuation.resume() }
+                }
+            } else {
+                try await Task.sleep(for: signIn)
+            }
             guard succeeds else { throw SignInDenied() }
             lock.withLock { signedIn = true }
             return true

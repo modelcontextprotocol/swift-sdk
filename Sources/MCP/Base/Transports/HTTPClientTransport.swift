@@ -440,6 +440,11 @@ public actor HTTPClientTransport: Transport {
         authorizations[key]?.waiters.remove(at: index).continuation.resume()
     }
 
+    /// The callers of ``authorizationEnd(of:)`` waiting, for every request.
+    var authorizationWaiterCount: Int {
+        authorizations.values.reduce(0) { $0 + $1.waiters.count }
+    }
+
     /// Runs an authorizer call for the POST of `message`, recorded for
     /// ``authorizationEnd(of:)``.
     private func authorizing<T: Sendable>(_ message: OutgoingMessage, _ body: () async throws -> T) async rethrows -> T {
@@ -604,8 +609,9 @@ public actor HTTPClientTransport: Transport {
             } else if contentType.contains(ContentType.json) {
                 logger.trace("Received JSON response", metadata: ["size": "\(data.count)"])
                 messageContinuation.yield(data)
-            } else if httpResponse.statusCode != 202 {
+            } else if httpResponse.statusCode != 202 || message.requestID != nil {
                 // 202 Accepted has no body: how a server accepts a notification or a response.
+                // A request is owed JSON or SSE.
                 logger.warning("Unexpected content type: \(contentType)")
             }
         }
@@ -667,8 +673,9 @@ public actor HTTPClientTransport: Transport {
                 }
                 logger.trace("Received JSON response", metadata: ["size": "\(buffer.count)"])
                 messageContinuation.yield(buffer)
-            } else if httpResponse.statusCode != 202 {
+            } else if httpResponse.statusCode != 202 || message.requestID != nil {
                 // 202 Accepted has no body: how a server accepts a notification or a response.
+                // A request is owed JSON or SSE.
                 logger.warning("Unexpected content type: \(contentType)")
             }
         }

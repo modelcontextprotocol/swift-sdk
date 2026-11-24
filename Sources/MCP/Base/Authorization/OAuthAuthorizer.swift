@@ -1174,7 +1174,9 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
     /// Refreshes `token` at the selected server, only if that server issued
     /// it. A token without a recorded server is refreshed only at a
     /// configured server or token endpoint. Returns `false` when the refresh
-    /// is not possible or the server refuses it.
+    /// is not possible, when the server refuses it with a 4xx, or when it
+    /// answers with a `Bearer` token for a resource that requires DPoP-bound
+    /// tokens, which is not stored: the challenge goes on to a full grant.
     private func refreshAccessToken(
         _ token: OAuthAccessToken,
         refreshToken: String,
@@ -1275,7 +1277,9 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
                 session: session
             )
         } catch {
-            // Registration failed rather than being unavailable: the next flow tries again.
+            // Nothing is remembered when registration failed, or when the
+            // server cannot register this client (`registrationInformationRequired`,
+            // `cimdNotSupported`, `invalidClientIDMetadataURL`): the next flow checks again.
             clientRegistrationAttempted = false
             registrationAttemptIssuer = nil
             throw error
