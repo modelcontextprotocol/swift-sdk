@@ -124,6 +124,11 @@ struct StatelessServerTests {
             #"{"jsonrpc":"2.0","id":8,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":42}}}"#
         )
         expectWire(badVersion[0], matches: try wireJSON(#"{"id":8,"error":{"code":-32602}}"#))
+
+        let emptyVersion = try await wire.send(
+            #"{"jsonrpc":"2.0","id":9,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"","io.modelcontextprotocol/clientCapabilities":{}}}}"#
+        )
+        expectWire(emptyVersion[0], matches: try wireJSON(#"{"id":9,"error":{"code":-32602}}"#))
     }
 
     @Test("Unsupported version is -32022 with the served versions")
@@ -402,6 +407,26 @@ struct StatelessHTTPTests {
                 #"{"jsonrpc":"2.0","id":"h","method":"tools/list","params":{"_meta":\#(meta)}}"#, version: header))
         #expect(response.statusCode == 400)
         expectWire(try bodyJSON(response), matches: try wireJSON(#"{"id":"h","error":{"code":\#(code)}}"#))
+    }
+
+    @Test("An empty _meta version is -32602, as in Server", arguments: [
+        // The header names a stateless revision: the transport answers.
+        ("2026-07-28", 400),
+        // No header: the server answers, with the handshake-era status for
+        // JSON-RPC errors.
+        (nil, 200),
+    ] as [(String?, Int)])
+    func testEmptyMetaVersion(header: String?, status: Int) async throws {
+        let server = await makeServer()
+        let transport = try await start(server)
+        defer { Task { await server.stop() } }
+
+        let response = await transport.handleRequest(
+            statelessRequest(
+                #"{"jsonrpc":"2.0","id":"e","method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"","io.modelcontextprotocol/clientCapabilities":{}}}}"#,
+                version: header))
+        #expect(response.statusCode == status)
+        expectWire(try bodyJSON(response), matches: try wireJSON(#"{"id":"e","error":{"code":-32602}}"#))
     }
 
     @Test("Unknown header version is -32022 with the request id")

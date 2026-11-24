@@ -490,7 +490,10 @@ enum JSONRPCMessageFields {
             id = try? container.decodeIfPresent(ID.self, forKey: .id)
             let meta = try? container.nestedContainer(keyedBy: Keys.self, forKey: .params)
                 .nestedContainer(keyedBy: Keys.self, forKey: ._meta)
-            protocolVersion = try? meta?.decodeIfPresent(String.self, forKey: .protocolVersion)
+            // An empty version is malformed, like one that is not a string:
+            // read it as absent, so `Server` answers -32602 for both.
+            let version = try? meta?.decodeIfPresent(String.self, forKey: .protocolVersion)
+            protocolVersion = version?.isEmpty == true ? nil : version
             errorCode = try? container.nestedContainer(keyedBy: Keys.self, forKey: .error)
                 .decodeIfPresent(Int.self, forKey: .code)
         }
@@ -552,7 +555,8 @@ enum JSONRPCMessageFields {
         return (try? JSONDecoder().decode(Cancelled.self, from: data))?.params?.requestId
     }
 
-    /// `params._meta["io.modelcontextprotocol/protocolVersion"]`, if it is a string.
+    /// `params._meta["io.modelcontextprotocol/protocolVersion"]`, if it is a
+    /// non-empty string.
     static func metaProtocolVersion(in data: Data) -> String? {
         probe(data)?.protocolVersion
     }

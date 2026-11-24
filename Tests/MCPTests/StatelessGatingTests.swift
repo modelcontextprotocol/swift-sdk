@@ -280,6 +280,38 @@ struct StatefulStatelessBoundaryTests {
         #expect(stranger.headers[HTTPHeaderName.sessionID] == nil)
     }
 
+    @Test("An empty _meta version on a session reaches the server and is -32602")
+    func emptyMetaVersion() async throws {
+        let server = Server(name: "empty", version: "1", capabilities: .init(tools: .init()))
+        await server.withMethodHandler(ListTools.self) { _ in .init(tools: []) }
+        let transport = StatefulHTTPServerTransport(validationPipeline: StandardValidationPipeline(validators: []))
+        try await server.start(transport: transport)
+        defer { Task { await server.stop() } }
+
+        let initResponse = await transport.handleRequest(post(initialize))
+        let sessionID = try #require(initResponse.headers[HTTPHeaderName.sessionID])
+
+        let body =
+            #"{"jsonrpc":"2.0","id":"e","method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"","io.modelcontextprotocol/clientCapabilities":{}}}}"#
+        let response = await transport.handleRequest(post(body, sessionID: sessionID, version: "2025-11-25"))
+        guard case .stream(let stream, _) = response else {
+            Issue.record("Expected the request to reach the server, got \(response.statusCode)")
+            return
+        }
+        let reply = Task { () throws -> String in
+            var text = ""
+            for try await chunk in stream {
+                text += String(decoding: chunk, as: UTF8.self)
+                if text.contains(#""id":"e""#) { break }
+            }
+            return text
+        }
+        let text = try #require(await resultWithinTwoSeconds(of: reply)).get()
+        let line = try #require(text.split(separator: "\n").first { $0.contains(#""id":"e""#) })
+        let message = try JSONDecoder().decode(Value.self, from: Data(line.dropFirst("data: ".count).utf8))
+        expectWire(message, matches: try wireJSON(#"{"id":"e","error":{"code":-32602}}"#))
+    }
+
     @Test("A stateless request still goes through the origin check")
     func statelessRequestIsValidated() async throws {
         let transport = StatefulHTTPServerTransport(
