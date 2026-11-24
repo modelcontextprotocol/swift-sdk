@@ -123,7 +123,8 @@ public enum MCPRequestHeaders {
     public static let maxAnnotations = 64
 
     /// The deepest `properties` nesting searched for annotations, and the
-    /// deepest subschema nesting inspected for misplaced ones.
+    /// deepest subschema nesting inspected for misplaced ones: a subschema
+    /// nested deeper is not read, so an annotation there is ignored.
     public static let maxSchemaDepth = 32
 
     /// The mirrored arguments of a tool input schema.
@@ -133,7 +134,8 @@ public enum MCPRequestHeaders {
     /// else (under `items`, `prefixItems`, `additionalProperties`,
     /// `anyOf`/`oneOf`/`allOf`, `not`, `if`/`then`/`else`, `$defs`,
     /// `patternProperties` or another subschema keyword, or on the root)
-    /// makes the schema invalid.
+    /// makes the schema invalid, down to ``maxSchemaDepth`` subschemas from
+    /// the root; below that it is neither rejected nor mirrored.
     ///
     /// - Throws: ``InvalidAnnotation`` when a header name is empty, not an
     ///   HTTP token, or duplicated (case-insensitively), when the property
@@ -197,7 +199,9 @@ public enum MCPRequestHeaders {
     /// Throws for an annotation that is not on a property reached through
     /// a chain of `properties` keys from the root. Subschemas are found by
     /// keyword, so values such as `default`, `const` or `enum`, which may
-    /// hold any JSON, are not read.
+    /// hold any JSON, are not read. Subschemas more than ``maxSchemaDepth``
+    /// levels down are not read either, so that a deep schema without
+    /// annotations stays valid.
     private static func rejectUnreachableAnnotations(in schema: Value) throws {
         func visit(_ schema: Value, path: [String], depth: Int, onChain: Bool) throws {
             guard let object = schema.objectValue else { return }

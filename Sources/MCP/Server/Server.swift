@@ -514,6 +514,12 @@ public actor Server {
                             for case .request(let request) in batch.items {
                                 startingRequests[request.id] = false
                             }
+                            // Answers to this server's requests (JSON-RPC 2.0
+                            // §6) resume their callers now, not after the
+                            // batch's requests are handled.
+                            for case .response(let response) in batch.items {
+                                await handleResponse(response)
+                            }
                             // Off the receive loop: a batched request may wait
                             // for the client's answer to a bridged input request.
                             Task {
@@ -2061,12 +2067,14 @@ public actor Server {
         return result.roots
     }
 
-    /// A JSON-RPC batch containing multiple requests and/or notifications
+    /// A JSON-RPC batch of requests, notifications and responses
     struct Batch: Sendable {
         /// An item in a JSON-RPC batch
         enum Item: Sendable {
             case request(Request<AnyMethod>)
             case notification(Message<AnyNotification>)
+            /// An answer to a request this server sent; it gets no reply.
+            case response(Response<AnyMethod>)
             case invalid(id: ID?, reason: String)
         }
 
@@ -2128,6 +2136,10 @@ public actor Server {
                 case .notification(let notification):
                     // Handle notification (no response needed)
                     try await handleMessage(notification)
+
+                case .response:
+                    // Handled by the receive loop.
+                    continue
 
                 case .invalid(let id, let reason):
                     let error = MCPError.invalidRequest(reason)
@@ -2967,26 +2979,46 @@ extension Server.Batch.Item: Decodable {
         case id
     }
 
+    /// Classifies an item as ``JSONRPCMessageKind`` does for a single
+    /// message. An item that is not a request, a notification or a response
+    /// is invalid: its -32600 carries its `id` when it is a string or an
+    /// integer, except for an unreadable response, whose `id` names a request
+    /// of this server, not one of the peer.
     init(from decoder: Decoder) throws {
+        let format = "Invalid batch item format"
         guard let container = try? decoder.container(keyedBy: CodingKeys.self) else {
             _ = try? Value(from: decoder)
-            self = .invalid(id: nil, reason: "Invalid batch item format")
+            self = .invalid(id: nil, reason: format)
             return
         }
-        if case .invalid(_, let id, let reason) = try? JSONRPCMessageKind(from: decoder) {
+        let isNull = (try? container.decodeNil(forKey: .id)) == true
+        let id = isNull ? nil : try? container.decode(ID.self, forKey: .id)
+
+        switch try? JSONRPCMessageKind(from: decoder) {
+        case .invalid(_, let id, let reason):
             self = .invalid(id: id, reason: reason)
-        } else if container.contains(.id) {
+        case .request:
             if let request = try? Request<AnyMethod>(from: decoder) {
                 self = .request(request)
             } else {
-                let isNull = (try? container.decodeNil(forKey: .id)) == true
-                let id = isNull ? nil : try? container.decode(ID.self, forKey: .id)
-                self = .invalid(id: id, reason: "Invalid batch item format")
+                self = .invalid(id: id, reason: format)
             }
-        } else if let notification = try? Message<AnyNotification>(from: decoder) {
-            self = .notification(notification)
-        } else {
-            self = .invalid(id: nil, reason: "Invalid batch item format")
+        case .notification:
+            if let notification = try? Message<AnyNotification>(from: decoder) {
+                self = .notification(notification)
+            } else {
+                self = .invalid(id: nil, reason: format)
+            }
+        case .response:
+            if let response = try? Response<AnyMethod>(from: decoder) {
+                self = .response(response)
+            } else {
+                self = .invalid(id: nil, reason: format)
+            }
+        case nil:
+            // No string `method`, and no `result` or `error` with a valid
+            // `id`, such as `{"jsonrpc": "2.0", "id": 7}`.
+            self = .invalid(id: id, reason: format)
         }
     }
 }

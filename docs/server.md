@@ -240,7 +240,7 @@ Errors the SDK returns before the handler runs:
 
 ### Header parameters
 
-At 2026-07-28 over HTTP, a client copies selected `tools/call` arguments into `Mcp-Param-<Name>` headers, so that gateways can route on them without reading the body (SEP-2243). Mark the argument in the input schema with `"x-mcp-header": "<Name>"`. Only `string`, `integer` and `boolean` properties reachable through `properties` from the schema root can be mirrored; `$ref` is not followed. An annotation anywhere else (under `items`, `anyOf`, `$defs` or another subschema keyword) makes the tool invalid, as an invalid name does. Header names must be HTTP tokens and unique, case-insensitively. A tool has at most 64 annotations (`MCPRequestHeaders.maxAnnotations`), nested at most 32 `properties` deep (`maxSchemaDepth`).
+At 2026-07-28 over HTTP, a client copies selected `tools/call` arguments into `Mcp-Param-<Name>` headers, so that gateways can route on them without reading the body (SEP-2243). Mark the argument in the input schema with `"x-mcp-header": "<Name>"`. Only `string`, `integer` and `boolean` properties reachable through `properties` from the schema root can be mirrored; `$ref` is not followed. An annotation anywhere else (under `items`, `anyOf`, `$defs` or another subschema keyword) makes the tool invalid, as an invalid name does. Header names must be HTTP tokens and unique, case-insensitively. A tool has at most 64 annotations (`MCPRequestHeaders.maxAnnotations`), nested at most 32 `properties` deep (`maxSchemaDepth`). Misplaced annotations are looked for down to the same depth: one under more than 32 levels of subschemas is ignored, not mirrored and not rejected.
 
 ```swift
 let queryTool = Tool(

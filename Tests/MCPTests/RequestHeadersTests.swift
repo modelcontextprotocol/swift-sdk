@@ -168,6 +168,22 @@ struct RequestHeadersTests {
         }
     }
 
+    @Test("A misplaced annotation is rejected down to maxSchemaDepth and ignored below it")
+    func testMisplacedAnnotationDepthLimit() throws {
+        func schema(depth: Int) -> Value {
+            var schema: Value = ["type": "string", "x-mcp-header": "Deep"]
+            for _ in 0..<depth {
+                schema = ["type": "array", "items": schema]
+            }
+            return schema
+        }
+        #expect(throws: MCPRequestHeaders.InvalidAnnotation.self) {
+            try MCPRequestHeaders.parameters(in: schema(depth: MCPRequestHeaders.maxSchemaDepth))
+        }
+        // Not inspected, so neither rejected nor mirrored.
+        #expect(try MCPRequestHeaders.parameters(in: schema(depth: MCPRequestHeaders.maxSchemaDepth + 1)).isEmpty)
+    }
+
     @Test("Subschemas nested deeper than maxSchemaDepth without annotations stay in stateless tools/list")
     func testDeepSubschemaWithoutAnnotations() async throws {
         var subschema: Value = ["type": "string"]

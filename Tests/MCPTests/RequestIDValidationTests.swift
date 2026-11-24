@@ -125,6 +125,74 @@ struct StreamRequestIDTests {
         #expect(items[3].objectValue?["id"] == 2)
         #expect(items[3].objectValue?["result"] != nil)
     }
+
+    @Test("A batch answers requests only: no reply to a notification or a response")
+    func batchNotificationsResponsesAndShapes() async throws {
+        let batch =
+            #"[{"jsonrpc":"2.0","method":"notifications/vendor"},{"jsonrpc":"2.0","id":7},{"jsonrpc":"2.0","id":8,"method":""},{"jsonrpc":"2.0","id":5,"result":{}},{"jsonrpc":"2.0","id":6,"error":{"code":-32603,"message":"x"}},{"jsonrpc":"2.0","id":2,"method":"tools/list"}]"#
+        let replies = try await replies(to: batch)
+        #expect(replies.count == 1)
+        let items = try #require(replies.first?.arrayValue)
+        // The notification and the two responses get nothing; an item with
+        // an id but no method is an invalid request; an empty method is a
+        // method that does not exist.
+        #expect(items.count == 3)
+        #expect(items[0].objectValue?["id"] == 7)
+        #expect(items[0].objectValue?["error"]?.objectValue?["code"] == -32600)
+        #expect(items[1].objectValue?["id"] == 8)
+        #expect(items[1].objectValue?["error"]?.objectValue?["code"] == -32601)
+        #expect(items[2].objectValue?["id"] == 2)
+        #expect(items[2].objectValue?["result"] != nil)
+    }
+
+    @Test("A batch of responses gets no reply")
+    func batchOfResponses() async throws {
+        let batch = #"[{"jsonrpc":"2.0","id":5,"result":{}},{"jsonrpc":"2.0","id":"x","result":{}}]"#
+        #expect(try await replies(to: batch, expected: 0).isEmpty)
+    }
+
+    @Test("A response in a batch answers the server's pending request")
+    @available(*, deprecated, message: "listRoots is deprecated by SEP-2577")
+    func batchedResponseResumesRequest() async throws {
+        let server = await makeServer()
+        let (peer, serverEnd) = await InMemoryTransport.createConnectedPair()
+        try await server.start(transport: serverEnd)
+        try await peer.connect()
+        var messages = await peer.receive().makeAsyncIterator()
+        try await peer.send(
+            Data(
+                #"{"jsonrpc":"2.0","id":"init","method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{"roots":{}},"clientInfo":{"name":"c","version":"1"}}}"#
+                    .utf8))
+        #expect(try decode(try await messages.next()).objectValue?["id"] == "init")
+        try await peer.send(Data(#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#.utf8))
+
+        let answered = Inbox()
+        let roots = Task {
+            for root in try await server.listRoots() { await answered.add(.string(root.uri)) }
+        }
+        let request = try decode(try await messages.next())
+        #expect(request.objectValue?["method"] == .string(ListRoots.name))
+        let id = try #require(request.objectValue?["id"])
+        let answer = Value.array([
+            ["jsonrpc": "2.0", "id": id, "result": ["roots": [["uri": "file:///work", "name": "work"]]]],
+            ["jsonrpc": "2.0", "id": "sentinel", "method": "ping"],
+        ])
+        try await peer.send(try JSONEncoder().encode(answer))
+
+        // The batch's only reply answers the ping.
+        let reply = try #require(try decode(try await messages.next()).arrayValue)
+        #expect(reply.count == 1)
+        #expect(reply.first?.objectValue?["id"] == "sentinel")
+        let deadline = ContinuousClock.now + .seconds(5)
+        while await answered.values.isEmpty, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(await answered.values == ["file:///work"])
+        await peer.disconnect()
+        // Fails a listRoots call still waiting.
+        await server.stop()
+        _ = await roots.result
+    }
 }
 
 @Suite("Request ids over the stateless HTTP transport", .timeLimit(.minutes(1)))
@@ -222,6 +290,20 @@ struct StatefulHTTPRequestIDTests {
         #expect(body.objectValue?["id"] == 1)
         #expect(body.objectValue?["error"]?.objectValue?["code"] == -32600)
         await transport.disconnect()
+    }
+
+    @Test("A cancellation names a request by the id its classification reads", arguments: validIDs.indices)
+    func cancelledIDMatchesRequestID(_ index: Int) throws {
+        let json = validIDs[index].json
+        guard case .request(let requested, _)? = JSONRPCMessageKind(
+            data: Data(#"{"jsonrpc":"2.0","id":\#(json),"method":"tools/list"}"#.utf8))
+        else {
+            Issue.record("not a request")
+            return
+        }
+        let cancelled = JSONRPCMessageKind.cancelledRequestID(
+            in: Data(#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":\#(json)}}"#.utf8))
+        #expect(cancelled == requested)
     }
 
     @Test("Classification by the presence of id, not its type")

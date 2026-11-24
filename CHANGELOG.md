@@ -87,8 +87,9 @@ Behavior that can break working code ([docs/migration.md](docs/migration.md#beha
 - A built-in `logging/setLevel` handler that filters `Server.log`.
 - `HTTPRequest.init(method:headerFields:body:path:)` takes the header field lines as received and
   `HTTPRequest.headerValues(_:)` returns each line's value, so the HTTP server transports refuse
-  a repeated `MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name` or `Mcp-Param-*` header (-32020)
-  without guessing from commas. Adapters should switch to it; the SwiftNIO example does.
+  a repeated `MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name` or `Mcp-Param-*` header at
+  2026-07-28 (-32020) without guessing from commas. A repeated `MCP-Protocol-Version` that names
+  only handshake revisions keeps -32022. Adapters should switch to it; the SwiftNIO example does.
 - `statelessRequestHook` on `Server.start`, `HTTPClientTransport.cancelRequest(_:)`,
   `BearerTokenValidationResult.tokenInfo`, and the `HTTPClientAuthorizer` requirement
   `handleChallenge(statusCode:headers:endpoint:operationKey:sentAuthorization:session:)`, with a
@@ -135,7 +136,9 @@ Behavior that can break working code ([docs/migration.md](docs/migration.md#beha
 - A request whose `id` is not a string or an integer (`null`, `1.5`, `[]`, `true`, `1e20`), or
   whose `jsonrpc` is not `"2.0"`, gets -32600 (HTTP 400) instead of being taken for a notification
   and left unanswered. `""` is a valid id: the HTTP transports serve it, and `Request` no longer
-  decodes a `null` id as `""`.
+  decodes a `null` id as `""`. In a JSON-RPC batch each invalid item gets its own -32600 and the
+  other requests are still answered; a response in a batch answers the server's request it names
+  instead of failing the batch.
 - A server that serves no handshake revision answers a request that names no `_meta` protocol
   version with -32602 (HTTP 400) and `data.supported`, not -32022 or -32601: the field is required,
   not unsupported. A `progressToken` that is not a string or an integer gets -32602 in every
@@ -146,11 +149,13 @@ Behavior that can break working code ([docs/migration.md](docs/migration.md#beha
   `resource_metadata` (RFC 6750 §3.1).
 - A `subscriptions/listen` stream the server ends (`closeSubscriptions()`, `stop()`) is followed,
   after its result, by `notifications/cancelled` for the listen request on stdio and other
-  message-stream transports, as cancellation.mdx requires; over HTTP the end of the response
-  stays the teardown.
+  message-stream transports, as cancellation.mdx requires; `stop()` sends both before it
+  disconnects the transport. Over HTTP the end of the response stays the teardown.
 - An `x-mcp-header` annotation off the `properties` chain (under `items`, `anyOf`, `$defs` or
   another subschema keyword, or on the root) makes the tool invalid: the client drops it from
   `tools/list` and the server hides it, as streamable-http.mdx requires. Before, it was ignored.
+  One under more than `MCPRequestHeaders.maxSchemaDepth` (32) levels of subschemas is still
+  ignored.
 - `HTTPRequest.header(_:)` joins the values of keys that differ only in case, in key order; it
   returned whichever the dictionary listed first. At 2026-07-28 a repeated `MCP-Protocol-Version`
   or `Mcp-Method` (joined with commas by the adapter, RFC 9110 §5.3) gets -32020 (HTTP 400)
