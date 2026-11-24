@@ -31,9 +31,11 @@ public actor Client {
 
         /// The lowest log level to request on stateless (2026-07-28) connections,
         /// sent in each request's `_meta`. `nil` requests no log notifications.
-        /// Changing it on ``Client/configuration`` changes ``Client/logLevel``
-        /// for the following requests, as ``Client/setLoggingLevel(_:)`` does;
-        /// the later of the two wins.
+        /// Changing it to another value on ``Client/configuration`` sets
+        /// ``Client/logLevel`` for the following requests, as
+        /// ``Client/setLoggingLevel(_:)`` does. ``Client/setLoggingLevel(_:)``
+        /// does not change it, so assigning the value it already has does
+        /// nothing: a level set with ``Client/setLoggingLevel(_:)`` stays.
         public var logLevel: LogLevel?
 
         /// How long ``ProtocolMode/automatic`` waits for the answer to

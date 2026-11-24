@@ -403,9 +403,10 @@ The client chooses its era once per connection with `Client.ProtocolMode`:
 | `.automatic` (default) | `server/discover` at `Version.stateless[0]`; retry once on -32022 with a stateless version from `data.supported`; fall back to `initialize` on other JSON-RPC errors, an HTTP 400/404/405 refusal, no answer within `discoveryTimeout`, when the discover result lists no stateless revision, or on a -32022 whose `data.supported` is empty or lists a handshake revision; rethrow other transport errors |
 | `.stateless(v)` | `server/discover` at `v`; no retry, no fallback |
 
-`connect(transport:)` returns an `Initialize.Result` in every mode. After `server/discover` the
-client synthesizes it from the discover result, so callers that read `capabilities` work in both
-eras.
+`connect(transport:)` returns a `Client.ConnectionInfo` in every mode: `protocolVersion`,
+`capabilities`, `serverInfo`, `instructions` and `isStateless`. After `server/discover` the client
+builds it from the discover result, so callers that read `capabilities` work in both eras;
+`serverInfo` is optional, `nil` when the server sends no `io.modelcontextprotocol/serverInfo`.
 
 ## Error model
 

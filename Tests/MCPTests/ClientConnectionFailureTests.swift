@@ -321,11 +321,8 @@ struct OutgoingMessageTests {
 
         @Test(
             "An error for the request on a 408, 429 or 5xx fails with the status",
-            arguments: [
-                (408, "Request timeout"), (429, "Too many requests"),
-                (500, "Server error: 500"), (503, "Server error: 503"),
-            ])
-        func unavailableStatusFails(status: Int, detail: String) async throws {
+            arguments: [408, 429, 500, 503])
+        func unavailableStatusFails(status: Int) async throws {
             let transport = await makeTransport { _ in
                 reply(status, #"{"jsonrpc":"2.0","id":"r1","error":{"code":-32000,"message":"Connection closed"}}"#)
             }
@@ -333,7 +330,8 @@ struct OutgoingMessageTests {
             await #expect {
                 try await transport.send(request)
             } throws: { error in
-                (error as? MCPError) == .internalError(detail)
+                guard case .transportError(let underlying) = error as? MCPError else { return false }
+                return (underlying as? HTTPStatusError)?.statusCode == status
             }
             await transport.disconnect()
         }
@@ -357,7 +355,8 @@ struct OutgoingMessageTests {
             await #expect {
                 try await client.connect(transport: transport)
             } throws: { error in
-                (error as? MCPError) == .internalError("Server error: 503")
+                guard case .transportError(let underlying) = error as? MCPError else { return false }
+                return (underlying as? HTTPStatusError)?.statusCode == 503
             }
             #expect(await methods.sent == [ServerDiscover.name])
             await client.disconnect()

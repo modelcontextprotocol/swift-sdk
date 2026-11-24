@@ -48,9 +48,9 @@ while the result's `retry` is `true` and fewer than `maxAuthorizationAttempts` a
 made; a retry the result marks `isDPoPNonceRetry` (a `use_dpop_nonce` challenge) does not count,
 and a second one fails the request. The authorizer classifies the challenge, not the transport:
 the default of the `sentAuthorization` variant reads it with `DefaultOAuthWWWAuthenticateParser`.
-An error from `handleChallenge` fails the request as
-`MCPError.transportError(error)`, and a 401 or 403 that is not retried as
-`transportError(HTTPStatusError)`.
+An error from `validateEndpointSecurity`, `authorizationHeaders` or `handleChallenge` fails the
+request as `MCPError.transportError(error)`, except a `CancellationError`, which is thrown as is,
+and a 401 or 403 that is not retried fails it as `transportError(HTTPStatusError)`.
 
 `OAuthAuthorizer` is the built-in implementation, configured with `OAuthConfiguration`:
 

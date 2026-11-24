@@ -297,8 +297,10 @@ the request's error when the error's ID is the request's ID. Otherwise it throws
 `MCPError.transportError(_:)` with an `HTTPStatusError`, whose description is
 `Bad request` (400), `Session expired` or `Endpoint not found` (404),
 `Method not allowed` (405), `Request timeout` (408), `Too many requests` (429),
-or `Server error: <status>` (5xx). A 404 with a session drops the session ID
-and sets `isSessionExpired`; on the GET stream it also stops the stream. The
+or `Server error: <status>` (5xx). A 404 to a POST that carried the session
+ID sets `isSessionExpired`, drops the session ID and stops the GET stream. A 404
+on the GET stream stops the stream and keeps the session ID: the next request
+carries it, receives the server's 404 and reports `isSessionExpired`. The
 client does not initialize a new session on its own; after an expired session,
 connect a new client. The Go and Python clients behave the same way.
 

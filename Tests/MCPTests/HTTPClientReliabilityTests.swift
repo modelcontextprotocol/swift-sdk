@@ -268,7 +268,8 @@ struct HTTPClientConnectionLimitTests {
 
         func makeTransport(
             streaming: Bool = false, sseInitializationTimeout: TimeInterval = 0.05,
-            authorizer: (any HTTPClientAuthorizer)? = nil, logger: Logger? = nil
+            authorizer: (any HTTPClientAuthorizer)? = nil, logger: Logger? = nil,
+            stripsSessionFromGET: Bool = false
         ) -> (HTTPClientTransport, String) {
             let key = UUID().uuidString
             let configuration = URLSessionConfiguration.ephemeral
@@ -277,7 +278,14 @@ struct HTTPClientConnectionLimitTests {
             configuration.httpMaximumConnectionsPerHost = HTTPClientTransport.defaultMaximumConnectionsPerHost
             let transport = HTTPClientTransport(
                 endpoint: endpoint, configuration: configuration, streaming: streaming,
-                sseInitializationTimeout: sseInitializationTimeout, authorizer: authorizer, logger: logger)
+                sseInitializationTimeout: sseInitializationTimeout, authorizer: authorizer,
+                requestModifier: { request in
+                    var request = request
+                    if stripsSessionFromGET, request.httpMethod == "GET" {
+                        request.setValue(nil, forHTTPHeaderField: "Mcp-Session-Id")
+                    }
+                    return request
+                }, logger: logger)
             return (transport, key)
         }
 
@@ -538,6 +546,103 @@ struct HTTPClientConnectionLimitTests {
             }
             #expect(await requests.all.last?.value(forHTTPHeaderField: "Mcp-Session-Id") == "s1")
             #expect(await transport.sessionID == nil)
+            await transport.disconnect()
+        }
+
+        /// The reply to `initialize`, which starts session `s1`.
+        func initializeReply() -> (HTTPURLResponse, Data) {
+            (
+                HTTPURLResponse(
+                    url: endpoint, statusCode: 200, httpVersion: "HTTP/1.1",
+                    headerFields: ["Content-Type": "application/json", "Mcp-Session-Id": "s1"])!,
+                Data(#"{"jsonrpc":"2.0","id":"i1","result":{}}"#.utf8)
+            )
+        }
+
+        @Test(
+            "Concurrent POSTs on an expired session all report the expiry, and the GET stream stops",
+            .timeLimit(.minutes(1)), arguments: [false, true])
+        func concurrentPostsOnExpiredSession(withErrorBody: Bool) async throws {
+            let (messages, sink) = AsyncStream<String>.makeStream()
+            let logger = Logger(label: "mcp.test.reliability") { _ in StreamingLogHandler(sink: sink) }
+            let (transport, key) = makeTransport(streaming: true, sseInitializationTimeout: 30, logger: logger)
+            let requests = RecordedRequests()
+            await IsolatedMockURLProtocol.setHandler(key: key) { request in
+                await requests.append(request)
+                // Without the stop, the GET stream reconnects after 10 s.
+                if request.httpMethod == "GET" { return sse("id: g1\nretry: 10000\ndata: \n\n") }
+                let body = request.httpBodyStreamData().map { String(decoding: $0, as: UTF8.self) } ?? ""
+                if body.contains("initialize") { return initializeReply() }
+                // The server forgot the session; it answers once both calls are in flight.
+                await requests.waitFor(3, "POST")
+                guard withErrorBody else {
+                    return (
+                        HTTPURLResponse(url: endpoint, statusCode: 404, httpVersion: "HTTP/1.1", headerFields: [:])!,
+                        Data()
+                    )
+                }
+                let id = body.contains(#""r1""#) ? "r1" : "r2"
+                return (
+                    HTTPURLResponse(
+                        url: endpoint, statusCode: 404, httpVersion: "HTTP/1.1",
+                        headerFields: ["Content-Type": "application/json"])!,
+                    Data(#"{"jsonrpc":"2.0","id":"\#(id)","error":{"code":-32001,"message":"Session not found"}}"#.utf8)
+                )
+            }
+            try await transport.connect()
+            try await transport.send(Data(#"{"jsonrpc":"2.0","id":"i1","method":"initialize"}"#.utf8))
+            await requests.waitFor(1, "GET")
+
+            let calls = ["r1", "r2"].map { id in
+                Task { () -> String in
+                    do {
+                        try await transport.send(
+                            Data(#"{"jsonrpc":"2.0","id":"\#(id)","method":"tools/call","params":{"name":"t"}}"#.utf8))
+                        return "delivered"
+                    } catch MCPError.transportError(let status as HTTPStatusError) {
+                        return status.isSessionExpired ? "expired" : "\(status)"
+                    } catch {
+                        return "\(error)"
+                    }
+                }
+            }
+            for call in calls {
+                #expect(await call.value == (withErrorBody ? "delivered" : "expired"))
+            }
+            let sent = await requests.all.filter { $0.httpMethod == "POST" }.dropFirst()
+            #expect(sent.map { $0.value(forHTTPHeaderField: "Mcp-Session-Id") } == ["s1", "s1"])
+            #expect(await transport.sessionID == nil)
+            let stopped = try await finishes(within: .seconds(5)) {
+                for await message in messages where message.contains("SSE retry loop exited") { return true }
+                return false
+            }
+            #expect(stopped == true)
+            #expect(await requests.gets.count == 1)
+            await transport.disconnect()
+        }
+
+        @Test(
+            "A 404 to a GET without the session ID does not end the session", .timeLimit(.minutes(1)))
+        func getNotFoundWithoutSessionHeader() async throws {
+            // A proxy-like modifier strips the session ID from GETs.
+            let (transport, key) = makeTransport(
+                streaming: true, sseInitializationTimeout: 30, stripsSessionFromGET: true)
+            let requests = RecordedRequests()
+            await IsolatedMockURLProtocol.setHandler(key: key) { request in
+                await requests.append(request)
+                if request.httpMethod == "POST" { return initializeReply() }
+                // The first GET ends at once; later ones get a 404.
+                return await requests.gets.count == 1 ? sse("id: g1\nretry: 10\ndata: \n\n") : sse("", status: 404)
+            }
+            try await transport.connect()
+            try await transport.send(Data(#"{"jsonrpc":"2.0","id":"i1","method":"initialize"}"#.utf8))
+            // Reported as an expiry, the 404 would end the GET loop after the second GET.
+            let deadline = ContinuousClock.now + .seconds(5)
+            while await requests.gets.count < 3 && ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            #expect(await requests.gets.count >= 3)
+            #expect(await transport.sessionID == "s1")
             await transport.disconnect()
         }
 

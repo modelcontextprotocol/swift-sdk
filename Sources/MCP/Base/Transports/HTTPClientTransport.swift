@@ -525,10 +525,14 @@ public actor HTTPClientTransport: Transport {
             guard isConnected else {
                 throw MCPError.internalError("Transport not connected")
             }
+            // What the server answers about: another request may drop or
+            // replace the session ID while this one waits.
+            let sentSessionID = request.value(forHTTPHeaderField: HTTPHeaderName.sessionID)
             do {
                 let (body, response) = try await session.responseBody(for: request, streaming: streamingSession)
                 noteResponse(response, to: request)
-                try await processResponse(response: response, body: body, request: message)
+                try await processResponse(
+                    response: response, body: body, request: message, sentSessionID: sentSessionID)
                 return
             } catch let authError as HTTPAuthenticationChallengeError {
                 guard let authorizer else {
@@ -572,7 +576,7 @@ public actor HTTPClientTransport: Transport {
     }
 
     private func processResponse(
-        response: URLResponse, body: ResponseBody, request message: OutgoingMessage
+        response: URLResponse, body: ResponseBody, request message: OutgoingMessage, sentSessionID: String?
     ) async throws {
         guard let httpResponse = response as? HTTPURLResponse else {
             throw MCPError.internalError("Invalid HTTP response")
@@ -591,11 +595,14 @@ public actor HTTPClientTransport: Transport {
 
         if Self.mayCarryPeerError(httpResponse.statusCode), contentType.contains(ContentType.json) {
             let errorBody = try await body.collect(limit: (1 << 20) + 1)
-            if deliverErrorResponse(errorBody, contentType: contentType, status: httpResponse.statusCode, request: message) {
+            if deliverErrorResponse(
+                errorBody, contentType: contentType, status: httpResponse.statusCode, request: message,
+                sentSessionID: sentSessionID)
+            {
                 return
             }
         }
-        try processHTTPResponse(httpResponse)
+        try processHTTPResponse(httpResponse, sentSessionID: sentSessionID)
         guard case 200..<300 = httpResponse.statusCode else { return }
 
         if contentType.contains(ContentType.sse) {
@@ -629,7 +636,9 @@ public actor HTTPClientTransport: Transport {
         }
     }
 
-    private func processHTTPResponse(_ response: HTTPURLResponse) throws {
+    /// Throws the error of a non-2xx reply to a POST that carried
+    /// `sentSessionID` as its `Mcp-Session-Id`.
+    private func processHTTPResponse(_ response: HTTPURLResponse, sentSessionID: String?) throws {
         switch response.statusCode {
         case 200..<300:
             return
@@ -646,9 +655,8 @@ public actor HTTPClientTransport: Transport {
                 headers: responseHeaders(from: response)
             )
 
-        case 404 where sessionID != nil:
-            logger.warning("Session has expired")
-            sessionID = nil
+        case 404 where sentSessionID != nil:
+            sessionExpired(sentSessionID)
             throw statusError(response, isSessionExpired: true)
 
         default:
@@ -725,7 +733,7 @@ public actor HTTPClientTransport: Transport {
     /// `true` when the error was delivered. Callers check
     /// `mayCarryPeerError(_:)` first.
     private func deliverErrorResponse(
-        _ body: Data, contentType: String, status: Int, request message: OutgoingMessage
+        _ body: Data, contentType: String, status: Int, request message: OutgoingMessage, sentSessionID: String?
     ) -> Bool {
         guard contentType.contains(ContentType.json),
             let requestID = message.requestID,
@@ -733,9 +741,8 @@ public actor HTTPClientTransport: Transport {
             json["error"] is [String: Any], json["result"] == nil,
             JSONRPCMessageKind.extractID(from: json) == requestID
         else { return false }
-        if status == 404, sessionID != nil {
-            logger.warning("Session has expired")
-            sessionID = nil
+        if status == 404 {
+            sessionExpired(sentSessionID)
         }
         messageContinuation.yield(body)
         return true
@@ -749,6 +756,20 @@ public actor HTTPClientTransport: Transport {
     /// JSON-RPC error for it.
     private static func mayCarryPeerError(_ status: Int) -> Bool {
         (400..<500).contains(status) && ![401, 403, 408, 429].contains(status)
+    }
+
+    /// Ends the session after a 404 to a POST that carried `sentSessionID`
+    /// (2025-11-25 transports, session management): drops the session ID and
+    /// stops the GET stream, which belonged to the session. Does nothing for
+    /// a request without a session ID, or when another reply already dropped
+    /// the session ID or a new session replaced it.
+    private func sessionExpired(_ sentSessionID: String?) {
+        guard let sentSessionID else { return }
+        logger.warning("Session has expired")
+        guard sessionID == sentSessionID else { return }
+        sessionID = nil
+        streamingTask?.cancel()
+        streamingTask = nil
     }
 
     /// Whether `error` reports a 400, 404 or 405 reply without a JSON-RPC
@@ -879,7 +900,7 @@ public actor HTTPClientTransport: Transport {
             logger.info("→ Connecting to SSE stream (no last event ID to resume from)")
         }
 
-        let (stream, httpResponse) = try await openEventStream(
+        let (stream, httpResponse, sentSessionID) = try await openEventStream(
             lastEventID: lastEventID, protocolVersion: protocolVersion)
 
         guard httpResponse.statusCode == 200 else {
@@ -890,7 +911,7 @@ public actor HTTPClientTransport: Transport {
             // The session ID stays: the next request carries it, gets the
             // 404 the server must send for it, and reports the expiry to
             // its caller.
-            if httpResponse.statusCode == 404, sessionID != nil {
+            if httpResponse.statusCode == 404, sentSessionID != nil {
                 logger.warning("Session has expired")
                 throw statusError(httpResponse, isSessionExpired: true)
             }
@@ -925,10 +946,11 @@ public actor HTTPClientTransport: Transport {
 
     /// Sends a GET for an SSE stream, resuming after `lastEventID` when
     /// given. A 401 or 403 goes to the authorizer, as for a POST, and the
-    /// GET is retried while it handles the challenge.
+    /// GET is retried while it handles the challenge. Returns the body, the
+    /// response and the `Mcp-Session-Id` the answered GET carried.
     private func openEventStream(
         lastEventID: String?, protocolVersion: String?
-    ) async throws -> (ResponseBody, HTTPURLResponse) {
+    ) async throws -> (ResponseBody, HTTPURLResponse, sentSessionID: String?) {
         if let authorizer {
             try? await authorizer.prepareAuthorization(for: endpoint, session: session)
         }
@@ -962,7 +984,7 @@ public actor HTTPClientTransport: Transport {
                 throw MCPError.internalError("Invalid HTTP response")
             }
             guard let authorizer, httpResponse.statusCode == 401 || httpResponse.statusCode == 403 else {
-                return (stream, httpResponse)
+                return (stream, httpResponse, request.value(forHTTPHeaderField: HTTPHeaderName.sessionID))
             }
             stream.cancel()
             let challenge = HTTPAuthenticationChallengeError(
@@ -1031,7 +1053,7 @@ public actor HTTPClientTransport: Transport {
             let stream: ResponseBody
             let httpResponse: HTTPURLResponse
             do {
-                (stream, httpResponse) = try await openEventStream(lastEventID: resumeFrom, protocolVersion: version)
+                (stream, httpResponse, _) = try await openEventStream(lastEventID: resumeFrom, protocolVersion: version)
             } catch where !Task.isCancelled && !(error is MCPError) && !(error is CancellationError) {
                 // A dropped connection is when resuming matters. Refusals,
                 // authorization failures and a closed transport are MCPErrors

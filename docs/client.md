@@ -20,7 +20,7 @@ This guide covers the `Client` actor: connecting at either protocol era, calling
 
 ## Connecting
 
-`Client(name:version:title:description:websiteUrl:icons:capabilities:configuration:)` describes the client. `connect(transport:)` connects the transport, starts the receive loop, opens the protocol connection and returns an `Initialize.Result`. The result is discardable. With the default configuration the client sends `server/discover` and connects at 2026-07-28 when the server serves it, and otherwise falls back to `initialize`.
+`Client(name:version:title:description:websiteUrl:icons:capabilities:configuration:)` describes the client. `connect(transport:)` connects the transport, starts the receive loop, opens the protocol connection and returns a `Client.ConnectionInfo` (see [Connection state](#connection-state)). The result is discardable. With the default configuration the client sends `server/discover` and connects at 2026-07-28 when the server serves it, and otherwise falls back to `initialize`.
 
 ```swift
 let client = Client(name: "my-client", version: "1.0.0")

@@ -138,8 +138,11 @@ struct ClientStatelessTests {
         await setLevel(.debug, on: client)
         #expect(try await client.listTools().tools.first?.name == "true|probe|debug")
 
-        // The later of setLoggingLevel and a configuration change wins.
+        // A configuration change to another value replaces the level of
+        // setLoggingLevel; assigning the value it already has does not.
         try await client.setLoggingLevel(.error)
+        #expect(try await client.listTools().tools.first?.name == "true|probe|error")
+        await setLevel(.debug, on: client)
         #expect(try await client.listTools().tools.first?.name == "true|probe|error")
         await setLevel(nil, on: client)
         #expect(try await client.listTools().tools.first?.name == "true|probe|-")
