@@ -50,9 +50,11 @@ extension Server {
     /// of them. Later pages continue the application's listing, then each
     /// source's, in order. The cursor carries every position. A merged page
     /// has the shortest `ttlMs` of its pages, and is `private` when any of
-    /// them is.
+    /// them is; a page without a hint, such as the views', counts with
+    /// `cacheHint`, the hint that the server adds to a result without one.
     static func builtInResources(
-        _ request: Request<AnyMethod>, sources: [BuiltInResourceSource], applicationList: RequestHandlerBox?
+        _ request: Request<AnyMethod>, sources: [BuiltInResourceSource], applicationList: RequestHandlerBox?,
+        cacheHint: CacheHint
     ) async throws -> Response<AnyMethod>? {
         let params = request.params.objectValue ?? [:]
         if request.method == ReadResource.name {
@@ -81,7 +83,7 @@ extension Server {
         }
         var resources: [Value] = []
         var meta: Value?
-        var hints: [String: Value] = [:]
+        var pages: [[String: Value]] = []
         var next = position
         if let application = applicationList, case .page(let cursor) = position.application {
             var forwarded = params
@@ -92,7 +94,7 @@ extension Server {
             guard case .success(let value) = response.result, let object = value.objectValue else { return response }
             resources += object["resources"]?.arrayValue ?? []
             meta = object["_meta"]
-            mergeCacheHints(object, into: &hints)
+            pages.append(object)
             next.application = object["nextCursor"]?.stringValue.map { .page($0) } ?? .done
         }
         // Each source joins the first page, and follows the application's
@@ -106,32 +108,39 @@ extension Server {
             let encoded = try Value.preservingStrings(page)
             resources += encoded.objectValue?["resources"]?.arrayValue ?? []
             if meta == nil { meta = encoded.objectValue?["_meta"] }
-            mergeCacheHints(encoded.objectValue ?? [:], into: &hints)
+            pages.append(encoded.objectValue ?? [:])
             next.sources[source.key] = page.nextCursor.map { .page($0) } ?? .done
         }
         var result: [String: Value] = ["resources": .array(resources)]
         if let cursor = next.encoded { result["nextCursor"] = .string(cursor) }
         if let meta { result["_meta"] = meta }
-        result.merge(hints) { current, _ in current }
+        result.merge(mergedCacheHints(pages, default: cacheHint)) { current, _ in current }
         return Response(id: request.id, result: .object(result))
     }
 
-    /// Adds the caching hints of `page` to those of a merged page: the
-    /// shortest `ttlMs`, and `private` when any page is private, so that no
-    /// entry is cached longer or more widely than its own page allows.
-    private static func mergeCacheHints(_ page: [String: Value], into hints: inout [String: Value]) {
-        if let ttl = page[ResultKeys.ttlMs] {
-            if let current = hints[ResultKeys.ttlMs]?.intValue, let new = ttl.intValue {
-                hints[ResultKeys.ttlMs] = .int(min(current, new))
-            } else if hints[ResultKeys.ttlMs]?.intValue == nil {
-                hints[ResultKeys.ttlMs] = ttl
+    /// The caching hints of a page merged from `pages`: the shortest
+    /// `ttlMs`, and `private` when any page is private, so that no entry is
+    /// cached longer or more widely than its own page allows. A page without
+    /// a hint counts with `defaultHint`, which the server would add to it
+    /// alone. When no page has a hint, the merged page has none either, and
+    /// the server adds `defaultHint`.
+    private static func mergedCacheHints(_ pages: [[String: Value]], default defaultHint: CacheHint) -> [String: Value]
+    {
+        var hints: [String: Value] = [:]
+        if let first = pages.lazy.compactMap({ $0[ResultKeys.ttlMs] }).first {
+            let ttls = pages.compactMap { page -> Int? in
+                guard let ttl = page[ResultKeys.ttlMs] else { return max(0, defaultHint.ttlMs) }
+                return ttl.intValue
             }
+            hints[ResultKeys.ttlMs] = ttls.min().map(Value.int) ?? first
         }
-        if let scope = page[ResultKeys.cacheScope],
-            hints[ResultKeys.cacheScope] == nil || scope.stringValue == CacheScope.private.rawValue
-        {
-            hints[ResultKeys.cacheScope] = scope
+        if let first = pages.lazy.compactMap({ $0[ResultKeys.cacheScope] }).first {
+            let isPrivate = pages.contains {
+                ($0[ResultKeys.cacheScope]?.stringValue ?? defaultHint.scope.rawValue) == CacheScope.private.rawValue
+            }
+            hints[ResultKeys.cacheScope] = isPrivate ? .string(CacheScope.private.rawValue) : first
         }
+        return hints
     }
 }
 

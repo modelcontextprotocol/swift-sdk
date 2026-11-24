@@ -25,11 +25,11 @@ public struct UIExtensionSettings: Hashable, Codable, Sendable {
     }
 
     /// The settings that `extensions` declares, or `nil` when it does not
-    /// declare the extension. Entries of `mimeTypes` that are not strings are
-    /// ignored.
+    /// declare the extension with an object. Entries of `mimeTypes` that are
+    /// not strings are ignored.
     public init?(_ extensions: [String: Value]?) {
-        guard let value = extensions?[ExtensionID.ui] else { return nil }
-        mimeTypes = value.objectValue?["mimeTypes"]?.arrayValue?.compactMap(\.stringValue) ?? []
+        guard let value = extensions?[ExtensionID.ui]?.objectValue else { return nil }
+        mimeTypes = value["mimeTypes"]?.arrayValue?.compactMap(\.stringValue) ?? []
     }
 
     /// Whether the host renders views of `mimeType`.
@@ -200,8 +200,10 @@ public struct UIResourceMeta: Hashable, Codable, Sendable {
 
         public init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
+            // As written: a `data:` URL stays a string.
             func strings(_ key: CodingKeys) -> [String]? {
-                ((try? container.decodeIfPresent([Value].self, forKey: key)) ?? nil)?.compactMap(\.stringValue)
+                ((try? container.decodeIfPresent([Value.Preserved].self, forKey: key)) ?? nil)?
+                    .compactMap(\.value.stringValue)
             }
             connectDomains = strings(.connectDomains)
             resourceDomains = strings(.resourceDomains)
@@ -346,8 +348,9 @@ public struct ToolUIMeta: Hashable, Codable, Sendable {
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         resourceUri = (try? container.decodeIfPresent(String.self, forKey: .resourceUri)) ?? nil
-        visibility = ((try? container.decodeIfPresent([Value].self, forKey: .visibility)) ?? nil)?
-            .compactMap(\.stringValue).map(Visibility.init(rawValue:))
+        // As written: a `data:` URL stays a string.
+        visibility = ((try? container.decodeIfPresent([Value.Preserved].self, forKey: .visibility)) ?? nil)?
+            .compactMap(\.value.stringValue).map(Visibility.init(rawValue:))
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -364,8 +367,8 @@ extension Tool {
     ///
     /// The getter reads the deprecated flat key `_meta["ui/resourceUri"]`
     /// when `_meta.ui` has no `resourceUri`. The setter writes the known
-    /// fields of `_meta.ui`, keeps its other keys, and removes the flat key.
-    /// Setting `nil` removes `_meta.ui`.
+    /// fields of `_meta.ui`, keeps its other top-level keys, and removes the
+    /// flat key. Setting `nil` removes `_meta.ui`.
     public var ui: ToolUIMeta? {
         get {
             var ui: ToolUIMeta? = UIMetaField.read(_meta)
@@ -438,7 +441,7 @@ private enum UIMetaField {
 
     static func write<T: Codable>(_ newValue: T?, keys: [String], into meta: inout Metadata?) {
         var fields = meta?.fields ?? [:]
-        if let newValue, let encoded = (try? Value(newValue))?.objectValue {
+        if let newValue, let encoded = (try? Value.preservingStrings(newValue))?.objectValue {
             var ui = fields[key]?.objectValue ?? [:]
             for known in keys { ui[known] = nil }
             ui.merge(encoded) { _, new in new }

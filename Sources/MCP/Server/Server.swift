@@ -2291,16 +2291,16 @@ public actor Server {
             handlerContext.isStateless && request.method == CallTool.name
                 && handlerContext.profile?.usesStandardHeaders == true
             ? httpContext : nil
+        let cacheHint = configuration.cacheHints[request.method] ?? configuration.defaultCacheHint
         let annotate: @Sendable (Response<AnyMethod>) -> Response<AnyMethod> = {
-            [serverInfo, configuration] response in
+            [serverInfo] response in
             guard handlerContext.isStateless, case .success(let value) = response.result else {
                 return response
             }
-            let hint = configuration.cacheHints[request.method] ?? configuration.defaultCacheHint
             return Response(
                 id: response.id,
                 result: StatelessRequests.annotate(
-                    value, method: request.method, serverInfo: serverInfo, cacheHint: hint))
+                    value, method: request.method, serverInfo: serverInfo, cacheHint: cacheHint))
         }
 
         // Sessionless handshake requests, other than `initialize`, pass the
@@ -2357,7 +2357,8 @@ public actor Server {
                     var response = try await Server.$currentHandlerContext.withValue(context) {
                         if !resourceSources.isEmpty,
                             let served = try await Self.builtInResources(
-                                request, sources: resourceSources, applicationList: applicationList)
+                                request, sources: resourceSources, applicationList: applicationList,
+                                cacheHint: cacheHint)
                         {
                             return served
                         }

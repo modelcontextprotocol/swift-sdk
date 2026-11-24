@@ -184,6 +184,28 @@ struct AppWireTests {
         #expect(lenient?.mimeTypes == [UIResource.mimeType])
         #expect(UIExtensionSettings([ExtensionID.ui: [:]])?.mimeTypes == [])
         #expect(UIExtensionSettings([ExtensionID.tasks: [:]]) == nil)
+        for value: Value in [.null, false, true, "ui", []] {
+            #expect(UIExtensionSettings([ExtensionID.ui: value]) == nil, "\(value)")
+        }
+    }
+
+    @Test("A data: URL string in _meta.ui is written and read as a string")
+    func dataURLStrings() throws {
+        func wire(_ value: some Encodable) throws -> Value {
+            try JSONDecoder().decode(Value.Preserved.self, from: JSONEncoder().encode(value)).value
+        }
+        var tool = Tool(name: "t", description: nil, inputSchema: ["type": "object"])
+        tool.ui = ToolUIMeta(visibility: ["data:,custom", .app])
+        #expect(try wire(tool).objectValue?["_meta"] == ["ui": ["visibility": ["data:,custom", "app"]]])
+        #expect(tool.ui?.visibility == ["data:,custom", .app])
+        #expect(tool.isCallableFromApp)
+
+        var resource = Resource(name: "r", uri: "ui://v")
+        resource.ui = UIResourceMeta(csp: .init(connectDomains: ["data:,x"]), domain: "data:,d")
+        #expect(
+            try wire(resource).objectValue?["_meta"]
+                == ["ui": ["csp": ["connectDomains": ["data:,x"]], "domain": "data:,d"]])
+        #expect(resource.ui == UIResourceMeta(csp: .init(connectDomains: ["data:,x"]), domain: "data:,d"))
     }
 }
 
@@ -412,7 +434,10 @@ struct AppServerTests {
     func mergedCacheHints(application: Int, applicationScope: CacheScope, skills: Int, skillsScope: CacheScope)
         async throws
     {
-        let server = Server(name: "s", version: "1", capabilities: .init(tools: .init()))
+        // The views' page has no hints: it counts with the server's hint.
+        let server = Server(
+            name: "s", version: "1", capabilities: .init(tools: .init()),
+            configuration: .init(cacheHints: [ListResources.name: .init(ttlMs: 7200, scope: .public)]))
         await server.withMethodHandler(ListResources.self) { _ in
             .init(resources: [Resource(name: "one", uri: "app://1")], ttlMs: application, cacheScope: applicationScope)
         }
@@ -425,6 +450,30 @@ struct AppServerTests {
         #expect(uris(page) == ["app://1", dashboardURI, "skill://s/SKILL.md"])
         #expect(page.objectValue?["ttlMs"] == 60)
         #expect(page.objectValue?["cacheScope"] == "private")
+    }
+
+    @Test(
+        "An application page without hints counts with the server's hint in a merged page",
+        arguments: [
+            (nil, 0, "private"), (CacheHint(ttlMs: 600, scope: .public), 600, "public"),
+            (CacheHint(ttlMs: 7200, scope: .public), 3600, "public"),
+        ])
+    func mergedCacheHintsDefault(hint: CacheHint?, ttlMs: Int, cacheScope: String) async throws {
+        let server = Server(
+            name: "s", version: "1", capabilities: .init(tools: .init()),
+            configuration: .init(cacheHints: hint.map { [ListResources.name: $0] } ?? [:]))
+        await server.withMethodHandler(ListResources.self) { _ in
+            .init(resources: [Resource(name: "one", uri: "app://1")])
+        }
+        await server.withSkills(HintedSkillCatalog(ttlMs: 3600, cacheScope: .public))
+        await server.withAppResources([try view()], listInResources: false)
+        let wire = WireExchange(server: server)
+        try await wire.start()
+        defer { Task { await wire.stop() } }
+        let page = try await result(wire, ListResources.name)
+        #expect(uris(page) == ["app://1", "skill://s/SKILL.md"])
+        #expect(page.objectValue?["ttlMs"] == .int(ttlMs))
+        #expect(page.objectValue?["cacheScope"] == .string(cacheScope))
     }
 
     @Test("The skills merge still works next to the views", arguments: [true, false])
@@ -579,7 +628,8 @@ struct AppClientTests {
         }
         defer { Task { await client.disconnect(); await server.stop() } }
         let cases: [(String, AppResourceError.Reason)] = [
-            ("https://x", .notUIResource), ("ui://", .notUIResource), ("ui://other", .missingContent),
+            ("https://x", .notUIResource), ("ui://", .notUIResource), ("UI://Upper", .notUIResource),
+            ("ui://other", .missingContent),
             ("ui://plain", .unsupportedMimeType), ("ui://none", .unsupportedMimeType), ("ui://bytes", .invalidContent),
         ]
         for (uri, reason) in cases {

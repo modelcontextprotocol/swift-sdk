@@ -14,7 +14,7 @@ public struct AppResourceError: Swift.Error, Hashable, Sendable, CustomStringCon
 
         public var description: String { rawValue }
 
-        /// The URI does not start with `ui://`.
+        /// The URI does not start with `ui://` in lowercase.
         public static let notUIResource = Reason("notUIResource")
         /// The read returned no content item for the URI.
         public static let missingContent = Reason("missingContent")
@@ -85,10 +85,11 @@ extension Client {
     ///
     /// Render the view in a sandbox with ``AppResourceContents/contentSecurityPolicy``.
     ///
-    /// - Throws: ``AppResourceError`` when `uri` is not a `ui://` URI, or the
-    ///   content is not an HTML view; the server's error otherwise.
+    /// - Throws: ``AppResourceError`` when `uri` is not a `ui://` URI (in
+    ///   lowercase, as ``UIResource`` requires), or the content is not an
+    ///   HTML view; the server's error otherwise.
     public func readAppResource(uri: String, listing: Resource? = nil) async throws -> AppResourceContents {
-        guard uri.count > 5, uri.lowercased().hasPrefix("ui://") else {
+        guard uri.count > 5, uri.hasPrefix("ui://") else {
             throw AppResourceError(.notUIResource, uri: uri, message: "\(uri) is not a ui:// URI")
         }
         let result = try await readResource(uri: uri)
