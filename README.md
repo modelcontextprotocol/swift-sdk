@@ -44,6 +44,7 @@ of the MCP specification.
   - [HTTP Request Context in Handlers](#http-request-context-in-handlers)
   - [Graceful Shutdown](#graceful-shutdown)
 - [Transports](#transports)
+  - [Custom Transport Implementation](#custom-transport-implementation)
 - [Authentication](#authentication)
   - [Client: Client Credentials Flow](#client-client-credentials-flow)
   - [Client: Authorization Code Flow](#client-authorization-code-flow)
@@ -61,7 +62,10 @@ of the MCP specification.
 
 ## Requirements
 
-- Swift 6.0+ (Xcode 16+)
+- Swift 6.1+ (Xcode 16.3+)
+
+A Swift 6.0 package manifest (`Package@swift-6.0.swift`) is also provided for the `MCP` library,
+but CI only tests Swift 6.1 and later.
 
 See the [Platform Availability](#platform-availability) section below
 for platform-specific requirements.
@@ -74,7 +78,7 @@ Add the following to your `Package.swift` file:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", from: "0.11.0")
+    .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", from: "0.12.0")
 ]
 ```
 
@@ -120,11 +124,34 @@ if result.capabilities.tools != nil {
 
 #### Stdio Transport
 
-For local subprocess communication:
+For communicating with a server running as a local subprocess.
+`StdioTransport()` with no arguments uses the current process's own stdin and stdout,
+which is what a *server* launched by a host application needs.
+To talk to a server subprocess from a client, launch it and pass its pipes to the transport:
 
 ```swift
-// Create a stdio transport (simplest option)
-let transport = StdioTransport()
+import Foundation
+import MCP
+#if canImport(System)
+    import System
+#else
+    import SystemPackage
+#endif
+
+// Launch the server process
+let serverInput = Pipe()   // the client writes, the server reads
+let serverOutput = Pipe()  // the server writes, the client reads
+let process = Process()
+process.executableURL = URL(fileURLWithPath: "/path/to/mcp-server")
+process.standardInput = serverInput
+process.standardOutput = serverOutput
+try process.run()
+
+// Connect over the server's stdin and stdout
+let transport = StdioTransport(
+    input: FileDescriptor(rawValue: serverOutput.fileHandleForReading.fileDescriptor),
+    output: FileDescriptor(rawValue: serverInput.fileHandleForWriting.fileDescriptor)
+)
 try await client.connect(transport: transport)
 ```
 
@@ -164,15 +191,12 @@ let (content, isError) = try await client.callTool(
 // Handle tool content
 for item in content {
     switch item {
-    case .text(let text):
+    case .text(let text, _, _):
         print("Generated text: \(text)")
-    case .image(let data, let mimeType, let metadata):
-        if let width = metadata?["width"] as? Int,
-           let height = metadata?["height"] as? Int {
-            print("Generated \(width)x\(height) image of type \(mimeType)")
-            // Save or display the image data
-        }
-    case .audio(let data, let mimeType):
+    case .image(let data, let mimeType, _, _):
+        print("Received \(data.count) bytes of base64 image data of type \(mimeType)")
+        // Decode with Data(base64Encoded: data) to save or display the image
+    case .audio(_, let mimeType, _, _):
         print("Received audio data of type \(mimeType)")
     case .resource(let resource, _, _):
         print("Received embedded resource: \(resource)")
@@ -196,6 +220,7 @@ let contents = try await client.readResource(uri: "resource://example")
 print("Resource content: \(contents)")
 
 // Subscribe to resource updates if supported
+// (`result` is the initialization result returned by `client.connect(transport:)`)
 if result.capabilities.resources?.subscribe == true {
     try await client.subscribeToResource(uri: "resource://example")
 
@@ -231,7 +256,7 @@ let (description, messages) = try await client.getPrompt(
 )
 
 // Use the prompt messages in your application
-print("Prompt description: \(description)")
+print("Prompt description: \(description ?? "none")")
 for message in messages {
     if case .text(text: let text) = message.content {
         print("\(message.role): \(text)")
@@ -277,7 +302,7 @@ let frameworkCompletion = try await client.complete(
     promptName: "code_review",
     argumentName: "framework",
     argumentValue: "fla",
-    context: ["language": .string("python")]
+    context: ["language": "python"]
 )
 // Returns: ["flask"]
 ```
@@ -305,6 +330,18 @@ Clients register a handler to process incoming sampling requests from servers.
 > not client to server. 
 > This enables servers to request AI assistance 
 > while clients maintain control over model access and user approval.
+
+The client must declare the `sampling` capability so that servers know they can send sampling requests:
+
+```swift
+let client = Client(
+    name: "MyApp",
+    version: "1.0.0",
+    capabilities: .init(sampling: .init())
+)
+```
+
+Then register a handler for incoming sampling requests:
 
 ```swift
 // Register a sampling handler in the client
@@ -352,6 +389,17 @@ such as credentials, configuration choices, or approval for sensitive operations
 
 #### Client-Side: Handling Elicitation Requests
 
+The client must declare the `elicitation` capability.
+Form mode is enabled by default; include `url: .init()` to also accept URL-mode requests:
+
+```swift
+let client = Client(
+    name: "MyApp",
+    version: "1.0.0",
+    capabilities: .init(elicitation: .init(form: .init(), url: .init()))
+)
+```
+
 Register an elicitation handler to respond to server requests:
 
 ```swift
@@ -362,11 +410,10 @@ await client.withElicitationHandler { parameters in
         // Display the request to the user
         print("Server requests: \(form.message)")
 
-        // If a schema was provided, inspect it
-        if let schema = form.requestedSchema {
-            print("Required fields: \(schema.required ?? [])")
-            print("Schema: \(schema.properties)")
-        }
+        // Inspect the requested schema
+        let schema = form.requestedSchema
+        print("Required fields: \(schema.required ?? [])")
+        print("Schema: \(schema.properties)")
 
         // Present UI to collect user input
         let userResponse = presentElicitationUI(form)
@@ -484,11 +531,12 @@ Either side can cancel an in-progress request and handle incoming cancellations 
 
 #### Option 1: Convenience Methods with RequestContext Overload
 
-For common operations like tool calls, use the overloaded method that returns `RequestContext`:
+For common operations like tool calls, use the overloaded method that returns `RequestContext`.
+Annotate the type so the compiler picks this overload rather than the one that awaits the result:
 
 ```swift
 // Call a tool and get a context for cancellation
-let context = try client.callTool(
+let context: RequestContext<CallTool.Result> = try await client.callTool(
     name: "long-running-analysis",
     arguments: ["data": largeDataset]
 )
@@ -517,7 +565,7 @@ let request = CallTool.request(.init(
 ))
 
 // Send and get a context for cancellation tracking
-let context: RequestContext<CallTool.Result> = try client.send(request)
+let context: RequestContext<CallTool.Result> = try await client.send(request)
 
 // Cancel when needed
 try await client.cancelRequest(context.requestID, reason: "Timeout")
@@ -528,7 +576,7 @@ let content = result.content
 let isError = result.isError
 ```
 
-### Progress tracking
+### Progress Tracking
 
 Clients can attach a progress token to a request and receive incremental progress updates for long-running operations:
 
@@ -598,33 +646,43 @@ do {
 
 #### Request Batching
 
+> [!WARNING]
+> JSON-RPC batching was removed from the MCP specification in protocol revision 2025-06-18.
+> Only use `withBatch` with servers that negotiate protocol version 2025-03-26 or earlier.
+
 If `withBatch` throws, any tasks returned by `batch.addRequest(_:)` that have not already
 completed fail with the same error. Catch the `withBatch` error to continue awaiting those tasks.
 
 `addRequest` throws `MCPError.invalidRequest` when an ID is repeated within the same batch.
 Callers must still keep request IDs unique across the session, including outside that batch.
 
-Improve performance by sending multiple requests in a single batch:
+Send multiple requests in a single JSON-RPC batch.
+The batch closure is `@Sendable`, so collect the returned tasks in an actor rather than a captured `var`:
 
 ```swift
-// Array to hold tool call tasks
-var toolTasks: [Task<CallTool.Result, Swift.Error>] = []
+/// Collects tasks created inside the batch closure.
+actor TaskCollector<Output: Sendable> {
+    private(set) var tasks: [Task<Output, Swift.Error>] = []
+    func append(_ task: Task<Output, Swift.Error>) { tasks.append(task) }
+}
+
+let toolTasks = TaskCollector<CallTool.Result>()
 
 // Send a batch of requests
 try await client.withBatch { batch in
     // Add multiple tool calls to the batch
     for i in 0..<10 {
-        toolTasks.append(
-            try await batch.addRequest(
-                CallTool.request(.init(name: "square", arguments: ["n": Value(i)]))
-            )
+        let task = try await batch.addRequest(
+            CallTool.request(.init(name: "square", arguments: ["n": Value(i)]))
         )
+        await toolTasks.append(task)
     }
 }
 
 // Process results after the batch is sent
-print("Processing \(toolTasks.count) tool results...")
-for (index, task) in toolTasks.enumerated() {
+let tasks = await toolTasks.tasks
+print("Processing \(tasks.count) tool results...")
+for (index, task) in tasks.enumerated() {
     do {
         let result = try await task.value
         print("\(index): \(result.content)")
@@ -637,27 +695,26 @@ for (index, task) in toolTasks.enumerated() {
 You can also batch different types of requests:
 
 ```swift
-// Declare task variables
-var pingTask: Task<Ping.Result, Error>?
-var promptTask: Task<GetPrompt.Result, Error>?
+let pingTasks = TaskCollector<Ping.Result>()
+let promptTasks = TaskCollector<GetPrompt.Result>()
 
 // Send a batch with different request types
 try await client.withBatch { batch in
-    pingTask = try await batch.addRequest(Ping.request())
-    promptTask = try await batch.addRequest(
-        GetPrompt.request(.init(name: "greeting"))
+    await pingTasks.append(try await batch.addRequest(Ping.request()))
+    await promptTasks.append(
+        try await batch.addRequest(GetPrompt.request(.init(name: "greeting")))
     )
 }
 
 // Process individual results
 do {
-    if let pingTask = pingTask {
-        try await pingTask.value
+    for task in await pingTasks.tasks {
+        _ = try await task.value
         print("Ping successful")
     }
 
-    if let promptTask = promptTask {
-        let promptResult = try await promptTask.value
+    for task in await promptTasks.tasks {
+        let promptResult = try await task.value
         print("Prompt: \(promptResult.description ?? "None")")
     }
 } catch {
@@ -666,7 +723,7 @@ do {
 ```
 
 > [!NOTE]
-> `Server` automatically handles batch requests from MCP clients.
+> `Server` still accepts batch requests from clients for backward compatibility with earlier protocol versions.
 
 ## Server Usage
 
@@ -747,20 +804,26 @@ await server.withMethodHandler(CallTool.self) { params in
         let units = params.arguments?["units"]?.stringValue ?? "metric"
         let weatherData = getWeatherData(location: location, units: units) // Your implementation
         return .init(
-            content: [.text("Weather for \(location): \(weatherData.temperature)°, \(weatherData.conditions)")],
+            content: [
+                .text(
+                    text: "Weather for \(location): \(weatherData.temperature)°, \(weatherData.conditions)",
+                    annotations: nil,
+                    _meta: nil
+                )
+            ],
             isError: false
         )
 
     case "calculator":
         if let expression = params.arguments?["expression"]?.stringValue {
             let result = evaluateExpression(expression) // Your implementation
-            return .init(content: [.text("\(result)")], isError: false)
+            return .init(content: [.text(text: "\(result)", annotations: nil, _meta: nil)], isError: false)
         } else {
-            return .init(content: [.text("Missing expression parameter")], isError: true)
+            return .init(content: [.text(text: "Missing expression parameter", annotations: nil, _meta: nil)], isError: true)
         }
 
     default:
-        return .init(content: [.text("Unknown tool")], isError: true)
+        return .init(content: [.text(text: "Unknown tool", annotations: nil, _meta: nil)], isError: true)
     }
 }
 ```
@@ -857,9 +920,9 @@ await server.withMethodHandler(ListPrompts.self) { params in
 await server.withMethodHandler(GetPrompt.self) { params in
     switch params.name {
     case "interview":
-        let position = params.arguments?["position"]?.stringValue ?? "Software Engineer"
-        let company = params.arguments?["company"]?.stringValue ?? "Acme Corp"
-        let interviewee = params.arguments?["interviewee"]?.stringValue ?? "Candidate"
+        let position = params.arguments?["position"] ?? "Software Engineer"
+        let company = params.arguments?["company"] ?? "Acme Corp"
+        let interviewee = params.arguments?["interviewee"] ?? "Candidate"
 
         let description = "Job interview for \(position) position at \(company)"
         let messages: [Prompt.Message] = [
@@ -871,7 +934,12 @@ await server.withMethodHandler(GetPrompt.self) { params in
         return .init(description: description, messages: messages)
 
     case "customer-support":
-        // Similar implementation for customer support prompt
+        let issue = params.arguments?["issue"] ?? "an issue"
+        let product = params.arguments?["product"] ?? "the product"
+        return .init(
+            description: "Customer support for \(product)",
+            messages: [.user(.text(text: "I need help with \(issue) in \(product)."))]
+        )
 
     default:
         throw MCPError.invalidParams("Unknown prompt name: \(params.name)")
@@ -944,7 +1012,7 @@ You can also use context from already-resolved arguments:
 await server.withMethodHandler(Complete.self) { params in
     // Access context from previous argument completions
     if let context = params.context,
-       let language = context.arguments["language"]?.stringValue {
+       let language = context.arguments["language"] {
 
         // Provide framework suggestions based on selected language
         if language == "python" {
@@ -966,13 +1034,15 @@ await server.withMethodHandler(Complete.self) { params in
 
 Servers can request LLM completions from clients through sampling. This enables agentic behaviors where servers can ask for AI assistance while maintaining human oversight.
 
+Sampling is a *client* capability: the server doesn't declare anything,
+but it can only send sampling requests to clients that declared `sampling` during initialization.
+With `configuration: .strict`, `requestSampling` throws if the client didn't declare it.
+
 ```swift
-// Enable sampling capability in server
 let server = Server(
     name: "MyModelServer",
     version: "1.0.0",
     capabilities: .init(
-        sampling: .init(),  // Enable sampling capability
         tools: .init(listChanged: true)
     )
 )
@@ -1149,7 +1219,7 @@ await server.withMethodHandler(CallTool.self) { params in
     // Read the progress token from request metadata
     guard let token = params._meta?.progressToken else {
         // No progress token provided — run without reporting progress
-        return .init(content: [.text("Done")], isError: false)
+        return .init(content: [.text(text: "Done", annotations: nil, _meta: nil)], isError: false)
     }
 
     // Report initial progress
@@ -1174,11 +1244,11 @@ await server.withMethodHandler(CallTool.self) { params in
     )
     try await server.notify(done)
 
-    return .init(content: [.text("Done")], isError: false)
+    return .init(content: [.text(text: "Done", annotations: nil, _meta: nil)], isError: false)
 }
 ```
 
-#### Initialize Hook
+### Initialize Hook
 
 Control client connections with an initialize hook:
 
@@ -1211,9 +1281,9 @@ method handlers can observe the originating HTTP request (headers, body, path, m
 ```swift
 await server.withMethodHandler(CallTool.self) { params in
     let httpRequest = Server.currentHandlerContext?.httpContext
-    let authHeader = httpRequest?.headers["Authorization"]
+    let authHeader = httpRequest?.header("Authorization")  // case-insensitive lookup
     // …use the header to scope the response, audit, etc.
-    return .init(content: [.text("ok")], isError: false)
+    return .init(content: [.text(text: "ok", annotations: nil, _meta: nil)], isError: false)
 }
 ```
 
@@ -1252,24 +1322,18 @@ import Logging
 
 struct MCPService: Service {
     let server: Server
-    let transport: Transport
-
-    init(server: Server, transport: Transport) {
-        self.server = server
-        self.transport = transport
-    }
+    let transport: any Transport
 
     func run() async throws {
         // Start the server
         try await server.start(transport: transport)
 
-        // Keep running until external cancellation
-        try await Task.sleep(for: .days(365 * 100))  // Effectively forever
-    }
-
-    func shutdown() async throws {
-        // Gracefully shutdown the server
-        await server.stop()
+        // Run until the transport closes, or stop the server on graceful shutdown
+        await withGracefulShutdownHandler {
+            await server.waitUntilCompleted()
+        } onGracefulShutdown: {
+            Task { await server.stop() }
+        }
     }
 }
 ```
@@ -1298,13 +1362,17 @@ let server = Server(
 await server.withMethodHandler(ListTools.self) { _ in
     // Your implementation
     return .init(tools: [
-        Tool(name: "example", description: "An example tool")
+        Tool(
+            name: "example",
+            description: "An example tool",
+            inputSchema: .object(["type": "object"])
+        )
     ])
 }
 
 await server.withMethodHandler(CallTool.self) { params in
     // Your implementation
-    return .init(content: [.text("Tool result")], isError: false)
+    return .init(content: [.text(text: "Tool result", annotations: nil, _meta: nil)], isError: false)
 }
 
 // Create MCP service and other services
@@ -1334,7 +1402,7 @@ Properly shuts down your MCP server and other services
 - **Timeout-based shutdown**:
 Configurable shutdown timeouts to prevent hanging processes
 - **Advanced service management**:
-`[ServiceLifecycle](https://swiftpackageindex.com/swift-server/swift-service-lifecycle/documentation/servicelifecycle)`
+[ServiceLifecycle](https://swiftpackageindex.com/swift-server/swift-service-lifecycle/documentation/servicelifecycle)
 also supports service dependencies, conditional services,
 and other useful features.
 
@@ -1346,12 +1414,12 @@ The Swift SDK provides multiple built-in transports:
 
 | Transport | Description | Platforms | Best for |
 | --------- | ----------- | --------- | -------- |
-| [`StdioTransport`](/Sources/MCP/Base/Transports/StdioTransport.swift) | Implements [stdio transport](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#stdio) using standard input/output streams | Apple platforms, Linux with glibc | Local subprocesses, CLI tools |
-| [`HTTPClientTransport`](/Sources/MCP/Base/Transports/HTTPClientTransport.swift) | Implements [Streamable HTTP transport](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#streamable-http) using Foundation's URL Loading System | All platforms with Foundation | Remote servers, web applications |
-| [`StatelessHTTPServerTransport`](/Sources/MCP/Base/Transports/HTTPServer/StatelessHTTPServerTransport.swift) | HTTP server transport with simple request-response semantics; no session management or SSE streaming | All platforms with Foundation | Simple HTTP servers, serverless/edge functions |
+| [`StdioTransport`](/Sources/MCP/Base/Transports/StdioTransport.swift) | Implements [stdio transport](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports#stdio) using standard input/output streams | Apple platforms, Linux (glibc and musl) | Local subprocesses, CLI tools |
+| [`HTTPClientTransport`](/Sources/MCP/Base/Transports/HTTPClientTransport.swift) | Implements [Streamable HTTP transport](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports#streamable-http) using Foundation's URL Loading System | All platforms with Foundation (SSE streaming on Apple platforms only; Linux uses request/response) | Remote servers, web applications |
+| [`StatelessHTTPServerTransport`](/Sources/MCP/Base/Transports/HTTPServer/StatelessHTTPServerTransport.swift) | HTTP server transport with simple request-response semantics; no session management or SSE streaming, so server-to-client requests and notifications aren't delivered | All platforms with Foundation | Simple HTTP servers, serverless/edge functions |
 | [`StatefulHTTPServerTransport`](/Sources/MCP/Base/Transports/HTTPServer/StatefulHTTPServerTransport.swift) | HTTP server transport with full session management and SSE streaming for server-initiated messages | All platforms with Foundation | Full-featured HTTP servers, streaming notifications |
 | [`InMemoryTransport`](/Sources/MCP/Base/Transports/InMemoryTransport.swift) | Custom in-memory transport for direct communication within the same process | All platforms | Testing, debugging, same-process client-server communication |
-| [`NetworkTransport`](/Sources/MCP/Base/Transports/NetworkTransport.swift) | Custom transport using Apple's Network framework for TCP/UDP connections | Apple platforms only | Low-level networking, custom protocols |
+| [`NetworkTransport`](/Sources/MCP/Base/Transports/NetworkTransport.swift) | Custom (non-standard) transport using Apple's Network framework for TCP/UDP connections, with heartbeats and automatic reconnection enabled by default; both peers should use `NetworkTransport` | Apple platforms only | Low-level networking, custom protocols |
 
 
 ### Custom Transport Implementation
@@ -1405,9 +1473,13 @@ When a server returns `401 Unauthorized` or `403 Forbidden`, the transport autom
 
 1. Discovers Protected Resource Metadata (RFC 9728) at `/.well-known/oauth-protected-resource`
 2. Discovers Authorization Server Metadata (RFC 8414 / OIDC Discovery 1.0)
-3. Registers the client dynamically (RFC 7591) if needed
-4. Acquires a Bearer token using the configured grant flow (PKCE enforced)
-5. Retries the original request with the token attached
+3. For a client configured with `.none(clientID:)`, uses the client ID as a Client ID Metadata Document
+   when it's an HTTPS URL and the authorization server supports them;
+   otherwise registers the client dynamically (RFC 7591) if needed
+4. Acquires a Bearer token using the configured grant flow (PKCE enforced),
+   refreshing tokens with a `refresh_token` grant when possible
+5. Retries the original request with the token attached,
+   and requests additional scopes when a server responds with `403 insufficient_scope`
 
 Authorization is opt-in and disabled by default.
 Pass an `OAuthAuthorizer` to `HTTPClientTransport(authorizer:)` to enable it.
@@ -1455,6 +1527,11 @@ let transport = HTTPClientTransport(
     authorizer: authorizer
 )
 ```
+
+> [!IMPORTANT]
+> By default, `authorizationRedirectURI` is a loopback URL on a random port that isn't reserved in advance,
+> so another local process could claim the port first.
+> In production, pass `authorizationRedirectURI:` with a fixed port or a custom URL scheme.
 
 ### Client: Custom Token Provider
 
@@ -1578,13 +1655,24 @@ let bearerValidator = BearerTokenValidator(
 )
 
 let pipeline = StandardValidationPipeline(validators: [
+    OriginValidator(              // DNS rebinding protection
+        allowedHosts: ["api.example.com"],
+        allowedOrigins: ["https://api.example.com"]
+    ),
     metadataValidator,            // serves /.well-known/oauth-protected-resource unauthenticated
     bearerValidator,              // validates Bearer tokens on all other requests
     AcceptHeaderValidator(mode: .sseRequired),
     ContentTypeValidator(),
+    ProtocolVersionValidator(),
     SessionValidator(),
 ])
+
+let transport = StatefulHTTPServerTransport(validationPipeline: pipeline)
 ```
+
+A custom pipeline replaces the transport's default one, so keep the default validators in it.
+In particular, `OriginValidator` provides DNS rebinding protection;
+the default pipeline only allows `localhost` hosts and origins.
 
 ## Platform Availability
 
@@ -1604,17 +1692,26 @@ The Swift SDK has the following platform requirements:
 While the core library works on any platform supporting Swift 6
 (including Linux), running a client or server requires a compatible transport.
 
+On Linux, some features need frameworks that are only available on Apple platforms:
+
+- `HTTPClientTransport` doesn't support SSE streaming and uses request/response instead.
+- The OAuth authorization code flow throws `pkceS256Unavailable`, because PKCE S256 requires CryptoKit.
+- `private_key_jwt` client assertions throw `cryptographyUnavailable`.
+- `NetworkTransport` requires the Network framework.
+
 ## Debugging and Logging
 
-Enable logging to help troubleshoot issues:
+Enable logging to help troubleshoot issues.
+`Client` and `Server` log through their transport's logger, so pass the logger to the transport:
 
 ```swift
 import Logging
 import MCP
 
-// Configure Logger
+// Configure logging. Log to standard error: for stdio servers,
+// standard output carries MCP messages and must not contain anything else.
 LoggingSystem.bootstrap { label in
-    var handler = StreamLogHandler.standardOutput(label: label)
+    var handler = StreamLogHandler.standardError(label: label)
     handler.logLevel = .debug
     return handler
 }
@@ -1622,18 +1719,14 @@ LoggingSystem.bootstrap { label in
 // Create logger
 let logger = Logger(label: "com.example.mcp")
 
-// Create client/server
+// Pass it to the transport. Each client or server needs its own transport.
+// In a client:
 let client = Client(name: "MyApp", version: "1.0.0")
+try await client.connect(transport: StdioTransport(logger: logger))
+
+// Or, in a server:
 let server = Server(name: "MyServer", version: "1.0.0")
-
-// Create transport with logger
-let transport = StdioTransport(logger: logger)
-
-// Connect client and transport with logger
-try await client.connect(transport: transport)
-
-// Connect server and transport with logger
-try await server.start(transport: transport)
+try await server.start(transport: StdioTransport(logger: logger))
 ```
 
 ## Additional Resources
