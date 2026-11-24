@@ -1,9 +1,9 @@
 # MCP Swift SDK design
 
 This document records the design of the `MCP` Swift package and the reasons behind it. It covers
-0.13.0, which adds the 2026-07-28 revision of the
+1.x, which adds the 2026-07-28 revision of the
 [Model Context Protocol](https://modelcontextprotocol.io) next to the `initialize`-based revisions
-(2025-11-25 and earlier). The base of 1.0.0 is `main` at `727175f` (the 0.12 line).
+(2025-11-25 and earlier). The base of 1.0.0 is `main` at `234e412` (the 0.12 line).
 
 Feature notes go deeper on single topics:
 
@@ -253,8 +253,10 @@ Defaults: localhost `OriginValidator`, `AcceptHeaderValidator`, `ContentTypeVali
 - A non-2xx reply with a JSON-RPC response body is delivered as a response, so the client sees
   the -32020/-32022 error instead of an HTTP error.
 
-`Client` reaches these features by downcasting its transport to `HTTPClientTransport`. A custom
-HTTP client transport does not get header parameters or abort-based cancellation.
+`Client` hands the `Mcp-Param-*` headers to any transport through the `Transport` requirement
+`send(_:additionalHeaders:)`, whose default ignores them. It reaches the other features by
+downcasting its transport to `HTTPClientTransport`, so a custom HTTP client transport does not
+get abort-based cancellation.
 
 ## JSON-RPC types
 
@@ -547,7 +549,10 @@ Implied by the design, not recorded as separate decisions:
 - A slow notification handler delays later notifications and the responses queued behind
   them. Running notification handlers concurrently, as the Python SDK does, would lose the
   ordering of progress before results.
-- `Client` downcasts to `HTTPClientTransport` for header parameters and cancellation. A transport
-  capability protocol would let custom transports opt in.
+- `Client` hands the `Mcp-Param-*` headers to any transport through
+  `Transport.send(_:additionalHeaders:)`, but still downcasts to `HTTPClientTransport` to cancel
+  a request at 2026-07-28, to pass on the negotiated or discovered protocol version, and to
+  extend a request's timeout while a sign-in runs. A transport capability protocol would let
+  custom transports opt in.
 - The type-erasure round trip through JSON on every request could be replaced by direct
   decoding from the received bytes.

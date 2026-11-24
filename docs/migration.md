@@ -5,7 +5,7 @@
 This guide lists every public API change between 0.12.1 (`a0ae212`) and
 1.0.0: the changes that break source code, the changes in behavior and on the
 wire, and the new opt-in features. 1.0.0 also contains the fixes merged to
-`main` after 0.12.1, up to `727175f`
+`main` after 0.12.1, up to `234e412`
 ([Fixes on `main` after 0.12.1](#fixes-on-main-after-0121)). From 1.0.0 on,
 only a major release breaks source compatibility
 ([VERSIONING.md](../VERSIONING.md)). Most code compiles unchanged. The
@@ -680,9 +680,10 @@ session ended.
 - An SSE line, or the data of one event, longer than 16 MiB fails the request
   with `internalError`. An event that the body ends before its closing blank
   line is discarded.
-- A 404 to the GET stream of a session ends the session, as a 404 to a POST
-  does: the session ID is dropped and the stream is not reopened. The
-  previous release kept reopening it with the expired session ID.
+- A 404 to the GET stream of a session stops the stream, which is not
+  reopened; the previous release kept reopening it with the expired session
+  ID. The session ID is kept, so the next request carries it, receives the
+  server's 404 and reports `isSessionExpired` to its caller.
 
 ### Authorization
 
@@ -767,7 +768,7 @@ released `MCP` version now resolves.
 
 ### Fixes on `main` after 0.12.1
 
-These commits on `main` (`a0ae212..727175f`) are part of 1.0.0:
+These commits on `main` (`a0ae212..234e412`) are part of 1.0.0:
 
 - `Data.parseDataURL(_:)` takes `;base64` from the header only:
   `data:text/plain,hello;base64,world` is a text URL, where the previous
@@ -793,7 +794,13 @@ These commits on `main` (`a0ae212..727175f`) are part of 1.0.0:
   process exited. After five consecutive empty reads on a connection
   that is no longer ready, the receive stream finishes with
   `connectionClosed` and the connection is cancelled, where the receive loop
-  ended and `receive()` kept waiting (#283).
+  ended and `receive()` kept waiting (#283). The transport then also counts
+  as disconnected and stops its heartbeats, which the previous release kept
+  sending to the closed connection (#326).
+- `NetworkTransport` clears the connection's state update handler on the
+  actor's executor when a connection attempt ends. The previous release also
+  cleared it from the state stream's termination callback, on any thread, a
+  data race (#301).
 - `StdioTransport.disconnect()` waits for the read loop and the sends in
   progress, then turns `O_NONBLOCK` off again on each descriptor that was
   blocking at `connect()` and still refers to the same file, and then
@@ -811,8 +818,11 @@ instead of `Codable` (#227).
 The other commits change no behavior: notification handlers are appended in
 place (#118), the client calls `send(request).value` instead of an internal
 helper (#304), the server reuses one encoder and decoder (#299), a
-`NetworkTransport` test checks the transport instead of its mock (#311), and
-the README, CI and CODEOWNERS changed (#155, #294, #306, #308).
+`NetworkTransport` test checks the transport instead of its mock (#311), the
+conformance server spaces its progress notifications 50 ms apart instead of
+50 µs (#329), `Package.resolved` pins swift-nio 2.100.0, which only the conformance server
+and the HTTP server example use (#325), and the README, agent guidance, CI and
+CODEOWNERS changed (#155, #294, #306, #308, #318, #320, #331, #333).
 
 ## New opt-in features
 
