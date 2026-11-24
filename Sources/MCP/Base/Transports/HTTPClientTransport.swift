@@ -446,7 +446,7 @@ public actor HTTPClientTransport: Transport {
                 logger.debug("Session ID received", metadata: ["sessionID": "\(newSessionID)"])
             }
 
-            if !(200..<300).contains(httpResponse.statusCode), ![401, 403].contains(httpResponse.statusCode),
+            if Self.mayCarryPeerError(httpResponse.statusCode),
                 deliverErrorResponse(data, contentType: contentType, status: httpResponse.statusCode, request: message)
             {
                 return
@@ -483,9 +483,7 @@ public actor HTTPClientTransport: Transport {
                 logger.debug("Session ID received", metadata: ["sessionID": "\(newSessionID)"])
             }
 
-            if !(200..<300).contains(httpResponse.statusCode), ![401, 403].contains(httpResponse.statusCode),
-                contentType.contains(ContentType.json)
-            {
+            if Self.mayCarryPeerError(httpResponse.statusCode), contentType.contains(ContentType.json) {
                 var body = Data()
                 for try await byte in stream {
                     body.append(byte)
@@ -606,7 +604,8 @@ public actor HTTPClientTransport: Transport {
     /// JSON-RPC body. Only an `error` whose ID is the request's ID is
     /// delivered: any other body (a `result`, a placeholder or foreign ID, a
     /// batch) leaves the request to fail with the status error. Returns
-    /// `true` when the error was delivered.
+    /// `true` when the error was delivered. Callers check
+    /// `mayCarryPeerError(_:)` first.
     private func deliverErrorResponse(
         _ body: Data, contentType: String, status: Int, request message: OutgoingMessage
     ) -> Bool {
@@ -622,6 +621,16 @@ public actor HTTPClientTransport: Transport {
         }
         messageContinuation.yield(body)
         return true
+    }
+
+    /// Whether a JSON-RPC error on a reply with `status` is the peer's
+    /// answer to the request: a 4xx other than 401 and 403 (authorization),
+    /// 408 and 429. Those, and 5xx, report that the server could not answer
+    /// (a server shutting down answers 503 with `connectionClosed`), so they
+    /// fail the request with the status error even when the body has a
+    /// JSON-RPC error for it.
+    private static func mayCarryPeerError(_ status: Int) -> Bool {
+        (400..<500).contains(status) && ![401, 403, 408, 429].contains(status)
     }
 
     /// Whether `error` reports a 400, 404 or 405 reply without a JSON-RPC

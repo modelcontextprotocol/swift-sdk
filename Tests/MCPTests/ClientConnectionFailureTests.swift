@@ -311,6 +311,65 @@ struct OutgoingMessageTests {
             await transport.disconnect()
         }
 
+        @Test(
+            "An error for the request on a 408, 429 or 5xx fails with the status",
+            arguments: [
+                (408, "Request timeout"), (429, "Too many requests"),
+                (500, "Server error: 500"), (503, "Server error: 503"),
+            ])
+        func unavailableStatusFails(status: Int, detail: String) async throws {
+            let transport = await makeTransport { _ in
+                reply(status, #"{"jsonrpc":"2.0","id":"r1","error":{"code":-32000,"message":"Connection closed"}}"#)
+            }
+            try await transport.connect()
+            await #expect {
+                try await transport.send(request)
+            } throws: { error in
+                (error as? MCPError) == .internalError(detail)
+            }
+            await transport.disconnect()
+        }
+
+        @Test("A 503 with a JSON-RPC error on server/discover is rethrown without initialize")
+        func unavailableDiscoverIsRethrown() async throws {
+            actor Methods {
+                private(set) var sent: [String] = []
+                func append(_ method: String) { sent.append(method) }
+            }
+            let methods = Methods()
+            let transport = await makeTransport { request in
+                let message = (try? JSONSerialization.jsonObject(with: Self.body(of: request))) as? [String: Any] ?? [:]
+                await methods.append(message["method"] as? String ?? "")
+                let id = message["id"] as? String ?? ""
+                return reply(
+                    503, #"{"jsonrpc":"2.0","id":"\#(id)","error":{"code":-32000,"message":"Connection closed"}}"#)
+            }
+            let client = Client(name: "probe", version: "1.0", configuration: .init(protocolMode: .automatic))
+
+            await #expect {
+                try await client.connect(transport: transport)
+            } throws: { error in
+                (error as? MCPError) == .internalError("Server error: 503")
+            }
+            #expect(await methods.sent == [ServerDiscover.name])
+            await client.disconnect()
+        }
+
+        static func body(of request: URLRequest) -> Data {
+            if let body = request.httpBody { return body }
+            guard let stream = request.httpBodyStream else { return Data() }
+            stream.open()
+            defer { stream.close() }
+            var data = Data()
+            var buffer = [UInt8](repeating: 0, count: 4096)
+            while stream.hasBytesAvailable {
+                let count = stream.read(&buffer, maxLength: buffer.count)
+                guard count > 0 else { break }
+                data.append(buffer, count: count)
+            }
+            return data
+        }
+
         @Test("A notification's non-2xx reply fails with the status")
         func notificationErrorFails() async throws {
             let transport = await makeTransport { _ in
