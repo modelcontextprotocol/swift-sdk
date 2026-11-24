@@ -2736,8 +2736,8 @@ import Testing
     // A transport the application drops without calling disconnect() is
     // released, and its GET stream stops.
 
-    /// One test's server: answers POSTs with 202 and each GET as `getReply`
-    /// says, and counts the GETs.
+    /// One test's server: answers POSTs with `postStatus` and each GET as
+    /// `getReply` says, and counts the GETs.
     private final class ReleaseTestServer: @unchecked Sendable {
         enum Reply {
             /// An empty reply with this status.
@@ -2746,16 +2746,21 @@ import Testing
             case events(String)
             /// A 200 SSE stream that stays open; ``write(_:)`` sends on it.
             case open
+            /// No response: the GET waits for its headers until the client
+            /// stops it. Counted as an open stream.
+            case silent
         }
 
         let key = UUID().uuidString
+        private let postStatus: Int
         private let getReply: @Sendable (Int) -> Reply
         private let lock = NSLock()
         private var gets = 0
         private var streams: [ObjectIdentifier: ReleaseTestProtocol] = [:]
         private var closed = 0
 
-        init(getReply: @escaping @Sendable (Int) -> Reply) {
+        init(postStatus: Int = 202, getReply: @escaping @Sendable (Int) -> Reply) {
+            self.postStatus = postStatus
             self.getReply = getReply
             ReleaseTestProtocol.register(self)
         }
@@ -2784,7 +2789,7 @@ import Testing
 
         fileprivate func start(_ loading: ReleaseTestProtocol) {
             guard loading.request.httpMethod == "GET" else {
-                loading.reply(status: 202, contentType: "application/json", body: nil)
+                loading.reply(status: postStatus, contentType: "application/json", body: nil)
                 return
             }
             let reply = lock.withLock { () -> Reply in
@@ -2799,6 +2804,8 @@ import Testing
             case .open:
                 lock.withLock { streams[ObjectIdentifier(loading)] = loading }
                 loading.reply(status: 200, contentType: "text/event-stream", body: nil, finish: false)
+            case .silent:
+                lock.withLock { streams[ObjectIdentifier(loading)] = loading }
             }
         }
 
@@ -2982,9 +2989,56 @@ import Testing
 
             #expect(await reference.isReleased())
             let gets = server.getCount
-            // Longer than the next waits of the backoff (100 ms, 200 ms).
+            // Longer than the next waits of the backoff (50, 100 and 200 ms).
             try await Task.sleep(for: .milliseconds(700))
             #expect(server.getCount == gets)
+        }
+
+        @Test("A transport waiting for the headers of its GET stream is released and stops the GET")
+        func releasedWhileAwaitingHeaders() async throws {
+            let server = ReleaseTestServer { _ in .silent }
+            var transport: HTTPClientTransport? = server.makeTransport(
+                streaming: true, sseInitializationTimeout: 0.05)
+            try await transport?.connect()
+            #expect(await eventually { server.openStreamCount == 1 })
+
+            let reference = WeakTransport(transport)
+            transport = nil
+
+            // Well within the request timeout (60 s), which would otherwise
+            // end the wait.
+            #expect(await reference.isReleased())
+            #expect(await eventually { server.closedStreamCount == 1 })
+            let gets = server.getCount
+            try await Task.sleep(for: .milliseconds(300))
+            #expect(server.getCount == gets)
+            #expect(gets == 1)
+        }
+
+        @Test(
+            "A client whose connect fails disconnects its transport and is released",
+            arguments: [Client.Configuration.default, .handshake])
+        func failedConnectReleasesTransport(configuration: Client.Configuration) async throws {
+            let server = ReleaseTestServer(postStatus: 500) { _ in .open }
+            var transport: HTTPClientTransport? = server.makeTransport(
+                streaming: true, sseInitializationTimeout: 0.05)
+            var client: Client? = Client(name: "test", version: "1.0", configuration: configuration)
+            do {
+                let connecting = try #require(transport)
+                await #expect(throws: (any Swift.Error).self) {
+                    try await client?.connect(transport: connecting)
+                }
+            }
+
+            // The client is kept: it no longer holds the transport.
+            let reference = WeakTransport(transport)
+            transport = nil
+            #expect(await reference.isReleased())
+            #expect(await eventually { server.openStreamCount == 0 })
+
+            weak var released = client
+            client = nil
+            #expect(await eventually { released == nil })
         }
     }
 #endif  // swift(>=6.1)

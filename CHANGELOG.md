@@ -48,6 +48,8 @@ Behavior that can break working code ([docs/migration.md](docs/migration.md#beha
   dynamic client registration. Pass `""` to register.
 - Authorization server metadata whose `issuer` does not match fails discovery
   (`authorizationServerIssuerMismatch`) instead of being used.
+- `HTTPClientTransport.connect()` after `disconnect()` throws `internalError`: create a new
+  transport to reconnect.
 
 ### Features
 
@@ -116,6 +118,8 @@ Behavior that can break working code ([docs/migration.md](docs/migration.md#beha
 - `HTTPStatusError`'s `debugDescription` names the response headers without their values.
 - An `HTTPClientTransport` dropped without `disconnect()` is released and stops its GET stream;
   before, it was never released and, with `streaming: true`, kept reconnecting.
+- A `connect(transport:)` that throws disconnects the transport and stops the receive loop;
+  before, both kept running and kept the client and the transport alive.
 - From `main` after 0.12.1: `Data.parseDataURL(_:)` reads `;base64` from the header only and
   decodes any percent-escaped byte (#309, #310); `client_secret_basic` percent-encodes the client
   credentials (RFC 6749 §2.3.1, #300); PKCE verifier characters are uniformly distributed (#303);

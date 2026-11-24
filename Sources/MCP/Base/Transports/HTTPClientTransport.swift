@@ -25,15 +25,19 @@ import Logging
 /// - Streaming HTTP with SSE (`streaming=true`): Enables server-to-client push messages
 ///
 /// ``disconnect()`` ends the connection at once. A transport dropped without
-/// it is still released, and then stops its GET stream and the POSTs in
-/// flight and invalidates its URL sessions.
+/// it is still released, and then stops its GET stream and invalidates its
+/// URL sessions; a ``send(_:)`` still running keeps the transport alive until
+/// it finishes or its task is cancelled.
 ///
 /// It behaves the same on Apple platforms and Linux. Response bodies are read
 /// as they arrive: with `URLSession.bytes(for:)` on Apple platforms, and with a
 /// data delegate on swift-corelibs-foundation, which has no `bytes(for:)`.
 ///
-/// An SSE line, or the data of one event, longer than 16 MiB fails the
-/// request with `internalError`; the stream is not resumed.
+/// An SSE line, or the data of one event, longer than 16 MiB ends its
+/// stream with `internalError`. On a POST's stream the request fails and the
+/// stream is not resumed; the GET stream reconnects after its backoff,
+/// without `Last-Event-ID`, since a replay would repeat the event, which is
+/// lost.
 ///
 /// ## Example Usage
 ///
@@ -348,9 +352,10 @@ public actor HTTPClientTransport: Transport {
     }
 
     deinit {
-        // No task can be creating a URLSession task: that holds the transport.
+        // A send() in flight holds the transport, so only the GET stream
+        // task can be running; a GET it is creating keeps the sessions
+        // valid until the task exists.
         streamingTask?.cancel()
-        for task in inFlightPosts.values { task.cancel() }
         sessionIDSignal.signal()
         messageContinuation.finish()
         if !streamingSession.lifetime.isInvalidated {
@@ -781,6 +786,11 @@ public actor HTTPClientTransport: Transport {
     }
 
     private func responseHeaders(from response: HTTPURLResponse) -> [String: String] {
+        Self.headers(of: response)
+    }
+
+    /// The headers of `response` whose names and values are strings.
+    private static func headers(of response: HTTPURLResponse) -> [String: String] {
         var headers: [String: String] = [:]
         for (key, value) in response.allHeaderFields {
             guard let key = key as? String, let value = value as? String else { continue }
@@ -871,8 +881,9 @@ public actor HTTPClientTransport: Transport {
     }
 
     /// The standalone GET stream loop. It holds `reference`'s transport only
-    /// for one step (an attempt to open the stream, one event), never while
-    /// it waits for a session ID, sleeps before reconnecting or waits for the
+    /// for one step (building the GET, reading its response's status, one
+    /// event), never while it waits for a session ID, for the authorizer or
+    /// the response headers, sleeps before reconnecting or waits for the
     /// next event, so a transport dropped without ``disconnect()`` is
     /// released; the loop then ends.
     private static func listenForServerEvents(
@@ -899,6 +910,7 @@ public actor HTTPClientTransport: Transport {
         // Failed connections and streams that close without an event in a
         // row; each one after the first doubles the wait.
         var consecutiveFailures = 0
+        var sessionExpired = false
 
         logger.debug("🔄 Starting SSE retry loop", metadata: [
             "isCancelled": "\(Task.isCancelled)"
@@ -926,8 +938,13 @@ public actor HTTPClientTransport: Transport {
                 let receivedEvents = try await connectToEventStream(reference, logger: logger)
                 consecutiveFailures = receivedEvents ? 0 : consecutiveFailures + 1
 
+                // `nil` once the transport is released or disconnected.
+                let willRetryAfter = await reference.transport?.listenState().map {
+                    "\(reconnectDelay(retryInterval: $0.retryInterval, consecutiveFailures: consecutiveFailures))ms"
+                }
                 logger.info("🔌 SSE stream closed gracefully, will reconnect", metadata: [
-                    "attempt": "\(attemptCount)"
+                    "attempt": "\(attemptCount)",
+                    "willRetryAfter": "\(willRetryAfter ?? "none")"
                 ])
             } catch {
                 consecutiveFailures += 1
@@ -938,6 +955,7 @@ public actor HTTPClientTransport: Transport {
                 }
                 // The stream belonged to the session the server ended.
                 if case .transportError(let status as HTTPStatusError) = error as? MCPError, status.isSessionExpired {
+                    sessionExpired = true
                     break
                 }
             }
@@ -947,8 +965,13 @@ public actor HTTPClientTransport: Transport {
             ])
         }
 
+        // Why the loop ended. disconnect(), a 405 and the switch to a
+        // stateless revision cancel it; so does the release of the transport.
+        let reason =
+            reference.transport == nil
+            ? "released" : sessionExpired ? "sessionExpired" : Task.isCancelled ? "cancelled" : "disconnected"
         logger.debug("⏹️ SSE retry loop exited", metadata: [
-            "isCancelled": "\(Task.isCancelled)",
+            "reason": "\(reason)",
             "totalAttempts": "\(attemptCount)"
         ])
     }
@@ -956,7 +979,7 @@ public actor HTTPClientTransport: Transport {
     /// Opens the standalone GET stream and reads it until it ends, or until
     /// `reference`'s transport is released. Returns whether any event arrived.
     private static func connectToEventStream(_ reference: WeakReference, logger: Logger) async throws -> Bool {
-        guard let stream = try await reference.transport?.openStandaloneStream() else { return false }
+        guard let stream = try await openStandaloneStream(reference, logger: logger) else { return false }
 
         logger.debug("📥 Starting SSE event processing")
         var eventCount = 0
@@ -990,12 +1013,30 @@ public actor HTTPClientTransport: Transport {
     }
 
     /// Opens the standalone GET stream: its body once the server accepted
-    /// it, `nil` when the transport is not connected.
-    private func openStandaloneStream() async throws -> ResponseBody? {
-        guard isConnected else {
+    /// it, `nil` when the transport is not connected or was released. It
+    /// holds `reference`'s transport only while it reads or records state,
+    /// not while it waits for the authorizer or the response headers.
+    private static func openStandaloneStream(_ reference: WeakReference, logger: Logger) async throws -> ResponseBody? {
+        guard let resumeFrom = try await reference.transport?.standaloneStreamStart() else {
             logger.debug("⚠️ Skipping connectToEventStream - transport not connected")
             return nil
         }
+        guard
+            let reply = try await openEventStream(
+                reference, lastEventID: resumeFrom.lastEventID, protocolVersion: resumeFrom.protocolVersion)
+        else { return nil }
+        guard try await reference.transport?.acceptStandaloneStream(reply) != nil else {
+            logger.debug("⏹️ Transport released, closing the SSE stream")
+            reply.stream.cancel()
+            return nil
+        }
+        return reply.stream
+    }
+
+    /// Checks the endpoint for the standalone GET stream and reads what its
+    /// GET resumes from: `nil` when the transport is not connected.
+    private func standaloneStreamStart() throws -> (lastEventID: String?, protocolVersion: String?)? {
+        guard isConnected else { return nil }
 
         if let authorizer {
             do {
@@ -1010,31 +1051,33 @@ public actor HTTPClientTransport: Transport {
         } else {
             logger.info("→ Connecting to SSE stream (no last event ID to resume from)")
         }
+        return (lastEventID, protocolVersion)
+    }
 
-        let (stream, httpResponse, sentSessionID) = try await openEventStream(
-            lastEventID: lastEventID, protocolVersion: protocolVersion)
-
-        guard httpResponse.statusCode == 200 else {
-            stream.cancel()
-            if httpResponse.statusCode == 405 {
+    /// Records the reply to the standalone GET: its session ID, or why the
+    /// server refused the stream, which it throws.
+    private func acceptStandaloneStream(_ reply: EventStreamReply) throws {
+        guard reply.statusCode == 200 else {
+            reply.stream.cancel()
+            if reply.statusCode == 405 {
                 self.streamingTask?.cancel()
             }
             // The session ID stays: the next request carries it, gets the
             // 404 the server must send for it, and reports the expiry to
             // its caller.
-            if httpResponse.statusCode == 404, sentSessionID != nil {
+            if reply.statusCode == 404, reply.sentSessionID != nil {
                 logger.warning("Session has expired")
-                throw statusError(httpResponse, isSessionExpired: true)
+                throw reply.statusError(isSessionExpired: true)
             }
             // The server no longer has the event to resume from: the next
             // connection opens a fresh stream instead of repeating the ID.
-            if httpResponse.statusCode == 400, lastEventID != nil {
+            if reply.statusCode == 400, lastEventID != nil {
                 lastEventID = nil
             }
-            throw statusError(httpResponse)
+            throw reply.statusError()
         }
 
-        if let newSessionID = httpResponse.value(forHTTPHeaderField: HTTPHeaderName.sessionID) {
+        if let newSessionID = reply.sessionID {
             let wasSessionIDNil = (self.sessionID == nil)
             self.sessionID = newSessionID
             if wasSessionIDNil {
@@ -1042,8 +1085,6 @@ public actor HTTPClientTransport: Transport {
             }
             logger.debug("Session ID received", metadata: ["sessionID": "\(newSessionID)"])
         }
-
-        return stream
     }
 
     /// Forgets the standalone stream's last event ID after an event too
@@ -1079,60 +1120,103 @@ public actor HTTPClientTransport: Transport {
         }
     }
 
+    /// The reply to a GET for an SSE stream.
+    private struct EventStreamReply: Sendable {
+        let stream: ResponseBody
+        let statusCode: Int
+        let headers: [String: String]
+        /// The `Mcp-Session-Id` header.
+        let sessionID: String?
+        /// The `Mcp-Session-Id` the answered GET carried.
+        let sentSessionID: String?
+
+        /// The ``HTTPStatusError`` of the reply, as the transport throws it.
+        func statusError(isSessionExpired: Bool = false) -> MCPError {
+            .transportError(HTTPStatusError(statusCode: statusCode, headers: headers, isSessionExpired: isSessionExpired))
+        }
+    }
+
+    /// What a GET for an SSE stream uses of the transport while it waits.
+    private var eventStreamInputs: (
+        endpoint: URL, session: URLSession, streamingSession: StreamingSession,
+        authorizer: (any HTTPClientAuthorizer)?
+    ) {
+        (endpoint, session, streamingSession, authorizer)
+    }
+
+    /// A GET for an SSE stream with the transport's current headers.
+    private func eventStreamRequest(lastEventID: String?, protocolVersion: String?) throws -> URLRequest {
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "GET"
+        request.addValue(ContentType.sse, forHTTPHeaderField: HTTPHeaderName.accept)
+        request.addValue("no-cache", forHTTPHeaderField: HTTPHeaderName.cacheControl)
+        if let protocolVersion {
+            request.addValue(protocolVersion, forHTTPHeaderField: HTTPHeaderName.protocolVersion)
+        }
+        if let sessionID {
+            request.addValue(sessionID, forHTTPHeaderField: HTTPHeaderName.sessionID)
+        }
+        if let lastEventID {
+            request.addValue(lastEventID, forHTTPHeaderField: HTTPHeaderName.lastEventID)
+        }
+        request = requestModifier(request)
+        try applyAuthorization(to: &request)
+
+        // disconnect() may have run while the authorizer was awaited.
+        guard isConnected else {
+            throw MCPError.internalError("Transport not connected")
+        }
+        return request
+    }
+
     /// Sends a GET for an SSE stream, resuming after `lastEventID` when
     /// given. A 401 or 403 goes to the authorizer, as for a POST, and the
-    /// GET is retried while it handles the challenge. Returns the body, the
-    /// response and the `Mcp-Session-Id` the answered GET carried.
-    private func openEventStream(
-        lastEventID: String?, protocolVersion: String?
-    ) async throws -> (ResponseBody, HTTPURLResponse, sentSessionID: String?) {
-        if let authorizer {
-            try? await authorizer.prepareAuthorization(for: endpoint, session: session)
+    /// GET is retried while it handles the challenge.
+    ///
+    /// It holds `reference`'s transport only while it builds each GET, not
+    /// while it waits for the authorizer or the response headers, and
+    /// returns `nil` when the transport was released.
+    private static func openEventStream(
+        _ reference: WeakReference, lastEventID: String?, protocolVersion: String?
+    ) async throws -> EventStreamReply? {
+        guard let inputs = await reference.transport?.eventStreamInputs else { return nil }
+        if let authorizer = inputs.authorizer {
+            try? await authorizer.prepareAuthorization(for: inputs.endpoint, session: inputs.session)
         }
         var attempts = 0
         var retriedNonce = false
         while true {
-            var request = URLRequest(url: endpoint)
-            request.httpMethod = "GET"
-            request.addValue(ContentType.sse, forHTTPHeaderField: HTTPHeaderName.accept)
-            request.addValue("no-cache", forHTTPHeaderField: HTTPHeaderName.cacheControl)
-            if let protocolVersion {
-                request.addValue(protocolVersion, forHTTPHeaderField: HTTPHeaderName.protocolVersion)
-            }
-            if let sessionID {
-                request.addValue(sessionID, forHTTPHeaderField: HTTPHeaderName.sessionID)
-            }
-            if let lastEventID {
-                request.addValue(lastEventID, forHTTPHeaderField: HTTPHeaderName.lastEventID)
-            }
-            request = requestModifier(request)
-            try applyAuthorization(to: &request)
-
-            // disconnect() may have run while the authorizer was awaited.
-            guard isConnected else {
-                throw MCPError.internalError("Transport not connected")
-            }
-            let (stream, response) = try await session.responseBody(for: request, streaming: streamingSession)
-            noteResponse(response, to: request)
+            guard
+                let request = try await reference.transport?.eventStreamRequest(
+                    lastEventID: lastEventID, protocolVersion: protocolVersion)
+            else { return nil }
+            let (stream, response) = try await inputs.session.responseBody(
+                for: request, streaming: inputs.streamingSession)
             guard let httpResponse = response as? HTTPURLResponse else {
                 stream.cancel()
                 throw MCPError.internalError("Invalid HTTP response")
             }
-            guard let authorizer, httpResponse.statusCode == 401 || httpResponse.statusCode == 403 else {
-                return (stream, httpResponse, request.value(forHTTPHeaderField: HTTPHeaderName.sessionID))
+            let headers = Self.headers(of: httpResponse)
+            inputs.authorizer?.didReceiveResponse(headers: headers, for: request.url ?? inputs.endpoint)
+            guard let authorizer = inputs.authorizer, httpResponse.statusCode == 401 || httpResponse.statusCode == 403
+            else {
+                return EventStreamReply(
+                    stream: stream, statusCode: httpResponse.statusCode, headers: headers,
+                    sessionID: httpResponse.value(forHTTPHeaderField: HTTPHeaderName.sessionID),
+                    sentSessionID: request.value(forHTTPHeaderField: HTTPHeaderName.sessionID))
             }
             stream.cancel()
-            let challenge = HTTPAuthenticationChallengeError(
-                statusCode: httpResponse.statusCode, headers: responseHeaders(from: httpResponse))
+            let failure = MCPError.transportError(
+                HTTPStatusError(statusCode: httpResponse.statusCode, headers: headers))
             let handled: HTTPChallengeResult
             do {
                 handled = try await authorizer.handleChallenge(
                     statusCode: httpResponse.statusCode,
-                    headers: challenge.headers,
-                    endpoint: endpoint,
+                    headers: headers,
+                    endpoint: inputs.endpoint,
                     operationKey: nil,
                     sentAuthorization: request.value(forHTTPHeaderField: HTTPHeaderName.authorization),
-                    session: session
+                    session: inputs.session
                 )
             } catch {
                 throw Self.authorizerError(error)
@@ -1140,14 +1224,14 @@ public actor HTTPClientTransport: Transport {
             // RFC 9449 §9: a DPoP nonce retry is allowed once per GET, as for a POST.
             if handled.isDPoPNonceRetry {
                 if retriedNonce {
-                    throw mapAuthenticationChallengeError(challenge)
+                    throw failure
                 }
                 retriedNonce = true
             } else {
                 attempts += 1
             }
             guard handled.retry, attempts < authorizer.maxAuthorizationAttempts else {
-                throw mapAuthenticationChallengeError(challenge)
+                throw failure
             }
         }
     }
@@ -1185,10 +1269,14 @@ public actor HTTPClientTransport: Transport {
             logger.debug(
                 "Resuming a response stream", metadata: ["lastEventID": "\(resumeFrom)", "attempt": "\(attempts)"])
 
-            let stream: ResponseBody
-            let httpResponse: HTTPURLResponse
+            let reply: EventStreamReply
             do {
-                (stream, httpResponse, _) = try await openEventStream(lastEventID: resumeFrom, protocolVersion: version)
+                // Never `nil`: this call holds the transport.
+                guard
+                    let opened = try await Self.openEventStream(
+                        WeakReference(self), lastEventID: resumeFrom, protocolVersion: version)
+                else { return }
+                reply = opened
             } catch where !Task.isCancelled && !(error is MCPError) && !(error is CancellationError) {
                 // A dropped connection is when resuming matters. Refusals,
                 // authorization failures and a closed transport are MCPErrors
@@ -1196,18 +1284,18 @@ public actor HTTPClientTransport: Transport {
                 logger.debug("Resuming a response stream failed", metadata: ["error": "\(error)"])
                 continue
             }
-            guard httpResponse.statusCode == 200 else {
-                stream.cancel()
+            guard reply.statusCode == 200 else {
+                reply.stream.cancel()
                 logger.warning(
                     "The server refused to resume a response stream",
-                    metadata: ["status": "\(httpResponse.statusCode)"])
+                    metadata: ["status": "\(reply.statusCode)"])
                 break
             }
             var responded = false
             var progressed = false
             do {
                 try await processSSE(
-                    stream, until: id,
+                    reply.stream, until: id,
                     onEventID: { lastEventID = $0.isEmpty ? nil : $0 },
                     onRetry: { retry = Self.clampedRetryInterval($0) },
                     onMessage: {
