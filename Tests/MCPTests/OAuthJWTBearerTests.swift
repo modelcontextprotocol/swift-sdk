@@ -133,13 +133,24 @@ struct OAuthJWTBearerGrantTests {
         #expect(tokenClient.capturedParameters?["assertion"] == "jwt-2")
     }
 
-    @Test("Without an assertion provider the grant fails")
+    @Test("Without an assertion provider the grant fails before the server's metadata is read")
     func missingProvider() async {
-        let authorizer = jwtBearerAuthorizer(.init(grantType: .jwtBearer, authentication: .none(clientID: "")))
-        await #expect(throws: OAuthAuthorizationError.self) {
+        let discovery = MockDiscoveryClient()
+        let tokenClient = MockTokenClient()
+        let authorizer = jwtBearerAuthorizer(
+            .init(
+                grantType: .jwtBearer, authentication: .none(clientID: ""),
+                endpointOverrides: .init(authorizationServerURL: URL(string: "https://auth.example.com")!)),
+            discovery: discovery, tokenClient: tokenClient)
+        await #expect {
             _ = try await authorizer.handleChallenge(
                 statusCode: 401, headers: headers401, endpoint: endpoint, session: .shared)
+        } throws: { error in
+            guard case .assertionProviderMissing = error as? OAuthAuthorizationError else { return false }
+            return true
         }
+        #expect(discovery.fetchAuthorizationServerMetadataCallCount == 0)
+        #expect(tokenClient.requestCallCount == 0)
     }
 
     @Test("An error from the assertion provider fails the attempt without a token request")
@@ -467,8 +478,10 @@ struct OAuthJWTBearerGrantTests {
         @Test("The pinned authorization server must publish metadata with its own issuer")
         func pinnedIssuerMismatch() async throws {
             let (session, key) = makeIsolatedSession()
+            let requests = Recorder<String>()
             await IsolatedMockURLProtocol.setHandler(key: key) { request in
                 let url = request.url!
+                await requests.append(url.host! + url.path)
                 switch (url.host!, url.path) {
                 case ("mcp.example.com", _):
                     return try json(url, 200, ["authorization_servers": ["https://evil.example.com"]])
@@ -476,16 +489,29 @@ struct OAuthJWTBearerGrantTests {
                     return try json(url, 200, [
                         "issuer": "https://evil.example.com", "token_endpoint": "https://evil.example.com/token",
                     ])
+                case ("idp.example.com", "/token"):
+                    return try json(url, 200, [
+                        "access_token": "id-jag", "issued_token_type": "urn:ietf:params:oauth:token-type:id-jag",
+                        "token_type": "N_A",
+                    ])
                 default:
                     return try json(url, 404, [:])
                 }
             }
             let authorizer = OAuthAuthorizer(
                 configuration: configuration(pinned: URL(string: "https://auth.example.com")!))
-            await #expect(throws: OAuthAuthorizationError.self) {
+            do {
                 _ = try await authorizer.handleChallenge(
                     statusCode: 401, headers: headers401, endpoint: endpoint, session: session)
+                Issue.record("The grant should fail")
+            } catch OAuthAuthorizationError.authorizationServerIssuerMismatch(let expected, let actual) {
+                #expect(expected == "https://auth.example.com")
+                #expect(actual == "https://evil.example.com")
             }
+            // No ID-JAG is asked for the issuer the metadata names, and nothing goes to its token endpoint.
+            let sent = await requests.values
+            #expect(!sent.contains("idp.example.com/token"))
+            #expect(!sent.contains { $0.hasPrefix("evil.example.com") })
         }
     }
 
@@ -620,6 +646,26 @@ struct OAuthJWTBearerDestinationTests {
         try await authorizer.prepareAuthorization(for: endpoint, session: .shared)
         #expect(await calls.values.count == 2)
         #expect(tokenClient.requestCallCount == 2)
+    }
+
+    @Test("A token issued again with the same value is renewed again before it expires")
+    func reissuedTokenRenewedAgain() async throws {
+        // MockTokenClient issues `mock-access-token` every time.
+        let tokenClient = MockTokenClient()
+        let storage = InMemoryTokenStorage()
+        let authorizer = jwtBearerAuthorizer(
+            .init(
+                grantType: .jwtBearer, authentication: .none(clientID: ""),
+                endpointOverrides: .init(authorizationServerURL: URL(string: "https://auth.example.com")!),
+                assertionProvider: { _, _ in "jwt" }),
+            tokenClient: tokenClient, storage: storage)
+        #expect(try await authorizer.handleChallenge(statusCode: 401, headers: headers401, endpoint: endpoint, session: .shared))
+        for renewals in 1...2 {
+            storage.save(aged(try #require(storage.load()), expiringIn: 40))
+            try await authorizer.prepareAuthorization(for: endpoint, session: .shared)
+            #expect(tokenClient.requestCallCount == 1 + renewals)
+        }
+        #expect(storage.load()?.value == "mock-access-token")
     }
 
     @Test("A configured token endpoint renews a token whose server metadata has none")
@@ -760,6 +806,52 @@ struct OAuthJWTBearerDestinationTests {
         for _ in 0..<3 {
             #expect(try await authorizer.handleChallenge(statusCode: 401, headers: headers401, endpoint: endpoint, session: session))
         }
+        #expect(await discoveries.values.count == 1)
+    }
+
+    @Test("A cancelled exchange keeps the identity provider's token endpoint")
+    func idpEndpointKeptOnCancellation() async throws {
+        let (session, key) = makeIsolatedSession()
+        let discoveries = Recorder<String>()
+        await IsolatedMockURLProtocol.setHandler(key: key) { request in
+            let url = request.url!
+            switch (url.host!, url.path) {
+            case ("mcp.example.com", _):
+                return try json(url, 200, ["authorization_servers": ["https://auth.example.com"]])
+            case ("auth.example.com", "/.well-known/oauth-authorization-server"):
+                return try json(url, 200, ["issuer": "https://auth.example.com", "token_endpoint": "https://auth.example.com/token"])
+            case ("login.example.com", "/.well-known/oauth-authorization-server"):
+                await discoveries.append(url.path)
+                return try json(url, 200, ["issuer": "https://login.example.com", "token_endpoint": "https://login.example.com/token"])
+            case ("login.example.com", "/token"):
+                return try json(url, 200, [
+                    "access_token": "id-jag", "issued_token_type": "urn:ietf:params:oauth:token-type:id-jag",
+                    "token_type": "N_A",
+                ])
+            case ("auth.example.com", "/token"):
+                return try json(url, 200, ["access_token": "mcp-token", "token_type": "Bearer", "expires_in": 3600])
+            default:
+                return try json(url, 404, [:])
+            }
+        }
+        // The first exchange is cancelled while it authenticates to the identity provider.
+        let signatures = Recorder<Int>()
+        let authorizer = OAuthAuthorizer(
+            configuration: .enterpriseManaged(
+                authentication: .clientSecretBasic(clientID: "c", clientSecret: "s"),
+                authorizationServer: URL(string: "https://auth.example.com")!,
+                identityProvider: .init(
+                    endpoint: .issuer(URL(string: "https://login.example.com")!),
+                    authentication: .privateKeyJWT(clientID: "i") { _, _ in
+                        await signatures.append(1)
+                        if await signatures.values.count == 1 { throw CancellationError() }
+                        return "client-assertion"
+                    }),
+                idToken: { _ in "id-token" }))
+        await #expect(throws: CancellationError.self) {
+            _ = try await authorizer.handleChallenge(statusCode: 401, headers: headers401, endpoint: endpoint, session: session)
+        }
+        #expect(try await authorizer.handleChallenge(statusCode: 401, headers: headers401, endpoint: endpoint, session: session))
         #expect(await discoveries.values.count == 1)
     }
     #endif

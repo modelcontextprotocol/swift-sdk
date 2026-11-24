@@ -242,6 +242,12 @@ public struct OAuthConfiguration: Sendable {
         public let protectedResourceMetadataURL: URL?
 
         /// Optional override for the authorization server issuer URL.
+        ///
+        /// Its metadata is used whatever `issuer` it names, except with the
+        /// ``GrantType/jwtBearer`` grant: the issuer is the audience of the
+        /// assertion, so it must be this URL (RFC 8414 §3.3), or the grant
+        /// fails with
+        /// ``OAuthAuthorizationError/authorizationServerIssuerMismatch(expected:actual:)``.
         public let authorizationServerURL: URL?
 
         /// Optional override for the token endpoint.

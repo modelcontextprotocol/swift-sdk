@@ -638,6 +638,31 @@ struct OAuthAuthorizerStateTests {
         #expect(storage.load()?.value != renewed.value)
     }
 
+    @Test("A cancelled proactive refresh is tried again by the next request", .timeLimit(.minutes(1)))
+    func cancelledRefreshTriedAgain() async throws {
+        let storage = InMemoryTokenStorage()
+        let tokens = RecordingTokenClient()
+        let authorizer = makeAuthorizer(discovery: discovery(listing: serverA), tokens: tokens, storage: storage)
+        #expect(try await challenge(authorizer))
+        storage.save(aged(try #require(storage.load()), expiringIn: 40))
+
+        // The refresh waits until its request is cancelled.
+        tokens.delay = .seconds(60)
+        let cancelled = Task { try await authorizer.prepareAuthorization(for: endpoint, session: .shared) }
+        let deadline = ContinuousClock.now + .seconds(10)
+        while tokens.calls.count < 2 && ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        cancelled.cancel()
+        _ = await cancelled.result
+        #expect(storage.load()?.value == "token-1")
+
+        tokens.delay = .zero
+        try await authorizer.prepareAuthorization(for: endpoint, session: .shared)
+        #expect(tokens.calls.map(\.grantType) == ["client_credentials", "refresh_token", "refresh_token"])
+        #expect(storage.load()?.value == "token-3")
+    }
+
     @Test("In-memory token storage is safe from several tasks")
     func storageIsThreadSafe() async {
         let storage = InMemoryTokenStorage()

@@ -801,12 +801,16 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
             candidates = metadata.authorizationServers
         }
 
+        // The issuer of a jwt-bearer server is checked even when configured:
+        // it is the audience of the assertion (RFC 7523 §3), and the ID-JAG
+        // draft (§9.5) forbids metadata whose issuer differs (RFC 8414 §3.3).
+        let trustedIssuer =
+            configuration.grantType == .jwtBearer ? nil : configuration.endpointOverrides.authorizationServerURL
         let server: URL
         let asMetadata: OAuthAuthorizationServerMetadata
         do {
             (server, asMetadata) = try await discoveryClient.fetchAuthorizationServerMetadata(
-                candidates: candidates, trustedIssuer: configuration.endpointOverrides.authorizationServerURL,
-                session: session)
+                candidates: candidates, trustedIssuer: trustedIssuer, session: session)
         } catch OAuthAuthorizationError.authorizationServerMetadataDiscoveryFailed
             where metadata.isFallback && configuration.endpointOverrides.authorizationServerURL == nil
                 // The jwt-bearer grant postdates 2025-03-26.
@@ -1150,6 +1154,8 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
         }
         let expiresAt = decoded.expiresIn.map { Date().addingTimeInterval(TimeInterval($0)) }
         storedTokenLifetime = decoded.expiresIn.map { (decoded.accessToken, TimeInterval($0)) }
+        // A stored token is new, even with the value of the one tried.
+        proactivelyRenewedToken = nil
         tokenStorage.save(OAuthAccessToken(
             value: decoded.accessToken,
             tokenType: OAuthTokenType.bearer,
@@ -1264,6 +1270,7 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
         requestedScopes: Set<String>?,
         authorizationServer: URL?
     ) {
+        proactivelyRenewedToken = nil
         tokenStorage.save(OAuthAccessToken(
             value: token,
             tokenType: OAuthTokenType.bearer,
@@ -1283,6 +1290,12 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
         requestedScopes: Set<String>?,
         session: URLSession
     ) async throws -> OAuthConfiguration.AccessTokenProviderContext {
+        // A grant that cannot run fails before the authorization server is asked.
+        if configuration.grantType == .jwtBearer, configuration.assertionProvider == nil,
+            configuration.accessTokenProvider == nil
+        {
+            throw OAuthAuthorizationError.assertionProviderMissing
+        }
         let asMetadata = try await resolveAuthorizationServerMetadata(
             metadata: metadata, session: session)
         let resource = try canonicalResource(for: endpoint)

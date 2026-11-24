@@ -65,6 +65,7 @@ public enum OAuthTokenExchange {
         /// The type of ``accessToken``, one of ``TokenType``.
         public let issuedTokenType: String
         /// How the token is used; `N_A` for tokens that are not access tokens.
+        /// Empty when the response has none; the SDK does not check it.
         public let tokenType: String
         /// Lifetime of the issued token, in seconds.
         public let expiresIn: Int?
@@ -245,8 +246,9 @@ extension OAuthConfiguration {
     ///     server, usually `.clientSecretBasic` or `.clientSecretPost`.
     ///   - authorizationServer: The issuer of the MCP authorization server, so that
     ///     the MCP server cannot direct the ID-JAG and the client credentials
-    ///     elsewhere. `nil` uses the server named in the protected resource
-    ///     metadata, and needs `allowsDiscoveredAuthorizationServer`.
+    ///     elsewhere. Its metadata must name it as `issuer`. `nil` uses the
+    ///     server named in the protected resource metadata, and needs
+    ///     `allowsDiscoveredAuthorizationServer`.
     ///   - identityProvider: The identity provider and the client's credentials there.
     ///   - idToken: Returns the user's ID token.
     ///   - retryPolicy: Controls retries for authorization challenges.
@@ -302,8 +304,9 @@ extension OAuthConfiguration {
                         urlValidator: validator)
                     return response.accessToken
                 } catch {
-                    // The metadata may have changed: discover it again next time.
-                    resolved.url = nil
+                    // The metadata may have changed: discover it again next
+                    // time. A cancelled exchange says nothing about it.
+                    if !(error is CancellationError), !Task.isCancelled { resolved.url = nil }
                     throw error
                 }
             },
