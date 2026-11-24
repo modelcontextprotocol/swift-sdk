@@ -138,11 +138,13 @@ struct ServerSentEventParserTests {
         }
         // Exactly at the limit is accepted.
         var exact = ServerSentEventParser()
+        var emitted: [ServerSentEvent] = []
         for byte in line + Array("data:".utf8) + half.dropLast() + [0x0A, 0x0A] {
-            if let event = try exact.consume(byte) {
-                #expect(event.data.utf8.count == ServerSentEventParser.maxEventLength)
-            }
+            if let event = try exact.consume(byte) { emitted.append(event) }
         }
+        #expect(emitted.count == 1)
+        let event = try #require(emitted.first)
+        #expect(event.data.utf8.count == ServerSentEventParser.maxEventLength)
     }
 
     @Test("Events after a long line parse as before")

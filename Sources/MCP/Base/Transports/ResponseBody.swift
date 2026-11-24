@@ -15,15 +15,35 @@ struct ResponseBody: AsyncSequence, Sendable {
     #if canImport(FoundationNetworking)
         let chunks: AsyncThrowingStream<Data, Swift.Error>
         let task: URLSessionDataTask
+        let cancellation: Cancellation
+
+        /// Whether `chunks` ended because its reader's task was cancelled:
+        /// the stream's iterator then returns `nil`, as at the end of the
+        /// body. A body that ended before its reader was cancelled is whole.
+        /// `@unchecked Sendable`: `lock` guards `cancelled`.
+        final class Cancellation: @unchecked Sendable {
+            private let lock = NSLock()
+            private var cancelled = false
+
+            var isCancelled: Bool { lock.withLock { cancelled } }
+
+            func record() { lock.withLock { cancelled = true } }
+        }
 
         struct AsyncIterator: AsyncIteratorProtocol {
             var chunks: AsyncThrowingStream<Data, Swift.Error>.AsyncIterator
+            let cancellation: Cancellation
             var chunk = Data()
             var index = 0
 
             mutating func next() async throws -> UInt8? {
                 while index >= chunk.endIndex {
-                    guard let next = try await chunks.next() else { return nil }
+                    guard let next = try await chunks.next() else {
+                        // A cut body must not pass for a whole one; this
+                        // throws where `URLSession.AsyncBytes` would.
+                        if cancellation.isCancelled { throw CancellationError() }
+                        return nil
+                    }
                     chunk = next
                     index = chunk.startIndex
                 }
@@ -33,7 +53,7 @@ struct ResponseBody: AsyncSequence, Sendable {
         }
 
         func makeAsyncIterator() -> AsyncIterator {
-            AsyncIterator(chunks: chunks.makeAsyncIterator())
+            AsyncIterator(chunks: chunks.makeAsyncIterator(), cancellation: cancellation)
         }
 
         /// Stops reading: cancels the data task.
@@ -183,11 +203,16 @@ extension URLSession {
             let task = streaming.session.dataTask(
                 with: request.addingAdditionalHeaders(of: streaming.session.configuration))
             let (chunks, continuation) = AsyncThrowingStream<Data, Swift.Error>.makeStream()
-            // A body nobody reads any more stops its task.
-            continuation.onTermination = { _ in task.cancel() }
+            let cancellation = ResponseBody.Cancellation()
+            // A body nobody reads any more stops its task. The handler runs
+            // before a cancelled reader's `next()` returns `nil`.
+            continuation.onTermination = { termination in
+                if case .cancelled = termination { cancellation.record() }
+                task.cancel()
+            }
             let response = try await streaming.delegate.start(
                 task, body: continuation, resumed: streaming.lifetime.end)
-            return (ResponseBody(chunks: chunks, task: task), response)
+            return (ResponseBody(chunks: chunks, task: task, cancellation: cancellation), response)
         #else
             // `bytes(for:)` creates its task after a suspension, so the
             // session stays valid until it returns.

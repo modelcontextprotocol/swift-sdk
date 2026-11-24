@@ -927,9 +927,16 @@ public actor HTTPClientTransport: Transport {
             logger.debug("Session ID received", metadata: ["sessionID": "\(newSessionID)"])
         }
 
-        return try await self.processSSE(
-            stream, onEventID: { self.lastEventID = $0.isEmpty ? nil : $0 },
-            onRetry: { self.retryInterval = Self.clampedRetryInterval($0) })
+        do {
+            return try await self.processSSE(
+                stream, onEventID: { self.lastEventID = $0.isEmpty ? nil : $0 },
+                onRetry: { self.retryInterval = Self.clampedRetryInterval($0) })
+        } catch where Self.isOversizedEvent(error) {
+            // A resumption would replay the same event: the next connection
+            // opens a fresh stream instead, and the event is lost.
+            lastEventID = nil
+            throw error
+        }
     }
 
     /// Sends a GET for an SSE stream, resuming after `lastEventID` when
@@ -1004,7 +1011,7 @@ public actor HTTPClientTransport: Transport {
         }
     }
 
-    /// The most GET resumptions of one POST stream in a row without a
+    /// The most GET resumptions of one POST stream in a row without a new
     /// message before its request fails.
     static let maxStreamResumptions = 10
 
@@ -1026,9 +1033,13 @@ public actor HTTPClientTransport: Transport {
         var lastEventID = eventID
         var retry = retry
         var attempts = 0
+        // The event IDs the client has seen: the points it resumed from and
+        // those of the messages the resumed streams delivered.
+        var seenEventIDs: Set<String> = []
         while let resumeFrom = lastEventID, attempts < Self.maxStreamResumptions {
             guard isConnected, !Task.isCancelled else { return }
             attempts += 1
+            seenEventIDs.insert(resumeFrom)
             try await Task.sleep(for: .milliseconds(retry ?? retryInterval))
             logger.debug(
                 "Resuming a response stream", metadata: ["lastEventID": "\(resumeFrom)", "attempt": "\(attempts)"])
@@ -1052,13 +1063,15 @@ public actor HTTPClientTransport: Transport {
                 break
             }
             var responded = false
-            var delivered = false
+            var progressed = false
             do {
                 try await processSSE(
                     stream, until: id,
                     onEventID: { lastEventID = $0.isEmpty ? nil : $0 },
                     onRetry: { retry = Self.clampedRetryInterval($0) },
-                    onMessage: { delivered = true },
+                    onMessage: {
+                        if let current = lastEventID, seenEventIDs.insert(current).inserted { progressed = true }
+                    },
                     onResponse: { if $0 == id { responded = true } })
             } catch {
                 if Task.isCancelled { return }
@@ -1068,9 +1081,11 @@ public actor HTTPClientTransport: Transport {
             }
             if responded { return }
             // A server that polls (SEP-1699) closes streams that delivered
-            // messages: only resumptions in a row without one count. A new
-            // event ID alone is no progress, as each resumption is primed.
-            if delivered { attempts = 0 }
+            // messages: only resumptions in a row without a new one count.
+            // A new event ID alone is no progress, as each resumption is
+            // primed, and neither is a message under an event ID seen
+            // before, which a server that ignores Last-Event-ID replays.
+            if progressed { attempts = 0 }
         }
         // A cancelled read can end the last attempt's stream without an
         // error: a cancelled request or a closed transport is no loss.

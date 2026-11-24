@@ -2506,6 +2506,13 @@ import Testing
     /// Reports two responses for one request, each with half of a JSON-RPC
     /// response that is valid only when the halves are joined.
     private final class TwoResponsesURLProtocol: URLProtocol, @unchecked Sendable {
+        /// Set by `stopLoading()`, as in `IsolatedMockURLProtocol`: the
+        /// client cancels the task at the second response, and corelibs traps
+        /// on a call for a cancelled task.
+        private let stateLock = NSLock()
+        private var stopped = false
+        private var isStopped: Bool { stateLock.withLock { stopped } }
+
         override class func canInit(with request: URLRequest) -> Bool { true }
         override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
         override func startLoading() {
@@ -2515,8 +2522,29 @@ import Testing
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
             client?.urlProtocol(self, didLoad: Data(#"{"jsonrpc":"2.0","#.utf8))
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            guard !isStopped else { return }
             client?.urlProtocol(self, didLoad: Data(#""id":"r1","result":{}}"#.utf8))
+            guard !isStopped else { return }
             client?.urlProtocolDidFinishLoading(self)
+        }
+        override func stopLoading() { stateLock.withLock { stopped = true } }
+    }
+
+    /// Answers a request with the first half of a JSON-RPC response and keeps
+    /// the body open; it never calls its client again.
+    private final class PartialBodyURLProtocol: URLProtocol, @unchecked Sendable {
+        /// Yields once a POST's partial body has been sent.
+        static let (postBodyStarted, postBodyStartedContinuation) = AsyncStream<Void>.makeStream()
+
+        override class func canInit(with request: URLRequest) -> Bool { true }
+        override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+        override func startLoading() {
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "application/json"])!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: Data(#"{"jsonrpc":"2.0","id":"r1","#.utf8))
+            if request.httpMethod == "POST" { Self.postBodyStartedContinuation.yield() }
         }
         override func stopLoading() {}
     }
@@ -2585,6 +2613,47 @@ import Testing
             }
             let result = await outcome(within: .seconds(2)) { try await task.value }
             #expect(result.error != nil)
+        }
+
+        @Test("A response body read from a task cancelled while it arrives throws instead of ending early")
+        func cancelledDuringBody() async throws {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [PartialBodyURLProtocol.self]
+            let session = URLSession(configuration: configuration)
+            let streaming = StreamingSession(configuration: configuration)
+            defer { streaming.invalidate(along: session) }
+            let (responded, respondedContinuation) = AsyncStream<Void>.makeStream()
+            let read = Task { [endpoint] in
+                let (body, _) = try await session.responseBody(for: URLRequest(url: endpoint), streaming: streaming)
+                respondedContinuation.yield()
+                return try await body.collect()
+            }
+            for await _ in responded { break }
+            read.cancel()
+            let result = await outcome(within: .seconds(5)) { try await read.value }
+            #if canImport(FoundationNetworking)
+                #expect(result.error is CancellationError)
+            #else
+                // `URLSession.AsyncBytes` throws its own error.
+                #expect(result.error != nil, "\(result)")
+            #endif
+        }
+
+        @Test("A request cancelled while its JSON response arrives delivers no part of it")
+        func cancelledDuringJSONResponse() async throws {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [PartialBodyURLProtocol.self]
+            let transport = HTTPClientTransport(endpoint: endpoint, configuration: configuration, streaming: false)
+            try await transport.connect()
+            let send = Task { [request] in try await transport.send(request) }
+            for await _ in PartialBodyURLProtocol.postBodyStarted { break }
+            send.cancel()
+            let result = await outcome(within: .seconds(5)) { try await send.value }
+            #expect(result.error != nil)
+            await transport.disconnect()
+            var delivered: [String] = []
+            for try await data in await transport.receive() { delivered.append(String(decoding: data, as: UTF8.self)) }
+            #expect(delivered.isEmpty)
         }
 
         #if canImport(FoundationNetworking)

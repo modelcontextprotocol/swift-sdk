@@ -27,14 +27,18 @@ arrives (`ResponseBody`) and parses `text/event-stream` with its own `ServerSent
 - swift-corelibs-foundation has no `bytes(for:)` and no per-task delegates. The transport keeps
   a second session with the same configuration and a `StreamingSessionDelegate`, which hands
   each data task's response to the caller waiting for it and its chunks to that task's body.
-  A second response for one task fails it rather than join the two bodies.
+  A second response for one task fails it rather than join the two bodies. The body is an
+  `AsyncThrowingStream`, whose iterator returns `nil` when the reading task is cancelled; the
+  body throws `CancellationError` then, where `AsyncBytes` throws an error of its own, so a cut
+  JSON body is not delivered as a message.
 
 A session traps (corelibs) or raises (Apple platforms) when a task is created after it was
 invalidated. `disconnect()` invalidates both sessions through `StreamingSession.Lifetime`: a task
 being created holds the invalidation until it exists, later ones throw, and `connect()` builds new
 sessions. The parser discards an event the body ends before its blank line (a server or proxy
 that cuts the stream), so its `id` never becomes the `Last-Event-ID`; a line, or the data of one
-event, over 16 MiB fails the request without a resumption.
+event, over 16 MiB fails the request without a resumption, and makes the GET stream reconnect
+without `Last-Event-ID`.
 
 Until this change the Linux path used `data(for:)`: it read a response only once the server
 ended it, passed an SSE body to the client as one message (which the client dropped), and never

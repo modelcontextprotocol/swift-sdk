@@ -186,6 +186,30 @@ import Testing
             await transport.disconnect()
         }
 
+        @Test("Resumptions that replay the same message use up the most resumptions", .timeLimit(.minutes(1)))
+        func replayedMessageIsNoProgress() async throws {
+            let (transport, key) = makeTransport()
+            let requests = Requests()
+            await IsolatedMockURLProtocol.setHandler(key: key) { [log] request in
+                await requests.append(request)
+                // The server ignores Last-Event-ID: every stream is the same.
+                return sse("id: e1\nretry: 10\ndata: \n\nid: e2\ndata: \(log)\n\n")
+            }
+            try await transport.connect()
+            try await transport.send(request)
+            var failure: String?
+            for try await data in await transport.receive() {
+                let message = String(decoding: data, as: UTF8.self)
+                if message.contains("could not be resumed") {
+                    failure = message
+                    break
+                }
+            }
+            #expect(failure != nil)
+            #expect(await requests.gets.count == HTTPClientTransport.maxStreamResumptions)
+            await transport.disconnect()
+        }
+
         @Test("A resumption GET that fails to connect is retried")
         func resumesAfterFailedGET() async throws {
             let (transport, key) = makeTransport()

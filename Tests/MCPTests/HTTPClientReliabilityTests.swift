@@ -328,6 +328,27 @@ struct HTTPClientConnectionLimitTests {
             #expect(ids.prefix(3) == [nil, "g1", nil])
         }
 
+        @Test(
+            "A GET stream that fails on a line over the limit reconnects without its Last-Event-ID",
+            .timeLimit(.minutes(1)))
+        func getStreamDropsEventIDAfterOversizedLine() async throws {
+            let (transport, key) = makeTransport(streaming: true)
+            let requests = RecordedRequests()
+            // A resumption after g1 would replay the same line.
+            let body =
+                "id: g1\nretry: 10\ndata: \n\ndata: "
+                + String(repeating: "a", count: ServerSentEventParser.maxLineLength) + "\n\n"
+            await IsolatedMockURLProtocol.setHandler(key: key) { request in
+                await requests.append(request)
+                return sse(body)
+            }
+            try await transport.connect()
+            await requests.waitFor(2, "GET")
+            await transport.disconnect()
+            let ids = await requests.gets.map { $0.value(forHTTPHeaderField: "Last-Event-ID") }
+            #expect(ids.prefix(2) == [nil, nil])
+        }
+
         @Test("A 401 on the GET stream goes to the authorizer and the GET is retried", .timeLimit(.minutes(1)))
         func getStreamHandlesChallenge() async throws {
             let authorizer = ChallengeCountingAuthorizer()
