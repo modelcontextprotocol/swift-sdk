@@ -127,11 +127,13 @@ let recentOnly = Server.Configuration(
 
 1. No `io.modelcontextprotocol/protocolVersion`: handshake era.
 2. A value that is not a non-empty string: -32602.
-3. A handshake revision: handshake era.
-4. Any other version: `clientCapabilities` must be present and valid, and
+3. A version that is not in `protocolVersions`, a handshake revision
+   included: -32022, with `data.supported` (the configured list) and
+   `data.requested`. The version is checked before the other `_meta`
+   members, so a request without `clientCapabilities` also gets -32022.
+4. A handshake revision: handshake era.
+5. Any other version: `clientCapabilities` must be present and valid, and
    `clientInfo` valid when present; otherwise -32602.
-5. A version that is not in `protocolVersions`: -32022, with
-   `data.supported` (the configured list) and `data.requested`.
 6. Otherwise: stateless era, at that version.
 
 Then the server checks the method:

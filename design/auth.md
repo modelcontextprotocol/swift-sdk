@@ -158,8 +158,8 @@ Metadata URLs per candidate:
   `authorizationServerIssuerMismatch`. The old fallback that accepted another issuer is removed.
 - **Authorization response (RFC 9207).** `perform` and `extractCode` take an
   `OAuthAuthorizationCodeFlow.ExpectedIssuer(issuer:isRequired:)`. The issuer is the metadata
-  `issuer` (or the selected AS). An `iss` parameter must equal it exactly
-  (`authorizationResponseIssuerMismatch`). A missing `iss` is rejected only when the metadata has
+  `issuer` (or the selected AS). An `iss` parameter must appear once and equal it
+  exactly (`authorizationResponseIssuerMismatch`); a repeated or valueless `iss` is rejected. A missing `iss` is rejected only when the metadata has
   `authorization_response_iss_parameter_supported: true` (`authorizationResponseMissingIssuer`).
 
 ### Registration: DCR and CIMD
@@ -205,7 +205,8 @@ every other case (the Python SDK's default).
   refreshed token is rejected again. After that re-read, a refreshed token is refreshed again when
   the PRM still lists its AS.
 - If the selected AS is no longer listed, the selection and AS metadata are reset and the stored
-  token is cleared.
+  token is cleared, unless `endpointOverrides.authorizationServerURL` configures the AS: the
+  override decides the AS whatever the PRM lists.
 - `authorizationHeader` clears a stored token whose AS differs from the selected one.
 - A refresh token is used only at the AS that issued it.
 - Registered credentials are bound to `registrationIssuer`. When the AS changes, authentication

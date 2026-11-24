@@ -349,17 +349,21 @@ version strings.
 
 ### Classification
 
-`StatelessRequests.classify(_:served:)` decides the era of every request from its `_meta`:
+`StatelessRequests.classify(_:served:)` decides the era of every request from its `_meta`, checking
+the rows in this order:
 
 | `_meta` | Result |
 |---|---|
 | no `protocolVersion` | handshake |
 | `protocolVersion` not a non-empty string | -32602 |
+| `protocolVersion` not in `Server.Configuration.protocolVersions` | -32022 with `data.supported` and `data.requested` |
 | `protocolVersion` in `Version.handshake` | handshake |
 | other version, `clientCapabilities` missing or invalid | -32602 |
 | other version, `clientInfo` present but invalid | -32602 |
-| other version, not in `Server.Configuration.protocolVersions` | -32022 with `data.supported` and `data.requested` |
-| other version, served | stateless |
+| other version | stateless |
+
+The version is checked before the other `_meta` members: a request for a version the server does
+not serve gets -32022 even when its capabilities are missing.
 
 What changes for a stateless request is listed in [stateless.md](stateless.md): removed methods,
 the capability gate, per-request client fields, log gating, result annotation, the server
@@ -439,9 +443,9 @@ await server.onNotification(RootsListChangedNotification.self) { _ in }
   replaces the first. It returns `Self` for chaining.
 - `onNotification(_:handler:)` appends. Every handler for a method runs, in order. Errors are
   logged.
-- `start(transport:initializeHook:)` registers the built-in handlers for `initialize`, `ping`,
-  `subscriptions/listen` and `server/discover`. They replace handlers registered for those methods
-  before `start`.
+- `start(transport:initializeHook:statelessRequestHook:)` registers the built-in handlers for
+  `initialize`, `ping`, `subscriptions/listen` and `server/discover`. They replace handlers
+  registered for those methods before `start`.
 - For `tools/call`, `prompts/get` and `resources/read`, `withMethodHandler` wraps the handler in
   the MRTR boundary ([mrtr.md](mrtr.md)).
 - The client registers handlers for server-to-client requests the same way:

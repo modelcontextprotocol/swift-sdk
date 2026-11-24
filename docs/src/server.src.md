@@ -218,7 +218,7 @@ At 2026-07-28 there is no session and no standalone GET stream. A client opens a
 1. It computes the honored filter: list changes only for capabilities declared with `listChanged: true`, resource URIs only with `resources.subscribe: true`.
 2. It sends `notifications/subscriptions/acknowledged` with the honored filter as the first message.
 3. It forwards every matching notification passed to `notify`. Each carries `_meta["io.modelcontextprotocol/subscriptionId"]`, the JSON-RPC id of the listen request.
-4. The stream ends when the client cancels or disconnects, or when the server calls `closeSubscriptions()` or `stop()`. `closeSubscriptions()` ends every stream with the listen result.
+4. The stream ends when the client cancels or disconnects, or when the server calls `closeSubscriptions()` or `stop()`. `closeSubscriptions()` ends every stream with the listen result. `stop()` does too, and waits until those results are sent before it closes the transport.
 
 Each stream buffers the newest 256 notifications and drops older ones. The notifications mean "fetch again", so a dropped duplicate loses nothing.
 
@@ -438,13 +438,15 @@ At 2026-07-28 the SDK answers -32601 for the methods of an undeclared capability
 
 ## Lifecycle
 
-`start(transport:initializeHook:)` registers the built-in handlers, connects the transport and starts the receive loop. It returns once the loop is running. `waitUntilCompleted()` returns when the loop ends, for example when the transport closes. `stop()` ends the listen streams, cancels the loop, fails pending server-to-client requests with -32603 "Server disconnected" and disconnects the transport.
+`start(transport:initializeHook:statelessRequestHook:)` registers the built-in handlers, connects the transport and starts the receive loop. It returns once the loop is running. `waitUntilCompleted()` returns when the loop ends, for example when the transport closes. `stop()` ends the listen streams, cancels the loop, fails pending server-to-client requests with -32603 "Server disconnected" and disconnects the transport.
 
 %include Examples/Snippets/Server/Server.swift lifecycle-run
 
 ### The initialize hook
 
 The hook runs when a handshake client sends `initialize`, with its `Client.Info` and `Client.Capabilities`, before the server answers. Throw from it to refuse the client: the error goes back as the `initialize` error. Stateless clients never send `initialize`, so the hook never runs for them; check stateless clients in the handlers, from the handler context, or in the HTTP layer.
+
+The `statelessRequestHook` of `start` runs before each stateless request, with `Server.currentHandlerContext` set, so it can read the HTTP request, and gets `nil` client info when the request carries none. Throw from it to refuse the request: an `MCPError` goes back as is, any other error as -32600.
 
 `initialize` errors:
 
