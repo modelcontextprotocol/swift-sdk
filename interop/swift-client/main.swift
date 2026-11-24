@@ -187,6 +187,7 @@ struct Battery: Sendable {
         }
         await check("discover", only: .stateless) {
             let result = try await client.send(ServerDiscover.request(.init())).value
+            try require(!result.supportedVersions.isEmpty, "no supportedVersions")
             return result.supportedVersions.joined(separator: ",")
         }
         await check("tools-list") {
@@ -282,7 +283,9 @@ struct Battery: Sendable {
                 let result = try await callTool("interop_no_such_tool")
                 try require(result.isError == true, "accepted")
                 return "isError result"
-            } catch let error as MCPError {
+            } catch let error as MCPError where error.code == -32602 {
+                // Only the spec's unknown-tool code: a crashed server or an
+                // HTTP 5xx also reaches the client as an MCPError.
                 return "JSON-RPC error \(error.code)"
             }
         }
@@ -316,7 +319,8 @@ struct Battery: Sendable {
             do {
                 _ = try await client.readResource(uri: "test://interop-missing")
                 throw Failure("accepted")
-            } catch let error as MCPError {
+            } catch let error as MCPError where error.code == -32602 || error.code == -32002 {
+                // Resource not found: -32602 at 2026-07-28, -32002 at 2025-11-25.
                 return "JSON-RPC error \(error.code)"
             }
         }

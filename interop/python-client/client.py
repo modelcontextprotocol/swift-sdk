@@ -216,7 +216,10 @@ class Battery:
         await self.check("ping", ping, only="handshake")
 
         async def discover() -> str:
-            result = await c.session.discover()
+            # discover() returns the result a pinned mode synthesized; send the request.
+            raw = await c.session.send_discover(c.protocol_version)
+            result = types.DiscoverResult.model_validate(raw)
+            require(bool(result.supported_versions), "no supported_versions")
             return ",".join(result.supported_versions or [])
 
         await self.check("discover", discover, only="stateless")
@@ -335,6 +338,10 @@ class Battery:
             try:
                 r = await self.call("interop_no_such_tool")
             except MCPError as e:
+                # Only the spec's unknown-tool code: a crashed server or an
+                # HTTP 5xx also reaches the client as an MCPError.
+                if e.code != -32602:
+                    raise
                 return f"JSON-RPC error {e.code}"
             require(bool(r.is_error), "accepted")
             return "isError result"
@@ -382,6 +389,9 @@ class Battery:
             try:
                 await c.read_resource("test://interop-missing")
             except MCPError as e:
+                # Resource not found: -32602 at 2026-07-28, -32002 at 2025-11-25.
+                if e.code not in (-32602, -32002):
+                    raise
                 return f"JSON-RPC error {e.code}"
             raise CheckFailed("accepted")
 

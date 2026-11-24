@@ -344,6 +344,10 @@ func (b *battery) runEverything() {
 		res, err := b.call(ctx, "interop_no_such_tool", nil)
 		var rpcErr *jsonrpc.Error
 		if errors.As(err, &rpcErr) {
+			// Only the spec's unknown-tool code; -32603 is a server failure.
+			if rpcErr.Code != -32602 {
+				return "", fmt.Errorf("unexpected JSON-RPC error: %v", err)
+			}
 			return fmt.Sprintf("JSON-RPC error %d", rpcErr.Code), nil
 		}
 		if err != nil {
@@ -416,6 +420,10 @@ func (b *battery) runEverything() {
 		_, err := b.cs.ReadResource(ctx, &mcp.ReadResourceParams{URI: "test://interop-missing"})
 		var rpcErr *jsonrpc.Error
 		if errors.As(err, &rpcErr) {
+			// Resource not found: -32602 at 2026-07-28, -32002 at 2025-11-25.
+			if rpcErr.Code != -32602 && rpcErr.Code != -32002 {
+				return "", fmt.Errorf("unexpected JSON-RPC error: %v", err)
+			}
 			return fmt.Sprintf("JSON-RPC error %d", rpcErr.Code), nil
 		}
 		if err != nil {

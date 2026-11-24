@@ -287,12 +287,13 @@ for client in swift go python; do
     run_cell "$client" go-stateless http stateless http://127.0.0.1:3202/
 done
 
-# Connect: era negotiation. Each client picks the era against every server;
-# the Go stateful server supports only 2025-11-25, so a client pinned to
-# 2026-07-28 must fail with an unsupported-version error.
+# Connect: era negotiation. Each client picks the era against every server: the
+# newest one both serve, so 2026-07-28 against the servers that serve both. The
+# Go stateful server supports only 2025-11-25, so a client pinned to 2026-07-28
+# must fail with an unsupported-version error.
 PROFILE=connect
 for client in swift go python; do
-    PROFILE_ARGS=(--profile connect)
+    PROFILE_ARGS=(--profile connect --expect-era stateless)
     run_cell "$client" swift http auto http://127.0.0.1:3101/mcp
     run_cell "$client" python http auto http://127.0.0.1:3301/mcp
     run_cell "$client" go-stateless http auto http://127.0.0.1:3202/

@@ -84,7 +84,7 @@ selects the battery; the three clients take the same flags (Go accepts
 | Check | Era | Passes when |
 |---|---|---|
 | `connect` | both | the client connects at the pinned era |
-| `ping` / `discover` | handshake / stateless | `ping`, or `server/discover`, succeeds |
+| `ping` / `discover` | handshake / stateless | `ping` succeeds, or a `server/discover` request returns a non-empty `supportedVersions` |
 | `tools-list` | both | the ten core tools are listed |
 | `tool-simple-text`, `tool-image`, `tool-audio`, `tool-embedded-resource`, `tool-multiple-content` | both | the content blocks have the expected types |
 | `tool-error` | both | `test_error_handling` returns `isError: true` |
@@ -92,7 +92,7 @@ selects the battery; the three clients take the same flags (Go accepts
 | `tool-logging`, `tool-progress` | both | `notifications/message`, `notifications/progress` arrive during the call |
 | `tool-sampling`, `tool-elicitation` | handshake | the server's request reaches the client's handler, and the answer comes back in the result |
 | `mrtr-elicitation`, `mrtr-sampling`, `mrtr-list-roots`, `mrtr-multiple-inputs`, `mrtr-multi-round` | stateless | the client answers the `input_required` rounds (SEP-2322) and the tool completes |
-| `unknown-tool`, `unknown-resource` | both | the server rejects them (an `isError` result or a JSON-RPC error) |
+| `unknown-tool`, `unknown-resource` | both | the server rejects them: an `isError` result or `-32602` for the tool, `-32602` or `-32002` (the 2025-11-25 code) for the resource; any other error fails |
 | `resources-list`, `resource-static-text`, `resource-static-binary`, `resource-templates-list`, `resource-template-read` | both | the static and template resources read back |
 | `prompts-list`, `prompt-simple`, `prompt-arguments`, `prompt-embedded-resource`, `prompt-image` | both | the prompts return the expected messages |
 
@@ -118,7 +118,9 @@ The Go everything-server is the only one that updates `test://watched-resource`
 ### `connect`
 
 Each client negotiates (`--era auto`) against every server, and must pick
-2025-11-25 against the Go stateful server, which has no 2026-07-28. Pinned to
+2026-07-28 against the servers that serve both eras (`--expect-era
+stateless`) and 2025-11-25 against the Go stateful server, which has no
+2026-07-28 (`--expect-era handshake`). Pinned to
 2026-07-28 against that server (`--expect-era unsupported`), the client must
 not exchange 2026-07-28 messages with it. Three outcomes pass: an
 unsupported-version error at connect (Swift: `-32022`), a fallback to the
@@ -207,7 +209,7 @@ example clients.
 - **Python client, pinned mode:** `mode="2026-07-28"` adopts a synthesized
   `DiscoverResult` with empty capabilities, and `session.discover()` returns
   it, so `server_capabilities` is empty. The battery calls `send_discover` to
-  learn the server's capabilities.
+  learn the server's capabilities, and in the `discover` check.
 - **Python server, 2025-11-25:** declares no `listChanged` for tools and
   prompts, and sends no `list_changed`; at 2026-07-28 it declares and sends
   them. The battery skips those checks.
