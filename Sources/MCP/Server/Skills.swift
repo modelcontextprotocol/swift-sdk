@@ -160,7 +160,8 @@ public struct SkillPackage: Sendable {
     ///
     /// Reads every regular file under the directory. Names that start with
     /// `.` (`.git`, `.DS_Store`) are skipped, and so is a symbolic link that
-    /// leads out of the directory. With `enforcesLimits`, the file count and
+    /// leads out of the directory, or to a file under such a name inside it
+    /// (`config -> .git/config`). With `enforcesLimits`, the file count and
     /// sizes are checked before any file is read.
     ///
     /// - Throws: ``ValidationError``, or the error reading a file.
@@ -171,11 +172,21 @@ public struct SkillPackage: Sendable {
     }
 
     /// The file at `uri`, with its MIME type.
+    ///
+    /// Each segment below the root is percent-decoded on its own; one that
+    /// is empty or decodes to text with a `/` names no file, as the manifest
+    /// encodes each component and the client refuses such a URI.
     func file(at uri: String) -> (data: Data, mimeType: String)? {
         let prefix = skill.rootURI.map { $0 + "/" } ?? ""
         guard uri.hasPrefix(prefix) else { return nil }
-        let encoded = uri.dropFirst(prefix.count)
-        guard let relative = encoded.removingPercentEncoding, let data = files[relative] else { return nil }
+        var components: [String] = []
+        for segment in uri.dropFirst(prefix.count).split(separator: "/", omittingEmptySubsequences: false) {
+            guard !segment.isEmpty, let decoded = segment.removingPercentEncoding, !decoded.contains("/")
+            else { return nil }
+            components.append(decoded)
+        }
+        let relative = components.joined(separator: "/")
+        guard let data = files[relative] else { return nil }
         return (data, Self.mimeType(of: relative))
     }
 
@@ -253,6 +264,12 @@ public struct SkillPackage: Sendable {
         }
     }
 
+    /// Whether a path below the skill directory has a component that starts
+    /// with `.`.
+    private static func isHidden(_ relative: Substring) -> Bool {
+        relative.split(separator: "/").contains { $0.hasPrefix(".") }
+    }
+
     private static func readFiles(in directory: URL, path: String, enforcesLimits: Bool) throws -> [String: Data] {
         let root = directory.resolvingSymlinksInPath()
         let rootPath = root.path.hasSuffix("/") ? root.path : root.path + "/"
@@ -260,11 +277,15 @@ public struct SkillPackage: Sendable {
         var found: [(relative: String, url: URL)] = []
         var total = 0
         for relative in try manager.subpathsOfDirectory(atPath: root.path) {
-            guard !relative.split(separator: "/").contains(where: { $0.hasPrefix(".") }) else { continue }
-            // A link is followed only when it stays in the directory.
+            guard !isHidden(relative[...]) else { continue }
+            // A link is followed only when it stays in the directory and its
+            // target is not hidden either: `env -> .env` is skipped as `.env`
+            // is.
             let resolved = root.appendingPathComponent(relative).resolvingSymlinksInPath()
             let values = try? resolved.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
-            guard resolved.path.hasPrefix(rootPath), values?.isRegularFile == true else { continue }
+            guard resolved.path.hasPrefix(rootPath), !isHidden(resolved.path.dropFirst(rootPath.count)),
+                values?.isRegularFile == true
+            else { continue }
             found.append((relative, resolved))
             let (sum, overflow) = total.addingReportingOverflow(values?.fileSize ?? 0)
             total = overflow ? .max : sum

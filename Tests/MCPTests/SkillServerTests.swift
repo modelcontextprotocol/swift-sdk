@@ -140,6 +140,50 @@ struct SkillPackageTests {
         #expect(package.files.keys.sorted() == ["SKILL.md", "forms.md", "references/FORMS.md"])
     }
 
+    @Test("A directory: links to dotfiles inside it are skipped as the dotfiles are")
+    func hiddenLinks() throws {
+        // A hidden directory above the skill hides nothing in it.
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(".skills-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let skill = root.appendingPathComponent("pdf")
+        let manager = FileManager.default
+        try manager.createDirectory(at: skill.appendingPathComponent(".git"), withIntermediateDirectories: true)
+        try manager.createDirectory(at: skill.appendingPathComponent("docs"), withIntermediateDirectories: true)
+        try manifest("pdf").write(to: skill.appendingPathComponent("SKILL.md"))
+        try data("TOKEN=x").write(to: skill.appendingPathComponent(".env"))
+        try data("[core]").write(to: skill.appendingPathComponent(".git/config"))
+        try data("guide").write(to: skill.appendingPathComponent("docs/guide.md"))
+        for (name, target) in [
+            ("env", ".env"), ("cfg", ".git/config"), ("git", ".git"), ("docs/env", "../.env"),
+            ("guide.md", "docs/guide.md"),
+        ] {
+            try manager.createSymbolicLink(atPath: skill.appendingPathComponent(name).path, withDestinationPath: target)
+        }
+
+        let package = try SkillPackage(path: "pdf", directory: skill)
+        #expect(package.files.keys.sorted() == ["SKILL.md", "docs/guide.md", "guide.md"])
+        guard case .manifest(let files) = package.skill.resources else { Issue.record("no manifest"); return }
+        #expect(files.map(\.uri) == ["skill://pdf/SKILL.md", "skill://pdf/docs/guide.md", "skill://pdf/guide.md"])
+        for uri in ["skill://pdf/env", "skill://pdf/cfg", "skill://pdf/git/config", "skill://pdf/docs/env"] {
+            #expect(package.file(at: uri)?.data == nil, "\(uri)")
+        }
+    }
+
+    @Test("A file is found by its URI segment by segment; an encoded / names no file")
+    func fileAtURI() throws {
+        let skill = try package("pdf", ["references/FORMS.md": data("forms"), "a b/c%.md": data("c")])
+        #expect(skill.file(at: "skill://pdf/references/FORMS.md")?.data == data("forms"))
+        #expect(skill.file(at: "skill://pdf/%72eferences/FORMS.md")?.data == data("forms"))
+        #expect(skill.file(at: "skill://pdf/a%20b/c%25.md")?.data == data("c"))
+        for uri in [
+            "skill://pdf/references%2FFORMS.md", "skill://pdf/references%2fFORMS.md", "skill://pdf/references//FORMS.md",
+            "skill://pdf//references/FORMS.md", "skill://pdf/references/FORMS.md/", "skill://pdf/a%20b%2Fc%25.md",
+            "skill://pdf/references/%E0.md",
+        ] {
+            #expect(skill.file(at: uri)?.data == nil, "\(uri)")
+        }
+    }
+
     @Test("Contents: UTF-8 text as text, other bytes and binary types as blobs")
     func contents() {
         let text = SkillPackage.contents(data("é"), uri: "u", mimeType: "text/markdown")
@@ -325,6 +369,8 @@ struct SkillServerTests {
         let doc = try await result(wire, ReadResource.name, ["uri": "app://doc"])
         expectWire(doc, matches: ["contents": [["text": "doc"]]])
         #expect(try await errorCode(wire, ReadResource.name, ["uri": "skill://pdf/nope.md"]) == -32602)
+        // The manifest encodes each component: an encoded / names no file.
+        #expect(try await errorCode(wire, ReadResource.name, ["uri": "skill://pdf/references%2FFORMS.md"]) == -32602)
     }
 
     @Test("Without an application handler, unknown resources are -32602")

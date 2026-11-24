@@ -77,19 +77,26 @@ struct SkillFrontmatterTests {
         let fields = (0..<1500).map { "k\($0): [a, b, c]" }.joined(separator: "\n")
         let document = "---\n" + fields + "\n---\n"
         #expect(try await SkillFrontmatter.parseInBackground(document: document).count == 1500)
-        let parsing = Parsing()
-        let task = Task { try await parsing.parse(document) }
-        while true {
-            let state = await parsing.state()
-            guard state.started else {
-                await Task.yield()
-                continue
+        // A parse that held the actor would finish before any read of its
+        // state; one that frees it is seen unfinished. On a loaded runner a
+        // parse can finish before the next hop, so several are tried.
+        var seenUnfinished = false
+        for _ in 0..<20 where !seenUnfinished {
+            let parsing = Parsing()
+            let task = Task { try await parsing.parse(document) }
+            while true {
+                let state = await parsing.state()
+                guard state.started else {
+                    await Task.yield()
+                    continue
+                }
+                seenUnfinished = !state.finished
+                break
             }
-            #expect(!state.finished)
-            break
+            try await task.value
+            #expect(await parsing.state().finished)
         }
-        try await task.value
-        #expect(await parsing.state().finished)
+        #expect(seenUnfinished)
     }
 
     @Test("A document: missing frontmatter, a non-mapping, the body ignored")
