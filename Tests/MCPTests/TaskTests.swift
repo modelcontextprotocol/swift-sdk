@@ -907,9 +907,10 @@ private func connectTaskClient(
     manager: TaskManager = TaskManager(configuration: .init(pollInterval: .milliseconds(10))),
     tasks: Client.Configuration.Tasks? = .init(minimumPollInterval: .milliseconds(5)),
     cancelled: Flag = Flag(),
+    ran: Counter = Counter(),
     elicit: (@Sendable (String) async throws -> CreateElicitation.Result)? = nil
 ) async throws -> (Client, Server) {
-    let server = await makeTaskServer(manager: manager, cancelled: cancelled)
+    let server = await makeTaskServer(manager: manager, cancelled: cancelled, ran: ran)
     let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
     try await server.start(transport: serverTransport)
     let client = Client(
@@ -1013,13 +1014,19 @@ struct ClientTaskTests {
     @Test("Cancelling the caller cancels the task on the server")
     func callerCancellation() async throws {
         let cancelled = Flag()
-        let (client, server) = try await connectTaskClient(cancelled: cancelled)
+        let ran = Counter()
+        let (client, server) = try await connectTaskClient(cancelled: cancelled, ran: ran)
         defer { Task { await client.disconnect(); await server.stop() } }
         let call = Task { try await client.callTool(name: "slow", arguments: ["seconds": 30]) }
-        try await Task.sleep(for: .milliseconds(100))
+        // The task runs on the server before the caller gives up.
+        var deadline = ContinuousClock.now + .seconds(10)
+        while await ran.value == 0, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        try #require(await ran.value == 1)
         call.cancel()
         _ = await call.result
-        let deadline = ContinuousClock.now + .seconds(10)
+        deadline = ContinuousClock.now + .seconds(10)
         while await !cancelled.isSet, ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(5))
         }
@@ -1762,108 +1769,90 @@ struct TaskNotificationTests {
 
 @Suite("Late task answers")
 struct LateTaskAnswerTests {
-    @Test("A tools/call cancelled before its answer arrives: a task in the late answer is cancelled")
-    func clientCancelsOrphan() async throws {
+    @Test(
+        "A tools/call cancelled before its answer arrives: a task in the late answer is cancelled",
+        arguments: LatePeer.revisions)
+    func clientCancelsOrphan(revision: String) async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
         try await serverTransport.connect()
+        let answers = LatePeer(revision: revision)
         let seen = Answers()
-        // A hand-driven peer: answers discovery, holds the tools/call until the
-        // client cancels it, then answers it with a task.
+        // A hand-driven peer: holds the tools/call until the client cancels
+        // it, then answers it with a task.
         let peer = Task {
             var call: Value?
             for try await data in await serverTransport.receive() {
                 let message = try JSONDecoder().decode(Value.self, from: data)
                 let object = message.objectValue ?? [:]
                 let method = object["method"]?.stringValue ?? ""
+                let params = object["params"]?.objectValue ?? [:]
                 await seen.record(method)
+                var reply: Value?
                 switch method {
-                case ServerDiscover.name:
-                    let reply: Value = [
-                        "jsonrpc": "2.0", "id": object["id"] ?? .null,
-                        "result": [
-                            "resultType": "complete", "supportedVersions": ["2026-07-28"],
-                            "capabilities": ["tools": [:], "extensions": [ExtensionID.tasks: [:]]],
-                            "_meta": [MetaKey.serverInfo: ["name": "peer", "version": "1"]],
-                        ],
-                    ]
-                    try await serverTransport.send(JSONEncoder().encode(reply))
                 case CallTool.name:
                     call = message
+                    if params["task"] != nil { await seen.record("augmented") }
                 case CancelledNotification.name:
-                    let reply: Value = [
-                        "jsonrpc": "2.0", "id": call?.objectValue?["id"] ?? .null,
-                        "result": [
-                            "resultType": "task", "taskId": "orphan", "status": "working",
-                            "createdAt": "2026-01-01T00:00:00Z", "lastUpdatedAt": "2026-01-01T00:00:00Z", "ttlMs": 60000,
-                        ],
+                    reply = [
+                        "jsonrpc": "2.0", "id": call?.objectValue?["id"] ?? .null, "result": answers.created("orphan"),
                     ]
-                    try await serverTransport.send(JSONEncoder().encode(reply))
-                case CancelTask.name:
-                    let reply: Value = ["jsonrpc": "2.0", "id": object["id"] ?? .null, "result": ["resultType": "complete"]]
-                    try await serverTransport.send(JSONEncoder().encode(reply))
                 default:
-                    break
+                    if method == CancelTask.name { await seen.record("cancel \(params["taskId"]?.stringValue ?? "?")") }
+                    if let result = answers.result(method, params: params) {
+                        reply = ["jsonrpc": "2.0", "id": object["id"] ?? .null, "result": result]
+                    }
                 }
+                if let reply { try await serverTransport.send(JSONEncoder().encode(reply)) }
             }
         }
         defer { peer.cancel() }
-        let client = Client(
-            name: "c", version: "1", configuration: .init(protocolMode: .stateless(Version.v2026_07_28), tasks: .init()))
+        let client = Client(name: "c", version: "1", configuration: answers.configuration)
         try await client.connect(transport: clientTransport)
         defer { Task { await client.disconnect() } }
+        _ = try await client.listTools()
 
         let call = Task { try await client.callTool(name: "anything") }
-        let deadline = ContinuousClock.now + .seconds(2)
+        var deadline = ContinuousClock.now + .seconds(10)
         while await !seen.messages.contains(CallTool.name), ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(5))
         }
         call.cancel()
         _ = await call.result
-        while await !seen.messages.contains(CancelTask.name), ContinuousClock.now < deadline {
+        deadline = ContinuousClock.now + .seconds(10)
+        while await !seen.messages.contains("cancel orphan"), ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(5))
         }
-        #expect(await seen.messages.contains(CancelTask.name))
+        #expect(await seen.messages.contains("cancel orphan"))
+        #expect(await seen.messages.contains("augmented") == answers.nests)
     }
 
-    @Test("A tools/call cancelled while its task answer is on the way: the task is cancelled")
-    func cancelRacesAnswer() async throws {
+    @Test(
+        "A tools/call cancelled while its task answer is on the way: the task is cancelled",
+        .timeLimit(.minutes(1)), arguments: LatePeer.revisions)
+    func cancelRacesAnswer(revision: String) async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
         try await serverTransport.connect()
+        let answers = LatePeer(revision: revision)
         let race = CallRace()
         // A hand-driven peer: answers each tools/call with a new task and, at
         // once, cancels the caller, so the answer and the cancellation race.
-        @Sendable func task(_ id: Value, resultType: String) -> Value {
-            [
-                "resultType": .string(resultType), "taskId": id, "status": "working",
-                "createdAt": "2026-01-01T00:00:00Z", "lastUpdatedAt": "2026-01-01T00:00:00Z",
-                "ttlMs": 60000, "pollIntervalMs": 1000,
-            ]
-        }
         let peer = Task {
             var count = 0
             for try await data in await serverTransport.receive() {
                 let object = try JSONDecoder().decode(Value.self, from: data).objectValue ?? [:]
                 let method = object["method"]?.stringValue
-                let taskID = object["params"]?.objectValue?["taskId"] ?? .null
+                let params = object["params"]?.objectValue ?? [:]
                 var result: Value?
                 switch method {
-                case ServerDiscover.name:
-                    result = [
-                        "resultType": "complete", "supportedVersions": ["2026-07-28"],
-                        "capabilities": ["tools": [:], "extensions": [ExtensionID.tasks: [:]]],
-                        "_meta": [MetaKey.serverInfo: ["name": "peer", "version": "1"]],
-                    ]
                 case CallTool.name:
                     count += 1
-                    await race.created("t\(count)")
-                    result = task(.string("t\(count)"), resultType: "task")
-                case GetTask.name:
-                    result = task(taskID, resultType: "complete")
+                    await race.created("t\(count)", augmented: params["task"] != nil)
+                    result = answers.created(.string("t\(count)"))
                 case CancelTask.name:
-                    await race.cancelled(taskID.stringValue ?? "?")
-                    result = ["resultType": "complete"]
+                    await race.cancelled(params["taskId"]?.stringValue ?? "?")
+                    result = answers.result(method, params: params)
                 default:
-                    break
+                    result = answers.result(method, params: params)
                 }
                 if let result {
                     let reply: Value = ["jsonrpc": "2.0", "id": object["id"] ?? .null, "result": result]
@@ -1873,11 +1862,10 @@ struct LateTaskAnswerTests {
             }
         }
         defer { peer.cancel() }
-        let client = Client(
-            name: "c", version: "1",
-            configuration: .init(protocolMode: .stateless(Version.v2026_07_28), tasks: .init()))
+        let client = Client(name: "c", version: "1", configuration: answers.configuration)
         try await client.connect(transport: clientTransport)
         defer { Task { await client.disconnect() } }
+        _ = try await client.listTools()
 
         for _ in 0..<CallRace.calls {
             let call = Task { try await client.callTool(name: "anything") }
@@ -1888,8 +1876,76 @@ struct LateTaskAnswerTests {
         while await !race.isSettled, ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(5))
         }
+        // Every call reached the peer and created a task, which was cancelled.
+        #expect(await race.isSettled)
         let orphans = await race.orphans
         #expect(orphans.isEmpty, "tasks never cancelled: \(orphans)")
+        #expect(await race.augmentedCalls == (answers.nests ? CallRace.calls : 0))
+    }
+}
+
+/// The answers of a hand-driven peer that serves tasks and one tool,
+/// `anything`, that runs only as a task. At 2025-11-25 the client connects
+/// with `initialize`, asks for the task in `tools/call`, and the created task
+/// is nested in `task`; at 2026-07-28 it discovers the server and the result
+/// is the task.
+private struct LatePeer {
+    static let revisions = [Version.v2025_11_25, Version.v2026_07_28]
+    let revision: String
+
+    /// Whether a created task is nested in `task` (2025-11-25).
+    var nests: Bool { Version.profile(for: revision).usesTaskAugmentation }
+
+    var configuration: Client.Configuration {
+        .init(protocolMode: nests ? .handshake : .stateless(revision), tasks: .init())
+    }
+
+    /// The answer to a `tools/call` that creates task `id`.
+    func created(_ id: Value) -> Value {
+        nests ? ["task": task(id)] : task(id, ["resultType": "task"])
+    }
+
+    /// The result of another request, or `nil` for a message it leaves unanswered.
+    func result(_ method: String?, params: [String: Value]) -> Value? {
+        let taskID = params["taskId"] ?? .null
+        let complete: [String: Value] = nests ? [:] : ["resultType": "complete"]
+        switch method {
+        case Initialize.name:
+            return [
+                "protocolVersion": .string(revision),
+                "capabilities": ["tools": [:], "tasks": ["cancel": [:], "requests": ["tools": ["call": [:]]]]],
+                "serverInfo": ["name": "peer", "version": "1"],
+            ]
+        case ServerDiscover.name:
+            return [
+                "resultType": "complete", "supportedVersions": .array([.string(revision)]),
+                "capabilities": ["tools": [:], "extensions": [ExtensionID.tasks: [:]]],
+                "_meta": [MetaKey.serverInfo: ["name": "peer", "version": "1"]],
+            ]
+        case ListTools.name:
+            let tool: Value = [
+                "name": "anything", "inputSchema": ["type": "object"], "execution": ["taskSupport": "required"],
+            ]
+            return .object(complete.merging(["tools": [tool]]) { $1 })
+        case GetTask.name:
+            return task(taskID, complete)
+        case CancelTask.name:
+            // 2025-11-25 answers with the task, 2026-07-28 with an empty result.
+            return nests ? task(taskID, ["status": "cancelled"]) : .object(complete)
+        default:
+            return nil
+        }
+    }
+
+    /// A working task, in the field names of the revision, with `extra` fields.
+    private func task(_ id: Value, _ extra: [String: Value] = [:]) -> Value {
+        var task: [String: Value] = [
+            "taskId": id, "status": "working",
+            "createdAt": "2026-01-01T00:00:00Z", "lastUpdatedAt": "2026-01-01T00:00:00Z",
+        ]
+        task[nests ? "ttl" : "ttlMs"] = 60000
+        task[nests ? "pollInterval" : "pollIntervalMs"] = 1000
+        return .object(task.merging(extra) { $1 })
     }
 }
 
@@ -1920,8 +1976,13 @@ private actor CallRace {
             cancelPending = true
         }
     }
-    func created(_ id: String) { createdTasks.insert(id) }
+    func created(_ id: String, augmented: Bool) {
+        createdTasks.insert(id)
+        if augmented { augmentedCalls += 1 }
+    }
     func cancelled(_ id: String) { cancelledTasks.insert(id) }
+    /// The calls that asked for a task (`task` in `tools/call`, 2025-11-25).
+    private(set) var augmentedCalls = 0
     var isSettled: Bool { createdTasks.count == Self.calls && cancelledTasks.isSuperset(of: createdTasks) }
     var orphans: [String] { createdTasks.subtracting(cancelledTasks).sorted() }
 }

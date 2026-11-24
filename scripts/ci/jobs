@@ -9,7 +9,8 @@
 #
 # `scripts/ci-linux.sh all` runs every line; .github/workflows/ci.yml runs the
 # same scripts with the same arguments. A job a host cannot run passes there
-# and says so: fuzz needs Linux, the apple-* jobs need Xcode.
+# and says so: fuzz needs Linux, the apple-* jobs need Xcode with the
+# platform's SDK and a simulator runtime (with CI set, a missing one fails).
 #
 # The apple-* jobs build every target for the platform's device SDK and run
 # the tests on its simulator (scripts/ci/apple-platform.sh). Conformance and

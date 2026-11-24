@@ -60,6 +60,10 @@ Behavior that can break working code ([docs/migration.md](docs/migration.md#beha
 - Tasks for `tools/call` at 2025-11-25 (SEP-1686) and the 2026-07-28 tasks extension
   (SEP-2663): `Server.withTasks(_:)`, `runAsTask`, `TaskManager` and `TaskStore` on the server;
   `Client.Configuration.tasks`, `callTool` that drives a task, and `TaskHandle` on the client.
+  A `tools/call` cancelled after the server created its task, also while the answer is on its
+  way, sends `tasks/cancel` for that task. Over `HTTPClientTransport` at 2026-07-28 the
+  cancellation closes the response stream, and an answer the client has not read by then is
+  lost: that task keeps running.
 - The skills extension (SEP-2640): `Server.withSkills(_:listInResources:)`, `SkillCatalog`,
   `SkillPackage` and `InMemorySkillCatalog` on the server; `listSkills`, `getSkill`,
   `readResourceDirectory` and `loadSkill`, which verifies size, digest and frontmatter, on the
@@ -120,11 +124,10 @@ Behavior that can break working code ([docs/migration.md](docs/migration.md#beha
   before, it was never released and, with `streaming: true`, kept reconnecting.
 - A `connect(transport:)` that throws disconnects the transport and stops the receive loop;
   before, both kept running and kept the client and the transport alive.
-- The package builds for iOS, tvOS, watchOS and visionOS: the interop client and the
-  `HelloClient` example no longer use `Process` there. CI builds every target for the iOS device
-  SDK and runs the tests on an iOS simulator.
-- A `tools/call` cancelled while the server's answer creating a task was already on its way gets
-  `tasks/cancel` for that task; before, the task could keep running.
+- Every target builds for iOS: the interop client and the `HelloClient` example no longer use
+  `Process` on iOS, tvOS, watchOS or visionOS. CI builds every target for the iOS device SDK and
+  runs the tests on an iOS simulator; `scripts/ci/apple-platform.sh` also takes tvOS, watchOS,
+  visionOS and Mac Catalyst, which CI does not check.
 - From `main` after 0.12.1: `Data.parseDataURL(_:)` reads `;base64` from the header only and
   decodes any percent-escaped byte (#309, #310); `client_secret_basic` percent-encodes the client
   credentials (RFC 6749 §2.3.1, #300); PKCE verifier characters are uniformly distributed (#303);

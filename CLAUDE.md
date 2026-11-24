@@ -307,7 +307,8 @@ flags and checks; keep them in step. Findings: `interop/README.md`.
 
 One job list, two runners. `scripts/ci/jobs` lists every job as
 `<id> <gate|advisory> <script> [args]`; `scripts/ci/<script>.sh` is the job (`build-test`,
-`docs`, `conformance` (flags of run-conformance.sh), `interop`, `apple-platform`). `scripts/ci/run-jobs.sh
+`docs`, `api-breakage`, `fuzz`, `conformance-scripts`, `conformance` (flags of
+run-conformance.sh), `interop`, `apple-platform`). `scripts/ci/run-jobs.sh
 [--gate|--advisory] [--strict] [--timeout m] [id-regex...]` runs a selection and prints a
 summary. Add or change a job there, not in a runner.
 
@@ -340,7 +341,9 @@ in each. Conformance and interop do not run there: the harnesses start fixtures 
 processes. `Process` does not exist on iOS, tvOS, watchOS or visionOS (Mac Catalyst is
 `os(iOS)`): code that starts one sits behind
 `#if !(os(iOS) || os(tvOS) || os(watchOS) || os(visionOS))` and the executables only compile
-there. The job passes and says so on Linux, as `fuzz` does on macOS.
+there. The job passes and says so on Linux, as `fuzz` does on macOS, and on a Mac whose Xcode
+lacks the platform's SDK or simulator runtime unless `CI` is set (GitHub Actions sets it), where
+it fails.
 
 ## Conformance fixtures
 

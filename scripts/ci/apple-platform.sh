@@ -17,8 +17,10 @@
 # executables only compile (Process does not exist there; --stdio fails at
 # run time).
 #
-# macOS only (xcodebuild). Elsewhere the job passes and says so. The result
-# bundle is .build/apple/<platform>/Tests.xcresult.
+# macOS only (xcodebuild). Elsewhere the job passes and says so, as it does on
+# a Mac whose Xcode lacks the platform's SDK or simulator runtime, unless CI is
+# set (GitHub Actions sets it): there a missing SDK or runtime fails the job.
+# The result bundle is .build/apple/<platform>/Tests.xcresult.
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 
@@ -29,6 +31,16 @@ if [[ "$(uname -s)" != Darwin ]]; then
     echo "apple-platform: needs Xcode; skipped on $(uname -s)"
     exit 0
 fi
+
+# Something this Mac lacks: fails in CI, skips (and passes) elsewhere.
+unavailable() {
+    if [[ -n "${CI:-}" ]]; then
+        echo "apple-platform: $*" >&2
+        exit 1
+    fi
+    echo "apple-platform: $*; skipped (CI is not set)"
+    exit 0
+}
 
 # The device SDK, to fail early with a hint when this Xcode lacks it.
 case "$PLATFORM" in
@@ -53,9 +65,8 @@ else
 fi
 
 if ! xcrun --sdk "$SDK" --show-sdk-path >/dev/null 2>&1; then
-    echo "apple-platform: this Xcode has no $PLATFORM SDK ($SDK);" \
-        "install it with xcodebuild -downloadPlatform $PLATFORM" >&2
-    exit 1
+    unavailable "this Xcode has no $PLATFORM SDK ($SDK);" \
+        "install it with xcodebuild -downloadPlatform $PLATFORM"
 fi
 
 SCHEME=mcp-swift-sdk-Package
@@ -79,9 +90,8 @@ if [[ -z "$DESTINATION_ID" ]]; then
         { if [[ -n "$VARIANT" ]]; then grep -F "variant:$VARIANT,"; else grep -v 'variant:'; fi } |
         sed -n 's/.* id:\([^,]*\),.*/\1/p' | head -1 || true)"
     if [[ -z "$DESTINATION_ID" ]]; then
-        echo "apple-platform: no $TEST_PLATFORM to test on;" \
-            "install a runtime (xcodebuild -downloadPlatform $PLATFORM) or pass a simulator id" >&2
-        exit 1
+        unavailable "no $TEST_PLATFORM to test on;" \
+            "install a runtime (xcodebuild -downloadPlatform $PLATFORM) or pass a simulator id"
     fi
 fi
 TEST_DESTINATION="platform=$TEST_PLATFORM,${VARIANT:+variant=$VARIANT,}id=$DESTINATION_ID"

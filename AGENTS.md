@@ -90,7 +90,7 @@ implements them. The server-side methods (tools, resources, prompts, completion,
 - **Platforms**: macOS 13+, iOS / Mac Catalyst / tvOS 16+, watchOS 9+, visionOS 1+, and Linux
   (glibc and the static musl SDK). On Linux, install `libcurl4-openssl-dev`.
 - **Dependencies**: `swift-system`, `swift-log`, `swift-crypto`, `Yams` (skill frontmatter),
-  `swift-nio` (conformance server only), and `swift-docc-plugin`.
+  `swift-nio` (the conformance server and the HTTP server example), and `swift-docc-plugin`.
 - **Tests**: [Swift Testing](https://developer.apple.com/documentation/testing) (`import Testing`).
   Do not add XCTest.
 - **Docs**: DocC, built in CI with `--warnings-as-errors` and published on the Swift Package Index.
@@ -252,8 +252,9 @@ public struct WidgetListChangedNotification: Notification {
 - Server handlers are registered with `withMethodHandler(_:handler:)`, which replaces any existing
   handler for that method. Notification handlers registered with `onNotification(_:handler:)` are
   appended. `Server.start` registers default handlers (`initialize`, `ping`, `server/discover`,
-  `subscriptions/listen`, `logging/setLevel`, and those of enabled features such as tasks and
-  skills); an application handler for the same method replaces the default.
+  `subscriptions/listen`, `logging/setLevel`), and `withTasks(_:)` and
+  `withSkills(_:listInResources:)` register those of their feature; an application handler for
+  the same method replaces the default.
 
 ### 4. Concurrency
 
@@ -283,6 +284,10 @@ platform-specific code with `canImport` checks where possible, and follow the ex
 | `System` vs `SystemPackage`              | `#if canImport(System)`                                            |
 | Secure Enclave keys (DPoP)               | `#if canImport(CryptoKit)`; other hashing and signing use `Crypto` |
 | Starting a process (`Process`)           | `#if !(os(iOS) \|\| os(tvOS) \|\| os(watchOS) \|\| os(visionOS))`  |
+
+The doc snippets that start a process also hand its pipes to `StdioTransport` as `System`
+`FileDescriptor`s, so they gate on `#if canImport(System) && os(macOS)` and compile on macOS
+only.
 
 `HTTPClientTransport` streams SSE through the same code on every platform. If a change can affect
 Linux, call that out in the PR and run `scripts/ci-linux.sh build-test` if you can, because CI is
