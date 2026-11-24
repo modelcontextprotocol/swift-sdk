@@ -69,7 +69,8 @@ Behavior that can break working code ([docs/migration.md](docs/migration.md#beha
   and client check the `sampling.tools` and `sampling.context` capabilities and the rules for
   tool uses and tool results.
 - Request association (SEP-2260): a sampling or elicitation request sent while the server handles
-  no client request logs one warning for each method. At 2025-11-25 it is still sent.
+  no client request logs one warning for each method. At 2025-11-25 it is still sent. At
+  2026-07-28 a request to the client throws -32600, also from code that handles no request.
 - A built-in `logging/setLevel` handler that filters `Server.log`.
 - `statelessRequestHook` on `Server.start`, `HTTPClientTransport.cancelRequest(_:)`,
   `BearerTokenValidationResult.tokenInfo`, and the `HTTPClientAuthorizer` requirement

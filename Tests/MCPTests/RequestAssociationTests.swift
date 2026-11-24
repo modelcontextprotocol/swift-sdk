@@ -5,9 +5,10 @@ import Testing
 @testable import MCP
 
 // SEP-2260: sampling and elicitation requests belong to a client request.
-// 2026-07-28 has no server-to-client requests, so the SEP holds there. At
-// 2025-11-25 the server sends the request anyway and logs one warning for
-// each method sent while it handles no client request.
+// 2026-07-28 has no server-to-client requests, so the SEP holds there: the
+// server throws, in a handler and outside one. At 2025-11-25 the server sends
+// the request anyway and logs one warning for each method sent while it
+// handles no client request.
 
 private actor Gate {
     private var waiters: [CheckedContinuation<Void, Never>] = []
@@ -40,8 +41,11 @@ private struct Connection {
     let late = Results()
 
     /// Connects a new client, to a new server or, after `previous` was
-    /// closed, to its server started again with the same log.
-    static func make(restarting previous: Connection? = nil) async throws -> Connection {
+    /// closed, to its server started again with the same log. The client
+    /// uses the handshake unless `configuration` says otherwise.
+    static func make(
+        restarting previous: Connection? = nil, configuration: Client.Configuration = .handshake
+    ) async throws -> Connection {
         let log = previous?.log ?? CapturingLogHandler()
         let (clientEnd, serverEnd) = await InMemoryTransport.createConnectedPair(
             logger: Logger(label: "test") { _ in log })
@@ -51,7 +55,7 @@ private struct Connection {
             client: Client(
                 name: "c", version: "1",
                 capabilities: .init(sampling: .init(), elicitation: .init(), roots: .init()),
-                configuration: .handshake),
+                configuration: configuration),
             log: log)
         await connection.register()
         try await server.start(transport: serverEnd)
@@ -156,4 +160,70 @@ struct RequestAssociationTests {
         #expect(await connection.late.models == ["m"])
         #expect(connection.warnings.count == 1)
     }
+
+    @Test("At 2026-07-28 a request from a handler throws")
+    func statelessInHandler() async throws {
+        let connection = try await Connection.make(configuration: .init())
+        defer { Task { await connection.close() } }
+        await #expect(throws: MCPError.invalidRequest("sampling/createMessage cannot be sent at protocol version 2026-07-28")) {
+            _ = try await connection.client.callTool(name: "sample")
+        }
+        #expect(connection.warnings.isEmpty)
+    }
+
+    @Test("At 2026-07-28 a request outside a handler throws, with no warning")
+    func statelessOutsideHandler() async throws {
+        // The client connected with server/discover: the connection served a
+        // stateless request.
+        let connection = try await Connection.make(configuration: .init())
+        defer { Task { await connection.close() } }
+        let server = connection.server
+        #expect(
+            await refusal { _ = try await server.requestSampling(messages: [.user("Hi")], maxTokens: 10) }
+                == .invalidRequest("sampling/createMessage cannot be sent at protocol version 2026-07-28"))
+        #expect(
+            await refusal { _ = try await server.requestElicitation(message: "Name?", requestedSchema: .init()) }
+                == .invalidRequest("elicitation/create cannot be sent at protocol version 2026-07-28"))
+        #expect(
+            await refusal { _ = try await server.listRoots() }
+                == .invalidRequest("roots/list cannot be sent at protocol version 2026-07-28"))
+        #expect(connection.warnings.isEmpty)
+    }
+
+    @Test("A server that serves no handshake revision throws before any request")
+    func statelessOnlyServer() async throws {
+        let (_, serverEnd) = await InMemoryTransport.createConnectedPair()
+        let server = Server(
+            name: "s", version: "1", capabilities: .init(),
+            configuration: .init(protocolVersions: Version.stateless))
+        try await server.start(transport: serverEnd)
+        defer { Task { await server.stop() } }
+        #expect(
+            await refusal { _ = try await server.requestSampling(messages: [.user("Hi")], maxTokens: 10) }
+                == .invalidRequest("sampling/createMessage cannot be sent at protocol version 2026-07-28"))
+    }
+
+    @Test("Behind a sessionless transport a request outside a handler throws")
+    func sessionlessOutsideHandler() async throws {
+        let server = Server(name: "s", version: "1", capabilities: .init())
+        try await server.start(transport: StatelessHTTPServerTransport())
+        defer { Task { await server.stop() } }
+        #expect(
+            await refusal { _ = try await server.requestSampling(messages: [.user("Hi")], maxTokens: 10) }
+                == .invalidRequest(
+                    "sampling/createMessage cannot be sent outside a client request: the transport has no stream for it"))
+    }
+}
+
+/// The error `request` throws in a detached task, which handles no client
+/// request; `nil` when it returns.
+private func refusal(_ request: @escaping @Sendable () async throws -> Void) async -> MCPError? {
+    await Task.detached {
+        do {
+            try await request()
+            return nil
+        } catch {
+            return error as? MCPError
+        }
+    }.value
 }

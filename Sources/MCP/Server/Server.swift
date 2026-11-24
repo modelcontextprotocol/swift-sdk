@@ -1681,9 +1681,8 @@ public actor Server {
             throw MCPError.internalError("Server connection not initialized")
         }
 
-        if let context = Server.currentHandlerContext, context.profile?.allowsServerRequests == false {
-            throw MCPError.invalidRequest(
-                "\(M.name) cannot be sent at protocol version \(context.protocolVersion ?? "")")
+        if let refusal = serverRequestRefusal(M.name) {
+            throw MCPError.invalidRequest(refusal)
         }
 
         let requestData = try encoder.encode(request)
@@ -1735,6 +1734,35 @@ public actor Server {
         return requestTask
     }
 
+    /// Why a request to the client cannot be sent now, or `nil` when it can.
+    ///
+    /// In a handler, the request's revision decides. Outside one, for example
+    /// in a background or detached task or in a task body, the connection
+    /// decides: a negotiated handshake revision allows the request; a
+    /// connection that served a stateless request, or a server that serves no
+    /// handshake revision, is at 2026-07-28, which has no server-to-client
+    /// requests (SEP-2260); and a sessionless transport has no stream outside a
+    /// request, so the request would wait for an answer that never comes.
+    private func serverRequestRefusal(_ method: String) -> String? {
+        if let context = Server.currentHandlerContext {
+            guard context.profile?.allowsServerRequests == false else { return nil }
+            return "\(method) cannot be sent at protocol version \(context.protocolVersion ?? "")"
+        }
+        if let protocolVersion {
+            guard !Version.profile(for: protocolVersion).allowsServerRequests else { return nil }
+            return "\(method) cannot be sent at protocol version \(protocolVersion)"
+        }
+        if servedStatelessRequest || handshakeVersions.isEmpty {
+            let version =
+                configuration.protocolVersions.first { !Version.profile(for: $0).allowsServerRequests }
+                ?? Version.stateless[0]
+            return "\(method) cannot be sent at protocol version \(version)"
+        }
+        if isSessionless {
+            return "\(method) cannot be sent outside a client request: the transport has no stream for it"
+        }
+        return nil
+    }
 
     /// The warning to log when `method` is sent while the server handles no
     /// client request, the first time only; otherwise `nil`.

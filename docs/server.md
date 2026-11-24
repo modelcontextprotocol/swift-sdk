@@ -1038,7 +1038,8 @@ func watchRoots(on server: Server, cache: RootsCache) async {
 - Fetch roots in the handler that needs them. When the client sends `notifications/roots/list_changed`, mark them stale, and fetch them again in the next handler, as `RootsCache` does.
 - In strict mode they fail with -32601 when the client did not declare the capability. Otherwise the request is sent, and a client without a handler answers with an error.
 - `requestSampling` with `tools` or `toolChoice` fails with -32601 when the client did not declare `sampling.tools`, also when the server is not strict: the specification forbids the request. It fails with -32602 when the messages break the rules in [Sampling with tools](#sampling-with-tools). It checks both before it sends the request.
-- At 2026-07-28 they throw -32600 "... cannot be sent at protocol version 2026-07-28". Use [multi round-trip requests](#multi-round-trip-requests), which serve both eras.
+- At 2026-07-28 they throw -32600 "... cannot be sent at protocol version 2026-07-28". Use [multi round-trip requests](#multi-round-trip-requests), which serve both eras. Outside a handler, for example in a detached task or a task body, the connection decides: a request throws once the connection has served a stateless request, or when the server serves no handshake revision.
+- Behind a `StatelessHTTPServerTransport` a request outside a handler throws -32600 "... cannot be sent outside a client request": the transport has no stream for it.
 - `notifications/roots/list_changed` exists only in the handshake era. Stateless clients send their roots per request.
 
 ## Cacheable results
