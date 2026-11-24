@@ -107,7 +107,7 @@ caller's context, so a per-caller list is honored:
 
 | `taskSupport` | v1 | v2 |
 |---|---|---|
-| absent, `forbidden` | -32601 when augmented | never a task |
+| absent, `forbidden`, unknown | -32601 when augmented | never a task |
 | `optional` | the client's choice | a task for declaring clients |
 | `required` | -32601 when not augmented | -32021 for non-declaring clients |
 

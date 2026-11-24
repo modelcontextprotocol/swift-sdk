@@ -131,7 +131,7 @@ public actor Client {
             /// (2025-11-25). It asks only when the server declares
             /// `tasks.requests.tools.call` and lists the tool with an
             /// `execution.taskSupport` that allows it; a tool the client has
-            /// not listed is called without a task.
+            /// not listed on this connection is called without a task.
             ///
             /// Open to values this SDK does not know, which act as
             /// ``whenRequired``.
@@ -841,15 +841,19 @@ public actor Client {
         let task: Task<Void, Never>?
         let pendingRequests: [AnyPendingRequest]
         let resourceWaiters: [CheckedContinuation<Void, Swift.Error>]
+        let taskWakeups: [ResponseSlot<Void>]
 
-        /// Fails the requests and `subscribeToResource` calls that waited
-        /// for the connection.
+        /// Fails the requests, `subscribeToResource` calls and task pollers
+        /// that waited for the connection.
         func fail(with error: Swift.Error) {
             for request in pendingRequests {
                 request.resume(throwing: error)
             }
             for waiter in resourceWaiters {
                 waiter.resume(throwing: error)
+            }
+            for slot in taskWakeups {
+                slot.resolve(.failure(error))
             }
         }
     }
@@ -887,7 +891,8 @@ public actor Client {
         connectionGeneration += 1
         let closed = ClosedConnection(
             transport: connection, task: task, pendingRequests: Array(pendingRequests.values),
-            resourceWaiters: closeNotificationStream().waiters)
+            resourceWaiters: closeNotificationStream().waiters,
+            taskWakeups: taskWakeups.values.flatMap(\.values))
 
         self.task = nil
         self.connection = nil
@@ -899,6 +904,11 @@ public actor Client {
         roundTrips = [:]
         cancelledRoundTrips = []
         self.toolHeaderParameters = [:]
+        // The next server may declare other tools, and sends its own task
+        // notifications.
+        toolTaskSupport = [:]
+        taskWakeups = [:]
+        notifiedTasks = []
         self.unsentRequests = []
 
         // Stop the handlers. They are not awaited: disconnect may be called
@@ -1720,11 +1730,15 @@ public actor Client {
 
     /// Waits for `timeout`, or less when a notification for the task arrives
     /// or arrived since the last wait.
+    ///
+    /// - Throws: The connection's error when it closes during the wait, and
+    ///   ``MCPError/connectionClosed`` when it closed before.
     func waitForTask(_ id: String, timeout: Duration) async throws {
         if let index = notifiedTasks.firstIndex(of: id) {
             notifiedTasks.remove(at: index)
             return
         }
+        guard connection != nil else { throw MCPError.connectionClosed }
         nextTaskWakeup += 1
         let token = nextTaskWakeup
         let slot = ResponseSlot<Void>()
@@ -1743,6 +1757,11 @@ public actor Client {
         } onCancel: {
             slot.resolve(.failure(CancellationError()))
         }
+    }
+
+    /// The number of task pollers waiting for their next poll.
+    func taskPollerCount() -> Int {
+        taskWakeups.values.reduce(0) { $0 + $1.count }
     }
 
     // MARK: - Batching

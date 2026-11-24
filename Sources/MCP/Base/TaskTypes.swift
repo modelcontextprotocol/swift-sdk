@@ -108,6 +108,11 @@ public struct TaskSupport: RawRepresentable, Hashable, Codable, Sendable,
     /// The tool runs only as a task: a client that cannot use tasks is
     /// refused.
     public static let required: TaskSupport = "required"
+
+    /// The support to act on: an unknown value is ``forbidden``.
+    var known: TaskSupport {
+        self == .optional || self == .required ? self : .forbidden
+    }
 }
 
 /// The `task` member of a request the client augments to run as a task

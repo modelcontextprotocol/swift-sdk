@@ -1038,7 +1038,7 @@ public actor Server {
             try? await connection.send(data)
         case .v2:
             guard listeners.values.contains(where: { $0.tasks.contains(record.id) }),
-                let snapshot = try? Value(record.snapshot(detailed: true))
+                let snapshot = try? Value.preservingStrings(record.snapshot(detailed: true))
             else { return }
             publish(.task(id: record.id, snapshot: snapshot), to: nil)
         }
@@ -2287,6 +2287,7 @@ public actor Server {
     /// What `tools/call` needs to know about a listed tool.
     struct ToolInfo: Sendable {
         let headers: ToolHeaders
+        /// The declared support, with an unknown value read as `forbidden`.
         let taskSupport: TaskSupport
     }
 
@@ -2340,7 +2341,7 @@ public actor Server {
                 let support = tool.objectValue?["execution"]?.objectValue?["taskSupport"]?.stringValue
                 tools[name] = ToolInfo(
                     headers: parameters.map(ToolHeaders.valid) ?? .invalid,
-                    taskSupport: support.map(TaskSupport.init(rawValue:)) ?? .forbidden)
+                    taskSupport: support.map { TaskSupport(rawValue: $0).known } ?? .forbidden)
             }
             guard let next = result.objectValue?["nextCursor"]?.stringValue else { return tools }
             cursor = next

@@ -341,7 +341,7 @@ public actor TaskManager {
     /// application runs outside the task, and cancels the task's work. A
     /// task that already finished is unchanged.
     public func complete(_ id: String, with result: CallTool.Result) async throws {
-        let value = try Value(result)
+        let value = try Value.preservingStrings(result)
         work.removeValue(forKey: id)?.cancel()
         await finish(id, .result(value))
     }
@@ -450,7 +450,7 @@ public actor TaskManager {
                 if result.isInputRequired || result.task != nil {
                     outcome = .error(.internalError("Server bug: a task's work returned input requests or a task"))
                 } else {
-                    outcome = .result(try Value(result))
+                    outcome = .result(try Value.preservingStrings(result))
                 }
             } catch is CancellationError {
                 outcome = .cancelled
@@ -745,7 +745,9 @@ public actor TaskManager {
         }
         if fits { return response }
         // Decoding by shape may have picked another kind: read it as a result of the request's method.
-        if let value = try? Value(response), let typed = try? InputResponse(method: request.method, result: value) {
+        if let value = try? Value.preservingStrings(response),
+            let typed = try? InputResponse(method: request.method, result: value)
+        {
             return typed
         }
         throw MCPError.invalidParams("The response \"\(key)\" is not a result of \(request.method)")

@@ -266,6 +266,8 @@ private func makeTaskServer(
             }
         case "toolError":
             return try await Server.runAsTask { _ in .init(content: [.text(text: "bad")], isError: true) }
+        case "dataText":
+            return try await Server.runAsTask { _ in TaskServer.dataResult }
         case "lateAnswer":
             let created = try await Server.runAsTask { _ in
                 await ran.increment()
@@ -338,7 +340,13 @@ private struct TaskServer {
         Tool(name: "progress", description: nil, inputSchema: [:], execution: .init(taskSupport: .optional)),
         Tool(name: "giveUp", description: nil, inputSchema: [:], execution: .init(taskSupport: .optional)),
         Tool(name: "lateAnswer", description: nil, inputSchema: [:], execution: .init(taskSupport: .optional)),
+        Tool(name: "dataText", description: nil, inputSchema: [:], execution: .init(taskSupport: .optional)),
+        Tool(name: "sometimes", description: nil, inputSchema: [:], execution: .init(taskSupport: "sometimes")),
     ]
+
+    /// A result whose strings are `data:` URLs, which must reach the client as written.
+    static let dataResult = CallTool.Result(
+        content: [.text(text: "data:,hello")], structuredContent: ["s": "data:,hello"] as Value?)
 
     init(manager: TaskManager = TaskManager()) async throws {
         let server = await makeTaskServer(manager: manager, cancelled: cancelled, ran: ran)
@@ -453,6 +461,31 @@ struct StatelessTaskServerTests {
         #expect(result["content"] == [["type": "text", "text": "sync"]])
         let forbidden = try await server.call("forbidden")
         #expect(forbidden["resultType"] == "complete")
+    }
+
+    @Test("A tool with an unknown taskSupport runs inline, as a forbidden one")
+    func unknownSupport() async throws {
+        let server = try await TaskServer()
+        defer { Task { await server.stop() } }
+        for capabilities in [tasksCapabilities, [:]] {
+            let result = try await server.call("sometimes", capabilities: capabilities)
+            #expect(result["resultType"] == "complete")
+            #expect(result["taskId"] == nil)
+            #expect(result["content"] == [["type": "text", "text": "inline"]])
+        }
+    }
+
+    @Test("A data: URL string in a result is sent as written, inline and as a task")
+    func dataStrings() async throws {
+        let server = try await TaskServer()
+        defer { Task { await server.stop() } }
+        let inline = try await server.call("dataText", capabilities: [:])
+        #expect(inline["resultType"] == "complete")
+        let created = try await server.call("dataText")
+        let id = try #require(created["taskId"]?.stringValue)
+        #expect(try await server.wait(id)["status"] == "completed")
+        // The inline result and the completed task's tasks/get.
+        expectDataStrings(await rawSent(server.wire, containing: "data:"), count: 2)
     }
 
     @Test("A required tool refuses an undeclared client with -32021 before its handler runs")
@@ -1003,6 +1036,33 @@ struct ClientTaskTests {
         await #expect(throws: MCPError.self) { try await client.getTask("unknown") }
     }
 
+    @Test("A connection that closes while result() waits between polls ends it with the connection's error")
+    func connectionClosedBetweenPolls() async throws {
+        // The server suggests 10 s between polls.
+        let server = await makeTaskServer(manager: TaskManager(configuration: .init(pollInterval: .seconds(10))))
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+        try await server.start(transport: serverTransport)
+        let client = Client(
+            name: "c", version: "1",
+            configuration: .init(protocolMode: .stateless(Version.v2026_07_28), tasks: .init()))
+        try await client.connect(transport: clientTransport)
+        defer { Task { await client.disconnect(); await server.stop() } }
+        let created = try await client.startToolCall(name: "slow", arguments: ["seconds": 30]).value
+        let handle = client.task(try #require(created.task))
+        let drive = Task { try await handle.result() }
+        let deadline = ContinuousClock.now + .seconds(3)
+        while await client.taskPollerCount() == 0, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(await client.taskPollerCount() == 1)
+
+        let closed = ContinuousClock.now
+        await serverTransport.disconnect()
+        await #expect(throws: MCPError.connectionClosed) { try await drive.value }
+        #expect(ContinuousClock.now - closed < .seconds(3))
+        #expect(await client.taskPollerCount() == 0)
+    }
+
     @Test("Poll intervals are kept within the configured bounds")
     func pollBounds() throws {
         let options = Client.Configuration.Tasks(
@@ -1173,6 +1233,26 @@ struct HandshakeTaskServerTests {
         let inline = try await server.result(CallTool.name, ["name": "slow"])
         #expect(inline["content"] == [["type": "text", "text": "inline"]])
         #expect(inline["task"] == nil)
+    }
+
+    @Test("A tool with an unknown taskSupport is forbidden: inline without task, -32601 with it")
+    func unknownSupport() async throws {
+        let server = try await HandshakeTaskServer()
+        defer { Task { await server.stop() } }
+        let inline = try await server.result(CallTool.name, ["name": "sometimes"])
+        #expect(inline["content"] == [["type": "text", "text": "inline"]])
+        #expect(inline["task"] == nil)
+        #expect(try await server.errorCode(CallTool.name, ["name": "sometimes", "task": [:]]) == -32601)
+    }
+
+    @Test("A data: URL string in a result is sent as written, inline and by tasks/result")
+    func dataStrings() async throws {
+        let server = try await HandshakeTaskServer()
+        defer { Task { await server.stop() } }
+        _ = try await server.result(CallTool.name, ["name": "dataText"])
+        let id = try #require(try await server.create("dataText")["taskId"])
+        _ = try await server.result(GetTaskPayload.name, ["taskId": id])
+        expectDataStrings(await rawSent(server.wire, containing: "data:"), count: 2)
     }
 
     @Test("A tool error fails the task; tasks/result returns the tool's result")
@@ -1440,6 +1520,32 @@ struct HandshakeClientTaskTests {
         defer { Task { await client.disconnect(); await server.stop() } }
         await #expect(throws: MCPError.self) { try await client.callTool(name: "must") }
     }
+
+    @Test("Task support listed on one connection does not apply on the next")
+    func supportForgottenOnReconnect() async throws {
+        let (client, first) = try await connectHandshakeClient(
+            tasks: .init(minimumPollInterval: .milliseconds(5), augmentation: .whenSupported))
+        defer { Task { await client.disconnect(); await first.stop() } }
+        #expect(text(try await client.callTool(name: "slow")) == "task")
+        #expect(text(try await client.callTool(name: "sometimes")) == "inline")
+
+        // The next server lists `slow` without execution: a call with `task` gets -32601.
+        let next = Server(name: "next", version: "1", capabilities: .init(tools: .init()))
+        await next.withTasks(TaskManager())
+        await next.withMethodHandler(ListTools.self) { _ in
+            .init(tools: [Tool(name: "slow", description: nil, inputSchema: [:])])
+        }
+        await next.withMethodHandler(CallTool.self) { _ in
+            try await Server.runAsTask { task in .init(content: [.text(text: task.isTask ? "task" : "inline")]) }
+        }
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+        try await next.start(transport: serverTransport)
+        defer { Task { await next.stop() } }
+        await client.disconnect()
+        try await client.connect(transport: clientTransport)
+        #expect(await client.serverCapabilities?.tasks?.requests?.tools?.call != nil)
+        #expect(text(try await client.callTool(name: "slow")) == "inline")
+    }
 }
 
 // MARK: - Every revision
@@ -1489,6 +1595,25 @@ private func sentMessage(
         try await Task.sleep(for: .milliseconds(5))
     }
     return nil
+}
+
+/// The raw JSON of the messages the server sent that contain `text`. A
+/// decoded `Value` cannot tell a `data:` URL string from its base64 form.
+private func rawSent(_ wire: WireExchange, containing text: String) async -> [String] {
+    await wire.transport.sentData.map { String(decoding: $0, as: UTF8.self) }.filter { $0.contains(text) }
+}
+
+/// Records an issue unless there are `count` messages and each carries the
+/// strings of ``TaskServer/dataResult`` as written.
+private func expectDataStrings(
+    _ messages: [String], count: Int, sourceLocation: SourceLocation = #_sourceLocation
+) {
+    #expect(messages.count == count, "\(messages)", sourceLocation: sourceLocation)
+    for message in messages {
+        #expect(message.contains(#""text":"data:,hello""#), "\(message)", sourceLocation: sourceLocation)
+        #expect(message.contains(#""s":"data:,hello""#), "\(message)", sourceLocation: sourceLocation)
+        #expect(!message.contains("base64"), "\(message)", sourceLocation: sourceLocation)
+    }
 }
 
 @Suite("Task notifications")
@@ -1584,6 +1709,27 @@ struct TaskNotificationTests {
         #expect(params["taskId"] == id)
         #expect(params["ttlMs"] != nil)
         #expect(params["_meta"]?.objectValue?[MetaKey.subscriptionID] == 500)
+    }
+
+    @Test("2026-07-28: complete(_:with:) and the task notification keep data: URL strings as written")
+    func listenDataStrings() async throws {
+        let manager = TaskManager()
+        let server = try await TaskServer(manager: manager)
+        defer { Task { await server.stop() } }
+        let id = try #require(try await server.call("slow", ["seconds": 30])["taskId"]?.stringValue)
+        _ = try await server.wire.send(
+            message(
+                id: 500, method: SubscriptionsListen.name,
+                params: ["notifications": ["taskIds": [.string(id)]]], capabilities: tasksCapabilities))
+        try await manager.complete(id, with: TaskServer.dataResult)
+        let note = try await sentMessage(server.wire) {
+            $0.objectValue?["method"] == "notifications/tasks"
+                && $0.objectValue?["params"]?.objectValue?["status"] == "completed"
+        }
+        #expect(note != nil)
+        _ = try await server.get(id)
+        // The notification and tasks/get.
+        expectDataStrings(await rawSent(server.wire, containing: "data:"), count: 2)
     }
 
     @Test("2026-07-28: naming tasks on a listen stream needs the extension")

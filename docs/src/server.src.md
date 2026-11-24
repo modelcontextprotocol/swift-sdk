@@ -350,7 +350,7 @@ Which tools may run as tasks comes from the `tools/list` handler's output, read 
 
 | `execution.taskSupport` | 2025-11-25 | 2026-07-28 |
 |---|---|---|
-| absent or `forbidden` | A call with `task`: -32601 | Never a task |
+| absent, `forbidden` or unknown | A call with `task`: -32601 | Never a task |
 | `optional` | The client's choice | A task for clients that declare the extension |
 | `required` | A call without `task`: -32601 | Clients that do not declare the extension: -32021 |
 
