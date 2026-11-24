@@ -480,6 +480,145 @@ struct ServerLifecycleTests {
             await server.stop()
         }
     }
+
+    @Test("a request received before stop() is not answered on the next connection")
+    func staleRequestNotAnsweredAfterRestart() async throws {
+        let server = Server(name: "s", version: "1", capabilities: .init(tools: .init()))
+        await server.withMethodHandler(CallTool.self) { params in
+            .init(content: [.text(text: params.name)])
+        }
+        let first = ContextGatedTransport()
+        try await server.start(transport: first)
+        await first.deliver(#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"old"}}"#)
+        // The request waits for its HTTP context while the server restarts.
+        try await first.waitUntilContextIsHeld()
+        await server.stop()
+
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+        let peer = RawPeer(clientTransport)
+        try await peer.start()
+        try await server.start(transport: serverTransport)
+        // The same id on the next connection: before the fix its entry in
+        // `startingRequests` replaced the one `stop()` marked cancelled.
+        try await peer.send(#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"new"}}"#)
+        let answer = await peer.first { $0.objectValue?["id"] == 1 }
+        #expect(answer?.objectValue?["result"]?.objectValue?["content"] == [["type": "text", "text": "new"]])
+
+        await first.releaseContext()
+        try await peer.sync("after")
+        let late = await peer.first(within: .milliseconds(300)) {
+            $0.objectValue?["id"] == 1 && $0 != answer
+        }
+        #expect(late == nil, "the request of the stopped connection was answered on the next one")
+        #expect(await first.sentCount == 0)
+        await server.stop()
+        await peer.stop()
+    }
+
+    @Test("a batch finished while stop() disconnects is not sent")
+    func staleBatchNotSent() async throws {
+        let server = Server(
+            name: "s", version: "1", capabilities: .init(tools: .init()), configuration: .strict)
+        let (started, startedSink) = AsyncStream<Void>.makeStream()
+        await server.withMethodHandler(CallTool.self) { params in
+            if params.name == "slow" {
+                startedSink.yield()
+                try await Task.sleep(for: .seconds(30))
+            }
+            return .init(content: [])
+        }
+        let transport = EndableTransport(mode: .shared)
+        try await server.start(transport: transport)
+        await transport.deliverFromServer(
+            Data(
+                #"{"jsonrpc":"2.0","id":"init","method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"raw","version":"1"}}}"#
+                    .utf8))
+        try await transport.waitUntilSentResponse(to: "init")
+        // The second call is handled after `stop()` reset `isInitialized`:
+        // before the fix the strict check refused it, on the transport that
+        // was disconnecting.
+        await transport.deliverFromServer(
+            Data(
+                #"[{"jsonrpc":"2.0","id":"slow","method":"tools/call","params":{"name":"slow"}},{"jsonrpc":"2.0","id":"late","method":"tools/call","params":{"name":"x"}}]"#
+                    .utf8))
+        for await _ in started { break }
+
+        await transport.holdNextDisconnect()
+        let stopping = Task { await server.stop() }
+        try await transport.waitUntilDisconnectIsHeld()
+        let deadline = ContinuousClock.now + .milliseconds(300)
+        while await transport.sentBatchCount == 0, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(await transport.sentBatchCount == 0)
+        await transport.releaseHeldDisconnect()
+        await stopping.value
+    }
+
+    @Test("a request to the client sent while stop() disconnects fails")
+    func requestDuringStopFails() async throws {
+        let server = Server(name: "s", version: "1")
+        let transport = EndableTransport(mode: .shared)
+        try await server.start(transport: transport)
+        await transport.holdNextDisconnect()
+        let stopping = Task { await server.stop() }
+        try await transport.waitUntilDisconnectIsHeld()
+
+        // Before the fix it was sent on the disconnecting transport, and no
+        // one resumed it.
+        let result = await outcome(within: .seconds(2)) {
+            try await server.requestSampling(messages: [.user("hi")], maxTokens: 1)
+        }
+        #expect(!result.didTimeOut)
+        #expect(result.mcpError != nil)
+        #expect(await !transport.sentMethods.contains(CreateSamplingMessage.name))
+        await transport.releaseHeldDisconnect()
+        await stopping.value
+    }
+}
+
+/// A transport that delivers the messages a test gives it, counts what the
+/// server sends, and holds every `httpRequestContext(for:)` call until the
+/// test releases it.
+private actor ContextGatedTransport: Transport, HTTPContextProviding {
+    nonisolated let logger = Logger(label: "mcp.test.context-gated") { _ in SwiftLogNoOpLogHandler() }
+    private let stream: AsyncThrowingStream<Data, Swift.Error>
+    private let continuation: AsyncThrowingStream<Data, Swift.Error>.Continuation
+    private var heldContext: CheckedContinuation<Void, Never>?
+    private(set) var sentCount = 0
+
+    init() {
+        (stream, continuation) = AsyncThrowingStream<Data, Swift.Error>.makeStream()
+    }
+
+    func connect() async throws {}
+    func disconnect() async { continuation.finish() }
+    func send(_ data: Data) async throws { sentCount += 1 }
+    func receive() -> AsyncThrowingStream<Data, Swift.Error> { stream }
+
+    func deliver(_ json: String) {
+        continuation.yield(Data(json.utf8))
+    }
+
+    func httpRequestContext(for id: ID) async -> HTTPRequest? {
+        await withCheckedContinuation { heldContext = $0 }
+        return nil
+    }
+
+    func waitUntilContextIsHeld(timeout: Duration = .seconds(2)) async throws {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while heldContext == nil {
+            guard ContinuousClock.now < deadline else {
+                throw MCPError.internalError("httpRequestContext(for:) was never called")
+            }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+    }
+
+    func releaseContext() {
+        heldContext?.resume()
+        heldContext = nil
+    }
 }
 
 /// Collects the messages logged through every logger it backs.
