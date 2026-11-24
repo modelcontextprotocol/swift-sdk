@@ -19,7 +19,21 @@ struct WireExchange {
         try await server.start(transport: transport)
     }
 
+    /// The server sent fewer messages than expected before the deadline.
+    struct Timeout: Error, CustomStringConvertible {
+        let expected: Int
+        let received: Int
+        let message: String
+
+        var description: String {
+            "Timed out waiting for \(expected) message(s), got \(received), after: \(message)"
+        }
+    }
+
     /// Sends `message` and waits until the server has sent `expecting` more messages.
+    ///
+    /// Throws ``Timeout`` when they don't arrive in time, so a caller that
+    /// indexes the reply fails the test instead of trapping.
     @discardableResult
     func send(_ message: String, expecting count: Int = 1, timeout: Duration = .seconds(2))
         async throws -> [Value]
@@ -29,8 +43,8 @@ struct WireExchange {
         let deadline = ContinuousClock.now + timeout
         while await transport.sentData.count < before + count {
             guard ContinuousClock.now < deadline else {
-                Issue.record("Timed out waiting for \(count) message(s) after: \(message)")
-                break
+                let received = await transport.sentData.count - before
+                throw Timeout(expected: count, received: received, message: message)
             }
             try await Task.sleep(for: .milliseconds(5))
         }

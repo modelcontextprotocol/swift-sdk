@@ -79,6 +79,22 @@ struct WireGoldenTests {
         #expect(meta.logLevel == .debug)
         #expect(meta.progressToken == .integer(9))
     }
+
+    @Test("A reply that never comes throws instead of returning fewer messages")
+    func testSendTimeoutThrows() async throws {
+        let wire = WireExchange(server: await makeServer())
+        try await wire.start()
+        defer { Task { await wire.stop() } }
+
+        // A notification gets no reply.
+        let error = await #expect(throws: WireExchange.Timeout.self) {
+            try await wire.send(
+                #"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+                timeout: .milliseconds(100))
+        }
+        #expect(error?.expected == 1)
+        #expect(error?.received == 0)
+    }
 }
 
 @Suite("Data URL String Tests")
