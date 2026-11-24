@@ -1,7 +1,7 @@
 # MCP Swift SDK design
 
 This document records the design of the `MCP` Swift package and the reasons behind it. It covers
-1.x, which adds the 2026-07-28 revision of the
+0.13.0, which adds the 2026-07-28 revision of the
 [Model Context Protocol](https://modelcontextprotocol.io) next to the `initialize`-based revisions
 (2025-11-25 and earlier). The base of 0.13.0 is `main` at `2a44bfd` (the 0.12 line).
 
