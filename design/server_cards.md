@@ -60,13 +60,16 @@ description, so both can be passed.
 ## Fetching
 
 `ServerCard.fetch(from:ifNoneMatch:session:)` sends `Accept: application/mcp-server-card+json`
-and `If-None-Match` when given; requires `https`, or `http` on a loopback host, for the URL;
-decodes and validates. Errors are `ServerCardError` with an open-struct `Reason`.
+and `If-None-Match` when given; requires a host and `https`, or `http` on a loopback host, for
+the URL, and refuses a private or reserved IP literal host (`OAuthURLValidator.isPrivateIPHost`,
+which allows loopback), as for a redirect target: the URL can come from an AI Catalog. Host names
+are not resolved (no DNS rebinding protection). It decodes and validates. Errors are
+`ServerCardError` with an open-struct `Reason`.
 
 - Redirects: each hop is checked before it is requested, with the rule of OAuth discovery
-  (`OAuthRedirectGuard`): the target must be `https`, or loopback `http` when the card URL is
+  (`OAuthRedirectGuard`): the target must be `https`, or loopback `http` when the previous hop is
   loopback `http`, and its host must not be a private IP literal. A refused redirect throws
-  `insecureURL`; the final URL is checked again.
+  `insecureURL`, judged from the hop that sent it; the final URL is checked again.
 - Size: the body is streamed (`URLSession.responseBody`, `ResponseBody.collect(limit:)`) and the
   read stops after 1 MiB + 1 byte; a larger `Content-Length` is refused before the body is read.
   Both throw `tooLarge`.
@@ -80,7 +83,8 @@ without query or fragment.
 `value`, then its `default`; a required or undeclared variable without a value throws. Values
 are percent-encoded except for unreserved characters (RFC 6570 simple expansion), so a value
 cannot add a path, query, fragment or user, or move the host; a placeholder that starts the URL
-(`{base}/mcp`) stands for the scheme and host and is inserted as given.
+(`{base}/mcp`) stands for the scheme and host and is inserted as given. Whether a placeholder
+starts the URL is its position in the template, so one after an empty `{base}` is still encoded.
 
 A card is advisory. `mismatches(with:)` compares it with a `server/discover` result: `name`,
 `version` and `title` against `serverInfo` (when the server sends it), and each remote's

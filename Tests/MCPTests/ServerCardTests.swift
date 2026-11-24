@@ -184,6 +184,20 @@ struct ServerCardFormatTests {
         #expect(try remote.url(resolving: ["tenant": "a-b_c.d~e", "path": "x"]).host == "a-b_c.d~e.example.com")
     }
 
+    @Test("Only the placeholder that starts the URL is inserted as given, even when it is empty")
+    func templateEmptyLeadingPlaceholder() throws {
+        // RFC 3986 §2.1: the value after an empty {prefix} is data, not the scheme and host.
+        let remote = ServerCard.Remote(
+            type: .streamableHTTP, url: "{prefix}{tenant}.example.com/mcp", variables: ["prefix": .init(), "tenant": .init()])
+        for values in [["tenant": "https://evil.com/x?"], ["prefix": "", "tenant": "https://evil.com/x?"]] {
+            #expect { _ = try remote.url(resolving: values) } throws: {
+                ($0 as? ServerCardError)?.reason == .invalidCard
+            }
+        }
+        let leading = ServerCard.Remote(type: .streamableHTTP, url: "{base}{path}")
+        #expect(try leading.url(resolving: ["base": "https://x.example/", "path": "a?b"]).absoluteString == "https://x.example/a%3Fb")
+    }
+
     @Test("Mismatches with server/discover")
     func mismatches() {
         var meta = Metadata()
@@ -276,6 +290,8 @@ struct ServerCardValidatorTests {
         #expect(await stateless.handleRequest(request()).statusCode == 200)
         #expect(await stateless.handleRequest(request(headers: ["If-None-Match": etag])).statusCode == 304)
         #expect(await stateless.handleRequest(request("OPTIONS")).statusCode == 204)
+        #expect(await stateless.handleRequest(request("HEAD")).statusCode == 200)
+        #expect(await stateless.handleRequest(request("HEAD", headers: ["If-None-Match": etag])).statusCode == 304)
 
         let stateful = StatefulHTTPServerTransport(validationPipeline: pipeline)
         #expect(await stateful.handleRequest(request()).statusCode == 200)
@@ -399,6 +415,20 @@ struct ServerCardValidatorTests {
                 #expect(log.requested == [chain[0]])
             }
 
+            @Test("A refused later hop is judged from the hop that sent it")
+            func refusedLaterRedirect() async throws {
+                // The guard refuses https -> loopback http; the first URL being
+                // loopback http does not make the refusal an HTTP status.
+                let chain = ["http://127.0.0.1:3000/card", "https://example.com/card", "http://127.0.0.1:3000/admin"]
+                let (session, log) = CardURLProtocol.session([
+                    chain[0]: .redirect(chain[1]), chain[1]: .redirect(chain[2]), chain[2]: .card,
+                ])
+                await #expect { _ = try await ServerCard.fetch(from: URL(string: chain[0])!, session: session) } throws: {
+                    ($0 as? ServerCardError)?.reason == .insecureURL
+                }
+                #expect(log.requested == Array(chain.prefix(2)))
+            }
+
             @Test("Redirects to https, and from loopback http to loopback http, are followed")
             func allowedRedirects() async throws {
                 for chain in [
@@ -434,9 +464,36 @@ struct ServerCardValidatorTests {
         @Test("http is allowed on a loopback host")
         func loopback() async throws {
             let session = await serve(body: try JSONEncoder().encode(validCard))
-            for address in ["http://127.0.0.1:3000/mcp/server-card", "http://localhost/mcp/server-card", "http://[::1]:8080/server-card"] {
+            for address in [
+                "http://127.0.0.1:3000/mcp/server-card", "http://localhost/mcp/server-card", "http://[::1]:8080/server-card",
+                "https://127.0.0.1/server-card", "https://[::1]/server-card",
+            ] {
                 #expect(try await ServerCard.fetch(from: URL(string: address)!, session: session) == validCard)
             }
+        }
+
+        @Test("The first URL is held to the rules of a redirect target, before it is requested", arguments: [
+            "https://169.254.169.254/card",
+            "https://10.0.0.5/card",
+            "http://10.0.0.5/card",
+            "https://192.168.1.1/card",
+            "https://0.0.0.0/card",
+            "https://167772161/card",
+            "https://[fd00::1]/card",
+            "https://[fe80::1]/card",
+            "https://[::ffff:10.0.0.1]/card",
+            "https:///mcp/server-card",
+            "http://[127.0.0.1]/card",
+            "http://[localhost]/card",
+        ])
+        func firstURL(address: String) async throws {
+            // A URL that Foundation does not parse cannot be passed at all.
+            guard let url = URL(string: address) else { return }
+            let (session, log) = CardURLProtocol.session([address: .card])
+            await #expect { _ = try await ServerCard.fetch(from: url, session: session) } throws: {
+                ($0 as? ServerCardError)?.reason == .insecureURL
+            }
+            #expect(log.requested.isEmpty)
         }
     }
 
@@ -587,7 +644,10 @@ struct ServerCardValidatorTests {
                             && getsockname(socket, address, &length) == 0
                     }
                 }
-                guard bound else { throw URLError(.cannotConnectToHost) }
+                guard bound else {
+                    close(socket)
+                    throw URLError(.cannotConnectToHost)
+                }
                 port = Int(UInt16(bigEndian: address.sin_port))
                 let thread = Thread { [self] in serve() }
                 thread.start()

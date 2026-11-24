@@ -178,7 +178,8 @@ extension ServerCard {
         /// in an RFC 6570 simple expansion, so it cannot add a path, query or
         /// user to the URL or change its host. A placeholder that starts the
         /// URL, such as `{base}/mcp`, is the scheme and host and is inserted
-        /// as given.
+        /// as given; the others are encoded, also after a starting placeholder
+        /// that is empty.
         ///
         /// The result can be `http` on any host: a card may list a plaintext
         /// endpoint, and the `https` rule of ``ServerCard/fetch(from:session:)``
@@ -199,7 +200,9 @@ extension ServerCard {
                 let name = String(rest[rest.index(after: open)..<close])
                 let input = variables?[name]
                 if let value = values[name] ?? input?.value ?? input?.default {
-                    result += result.isEmpty ? value : Self.percentEncoded(value)
+                    // `rest` shares the indices of `url`. Only the placeholder at
+                    // the start is the scheme and host, even when it is empty.
+                    result += open == url.startIndex ? value : Self.percentEncoded(value)
                 } else if input == nil || input?.isRequired == true {
                     throw ServerCardError(.missingVariable, "The remote URL needs a value for {\(name)}")
                 }
@@ -337,7 +340,8 @@ public struct ServerCardError: LocalizedError, Hashable, Sendable, CustomStringC
 
         public var description: String { rawValue }
 
-        /// The URL is not `https`, and its host is not a loopback address.
+        /// The URL has no host, is not `https` and not `http` on a loopback
+        /// host, or has a private IP address; or a redirect was refused.
         public static let insecureURL = Reason("insecureURL")
         /// The server answered with a status other than 200 or 304.
         public static let httpStatus = Reason("httpStatus")
@@ -492,10 +496,15 @@ extension ServerCard {
 
     /// Fetches the card at `url`, decodes it and checks it.
     ///
-    /// The request asks for ``mediaType``. `url` must be `https`, or `http` on
-    /// a loopback host for local development. A redirect is followed only to
-    /// an `https` URL, or from loopback `http` to loopback `http`, and never
-    /// to a private IP address. The body is read up to ``maximumSize``.
+    /// The request asks for ``mediaType``. `url` must have a host and be
+    /// `https`, or `http` on a loopback host for local development. Its host
+    /// must not be a private or reserved IP literal, such as `10.0.0.5` or
+    /// `169.254.169.254`, since the URL can come from an untrusted catalog;
+    /// loopback hosts are allowed. A redirect is followed only to an `https`
+    /// URL, or from loopback `http` to loopback `http`; it goes to a loopback
+    /// host only from a loopback host, and never to a private IP literal. Host
+    /// names are not resolved: a name whose address is private is fetched. The
+    /// body is read up to ``maximumSize``.
     ///
     /// - Throws: ``ServerCardError``, or the error of the session.
     public static func fetch(from url: URL, session: URLSession = .shared) async throws -> ServerCard {
@@ -536,7 +545,8 @@ extension ServerCard {
         if (300..<400).contains(http.statusCode), http.statusCode != 304,
             let location = http.value(forHTTPHeaderField: "Location"),
             let target = URL(string: location, relativeTo: http.url ?? url)?.absoluteURL,
-            !redirects.allows(from: url, to: target)
+            // The hop the guard judged it from, not the first URL.
+            !redirects.allows(from: http.url ?? url, to: target)
         {
             throw ServerCardError(
                 .insecureURL,
@@ -566,12 +576,21 @@ extension ServerCard {
         return .card(card, etag: http.value(forHTTPHeaderField: HTTPHeaderName.etag))
     }
 
+    /// The rules of a redirect target (`OAuthRedirectGuard`) for the URL the
+    /// caller passes, with loopback hosts allowed: a host, no private IP
+    /// literal, and `https` or loopback `http`.
     private static func checkSecure(_ url: URL) throws(ServerCardError) {
-        let scheme = url.scheme?.lowercased()
-        var host = url.host?.lowercased() ?? ""
-        if host.hasPrefix("["), host.hasSuffix("]") { host = String(host.dropFirst().dropLast()) }
-        if scheme == "https" || (scheme == "http" && OAuthLoopbackHost.isLoopback(host)) { return }
-        throw ServerCardError(.insecureURL, "A Server Card needs https, or http on a loopback host: \(url.absoluteString)")
+        if let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+            let scheme = components.scheme?.lowercased(),
+            let host = components.host?.lowercased(), !host.isEmpty,
+            !OAuthURLValidator().isPrivateIPHost(host),
+            scheme == "https" || (scheme == "http" && OAuthLoopbackHost.isLoopback(host))
+        {
+            return
+        }
+        throw ServerCardError(
+            .insecureURL,
+            "A Server Card needs https, or http on a loopback host, and no private IP address: \(url.absoluteString)")
     }
 }
 
