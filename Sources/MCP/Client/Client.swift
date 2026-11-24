@@ -262,9 +262,12 @@ public actor Client {
     /// arrive twice.
     private var retiredNotificationStreams: Set<ID> = []
     /// Resource URIs subscribed at 2026-07-28, in subscription order.
-    private var subscribedResources: [String] = []
+    private(set) var subscribedResources: [String] = []
+    /// The subscribed URIs that `subscribeToResource` added and no stream has
+    /// served yet; one is dropped when the last call waiting for it is cancelled.
+    private var unservedResources: Set<String> = []
     /// `subscribeToResource` calls waiting for a stream that names their URI.
-    private var resourceWaiters: [(id: UUID, uri: String, continuation: CheckedContinuation<Void, Swift.Error>)] = []
+    private(set) var resourceWaiters: [(id: UUID, uri: String, continuation: CheckedContinuation<Void, Swift.Error>)] = []
     /// Waiters for `subscriptions/listen` acknowledgements, by request id.
     private var listenAcknowledgements:
         [ID: AsyncStream<Result<SubscriptionFilter, Swift.Error>>.Continuation] = [:]
@@ -431,6 +434,7 @@ public actor Client {
         notificationStreamRetry = nil
         retiredNotificationStreams = []
         subscribedResources = []
+        unservedResources = []
         let waiters = resourceWaiters
         resourceWaiters = []
         for waiter in waiters {
@@ -450,6 +454,7 @@ public actor Client {
 
         // A subscribeToResource call made while the stream was closing.
         subscribedResources = []
+        unservedResources = []
         let lateWaiters = resourceWaiters
         resourceWaiters = []
         for waiter in lateWaiters {
@@ -735,7 +740,15 @@ public actor Client {
             await opened.cancel()
             return
         }
-        if !current, notificationStreamFilter == nil { notificationStreamFilter = wanted }
+        if current {
+            // The previous stream may have ended meanwhile, which cleared the
+            // filter and scheduled a reopen; this stream serves what is wanted.
+            notificationStreamFilter = wanted
+            notificationStreamRetry?.cancel()
+            notificationStreamRetry = nil
+        } else if notificationStreamFilter == nil {
+            notificationStreamFilter = wanted
+        }
         let previous = notificationStream
         if previous == nil { notificationStreamSince = .now }
         notificationStream = opened
@@ -808,6 +821,7 @@ public actor Client {
         let named = Set(requested.resourceSubscriptions ?? [])
         let served = Set(honored.resourceSubscriptions ?? [])
         let refused = named.subtracting(served)
+        unservedResources.subtract(named)
         if !refused.isEmpty {
             subscribedResources.removeAll { refused.contains($0) }
             if wantedNotifications == SubscriptionFilter() {
@@ -841,6 +855,7 @@ public actor Client {
             .subtracting(served)
         guard !failed.isEmpty else { return }
         subscribedResources.removeAll { failed.contains($0) }
+        unservedResources.subtract(failed)
         var waiting: [(id: UUID, uri: String, continuation: CheckedContinuation<Void, Swift.Error>)] = []
         for waiter in resourceWaiters {
             if failed.contains(waiter.uri) {
@@ -1359,7 +1374,8 @@ public actor Client {
     /// stream, which is replaced by one that names it; this returns once the
     /// server acknowledges that stream. Subscribing again to a subscribed URI
     /// does nothing. Cancelling the calling task ends the wait with
-    /// `CancellationError` and drops the URI again when this call added it.
+    /// `CancellationError`; the URI is dropped again when no stream has
+    /// served it yet and no other call waits for it.
     ///
     /// - Throws: ``MCPError/invalidRequest(_:)`` when the server does not
     ///   send updates for `uri`, or the error that kept the stream from
@@ -1377,15 +1393,18 @@ public actor Client {
                 "Resource subscriptions at 2026-07-28 need streamed responses, which HTTPClientTransport does not read on Linux")
         }
         if subscribedResourceURIs.contains(uri) { return }
-        let added = !subscribedResources.contains(uri)
-        if added { subscribedResources.append(uri) }
+        try Task.checkCancellation()
+        if !subscribedResources.contains(uri) {
+            subscribedResources.append(uri)
+            unservedResources.insert(uri)
+        }
         let waiter = UUID()
         try await withTaskCancellationHandler { () async throws -> Void in
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Swift.Error>) in
                 addResourceWaiter(waiter, uri: uri, continuation: continuation)
             }
         } onCancel: {
-            Task { await self.abandonResourceWaiter(waiter, uri: uri, added: added) }
+            Task { await self.abandonResourceWaiter(waiter, uri: uri) }
         }
     }
 
@@ -1393,24 +1412,25 @@ public actor Client {
     private func addResourceWaiter(
         _ id: UUID, uri: String, continuation: CheckedContinuation<Void, Swift.Error>
     ) {
-        if Task.isCancelled {
+        guard !Task.isCancelled else {
+            // The cancellation handler drops the URI; opening a stream for
+            // it now would only be replaced again.
             continuation.resume(throwing: CancellationError())
-        } else {
-            resourceWaiters.append((id: id, uri: uri, continuation: continuation))
+            return
         }
+        resourceWaiters.append((id: id, uri: uri, continuation: continuation))
         refreshNotificationStream()
     }
 
-    /// Ends a `subscribeToResource` call whose task was cancelled. A URI that
-    /// call added is dropped unless the stream serves it or another call
-    /// waits for it.
-    private func abandonResourceWaiter(_ id: UUID, uri: String, added: Bool) {
+    /// Ends a `subscribeToResource` call whose task was cancelled. Once no
+    /// call waits for the URI, it is dropped if no stream has served it yet.
+    private func abandonResourceWaiter(_ id: UUID, uri: String) {
         if let index = resourceWaiters.firstIndex(where: { $0.id == id }) {
             resourceWaiters.remove(at: index).continuation.resume(throwing: CancellationError())
         }
-        guard added, subscribedResources.contains(uri), !subscribedResourceURIs.contains(uri),
-            !resourceWaiters.contains(where: { $0.uri == uri })
+        guard unservedResources.contains(uri), !resourceWaiters.contains(where: { $0.uri == uri })
         else { return }
+        unservedResources.remove(uri)
         subscribedResources.removeAll { $0 == uri }
         refreshNotificationStream()
     }
@@ -1430,6 +1450,7 @@ public actor Client {
         }
         guard subscribedResources.contains(uri) else { return }
         subscribedResources.removeAll { $0 == uri }
+        unservedResources.remove(uri)
         var waiting: [(id: UUID, uri: String, continuation: CheckedContinuation<Void, Swift.Error>)] = []
         for waiter in resourceWaiters {
             if waiter.uri == uri {

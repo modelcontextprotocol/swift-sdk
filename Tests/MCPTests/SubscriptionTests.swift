@@ -38,6 +38,25 @@ private func eventually(_ condition: @Sendable () async -> Bool) async -> Bool {
     return await condition()
 }
 
+/// Holds callers of ``wait()`` until ``open()``.
+private actor Gate {
+    private(set) var isWaiting = false
+    private var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        guard !isOpen else { return }
+        isWaiting = true
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func open() {
+        isOpen = true
+        for waiter in waiters { waiter.resume() }
+        waiters = []
+    }
+}
+
 private struct TimedOut: Error {}
 
 /// Runs `body`, throwing ``TimedOut`` when it has not finished after
@@ -150,6 +169,43 @@ struct SubscriptionTests {
         await server.closeSubscriptions()
         try await subscription.finished()
         #expect(await server.openSubscriptionCount == 0)
+    }
+
+    @Test("stop() ends listen streams with their result before it closes the transport")
+    func testStopSendsResults() async throws {
+        let server = makeListenServer()
+        let client = try await connect(server)
+        defer { Task { await client.disconnect() } }
+
+        let subscription = try await client.listen(.init(toolsListChanged: true))
+        await server.stop()
+        try await within(.seconds(2)) { try await subscription.finished() }
+        #expect(await server.openSubscriptionCount == 0)
+    }
+
+    @Test("A listen stream still being authorized when the server stops is refused")
+    func testStopRefusesPendingListen() async throws {
+        let gate = Gate()
+        let server = makeListenServer()
+        await server.withSubscriptionAuthorizer { filter, _ in
+            await gate.wait()
+            return filter
+        }
+        let transport = MockTransport()
+        try await server.start(transport: transport)
+        await transport.queue(
+            data: Data(
+                #"{"jsonrpc":"2.0","id":1,"method":"subscriptions/listen","params":{"notifications":{"toolsListChanged":true},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#
+                    .utf8))
+        #expect(await eventually { await gate.isWaiting })
+
+        // stop() does not wait for the authorizer, and the stream does not
+        // open on the stopped server once it returns.
+        try await within(.seconds(2)) { await server.stop() }
+        await gate.open()
+        #expect(await eventually { await server.listenRequestCount == 0 })
+        #expect(await server.openSubscriptionCount == 0)
+        #expect(!(await transport.sentMessages.contains { $0.contains("notifications/subscriptions/acknowledged") }))
     }
 
     @Test("listen requires a stateless connection")
@@ -384,6 +440,102 @@ struct SubscriptionTests {
         let cancel = try await transport.message(3)
         #expect(cancel["method"] == "notifications/cancelled")
         #expect(await client.subscribedResourceURIs.isEmpty)
+    }
+
+    @Test("Cancelling every subscribeToResource call waiting for a URI drops it")
+    func testConcurrentSubscribesCancelled() async throws {
+        let transport = ListenScript()
+        let client = try await connect(transport, capabilities: #"{"resources":{"subscribe":true}}"#)
+        defer { Task { await client.disconnect() } }
+
+        let first = Task { try await client.subscribeToResource(uri: "test://a") }
+        let listen = try await transport.message(2)
+        let second = Task { try await client.subscribeToResource(uri: "test://a") }
+        #expect(await eventually { await client.resourceWaiters.count == 2 })
+
+        first.cancel()
+        await #expect(throws: CancellationError.self) { try await within(.seconds(2)) { try await first.value } }
+        #expect(await client.subscribedResources == ["test://a"])
+        second.cancel()
+        await #expect(throws: CancellationError.self) { try await within(.seconds(2)) { try await second.value } }
+        #expect(await client.subscribedResources.isEmpty)
+
+        // Nothing wants the stream any more: its late acknowledgement closes it.
+        try await transport.acknowledge(listen, #"{"resourceSubscriptions":["test://a"]}"#)
+        let cancel = try await transport.message(3)
+        #expect(cancel["method"] == "notifications/cancelled")
+        #expect(await client.subscribedResourceURIs.isEmpty)
+    }
+
+    @Test("Cancelling a second subscribeToResource call keeps an established URI")
+    func testResubscribeCancelledKeepsURI() async throws {
+        let transport = ListenScript()
+        let client = try await connect(transport, capabilities: #"{"resources":{"subscribe":true}}"#)
+        defer { Task { await client.disconnect() } }
+
+        let subscribing = Task { try await client.subscribeToResource(uri: "test://a") }
+        let first = try await transport.message(2)
+        try await transport.acknowledge(first, #"{"resourceSubscriptions":["test://a"]}"#)
+        try await within { try await subscribing.value }
+
+        // The stream drops; a call made before it is reopened waits, and is cancelled.
+        try await transport.reply(to: first, #""error":{"code":-32603,"message":"stream reset"}"#)
+        #expect(await eventually { await client.notificationStream == nil })
+        let again = Task { try await client.subscribeToResource(uri: "test://a") }
+        #expect(await eventually { await client.resourceWaiters.count == 1 })
+        again.cancel()
+        await #expect(throws: CancellationError.self) { try await within(.seconds(2)) { try await again.value } }
+        #expect(await client.subscribedResources == ["test://a"])
+        let reopened = try await transport.message(3, timeout: .seconds(3))
+        #expect(resourceSubscriptions(of: reopened) == ["test://a"])
+    }
+
+    @Test("subscribeToResource from a cancelled task throws without opening a stream")
+    func testSubscribeFromCancelledTask() async throws {
+        let transport = ListenScript()
+        let client = try await connect(transport, capabilities: #"{"resources":{"subscribe":true}}"#)
+        defer { Task { await client.disconnect() } }
+
+        let cancelled = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            try await client.subscribeToResource(uri: "test://a")
+        }
+        await #expect(throws: CancellationError.self) { try await cancelled.value }
+        #expect(await client.subscribedResources.isEmpty)
+
+        // The next stream names only the URI of the call that was not cancelled.
+        let subscribing = Task { try await client.subscribeToResource(uri: "test://b") }
+        let listen = try await transport.message(2)
+        #expect(resourceSubscriptions(of: listen) == ["test://b"])
+        subscribing.cancel()
+    }
+
+    @Test("A replacement acknowledged after its predecessor ended is kept")
+    func testReplacementOutlivesPredecessor() async throws {
+        let transport = ListenScript()
+        let client = try await connect(
+            transport, capabilities: #"{"tools":{"listChanged":true},"resources":{"subscribe":true}}"#)
+        defer { Task { await client.disconnect() } }
+
+        await client.onNotification(ToolListChangedNotification.self) { _ in }
+        let first = try await transport.message(2)
+        try await transport.acknowledge(first)
+        #expect(await eventually { await client.notificationStream != nil })
+
+        // The first stream ends while its replacement waits for the acknowledgement.
+        let subscribing = Task { try await client.subscribeToResource(uri: "test://a") }
+        let second = try await transport.message(3)
+        try await transport.reply(to: first, #""result":{"resultType":"complete"}"#)
+        #expect(await eventually { await client.notificationStreamFailures == 1 })
+        try await transport.acknowledge(second, #"{"toolsListChanged":true,"resourceSubscriptions":["test://a"]}"#)
+        try await within { try await subscribing.value }
+
+        // The replacement serves what is wanted: the same filter opens nothing.
+        await client.onNotification(ToolListChangedNotification.self) { _ in }
+        try await client.unsubscribeFromResource(uri: "test://a")
+        let third = try await transport.message(4)
+        #expect(third["method"] == "subscriptions/listen")
+        #expect(resourceSubscriptions(of: third) == nil)
     }
 
     @Test("The reopen delay keeps growing while acknowledged streams fail at once")

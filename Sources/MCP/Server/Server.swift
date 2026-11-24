@@ -285,6 +285,12 @@ public actor Server {
     /// Open `subscriptions/listen` streams.
     private var listeners: [Int: Listener] = [:]
     private var nextListenerToken = 0
+    /// The tasks handling `subscriptions/listen` requests, by request id, so
+    /// that ``stop()`` can wait for the results of the streams it ends.
+    private var listenRequests: [ID: Task<Void, Never>] = [:]
+    /// Whether ``stop()`` is ending the listen streams; a stream that would
+    /// open meanwhile is refused.
+    private var isStopping = false
     /// The task for the message handling loop
     private var task: Task<Void, Never>?
     /// Whether ``start(transport:initializeHook:statelessRequestHook:)`` got an initialize hook.
@@ -367,9 +373,12 @@ public actor Server {
                         } else if let request = try? decoder.decode(AnyRequest.self, from: data) {
                             // Handle request in a separate task to avoid blocking the receive loop
                             startingRequests[request.id] = false
-                            Task {
+                            let isListen = request.method == SubscriptionsListen.name
+                            let handling = Task {
                                 _ = try? await self.handleRequest(request, sendResponse: true)
+                                if isListen { self.listenRequests[request.id] = nil }
                             }
+                            if isListen { listenRequests[request.id] = handling }
                         } else if let message = try? decoder.decode(AnyMessage.self, from: data) {
                             try await handleMessage(message)
                         } else {
@@ -410,8 +419,20 @@ public actor Server {
     }
 
     /// Stop the server
+    ///
+    /// Open `subscriptions/listen` streams end with their result, as with
+    /// ``closeSubscriptions()``, and `stop()` waits until those results are
+    /// sent before it closes the transport. A stream that is still being
+    /// authorized is refused.
     public func stop() async {
+        isStopping = true
+        defer { isStopping = false }
         closeSubscriptions()
+        // The handlers resume only once this suspends: closing the
+        // transport first lost their results.
+        let ending = listeners.values.compactMap { listenRequests[$0.context.id] }
+        for handling in ending { await handling.value }
+
         task?.cancel()
         task = nil
 
@@ -634,6 +655,9 @@ public actor Server {
     /// The number of open `subscriptions/listen` streams.
     var openSubscriptionCount: Int { listeners.count }
 
+    /// The number of `subscriptions/listen` requests still being handled.
+    var listenRequestCount: Int { listenRequests.count }
+
     /// Ends every open `subscriptions/listen` stream with its result.
     public func closeSubscriptions() {
         for listener in listeners.values {
@@ -692,6 +716,10 @@ public actor Server {
         if let authorize = subscriptionAuthorizer {
             requested = try checked(try await authorize(requested, context))
             try checkCapacity()
+        }
+        // The server may have stopped, or be stopping, while the authorizer ran.
+        guard !isStopping, let current = self.connection, current === connection else {
+            throw MCPError.internalError("Server stopped")
         }
         let filter = honored(requested)
         var meta = Metadata()

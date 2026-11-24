@@ -1616,6 +1616,7 @@ A client opens a `subscriptions/listen` stream for the notifications it wants
   URIs are dropped.
 - A stream ends when the client disconnects or cancels, or when the server
   calls `closeSubscriptions()` or `stop()`, which send the listen result.
+  `stop()` waits until those results are sent before it closes the transport.
 - `StatelessHTTPServerTransport` refuses a listen request whose `Accept` lacks
   `text/event-stream` with 406, and sends a `: keep-alive` SSE comment on
   open streams every `keepAliveInterval` (15 seconds).
@@ -1628,15 +1629,17 @@ On stateless connections, `Client` opens these streams itself:
   and for the subscribed resources.
 - Registering a handler or subscribing replaces the stream with a wider one,
   and the old stream closes once the new one is acknowledged. When the new
-  stream cannot be opened, the old one stays open. Notifications of a
-  replaced stream are dropped.
+  stream cannot be opened, the old one stays open. Until a replaced stream
+  ends, its notifications that the client still wants are delivered and the
+  rest are dropped.
 - **Resource updates:** `subscribeToResource(uri:)` returns once the server
   acknowledges a stream that names the URI, and throws when it does not serve
   it; `unsubscribeFromResource(uri:)` replaces the stream with one without it.
   `subscribedResourceURIs` lists the URIs the open stream serves.
-- A stream that fails, for example on a network error, is reopened after 1
-  second, then after delays that double up to 60 seconds. A stream the server
-  ends with its result is reopened by the next change.
+- A stream that ends, on an error or because the server closed it with its
+  result, is reopened after 1 second, then after delays that double up to 60
+  seconds. The delay is reset only when a stream ends after staying open for
+  at least 60 seconds.
 - Listen POSTs have an idle timeout of one hour instead of the session's
   `timeoutIntervalForRequest`.
 - `disconnect()` closes the stream.
