@@ -8,15 +8,15 @@ CI is red on the legs below until the client transport is fixed.
 
 ## Summary
 
-| Job | ubi9 (`swift:6.1-rhel-ubi9`) | `swift:6.1-noble` |
+| Jobs | ubi9 (`swift:6.1-rhel-ubi9`) | `swift:6.1-noble` |
 |---|---|---|
 | `build-test` (734 tests, hello example) | pass | not run |
 | `docs` (DocC, `weave --check`) | pass | not run |
-| `conformance-2026-07-28`, both modes | pass | hangs (client, below) |
-| `conformance-2025-11-25` | server pass; client fails 6 scenarios | not run |
-| `conformance-default` | server pass; client fails the same 6 | not run |
-| `tier-2025-11-25` | server 30/30; client 13/18 (macOS: 18/18) | not run |
-| `tier-2026-07-28` | pass | not run |
+| `conformance-2026-07-28-*` | pass | hangs (client, below) |
+| `conformance-2025-11-25-*` | server pass; client fails 6 scenarios | not run |
+| `conformance-default-*` | server pass; client fails the same 6 | not run |
+| `tier-2025-11-25-*` | server 30/30; client 13/18 (macOS: 18/18) | not run |
+| `tier-2026-07-28-*` | pass | not run |
 | `interop` | every Swift-client HTTP cell differs (below) | not run |
 
 The server side, stdio, and every Go and Python client match macOS exactly. All of
@@ -81,5 +81,5 @@ is 6.1.3 on both, but FoundationNetworking links the system libcurl, which is
 ```sh
 scripts/ci-linux.sh conformance --spec-version 2025-11-25 --mode client --solo-attempts 0
 scripts/ci-linux.sh interop      # then diff .build/linux/*/interop/report.md interop/RESULTS.md
-scripts/ci-linux.sh --image swift:6.1-noble --job-timeout 5 conformance-2026-07-28
+scripts/ci-linux.sh --image swift:6.1-noble --job-timeout 5 conformance-2026-07-28-client
 ```

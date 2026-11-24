@@ -33,7 +33,7 @@
 #   --cpus <n>        CPUs for the container (default: 8).
 #   --memory <size>   Memory for the container (default: 16G).
 #   --clean           Delete the build volume first (with --session, the
-#                     session is restarted).
+#                     session is restarted; refused while a run uses it).
 #   --job-timeout <m> Stop a job, or a -- command, after <m> minutes
 #                     (default: 30); it counts as failed.
 #   --source <dir>    Run against another git working tree, e.g. a worktree of
@@ -45,7 +45,8 @@
 #                     The volume mounted at /w/.build (default:
 #                     mcp-ci-build-<image>-<arch>). SwiftPM locks .build, and a
 #                     volume can be attached to one running container at a
-#                     time, so runs in parallel need one each.
+#                     time, so runs in parallel need one each. With a volume
+#                     other than the default, results go to .build/linux/<name>/.
 #   --seed-from <volume>
 #                     When the build volume does not exist yet, create it as a
 #                     copy of <volume>, so its first build compiles only what
@@ -133,6 +134,8 @@ done
 for name in "$SESSION" "$STOP_SESSION"; do
     [[ -z "$name" || "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "invalid session name $name"
 done
+# The name is also a directory of .build/linux.
+[[ -z "$BUILD_VOLUME" || "$BUILD_VOLUME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "invalid --build-volume name $BUILD_VOLUME"
 if [[ -z "$STOP_SESSION" ]]; then
     [[ $SHELL_MODE -eq 0 || $COMMAND_MODE -eq 0 ]] || die "--shell and -- <command> do not go together"
     [[ $SHELL_MODE -eq 1 || $# -gt 0 ]] || { usage; exit 2; }
@@ -150,6 +153,12 @@ stop_session() { # name
     info "stopping session mcp-ci-session-$1"
     container stop "mcp-ci-session-$1" >/dev/null 2>&1 || true
     rm -rf "${SESSIONS:?}/$1"
+}
+# Prints the pid of the run that holds the session's lock, when it is alive.
+session_owner() { # name
+    local owner
+    owner="$(cat "$SESSIONS/$1/lock/pid" 2>/dev/null)" && [[ -n "$owner" ]] && kill -0 "$owner" 2>/dev/null &&
+        echo "$owner"
 }
 
 if [[ -n "$STOP_SESSION" ]]; then
@@ -297,7 +306,10 @@ if holder="$(volume_session "$BUILD_VOLUME")"; then
 fi
 
 if [[ $CLEAN -eq 1 ]]; then
-    if [[ -n "$SESSION" ]] && session_running "$SESSION"; then stop_session "$SESSION"; fi
+    if [[ -n "$SESSION" ]] && session_running "$SESSION"; then
+        if owner="$(session_owner "$SESSION")"; then die "session $SESSION is busy (run $owner)"; fi
+        stop_session "$SESSION"
+    fi
     info "deleting $BUILD_VOLUME"
     container volume rm "$BUILD_VOLUME" >/dev/null 2>&1 || true
 fi
@@ -351,8 +363,7 @@ if [[ -n "$SESSION" ]]; then
         printf '%s\n' "$config" >"$STATE/config"
     fi
     if ! mkdir "$STATE/lock" 2>/dev/null; then
-        owner="$(cat "$STATE/lock/pid" 2>/dev/null || true)"
-        [[ -n "$owner" ]] && kill -0 "$owner" 2>/dev/null && die "session $SESSION is busy (run $owner)"
+        if owner="$(session_owner "$SESSION")"; then die "session $SESSION is busy (run $owner)"; fi
     fi
     echo $$ >"$STATE/lock/pid"
     LOCKED=1
@@ -372,6 +383,8 @@ fi
     COPYFILE_DISABLE=1 tar --null --no-xattrs --no-mac-metadata -T - -cf "$IN/src.tar")
 
 OUT="$SOURCE/.build/linux/$KEY"
+# Runs in parallel against one tree each have a build volume of their own.
+[[ "$BUILD_VOLUME" == "mcp-ci-build-$KEY" ]] || OUT="$SOURCE/.build/linux/$BUILD_VOLUME"
 rm -rf "$OUT"
 mkdir -p "$OUT"
 

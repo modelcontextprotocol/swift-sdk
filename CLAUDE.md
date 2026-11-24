@@ -248,7 +248,8 @@ summary. Add or change a job there, not in a runner.
   `scripts/ci/deps-linux.sh` installs Node, Go, uv and ps (dnf or apt) into a derived image;
   `/w/.build` is a named volume (`--build-volume`, `--seed-from`), the package caches a
   directory on the Mac; `--session` keeps a container up between runs, `--source` runs another
-  worktree, `-- <command>` any command; results go to `.build/linux/<image>-<arch>/`;
+  worktree, `-- <command>` any command; results go to `.build/linux/<image>-<arch>/`
+  (`.build/linux/<volume>/` with another `--build-volume`);
   `--job-timeout` (default 30 min) stops a hung job.
 
 Linux is not conformant yet, and fixing it is deferred. Baselines and `interop/RESULTS.md`

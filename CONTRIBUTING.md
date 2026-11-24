@@ -149,6 +149,7 @@ scripts/ci-linux.sh --stop-session wt-p5   # the volume stays, warm, for the nex
 
 A volume can be attached to one running container at a time, so sessions that run in parallel
 need their own `--build-volume` (and a reference volume cannot seed while a session holds it).
+A run with a `--build-volume` other than the default puts its results in `.build/linux/<volume>/`.
 
 Conformance baselines and `interop/RESULTS.md` are shared by macOS and Linux. Jobs that the
 Linux HTTP client fails today are marked `advisory` in `scripts/ci/jobs`: on Linux they run and
