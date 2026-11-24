@@ -57,6 +57,39 @@ struct OAuthIssuerTests {
         }
     }
 
+    @Test("An iss given twice or without a value is rejected, advertised or not")
+    func testRepeatedOrEmptyIss() {
+        let redirects = [
+            "https://app.example.com/callback?code=c&state=s&iss=https://as.example&iss=https://evil.example",
+            "https://app.example.com/callback?code=c&state=s&iss=https://evil.example&iss=https://as.example",
+            "https://app.example.com/callback?code=c&state=s&iss=https://as.example&iss=https://as.example",
+            "https://app.example.com/callback?code=c&state=s&iss",
+            "https://app.example.com/callback?code=c&state=s&iss=",
+        ]
+        for redirect in redirects {
+            for required in [false, true] {
+                do {
+                    _ = try flow.extractCode(
+                        from: URL(string: redirect)!, expectedRedirectURI: redirectURI, expectedState: "s",
+                        expectedIssuer: .init(issuer: "https://as.example", isRequired: required))
+                    Issue.record("Expected an issuer mismatch for \(redirect)")
+                } catch OAuthAuthorizationError.authorizationResponseIssuerMismatch {
+                } catch {
+                    Issue.record("Unexpected error \(error) for \(redirect)")
+                }
+            }
+        }
+    }
+
+    @Test("A root issuer with an IPv6 host matches with and without its trailing slash")
+    func testIPv6IssuerComparison() {
+        #expect(OAuthIssuer.matches("https://[::1]:8443", "https://[::1]:8443/"))
+        #expect(OAuthIssuer.matches("https://[2001:db8::1]/", "https://[2001:db8::1]"))
+        #expect(!OAuthIssuer.matches("https://[::1]/tenant", "https://[::1]/tenant/"))
+        #expect(!OAuthIssuer.matches("https://as.example?x", "https://as.example?x/"))
+        #expect(!OAuthIssuer.matches("https://user@as.example", "https://user@as.example/"))
+    }
+
     @Test("The authorizer passes the metadata issuer and its iss support to the flow")
     func testAuthorizerPassesIssuer() async throws {
         let discovery = MockDiscoveryClient()

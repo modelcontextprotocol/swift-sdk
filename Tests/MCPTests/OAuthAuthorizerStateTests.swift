@@ -16,6 +16,7 @@ final class RecordingTokenClient: OAuthTokenRequesting, @unchecked Sendable {
         let endpoint: URL
         let grantType: String?
         let refreshToken: String?
+        let scope: String?
     }
 
     private let lock = NSLock()
@@ -37,7 +38,9 @@ final class RecordingTokenClient: OAuthTokenRequesting, @unchecked Sendable {
         let grant = parameters[OAuthParameterName.grantType]
         let number: Int = lock.withLock {
             recorded.append(
-                Call(endpoint: endpoint, grantType: grant, refreshToken: parameters[OAuthParameterName.refreshToken]))
+                Call(
+                    endpoint: endpoint, grantType: grant, refreshToken: parameters[OAuthParameterName.refreshToken],
+                    scope: parameters[OAuthParameterName.scope]))
             issued += 1
             return issued
         }
@@ -279,8 +282,7 @@ struct OAuthAuthorizerStateTests {
         let first = Task { try await challenge(authorizer, sent: nil) }
         await entered.next()
         let waiting = (0..<2).map { _ in Task { try await challenge(authorizer, sent: nil) } }
-        try await waitUntil { validator.endpointChecks == 3 }
-        try await Task.sleep(for: .milliseconds(50))
+        try await waitUntil { validator.endpointChecks == 3 && authorizer.gate.waiterCount == 2 }
         flow.release()
 
         for task in [first] + waiting {
@@ -292,6 +294,40 @@ struct OAuthAuthorizerStateTests {
         flow.error = nil
         #expect(try await challenge(authorizer, sent: nil))
         #expect(flow.performCount == 2)
+    }
+
+    @Test(
+        "Concurrent 403 step-ups for a token whose step-up the user cancelled ask once and fail",
+        .timeLimit(.minutes(1)))
+    func waitersShareCancelledStepUp() async throws {
+        let storage = InMemoryTokenStorage()
+        storage.save(
+            OAuthAccessToken(
+                value: "narrow", tokenType: "Bearer", expiresAt: Date().addingTimeInterval(3600), scopes: ["read"],
+                authorizationServer: nil, refreshToken: nil))
+        let flow = GatedAuthCodeFlow()
+        flow.error = UserCancelledAuthorization()
+        let authorizer = makeAuthorizer(
+            discovery: discovery(listing: serverA), tokens: RecordingTokenClient(), storage: storage,
+            grantType: .authorizationCode, authCodeFlow: flow)
+        let insufficient = ["WWW-Authenticate": #"Bearer error="insufficient_scope", scope="admin""#]
+        var entered = flow.entered.makeAsyncIterator()
+
+        let first = Task { try await challenge(authorizer, sent: "Bearer narrow", status: 403, headers: insufficient) }
+        await entered.next()
+        let waiting = Task {
+            try await challenge(authorizer, sent: "Bearer narrow", status: 403, headers: insufficient)
+        }
+        try await waitUntil { authorizer.gate.waiterCount == 1 }
+        flow.release()
+
+        // The narrower token is still stored and valid, but it is the one
+        // the waiting request carried.
+        for task in [first, waiting] {
+            await #expect(throws: UserCancelledAuthorization.self) { _ = try await task.value }
+        }
+        #expect(flow.performCount == 1)
+        #expect(storage.load()?.value == "narrow")
     }
 
     @Test("Concurrent 403 step-ups for the same scopes run one token request", .timeLimit(.minutes(1)))
@@ -340,8 +376,7 @@ struct OAuthAuthorizerStateTests {
         let first = Task { try await challenge(authorizer, sent: nil) }
         await entered.next()
         let waiting = Task { try await challenge(authorizer, sent: nil) }
-        try await waitUntil { validator.endpointChecks == 2 }
-        try await Task.sleep(for: .milliseconds(20))
+        try await waitUntil { validator.endpointChecks == 2 && authorizer.gate.waiterCount == 1 }
         waiting.cancel()
 
         // The cancelled challenge returns while the first still holds the gate.
@@ -418,6 +453,52 @@ struct OAuthAuthorizerStateTests {
         #expect(discovery.fetchProtectedResourceMetadataCallCount == fetches + 1)
         #expect(tokens.calls.last?.endpoint.host == serverB.host)
         #expect(tokens.calls.last?.grantType == "client_credentials")
+    }
+
+    @Test("With a configured authorization server, a 401 keeps the token when the resource lists another server")
+    func configuredServerKeepsTokenOn401() async throws {
+        let storage = InMemoryTokenStorage()
+        let discovery = discovery(listing: serverA)
+        let tokens = RecordingTokenClient()
+        let authorizer = makeAuthorizer(
+            discovery: discovery, tokens: tokens, storage: storage, overrides: .init(authorizationServerURL: serverA))
+        #expect(try await challenge(authorizer, sent: nil))
+        #expect(try await challenge(authorizer, sent: "Bearer token-1"))  // refresh
+
+        // The refreshed token is rejected, so the resource metadata is read
+        // again; it lists B. The server metadata cannot be read again now.
+        discovery.protectedResourceMetadataResult = OAuthProtectedResourceMetadata(
+            resource: nil, authorizationServers: [serverB], scopesSupported: nil)
+        discovery.authorizationServerMetadataError = OAuthMetadataUnavailable(url: serverA, reason: "HTTP 503")
+        #expect(try await challenge(authorizer, sent: "Bearer token-2"))
+        #expect(tokens.calls.map(\.grantType) == ["client_credentials", "refresh_token", "refresh_token"])
+        #expect(tokens.calls.allSatisfy { $0.endpoint.host == serverA.host })
+        #expect(storage.load()?.value == "token-3")
+    }
+
+    @Test("With a configured authorization server, a 403 step-up keeps the token and its scopes")
+    func configuredServerKeepsTokenOnStepUp() async throws {
+        let storage = InMemoryTokenStorage()
+        let discovery = discovery(listing: serverA)
+        let tokens = RecordingTokenClient()
+        let authorizer = makeAuthorizer(
+            discovery: discovery, tokens: tokens, storage: storage, overrides: .init(authorizationServerURL: serverA))
+        #expect(try await challenge(authorizer, sent: nil, headers: ["WWW-Authenticate": #"Bearer scope="read""#]))
+
+        discovery.protectedResourceMetadataResult = OAuthProtectedResourceMetadata(
+            resource: nil, authorizationServers: [serverB], scopesSupported: nil)
+        let moved = [
+            "WWW-Authenticate":
+                #"Bearer error="insufficient_scope", scope="admin", resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/other""#
+        ]
+        tokens.refusedGrants = ["client_credentials"]
+        await #expect(throws: OAuthAuthorizationError.self) {
+            _ = try await challenge(authorizer, sent: "Bearer token-1", status: 403, headers: moved)
+        }
+        let requested = tokens.calls.last?.scope?.split(separator: " ").map(String.init) ?? []
+        #expect(Set(requested) == ["read", "admin"])
+        #expect(tokens.calls.last?.endpoint.host == serverA.host)
+        #expect(storage.load()?.value == "token-1")
     }
 
     @Test("A new authorization server drops the stored token, so its refresh token never reaches that server")

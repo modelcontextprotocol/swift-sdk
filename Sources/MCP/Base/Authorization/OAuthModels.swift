@@ -116,12 +116,15 @@ enum OAuthIssuer {
     static func matches(_ lhs: String, _ rhs: String) -> Bool {
         if lhs == rhs { return true }
         let (shorter, longer) = lhs.count < rhs.count ? (lhs, rhs) : (rhs, lhs)
+        // The shorter one must be a bare origin. Its parts are checked rather
+        // than the origin rebuilt from them, so the result does not depend on
+        // how a Foundation version spells an IPv6 host.
         guard longer == shorter + "/",
-            let components = URLComponents(string: shorter), let scheme = components.scheme,
-            let host = components.percentEncodedHost
+            let components = URLComponents(string: shorter), components.scheme != nil,
+            components.host?.isEmpty == false, components.user == nil, components.password == nil,
+            components.path.isEmpty, components.query == nil, components.fragment == nil
         else { return false }
-        let port = components.port.map { ":\($0)" } ?? ""
-        return shorter == "\(scheme)://\(host)\(port)"
+        return true
     }
 }
 

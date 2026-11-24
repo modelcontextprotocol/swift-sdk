@@ -194,8 +194,9 @@ public struct OAuthAuthorizationCodeFlow: Sendable {
 
     /// Extracts and validates the authorization code from the redirect URL.
     ///
-    /// An `iss` parameter must equal the expected issuer exactly, without URL
-    /// normalization; a missing `iss` is rejected when the server advertised it.
+    /// An `iss` parameter must appear once and equal the expected issuer
+    /// exactly, without URL normalization; a missing `iss` is rejected when
+    /// the server advertised it.
     ///
     /// - Parameters:
     ///   - redirectURL: The redirect URL received from the authorization server.
@@ -244,13 +245,16 @@ public struct OAuthAuthorizationCodeFlow: Sendable {
         }
 
         if let expectedIssuer {
-            let iss = redirectComponents.queryItems?.first(where: {
-                $0.name == OAuthParameterName.issuer
-            })?.value
-            if let iss {
-                guard iss == expectedIssuer.issuer else {
+            // RFC 9207 §2.4: a present `iss` must equal the issuer. A
+            // parameter is sent at most once (RFC 6749 §3.1), so an `iss`
+            // given twice, or without a value, does not match either.
+            let issValues = (redirectComponents.queryItems ?? [])
+                .filter { $0.name == OAuthParameterName.issuer }
+                .map { $0.value ?? "" }
+            if !issValues.isEmpty {
+                guard issValues == [expectedIssuer.issuer] else {
                     throw OAuthAuthorizationError.authorizationResponseIssuerMismatch(
-                        expected: expectedIssuer.issuer, actual: iss)
+                        expected: expectedIssuer.issuer, actual: issValues.joined(separator: ", "))
                 }
             } else if expectedIssuer.isRequired {
                 throw OAuthAuthorizationError.authorizationResponseMissingIssuer

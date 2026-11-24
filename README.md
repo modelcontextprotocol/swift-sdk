@@ -1844,7 +1844,8 @@ The authorizer also:
   `endpointOverrides.authorizationServerURL` is trusted: its metadata is used
   whatever `issuer` it names;
 - checks the `iss` parameter of the authorization response against that
-  issuer with simple string comparison, and rejects a response without `iss`
+  issuer with simple string comparison, rejects an `iss` given more than
+  once or without a value, and rejects a response without `iss`
   when the server advertises `authorization_response_iss_parameter_supported`
   (RFC 9207, SEP-2468);
 - sends `application_type` during dynamic registration (SEP-837): `web` for
@@ -1855,7 +1856,8 @@ The authorizer also:
   token is rejected too; a refreshed token is then refreshed again when the
   resource still names the same server. When the resource names another
   authorization server, registered credentials and tokens from the previous
-  server are dropped and the client registers again (SEP-2352). Pre-registered
+  server are dropped and the client registers again (SEP-2352), unless
+  `endpointOverrides.authorizationServerURL` configures the server. Pre-registered
   credentials are kept. A failed read falls back to the metadata read before;
   with none, the request fails and the token is kept. A network error or an
   unexpected status while reading the authorization server metadata also
@@ -1868,9 +1870,10 @@ The authorizer also:
   fails the request instead;
 - handles one challenge at a time: concurrent requests that get a 401, or a
   403 for the same scopes, wait for the first and retry with the token it
-  obtained. When it fails and leaves no token (a cancelled authorization, a
-  refused grant), they fail with its error; a later request starts a new
-  flow. A request cancelled while waiting stops waiting;
+  obtained. When it fails and leaves no token other than the one they
+  carried (a cancelled authorization, a refused grant), they fail with its
+  error; a later request starts a new flow. A request cancelled while waiting
+  stops waiting;
 - compares a challenge with the token the challenged request carried, so a
   401 for a token another request already replaced retries with the new one;
 - retries dynamic client registration in the next flow when it failed with

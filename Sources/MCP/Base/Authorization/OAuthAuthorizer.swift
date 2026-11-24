@@ -162,7 +162,7 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
     /// Guards every stored property below that has an underscore.
     private let stateLock = NSLock()
     /// Runs `handleChallenge` and `prepareAuthorization` one at a time.
-    private let gate = AsyncGate()
+    let gate = AsyncGate()
 
     private var _configuration: OAuthConfiguration
     private var _selectedAuthorizationServer: URL?
@@ -365,7 +365,7 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
         statusCode: Int,
         headers: [String: String],
         endpoint: URL,
-        operationKey: String?,
+        operationKey: String? = nil,
         sentAuthorization: String?,
         session: URLSession
     ) async throws -> Bool {
@@ -393,10 +393,12 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
         return try await gate.run {
             // A challenge that ended while this one waited failed (a user who
             // cancelled the authorization, a refused grant) and left no
-            // token: fail with it instead of starting the same flow again.
+            // token other than the one this request carried, which the
+            // resource rejected: fail with it instead of starting the same
+            // flow again.
             let last = lastChallenge
             if last.count > completedBefore, let error = last.error,
-                tokenStorage.load().map({ $0.isExpired() }) ?? true
+                tokenStorage.load().map({ $0.isExpired() || $0.value == sentToken }) ?? true
             {
                 throw error
             }
@@ -628,7 +630,8 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
     /// is none, when the challenge names another metadata URL, or when
     /// `refresh` is set. A failed or synthesized refetch keeps a fetched
     /// copy. When the selected authorization server is no longer listed, the
-    /// selection and the stored token are dropped.
+    /// selection and the stored token are dropped, unless
+    /// `endpointOverrides.authorizationServerURL` configures the server.
     private func discoverProtectedResourceMetadata(
         endpoint: URL,
         challenge: OAuthBearerChallenge?,
@@ -685,7 +688,10 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
         }
         try validateProtectedResource(metadata: metadata, endpoint: endpoint)
 
-        if let selected = selectedAuthorizationServer,
+        // A configured authorization server is used whatever the resource
+        // lists, so the resource cannot move away from it.
+        if configuration.endpointOverrides.authorizationServerURL == nil,
+            let selected = selectedAuthorizationServer,
             !metadata.authorizationServers.contains(where: { authorizationServersMatch($0, selected) })
         {
             // Another server: the token, and its refresh token, belong to the old one.
@@ -1186,6 +1192,9 @@ final class AsyncGate: @unchecked Sendable {
     private var busy = false
     private var nextWaiter = 0
     private var waiters: [(id: Int, continuation: CheckedContinuation<Void, any Error>)] = []
+
+    /// The number of tasks waiting for the gate.
+    var waiterCount: Int { lock.withLock { waiters.count } }
 
     func run<T>(_ body: () async throws -> T) async throws -> T {
         try await acquire()
