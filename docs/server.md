@@ -638,7 +638,7 @@ func adviseTravel(_ params: CallTool.Parameters, maxRounds: Int = 4) throws -> C
 ```
 
 - `tools` and `toolChoice` need the client's `sampling.tools` capability. An `includeContext` other than `none` needs `sampling.context`. Without them the call fails with -32021 at both eras.
-- The SDK checks the messages of each sampling request before it goes to the client. A message with tool results holds only tool results. Each tool use has a result in the next message, which is a user message. Each tool result answers a tool use in the message before it. A request that breaks a rule fails the call with -32603.
+- The SDK checks the messages of each sampling request before it goes to the client. Tool uses are in assistant messages, tool results in user messages. A message with tool results holds only tool results. Each tool use has a result in the next message, which is a user message. Each tool result answers a tool use in the message before it. A request that breaks a rule fails the call with -32603.
 - Limit the rounds. On the last round, send `toolChoice: .init(mode: .none)`: the model must then answer without tools.
 
 ### Errors

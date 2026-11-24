@@ -513,6 +513,9 @@ public enum CreateSamplingMessage: Method {
         }
 
         /// The tool choice mode. If omitted, defaults to `.auto`.
+        ///
+        /// The initializers and decoding store `.auto` for an omitted mode,
+        /// so this is never `nil`.
         public let mode: Mode?
 
         /// Creates a tool choice.
@@ -530,7 +533,7 @@ public enum CreateSamplingMessage: Method {
         @_disfavoredOverload
         @available(*, deprecated, message: "Pass a Mode; nil is .auto")
         public init(mode: Mode?) {
-            self.mode = mode
+            self.mode = mode ?? .auto
         }
 
         private enum CodingKeys: String, CodingKey {
@@ -678,6 +681,7 @@ extension CreateSamplingMessage.Parameters {
     /// The first violation of the message rules for tools, or `nil`.
     ///
     /// The rules of the specification:
+    /// - Tool uses are in assistant messages, tool results in user messages.
     /// - A message with tool results holds only tool results.
     /// - Each tool use in a message has a tool result in the next message,
     ///   which is a user message.
@@ -685,6 +689,9 @@ extension CreateSamplingMessage.Parameters {
     ///
     /// Blocks of an unknown type are not counted: a later revision decides
     /// where they may appear.
+    ///
+    /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/client/sampling#message-content-constraints
+    /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/client/sampling#message-roles
     func toolMessageProblem() -> String? {
         for (index, message) in messages.enumerated() {
             let blocks = message.content.asArray
@@ -699,7 +706,13 @@ extension CreateSamplingMessage.Parameters {
                 default: others += 1
                 }
             }
+            if !uses.isEmpty, message.role != .assistant {
+                return "messages[\(index)] has tool uses, which belong in an assistant message"
+            }
             if !results.isEmpty {
+                if message.role != .user {
+                    return "messages[\(index)] has tool results, which belong in a user message"
+                }
                 if others > 0 || !uses.isEmpty {
                     return "messages[\(index)] has tool results and other content"
                 }

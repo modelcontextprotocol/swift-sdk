@@ -385,7 +385,7 @@ The specification expects the client to let the user review the request and the 
 The client checks each sampling request before the handler runs. It answers with -32602, and the handler does not run, when:
 
 - The request has `tools` or `toolChoice`, and `capabilities` has no `sampling.tools`.
-- The messages break the rules for tools. A message with tool results holds only tool results. Each tool use has a result in the next message, which is a user message. Each tool result answers a tool use in the message before it.
+- The messages break the rules for tools. Tool uses are in assistant messages, tool results in user messages. A message with tool results holds only tool results. Each tool use has a result in the next message, which is a user message. Each tool result answers a tool use in the message before it.
 
 At 2026-07-28 the call that received the input request fails with that error. The client does not refuse an `includeContext` it did not declare `context` for: it can ignore the field.
 

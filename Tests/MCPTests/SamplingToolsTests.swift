@@ -214,6 +214,26 @@ struct SamplingToolMessageRuleTests {
         #expect(
             problem([.user("Hi"), .assistant(.single(use("a", "Paris"))), .user(.multiple([result("a"), result("z")]))])
                 == "messages[2] has a result for tool use z, which is not in the message before it")
+        // Tool uses are in assistant messages, tool results in user messages.
+        #expect(
+            problem([.user(.single(use("a", "Paris"))), .user(.single(result("a")))])
+                == "messages[0] has tool uses, which belong in an assistant message")
+        #expect(
+            problem([.user("Hi"), .assistant(.single(result("x")))])
+                == "messages[1] has tool results, which belong in a user message")
+    }
+
+    @Test("ToolChoice(mode: nil) is the auto mode, also after a round trip")
+    @available(*, deprecated, message: "Tests the deprecated ToolChoice(mode: Mode?)")
+    func toolChoiceNil() throws {
+        typealias ToolChoice = CreateSamplingMessage.ToolChoice
+        let choice = ToolChoice(mode: nil as ToolChoice.Mode?)
+        #expect(choice == ToolChoice(mode: .auto))
+        #expect(choice.mode == .auto)
+        let data = try JSONEncoder().encode(choice)
+        #expect(try JSONDecoder().decode(Value.self, from: data) == [:])
+        #expect(try JSONDecoder().decode(ToolChoice.self, from: data) == choice)
+        #expect(ToolChoice(mode: ToolChoice.Mode?.some(.none)).mode == ToolChoice.Mode.none)
     }
 
     @Test("ToolChoice(mode: .none) is the none mode, not the default")
@@ -589,9 +609,15 @@ struct SamplingToolClientTests {
                          {"role":"user","content":{"type":"tool_result","toolUseId":"a","content":[]}}],
              "maxTokens":10,"tools":[{"name":"t","inputSchema":{"type":"object"}}]}
             """#
+        let userToolUse = #"""
+            {"messages":[{"role":"user","content":{"type":"tool_use","id":"a","name":"t","input":{}}},
+                         {"role":"user","content":{"type":"tool_result","toolUseId":"a","content":[]}}],
+             "maxTokens":10,"tools":[{"name":"t","inputSchema":{"type":"object"}}]}
+            """#
         for (params, message) in [
             (mixed, "messages[2] has tool results and other content"),
             (missing, "messages[2] has no result for tool use b"),
+            (userToolUse, "messages[0] has tool uses, which belong in an assistant message"),
         ] {
             let reply = try await server.sample(params)
             expectWire(reply, matches: ["id": "s1", "error": ["code": -32602, "message": .string("Invalid params: \(message)")]])

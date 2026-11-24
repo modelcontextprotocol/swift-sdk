@@ -485,11 +485,15 @@ The specification's rules for sampling with tools (SEP-1577) are checked:
   request has `tools` or `toolChoice` and `capabilities` has no
   `sampling.tools`. The previous release called the handler.
 - The client answers -32602 when the messages break the rules for tool uses
-  and tool results: a message with tool results holds only tool results, each
+  and tool results: tool uses are in assistant messages and tool results in
+  user messages, a message with tool results holds only tool results, each
   tool use has a result in the next message, which is a user message, and
   each tool result answers a tool use in the message before it.
   `Server.requestSampling` throws -32602 for such messages before it sends
   the request. The previous release sent them.
+- `Server.requestSampling` throws -32601 when the request has `tools` or
+  `toolChoice` and the client did not declare `sampling.tools`, also when the
+  server is not strict. The previous release sent the request.
 
 ### HTTP server transports
 
