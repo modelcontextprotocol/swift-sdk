@@ -362,6 +362,138 @@ struct DPoPAuthorizerTests {
         #expect(try authorizer.authorizationHeaders(for: endpoint, method: "POST").isEmpty)
     }
 
+    @Test("An expired token bound to another key is discarded")
+    func expiredTokenOfOtherKey() throws {
+        let storage = InMemoryTokenStorage()
+        storage.save(OAuthAccessToken(
+            value: "old", tokenType: "DPoP", expiresAt: Date().addingTimeInterval(-60), scopes: [],
+            authorizationServer: nil, refreshToken: "rt-other-key", keyThumbprint: "another-key"))
+        let authorizer = dpopAuthorizer(tokenStorage: storage)
+        #expect(try authorizer.authorizationHeaders(for: endpoint, method: "POST").isEmpty)
+        #expect(storage.load() == nil)
+    }
+
+    @Test("The refresh token of a token bound to another key is not used (RFC 9449 section 5)")
+    func refreshTokenOfOtherKey() async throws {
+        let dpop = OAuthConfiguration.DPoP()
+        let storage = InMemoryTokenStorage()
+        storage.save(OAuthAccessToken(
+            value: "old", tokenType: "DPoP", expiresAt: Date().addingTimeInterval(-60), scopes: [],
+            authorizationServer: URL(string: "https://auth.example.com")!, refreshToken: "rt-other-key",
+            keyThumbprint: "another-key"))
+        let tokenClient = dpopTokenClient()
+        let authorizer = dpopAuthorizer(dpop: dpop, tokenStorage: storage, tokenClient: tokenClient)
+        #expect(try await authorizer.handleChallenge(
+            statusCode: 401, headers: headers401, endpoint: endpoint, session: .shared))
+        #expect(tokenClient.requestCallCount == 1)
+        #expect(tokenClient.capturedParameters?[OAuthParameterName.grantType] == OAuthGrantTypeValue.clientCredentials)
+        #expect(tokenClient.capturedParameters?[OAuthParameterName.refreshToken] == nil)
+        let token = try #require(storage.load())
+        #expect(token.value == "dpop-token")
+        #expect(token.keyThumbprint == dpop.keyThumbprint)
+    }
+
+    @Test("A DPoP-bound token is refreshed with a proof of its key and stays bound to it")
+    func refreshBoundToken() async throws {
+        let dpop = OAuthConfiguration.DPoP()
+        let storage = InMemoryTokenStorage()
+        storage.save(OAuthAccessToken(
+            value: "old", tokenType: "DPoP", expiresAt: Date().addingTimeInterval(-60), scopes: [],
+            authorizationServer: URL(string: "https://auth.example.com")!, refreshToken: "rt-1",
+            keyThumbprint: dpop.keyThumbprint))
+        let tokenClient = dpopTokenClient("refreshed")
+        let authorizer = dpopAuthorizer(dpop: dpop, tokenStorage: storage, tokenClient: tokenClient)
+        let result = try await authorizer.handleChallenge(
+            statusCode: 401, headers: headers401, endpoint: endpoint, operationKey: nil,
+            sentAuthorization: "DPoP old", session: .shared)
+        #expect(result == HTTPChallengeResult(retry: true))
+        #expect(tokenClient.requestCallCount == 1)
+        #expect(tokenClient.capturedParameters?[OAuthParameterName.grantType] == OAuthGrantTypeValue.refreshToken)
+        #expect(tokenClient.capturedParameters?[OAuthParameterName.refreshToken] == "rt-1")
+        #expect(tokenClient.capturedDPoP?.thumbprint == dpop.keyThumbprint)
+
+        let token = try #require(storage.load())
+        #expect(token.value == "refreshed")
+        #expect(token.isDPoPBound)
+        #expect(token.keyThumbprint == dpop.keyThumbprint)
+        #expect(token.refreshToken == "rt-1")
+        let headers = try authorizer.authorizationHeaders(for: endpoint, method: "POST")
+        #expect(headers[HTTPHeaderName.authorization] == "DPoP refreshed")
+        let proof = try DecodedProof(try #require(headers[HTTPHeaderName.dpop]))
+        #expect(proof.claims["ath"] as? String == accessTokenHash("refreshed"))
+    }
+
+    @Test("use_dpop_nonce for a token bound to another key is not a nonce retry")
+    func resourceNonceForOtherKey() async throws {
+        let storage = InMemoryTokenStorage()
+        storage.save(OAuthAccessToken(
+            value: "old", tokenType: "DPoP", expiresAt: nil, scopes: [], authorizationServer: nil,
+            refreshToken: nil, keyThumbprint: "another-key"))
+        let tokenClient = dpopTokenClient()
+        let authorizer = dpopAuthorizer(tokenStorage: storage, tokenClient: tokenClient)
+        let result = try await authorizer.handleChallenge(
+            statusCode: 401,
+            headers: ["WWW-Authenticate": #"DPoP error="use_dpop_nonce""#, "DPoP-Nonce": "rs-nonce-1"],
+            endpoint: endpoint, operationKey: nil, sentAuthorization: "DPoP old", session: .shared)
+        #expect(result == HTTPChallengeResult(retry: true, isDPoPNonceRetry: false))
+        #expect(tokenClient.requestCallCount == 1)
+        #expect(storage.load()?.value == "dpop-token")
+    }
+
+    @Test("Of a Bearer and a DPoP challenge, the one for the scheme the request used is answered")
+    func dualSchemeStepUp() async throws {
+        // RFC 9449 §7.2: the error is in the challenge of the scheme used.
+        func stepUp(sent scheme: String, tokenType: String, challenge: String) async throws -> Set<String>? {
+            let dpop = OAuthConfiguration.DPoP()
+            let storage = InMemoryTokenStorage()
+            storage.save(OAuthAccessToken(
+                value: "old", tokenType: tokenType, expiresAt: nil, scopes: ["read"],
+                authorizationServer: nil, refreshToken: nil,
+                keyThumbprint: tokenType == "DPoP" ? dpop.keyThumbprint : nil))
+            let tokenClient = dpopTokenClient()
+            let authorizer = dpopAuthorizer(dpop: dpop, tokenStorage: storage, tokenClient: tokenClient)
+            let result = try await authorizer.handleChallenge(
+                statusCode: 403, headers: ["WWW-Authenticate": challenge], endpoint: endpoint,
+                operationKey: nil, sentAuthorization: "\(scheme) old", session: .shared)
+            guard result.retry else { return nil }
+            return tokenClient.capturedParameters?[OAuthParameterName.scope].map {
+                Set($0.split(separator: " ").map(String.init))
+            }
+        }
+
+        #expect(
+            try await stepUp(
+                sent: "DPoP", tokenType: "DPoP",
+                challenge: #"Bearer realm="mcp", DPoP error="insufficient_scope", scope="read write""#)
+                == ["read", "write"])
+        // A Bearer token (a downgrade) gets its error in the Bearer challenge.
+        #expect(
+            try await stepUp(
+                sent: "Bearer", tokenType: "Bearer",
+                challenge: #"Bearer error="insufficient_scope", scope="read write", DPoP algs="ES256""#)
+                == ["read", "write"])
+    }
+
+    @Test("The resource_metadata of the other challenge is used when the answered one has none")
+    func dualSchemeResourceMetadata() async throws {
+        func candidate(_ challenge: String) async throws -> URL? {
+            let discovery = MockDiscoveryClient()
+            let authorizer = dpopAuthorizer(discovery: discovery, tokenClient: dpopTokenClient())
+            _ = try await authorizer.handleChallenge(
+                statusCode: 401, headers: ["WWW-Authenticate": challenge], endpoint: endpoint,
+                operationKey: nil, sentAuthorization: "DPoP old", session: .shared)
+            return discovery.lastProtectedResourceMetadataCandidates.first
+        }
+
+        #expect(
+            try await candidate(
+                #"Bearer resource_metadata="https://mcp.example.com/bearer", DPoP error="invalid_token", resource_metadata="https://mcp.example.com/dpop""#)
+                == URL(string: "https://mcp.example.com/dpop"))
+        #expect(
+            try await candidate(#"Bearer resource_metadata="https://mcp.example.com/bearer", DPoP error="invalid_token""#)
+                == URL(string: "https://mcp.example.com/bearer"))
+    }
+
     @Test("use_dpop_nonce from the resource keeps the token and retries with the nonce")
     func resourceNonce() async throws {
         let tokenClient = dpopTokenClient()

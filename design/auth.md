@@ -264,12 +264,15 @@ nonces, keyed by kind (authorization server or resource server) and origin, behi
 - Storage: a `DPoP` token is stored with `tokenType` `DPoP` and `keyThumbprint`. A `Bearer`
   answer (an AS without DPoP) is stored and used as Bearer. `authorizationHeaders` discards a
   DPoP token whose thumbprint differs from the configured key's, or any DPoP token when DPoP
-  is off.
+  is off, expired or not; such a token's refresh token is never sent (RFC 9449 §5).
 - Metadata: with DPoP, AS `dpop_signing_alg_values_supported` without `ES256` throws
   `dpopAlgorithmUnsupported`; without DPoP, PRM `dpop_bound_access_tokens_required: true`
   throws `dpopRequired`. Both are checked before registration and the grant.
 - The parser reads any scheme (`parseChallenge(scheme:from:)`); `handleChallenge` uses the
-  `Bearer` challenge, else the `DPoP` one, for `resource_metadata`, `scope` and `error`.
+  challenge of the scheme the request was sent with (RFC 9449 §7.2), `Bearer` when it carried
+  no token, else the other one, for `resource_metadata`, `scope` and `error`. A
+  `resource_metadata` missing from it is taken from the other challenge. A `use_dpop_nonce`
+  retry needs a stored DPoP token bound to the configured key.
 
 Comparison: the Python and Go SDKs declare the DPoP metadata fields only.
 

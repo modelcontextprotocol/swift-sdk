@@ -386,22 +386,31 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
             clearStoredToken(accessToken)
             return [:]
         }
+        // A DPoP-bound token, expired or not, is usable only with the key it
+        // is bound to, and so is its refresh token (RFC 9449 §5).
+        if isBoundToAnotherKey(accessToken) {
+            clearStoredToken(accessToken)
+            return [:]
+        }
         if accessToken.isExpired() {
             return [:]
         }
-        guard accessToken.isDPoPBound else {
+        guard let dpopSigner, accessToken.isDPoPBound else {
             return [HTTPHeaderName.authorization: "\(OAuthTokenType.bearer) \(accessToken.value)"]
-        }
-        // A DPoP-bound token is usable only with the key it is bound to.
-        guard let dpopSigner, accessToken.keyThumbprint == dpopSigner.thumbprint else {
-            clearStoredToken(accessToken)
-            return [:]
         }
         return [
             HTTPHeaderName.authorization: "\(OAuthTokenType.dpop) \(accessToken.value)",
             HTTPHeaderName.dpop: try dpopSigner.proof(
                 method: method, url: url, accessToken: accessToken.value, server: .resourceServer),
         ]
+    }
+
+    /// Whether `token` is DPoP-bound to another key than the configured one,
+    /// or DPoP-bound while ``OAuthConfiguration/dpop`` is not set.
+    private func isBoundToAnotherKey(_ token: OAuthAccessToken) -> Bool {
+        guard token.isDPoPBound else { return false }
+        guard let dpopSigner else { return true }
+        return token.keyThumbprint != dpopSigner.thumbprint
     }
 
     /// Clears the stored token if it is still `token`. Runs outside the gate:
@@ -424,9 +433,10 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
     ) async throws -> Bool {
         // The sent token is not known: take the stored one, before waiting
         // for a challenge in progress.
-        try await handleChallenge(
+        let stored = tokenStorage.load()
+        return try await handleChallenge(
             statusCode: statusCode, headers: headers, endpoint: endpoint, operationKey: operationKey,
-            sentToken: tokenStorage.load()?.value, session: session
+            sentToken: stored?.value, sentDPoP: stored?.isDPoPBound == true, session: session
         ).retry
     }
 
@@ -436,8 +446,10 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
     ///
     /// The result is a DPoP nonce retry when the challenge, read with the
     /// authorizer's `challengeParser`, is a `401` with a `use_dpop_nonce`
-    /// error and a `DPoP-Nonce` header, and a valid DPoP-bound token is
-    /// stored (RFC 9449 §9).
+    /// error and a `DPoP-Nonce` header, and a valid token bound to the
+    /// configured DPoP key is stored (RFC 9449 §9). Of a `Bearer` and a
+    /// `DPoP` challenge, the one for the scheme of `sentAuthorization` is
+    /// answered (RFC 9449 §7.2).
     public func handleChallenge(
         statusCode: Int,
         headers: [String: String],
@@ -446,15 +458,17 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
         sentAuthorization: String?,
         session: URLSession
     ) async throws -> HTTPChallengeResult {
-        // The credentials after the scheme ("Bearer <token>").
-        let sentToken = sentAuthorization.map { value in
+        // The scheme and the credentials after it ("Bearer <token>").
+        let sent = sentAuthorization.map { value -> (scheme: String, token: String) in
             let trimmed = value.trimmingCharacters(in: .whitespaces)
-            guard let space = trimmed.firstIndex(of: " ") else { return trimmed }
-            return trimmed[space...].trimmingCharacters(in: .whitespaces)
+            guard let space = trimmed.firstIndex(of: " ") else { return ("", trimmed) }
+            return (String(trimmed[..<space]), trimmed[space...].trimmingCharacters(in: .whitespaces))
         }
         return try await handleChallenge(
             statusCode: statusCode, headers: headers, endpoint: endpoint, operationKey: operationKey,
-            sentToken: sentToken, session: session)
+            sentToken: sent?.token,
+            sentDPoP: sent?.scheme.caseInsensitiveCompare(OAuthTokenType.dpop) == .orderedSame,
+            session: session)
     }
 
     private func handleChallenge(
@@ -463,6 +477,7 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
         endpoint: URL,
         operationKey: String?,
         sentToken: String?,
+        sentDPoP: Bool,
         session: URLSession
     ) async throws -> HTTPChallengeResult {
         try validateEndpointSecurity(for: endpoint)
@@ -482,7 +497,7 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
             do {
                 let handled = try await handleChallengeAlone(
                     statusCode: statusCode, headers: headers, endpoint: endpoint, operationKey: operationKey,
-                    sentToken: sentToken, session: session)
+                    sentToken: sentToken, sentDPoP: sentDPoP, session: session)
                 recordChallenge(error: nil)
                 return handled
             } catch is CancellationError {
@@ -500,16 +515,23 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
         endpoint: URL,
         operationKey: String?,
         sentToken: String?,
+        sentDPoP: Bool,
         session: URLSession
     ) async throws -> HTTPChallengeResult {
+        let bearerChallenge = challengeParser.parseBearer(from: headers)
         let dpopChallenge = challengeParser.parseChallenge(scheme: OAuthTokenType.dpop, from: headers)
-        let challenge = challengeParser.parseBearer(from: headers) ?? dpopChallenge
+        // RFC 9449 §7.2: a resource that offers both schemes reports the error
+        // in the challenge of the scheme the request used.
+        let challenge = Self.challenge(
+            preferring: sentDPoP ? dpopChallenge : bearerChallenge,
+            other: sentDPoP ? bearerChallenge : dpopChallenge)
 
         if let dpopSigner {
             let nonce = dpopSigner.recordNonce(from: headers, for: endpoint, server: .resourceServer)
             // RFC 9449 §9: the token is valid; retry with the server's nonce.
             if statusCode == 401, dpopChallenge?.error == OAuthErrorCode.useDPoPNonce, nonce != nil,
-                let token = tokenStorage.load(), token.isDPoPBound, !token.isExpired()
+                let token = tokenStorage.load(), token.isDPoPBound,
+                token.keyThumbprint == dpopSigner.thumbprint, !token.isExpired()
             {
                 return HTTPChallengeResult(retry: true, isDPoPNonceRetry: true)
             }
@@ -519,6 +541,21 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
             retry: try await answerChallenge(
                 statusCode: statusCode, challenge: challenge, endpoint: endpoint, operationKey: operationKey,
                 sentToken: sentToken, session: session))
+    }
+
+    /// The `preferred` challenge, or `other` when there is none. The
+    /// `resource_metadata` of `other` fills in a missing one: it names the
+    /// resource's metadata (RFC 9728 §5.1), whichever the scheme.
+    private static func challenge(
+        preferring preferred: OAuthBearerChallenge?, other: OAuthBearerChallenge?
+    ) -> OAuthBearerChallenge? {
+        guard let preferred else { return other }
+        guard preferred.parameters["resource_metadata"] == nil,
+            let resourceMetadata = other?.parameters["resource_metadata"]
+        else { return preferred }
+        var parameters = preferred.parameters
+        parameters["resource_metadata"] = resourceMetadata
+        return OAuthBearerChallenge(parameters: parameters)
     }
 
     /// Answers a challenge that a DPoP nonce alone does not: returns whether
@@ -1157,6 +1194,9 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
         asMetadata: OAuthAuthorizationServerMetadata,
         session: URLSession
     ) async throws -> Bool {
+        // RFC 9449 §5: a public client presents a DPoP proof of the key the
+        // refresh token was obtained with; the authorizer does not hold it.
+        guard !isBoundToAnotherKey(token) else { return false }
         if let issuer = token.authorizationServer {
             guard let selectedAuthorizationServer, authorizationServersMatch(issuer, selectedAuthorizationServer)
             else { return false }

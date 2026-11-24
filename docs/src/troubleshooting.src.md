@@ -280,8 +280,8 @@ authorizer, a 401 is `Authentication required` and a 403 is
 
 A DPoP client that keeps asking for authorization after a relaunch has stored
 tokens bound to a key it no longer has: the authorizer discards a token whose
-`keyThumbprint` differs from the configured key's. Persist the key with the
-tokens.
+`keyThumbprint` differs from the configured key's, with its refresh token.
+Persist the key with the tokens.
 
 Issuer mismatches are configuration errors on the server side: the issuer in
 the metadata must equal the URL that serves it, with no other normalization.

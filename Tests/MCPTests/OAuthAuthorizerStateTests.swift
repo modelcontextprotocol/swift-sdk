@@ -253,11 +253,16 @@ struct OAuthAuthorizerStateTests {
         let storage = InMemoryTokenStorage()
         let tokens = RecordingTokenClient()
         let authorizer = makeAuthorizer(discovery: discovery(listing: serverA), tokens: tokens, storage: storage)
-        #expect(try await challenge(authorizer, sent: nil))
+        #expect(try await challenge(authorizer, sent: nil, headers: ["WWW-Authenticate": #"Bearer scope="files:read""#]))
+        let previous = try #require(storage.load())
+        #expect(previous.scopes == ["files:read"])
         tokens.omitsRefreshToken = true
         #expect(try await challenge(authorizer, sent: "Bearer token-1"))  // refresh
         #expect(storage.load()?.value == "token-2")
         #expect(storage.load()?.refreshToken == "refresh-1")
+        // Neither the refresh request nor the response names a scope: the
+        // token keeps the scopes granted before.
+        #expect(storage.load()?.scopes == previous.scopes)
 
         // The kept refresh token refreshes again instead of a new grant.
         #expect(try await challenge(authorizer, sent: "Bearer token-2"))

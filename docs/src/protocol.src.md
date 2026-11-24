@@ -515,6 +515,8 @@ With `dpop` set, tokens are sender-constrained (RFC 9449, SEP-1932): the authori
 - The stored token records the key's thumbprint (`OAuthAccessToken.keyThumbprint`). A token bound to another key is discarded. Persist the key with the tokens (`P256.Signing.PrivateKey.rawRepresentation`) to use them after a relaunch, or keep it in the Secure Enclave: `DPoP(key:)` takes any `DPoPSigningKey`, which `SecureEnclave.P256.Signing.PrivateKey` is on Apple platforms. The key signs synchronously for every request, and the transport waits for it, so a key behind a network call (a remote HSM, a key service) slows every request.
 - With `dpop`, an authorization server whose `dpop_signing_alg_values_supported` lacks ES256 fails with `dpopAlgorithmUnsupported`. Without it, a protected resource with `dpop_bound_access_tokens_required` fails with `dpopRequired`.
 - Tokens from `accessTokenProvider` are always Bearer tokens.
+- When the MCP server sends both a `Bearer` and a `DPoP` challenge, `OAuthAuthorizer` reads the `error` and `scope` of the one for the scheme the request used (RFC 9449 §7.2), so a 403 `insufficient_scope` in the `DPoP` challenge steps up a DPoP token.
+- A token bound to another key is discarded even when it has expired, and its refresh token is not used (RFC 9449 §5).
 
 ### Server
 
