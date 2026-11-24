@@ -66,6 +66,23 @@ private actor Counter {
     func increment() { value += 1 }
 }
 
+private actor Recorder<Element: Sendable> {
+    private(set) var values: [Element] = []
+    func record(_ value: Element) { values.append(value) }
+}
+
+/// A client method the SDK does not know, asked for as an input request.
+private enum Approve: MCP.Method {
+    static let name = "example/approve"
+
+    struct Parameters: Hashable, Codable, Sendable {
+        let taskId: String
+        let src: String
+    }
+
+    typealias Result = Value
+}
+
 private func connect(
     _ server: Server,
     mode: Client.ProtocolMode = .automatic,
@@ -400,22 +417,24 @@ struct MultiRoundTripTests {
         }
     }
 
+    /// A server whose `speak` tool asks for an elicitation of an unknown mode.
+    private func makeUnknownModeServer() async -> Server {
+        let server = Server(name: "mrtr", version: "1.0", capabilities: .init(tools: .init()))
+        await server.withMethodHandler(CallTool.self) { params in
+            if params.inputResponses?["voice"] != nil {
+                return .init(content: [.text(text: "answered", annotations: nil, _meta: nil)])
+            }
+            return .inputRequired(
+                ["voice": .elicitation(.unknown(mode: .init(rawValue: "voice"), ["message": "Say it"]))],
+                requestState: "s")
+        }
+        return server
+    }
+
     @Test("An elicitation of an unknown mode needs only the elicitation capability")
     func testUnknownModeCapability() async throws {
-        func makeServer() async -> Server {
-            let server = Server(name: "mrtr", version: "1.0", capabilities: .init(tools: .init()))
-            await server.withMethodHandler(CallTool.self) { params in
-                if params.inputResponses?["voice"] != nil {
-                    return .init(content: [.text(text: "answered", annotations: nil, _meta: nil)])
-                }
-                return .inputRequired(
-                    ["voice": .elicitation(.unknown(mode: .init(rawValue: "voice"), ["message": "Say it"]))],
-                    requestState: "s")
-            }
-            return server
-        }
         // A client without elicitation is told to declare it, with no sub-capability.
-        let server = await makeServer()
+        let server = await makeUnknownModeServer()
         let (clientEnd, serverEnd) = await InMemoryTransport.createConnectedPair()
         try await server.start(transport: serverEnd)
         try await clientEnd.connect()
@@ -433,15 +452,76 @@ struct MultiRoundTripTests {
         #expect(error?["data"] == ["requiredCapabilities": ["elicitation": [:]]])
         await clientEnd.disconnect()
         await server.stop()
+    }
 
-        let other = await makeServer()
-        let with = try await connect(other, capabilities: .init(elicitation: .init(form: nil, url: .init()))) {
+    @Test(
+        "An elicitation of an unknown mode reaches a client with only URL elicitation",
+        arguments: [Client.ProtocolMode.automatic, .handshake])
+    func testUnknownModeEndToEnd(mode: Client.ProtocolMode) async throws {
+        let server = await makeUnknownModeServer()
+        let client = try await connect(
+            server, mode: mode, capabilities: .init(elicitation: .init(form: nil, url: .init()))
+        ) {
             await $0.withElicitationHandler { _ in .init(action: .decline) }
         }
-        let (content, _) = try await with.callTool(name: "speak")
+        let (content, _) = try await client.callTool(name: "speak")
         #expect(content == [.text(text: "answered", annotations: nil, _meta: nil)])
-        await with.disconnect()
-        await other.stop()
+        await client.disconnect()
+        await server.stop()
+    }
+
+    @Test(
+        "An input request of an unknown method reaches the client's handler for it, and its result the tool",
+        arguments: [Client.ProtocolMode.automatic, .handshake])
+    func testUnknownInputRequestEndToEnd(mode: Client.ProtocolMode) async throws {
+        let server = Server(name: "mrtr", version: "1.0", capabilities: .init(tools: .init()))
+        let request: Value = ["taskId": "t1", "src": "data:,hi"]
+        let response: Value = ["approved": true, "note": "data:,ok"]
+        await server.withMethodHandler(CallTool.self) { params in
+            guard let answer = params.inputResponses?["approve"] else {
+                return .inputRequired(["approve": .unknown(method: Approve.name, params: request)])
+            }
+            // The result reaches the tool as the client's handler returned it.
+            return .init(content: [.text(text: answer == .unknown(response) ? "kept" : "\(answer)", annotations: nil, _meta: nil)])
+        }
+        let received = Recorder<Approve.Parameters>()
+        let client = try await connect(server, mode: mode, capabilities: .init()) { client in
+            await client.withMethodHandler(Approve.self) { params in
+                await received.record(params)
+                return response
+            }
+        }
+        let (content, _) = try await client.callTool(name: "approve")
+        #expect(content == [.text(text: "kept", annotations: nil, _meta: nil)])
+        #expect(await received.values == [.init(taskId: "t1", src: "data:,hi")])
+        await client.disconnect()
+        await server.stop()
+    }
+
+    @Test(
+        "A data: URL string in a sampling prompt and its result is kept as written",
+        arguments: [Client.ProtocolMode.automatic, .handshake])
+    func testDataURLStringsInKnownKinds(mode: Client.ProtocolMode) async throws {
+        let server = Server(name: "mrtr", version: "1.0", capabilities: .init(tools: .init()))
+        await server.withMethodHandler(CallTool.self) { params in
+            guard let sampled = params.inputResponses?["model"]?.sampling else {
+                return .inputRequired(["model": .sampling(.init(messages: [.user(.text("data:,hello"))], maxTokens: 10))])
+            }
+            guard case .single(.text(let text)) = sampled.content else { throw MCPError.internalError("Not text") }
+            return .init(content: [.text(text: text, annotations: nil, _meta: nil)])
+        }
+        let prompts = Recorder<Sampling.Message.Content>()
+        let client = try await connect(server, mode: mode) { client in
+            await client.withSamplingHandler { params in
+                await prompts.record(params.messages[0].content)
+                return .init(model: "test", role: .assistant, content: .text("data:,hi"))
+            }
+        }
+        let (content, _) = try await client.callTool(name: "sample")
+        #expect(content == [.text(text: "data:,hi", annotations: nil, _meta: nil)])
+        #expect(await prompts.values == [.text("data:,hello")])
+        await client.disconnect()
+        await server.stop()
     }
 
     @Test("A result with content and input requests is a server error")

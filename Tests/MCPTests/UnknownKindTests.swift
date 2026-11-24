@@ -153,6 +153,44 @@ struct UnknownKindTests {
         await server.stop()
     }
 
+    @Test("Input requests and responses keep data: URL strings as written")
+    func inputDataURL() throws {
+        /// Encodes `value`, decodes it with a plain decoder, and checks that
+        /// the decoded value is `value` and encodes to the same JSON.
+        func check<T: Codable & Equatable>(_ value: T) throws {
+            let json = try JSONEncoder().encode(value)
+            let decoded = try JSONDecoder().decode(T.self, from: json)
+            #expect(decoded == value, "\(value)")
+            let reencoded = try JSONEncoder().encode(decoded)
+            let expected = try JSONDecoder().decode(Value.Preserved.self, from: json).value
+            #expect(try JSONDecoder().decode(Value.Preserved.self, from: reencoded).value == expected, "\(value)")
+        }
+        try check(InputResponse.unknown(.object(["src": "data:,hi"])))
+        try check(InputRequest.unknown(method: "example/approve", params: ["src": "data:,hi", "list": ["data:,x"]]))
+        try check(InputResponse.sampling(.init(model: "m", role: .assistant, content: .text("data:,hi"))))
+        try check(InputRequest.sampling(.init(messages: [.user(.text("data:,hello"))], maxTokens: 10)))
+        try check(InputRequest.elicitation(message: "data:,hello"))
+        try check(InputResponse.roots(.init(roots: [Root(uri: "file:///x", name: "data:,hi")])))
+
+        // A request's params, as handed to the client's handler.
+        let sampling = InputRequest.sampling(.init(messages: [.user(.text("data:,hello"))], maxTokens: 10))
+        #expect(
+            try sampling.params().objectValue?["messages"]?.arrayValue?.first?.objectValue?["content"]
+                == ["type": "text", "text": "data:,hello"])
+
+        // A known result reads a `Value` field as its decoder does, once.
+        let accept = Data(#"{"action":"accept","content":{"x":"data:,hi"}}"#.utf8)
+        let preserving = JSONDecoder()
+        preserving.userInfo[.valuePreservesStrings] = true
+        let elicitation = try preserving.decode(InputResponse.self, from: accept).elicitation
+        #expect(elicitation?.content?["x"] == .string("data:,hi"))
+        // A client handler's result is sent on as the handler returned it.
+        let returned = try InputResponse(
+            method: CreateElicitation.name, result: ["action": "accept", "content": ["x": "data:,hi"]])
+        #expect(returned.elicitation?.content?["x"] == .string("data:,hi"))
+        #expect(try Value.preservingStrings(returned) == ["action": "accept", "content": ["x": "data:,hi"]])
+    }
+
     @Test("Elicitation parameters of an unknown mode are kept")
     func elicitationMode() throws {
         let json = #"{"mode":"voice","message":"Say it","language":"en"}"#

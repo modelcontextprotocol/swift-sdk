@@ -505,9 +505,11 @@ struct OAuthJWTBearerGrantTests {
                 _ = try await authorizer.handleChallenge(
                     statusCode: 401, headers: headers401, endpoint: endpoint, session: session)
                 Issue.record("The grant should fail")
-            } catch OAuthAuthorizationError.authorizationServerIssuerMismatch(let expected, let actual) {
-                #expect(expected == "https://auth.example.com")
-                #expect(actual == "https://evil.example.com")
+            } catch let error as OAuthAuthorizationError {
+                #expect(
+                    error
+                        == .authorizationServerIssuerMismatch(
+                            expected: "https://auth.example.com", actual: "https://evil.example.com"))
             }
             // No ID-JAG is asked for the issuer the metadata names, and nothing goes to its token endpoint.
             let sent = await requests.values

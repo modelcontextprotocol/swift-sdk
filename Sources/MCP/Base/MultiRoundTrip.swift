@@ -80,11 +80,11 @@ public enum InputRequest: Hashable, Sendable {
         }
     }
 
-    /// The `params` of the request.
+    /// The `params` of the request, with strings as written.
     func params() throws -> Value {
         switch self {
-        case .elicitation(let params): return try Value(params)
-        case .sampling(let params): return try Value(params)
+        case .elicitation(let params): return try Value.preservingStrings(params)
+        case .sampling(let params): return try Value.preservingStrings(params)
         case .listRoots: return [:]
         case .unknown(_, let params): return params
         }
@@ -107,7 +107,8 @@ extension InputRequest: Codable {
         case ListRoots.name:
             self = .listRoots
         default:
-            self = .unknown(method: method, params: try container.decodeIfPresent(Value.self, forKey: .params) ?? [:])
+            let params = try container.decodeIfPresent(Value.Preserved.self, forKey: .params)
+            self = .unknown(method: method, params: params?.value ?? [:])
         }
     }
 
@@ -158,33 +159,41 @@ public enum InputResponse: Hashable, Sendable {
         return nil
     }
 
-    /// Decodes the result of a request of `method`.
+    /// Decodes the result of a request of `method`, with strings as
+    /// written: the response is sent on as the handler returned it.
     init(method: String, result: Value) throws {
         switch method {
-        case CreateElicitation.name: self = .elicitation(try CreateElicitation.Result(decoding: result))
-        case CreateSamplingMessage.name: self = .sampling(try CreateSamplingMessage.Result(decoding: result))
-        case ListRoots.name: self = .roots(try ListRoots.Result(decoding: result))
+        case CreateElicitation.name:
+            self = .elicitation(try CreateElicitation.Result(decoding: result, preservingStrings: true))
+        case CreateSamplingMessage.name:
+            self = .sampling(try CreateSamplingMessage.Result(decoding: result, preservingStrings: true))
+        case ListRoots.name: self = .roots(try ListRoots.Result(decoding: result, preservingStrings: true))
         default: self = .unknown(result)
         }
     }
 }
 
 extension InputResponse: Codable {
+    private enum ShapeKeys: String, CodingKey {
+        case roots, action, content, model
+    }
+
     public init(from decoder: Decoder) throws {
-        let object = try [String: Value](from: decoder)
-        let value = Value.object(object)
-        // A result of a later kind may share a key with a known one: it is
+        let shape = try decoder.container(keyedBy: ShapeKeys.self)
+        // A known kind decodes from `decoder` itself, not through a `Value`,
+        // so a `data:` URL string is read once, as for any other type. A
+        // result of a later kind may share a key with a known one: it is
         // unknown when it does not decode as the kind its shape suggests.
-        if object["roots"] != nil, let result = try? ListRoots.Result(decoding: value) {
+        if shape.contains(.roots), let result = try? ListRoots.Result(from: decoder) {
             self = .roots(result)
-        } else if object["action"] != nil, let result = try? CreateElicitation.Result(decoding: value) {
+        } else if shape.contains(.action), let result = try? CreateElicitation.Result(from: decoder) {
             self = .elicitation(result)
-        } else if object["content"] != nil || object["model"] != nil,
-            let result = try? CreateSamplingMessage.Result(decoding: value)
+        } else if shape.contains(.content) || shape.contains(.model),
+            let result = try? CreateSamplingMessage.Result(from: decoder)
         {
             self = .sampling(result)
         } else {
-            self = .unknown(value)
+            self = .unknown(try Value.Preserved(from: decoder).value)
         }
     }
 
@@ -265,9 +274,12 @@ enum MRTR {
 }
 
 extension Decodable {
-    /// Decodes a value from its JSON `Value`.
-    init(decoding value: Value) throws {
+    /// Decodes a value from its JSON `Value`. With `preservingStrings`, a
+    /// `data:` URL string in a `Value` field stays a string.
+    init(decoding value: Value, preservingStrings: Bool = false) throws {
         let data = try JSONEncoder().encode(value)
-        self = try JSONDecoder().decode(Self.self, from: data)
+        let decoder = JSONDecoder()
+        if preservingStrings { decoder.userInfo[.valuePreservesStrings] = true }
+        self = try decoder.decode(Self.self, from: data)
     }
 }

@@ -762,8 +762,16 @@ public actor Server {
         case .listRoots:
             return .roots(try await ask(ListRoots.request()))
         case .unknown(let method, let params):
-            return .unknown(try await ask(Request<AnyMethod>(method: method, params: params)))
+            return .unknown(try await ask(Request<UnknownInputRequest>(method: method, params: params)).value)
         }
+    }
+
+    /// A bridged input request of a method the SDK does not know: its
+    /// result is kept as received, with `data:` URL strings as written.
+    private enum UnknownInputRequest: Method {
+        static var name: String { "" }
+        typealias Parameters = Value
+        typealias Result = Value.Preserved
     }
 
     /// Sends one bridged request to the client. A client error fails the

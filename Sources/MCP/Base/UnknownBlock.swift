@@ -4,7 +4,9 @@ import Foundation
 /// whole JSON object, kept as received.
 enum UnknownBlock {
     /// The object `decoder` holds, with strings as written: a `data:` URL
-    /// stays a string, so the block encodes back byte for byte.
+    /// stays a string, so the block encodes back to the same JSON value,
+    /// though not always the same bytes: key order and number formatting
+    /// may change (`1.0` is written `1`).
     static func decode(from decoder: any Decoder) throws -> Value {
         try Value.Preserved(from: decoder).value
     }

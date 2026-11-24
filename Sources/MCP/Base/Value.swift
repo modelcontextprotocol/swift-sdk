@@ -132,9 +132,13 @@ extension CodingUserInfoKey {
 
 extension Value {
     /// A `Value` decoded with strings as written: a `data:` URL stays a
-    /// string, at any depth.
-    struct Preserved: Decodable, Sendable {
+    /// string, at any depth. It encodes as its value.
+    struct Preserved: Hashable, Codable, Sendable {
         let value: Value
+
+        func encode(to encoder: Encoder) throws {
+            try value.encode(to: encoder)
+        }
 
         init(from decoder: Decoder) throws {
             let container = try decoder.singleValueContainer()
