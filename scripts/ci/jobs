@@ -8,8 +8,16 @@
 #             macOS share the conformance baselines and interop/RESULTS.md.
 #
 # `scripts/ci-linux.sh all` runs every line; .github/workflows/ci.yml runs the
-# same scripts with the same arguments.
+# same scripts with the same arguments. A job a host cannot run passes there
+# and says so: fuzz needs Linux, the apple-* jobs need Xcode with the
+# platform's SDK and a simulator runtime (with CI set, a missing one fails).
+#
+# The apple-* jobs build every target for the platform's device SDK and run
+# the tests on its simulator (scripts/ci/apple-platform.sh). Conformance and
+# interop do not run on them. Another platform of Package.swift (tvOS,
+# watchOS, visionOS, macCatalyst) is one more line here and in ci.yml.
 build-test                     gate      build-test
+apple-ios                      gate      apple-platform iOS
 docs                           gate      docs
 api-breakage                   gate      api-breakage
 fuzz                           gate      fuzz

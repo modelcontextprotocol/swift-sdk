@@ -19,11 +19,14 @@ final class ResponseSlot<T: Sendable>: @unchecked Sendable {
     private var outcome: Result<T, Swift.Error>?
     private var waiter: CheckedContinuation<T, Swift.Error>?
 
-    func resolve(_ result: Result<T, Swift.Error>) {
+    /// Resolves the slot, unless it already is.
+    /// - Returns: Whether this outcome is the one the sender gets.
+    @discardableResult
+    func resolve(_ result: Result<T, Swift.Error>) -> Bool {
         lock.lock()
         guard !resolved else {
             lock.unlock()
-            return
+            return false
         }
         resolved = true
         if let waiter {
@@ -34,6 +37,7 @@ final class ResponseSlot<T: Sendable>: @unchecked Sendable {
             outcome = result
             lock.unlock()
         }
+        return true
     }
 
     /// Waits for the outcome. Call at most once.
@@ -54,11 +58,14 @@ final class ResponseSlot<T: Sendable>: @unchecked Sendable {
 
 /// A type-erased pending request.
 struct AnyPendingRequest: Sendable {
-    private let _resume: @Sendable (Result<Any, Swift.Error>) -> Void
+    private let _resume: @Sendable (Result<Any, Swift.Error>) -> Bool
 
     init<T: Sendable & Decodable>(_ request: PendingRequest<T>) {
         let continuation = request.continuation
-        self.init(T.self) { continuation.resume(with: $0) }
+        self.init(T.self) {
+            continuation.resume(with: $0)
+            return true
+        }
     }
 
     init<T: Sendable & Decodable>(_ slot: ResponseSlot<T>) {
@@ -66,7 +73,7 @@ struct AnyPendingRequest: Sendable {
     }
 
     private init<T: Sendable & Decodable>(
-        _ type: T.Type, deliver: @escaping @Sendable (Result<T, Swift.Error>) -> Void
+        _ type: T.Type, deliver: @escaping @Sendable (Result<T, Swift.Error>) -> Bool
     ) {
         _resume = { result in
             switch result {
@@ -77,23 +84,30 @@ struct AnyPendingRequest: Sendable {
                     let data = try? JSONEncoder().encode(value),
                     let decoded = try? JSONDecoder().decode(T.self, from: data)
                 {
-                    deliver(.success(decoded))
+                    return deliver(.success(decoded))
                 } else if let typedValue = value as? T {
-                    deliver(.success(typedValue))
+                    return deliver(.success(typedValue))
                 } else {
-                    deliver(.failure(TypeMismatchError()))
+                    return deliver(.failure(TypeMismatchError()))
                 }
             case .failure(let error):
-                deliver(.failure(error))
+                return deliver(.failure(error))
             }
         }
     }
 
-    func resume(returning value: Any) {
+    /// Delivers a result.
+    /// - Returns: `false` when the sender already has an outcome, such as a
+    ///   cancellation, and this one is dropped.
+    @discardableResult
+    func resume(returning value: Any) -> Bool {
         _resume(.success(value))
     }
 
-    func resume(throwing error: Swift.Error) {
+    /// Delivers an error.
+    /// - Returns: `false` when the sender already has an outcome.
+    @discardableResult
+    func resume(throwing error: Swift.Error) -> Bool {
         _resume(.failure(error))
     }
 }

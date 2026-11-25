@@ -17,7 +17,9 @@ import MCP
         await server.waitUntilCompleted()
         // endsnippet
     }
+#endif
 
+#if canImport(System) && os(macOS)
     /// Launches a server executable and connects to it over pipes.
     func connectToSubprocess(executable: URL) async throws -> Client {
         // snippet: transport-stdio-client

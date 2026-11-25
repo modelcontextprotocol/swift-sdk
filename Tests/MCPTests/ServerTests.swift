@@ -90,7 +90,7 @@ struct ServerTests {
                 )
             ))
         try await server.start(transport: transport)
-        try await Task.sleep(for: .milliseconds(200))
+        try await transport.waitForSentMessages()
 
         let response: Response<Initialize>? = await transport.decodeLastSentMessage()
         let result = try #require(response).result.get()
