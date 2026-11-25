@@ -1,27 +1,29 @@
 # Migration guide
 
-This guide lists every public API change between 0.12 (commit `2a44bfd`)
-and 0.13.0: the changes that break source code, the changes in behavior and
-on the wire, and the new opt-in features.
-Under the package's 0.x rules ([VERSIONING.md](../VERSIONING.md)), 0.13.0 is
-the major version that carries them.
-Most code compiles unchanged; the breaking changes are in `MCPError`,
-`HTTPResponse`, `Client.Capabilities.experimental`, `OAuthAuthorizationError`,
-the enums that became open structs, and `HTTPClientAuthorizer`.
+This guide lists every public API change between 0.12.1 (`a0ae212`) and
+1.0.0: the changes that break source code, the changes in behavior and on the
+wire, and the new opt-in features. 1.0.0 also contains the fixes merged to
+`main` after 0.12.1, up to `234e412`
+([Fixes on `main` after 0.12.1](#fixes-on-main-after-0121)). From 1.0.0 on,
+only a major release breaks source compatibility
+([VERSIONING.md](../VERSIONING.md)). Most code compiles unchanged. The
+[summary](#summary) lists every change with what to do, and
+[Breaking changes](#breaking-changes) shows the code before and after for
+each change that breaks source code.
 
 ## Summary
 
 | Area | Change | Action |
 |---|---|---|
 | `MCPError` | New cases; `serverError` has a third associated value | Update exhaustive `switch` statements and `serverError` patterns |
-| `MCPError` decoding | -32000 and -32001 decode as `serverError`; -32602 with `data.uri` as `resourceNotFound` | Match the new cases |
+| `MCPError` decoding | -32000 and -32001 decode as `serverError`; -32602 with `data.uri` as `resourceNotFound`; without `data.detail`, the standard cases drop their own message text | Match the new cases |
 | `HTTPResponse` | `.data` and `.error` have new associated values | Update patterns |
 | `Client.Capabilities.experimental` | `[String: String]?` became `[String: Value]?` | Pass `Value`s |
 | `OAuthAuthorizationError` | A struct with a `code`, not an enum; eight new codes | Read details from properties instead of binding associated values |
-| `GrantType`, `TokenEndpointAuthentication`, `PrivateKeyJWTSigningAlgorithm` | Structs, not enums; new grant type `.jwtBearer` | Add a `default` to `switch` statements |
-| `BearerTokenValidationResult`, `Elicitation.Mode`, `ToolChoice.Mode` | Structs, not enums | Add a `default` to `switch` statements |
+| `GrantType`, `TokenEndpointAuthentication`, `PrivateKeyJWTSigningAlgorithm` | Structs, not enums; new grant type `.jwtBearer` | Add a `default` to `switch` statements; write `.ES256` instead of `init(rawValue:)` |
+| `BearerTokenValidationResult`, `Elicitation.Mode`, `ToolChoice.Mode` | Structs, not enums; `Mode(rawValue:)` is not optional | Add a `default` to `switch` statements; drop the optional binding |
 | Content blocks, `InputRequest`, `InputResponse`, `CreateElicitation.Parameters` | New case `.unknown` for kinds from a later revision | Add it, or a `default`, to `switch` statements |
-| `HTTPClientAuthorizer` | `authorizationHeader(for:)` became `authorizationHeaders(for:method:)` | Update custom authorizers |
+| `HTTPClientAuthorizer` | `authorizationHeader(for:)` became `authorizationHeaders(for:method:)`; new requirement `handleChallenge(statusCode:headers:endpoint:operationKey:sentAuthorization:session:)`, returning `HTTPChallengeResult`, with a default that calls the Bool method | Update custom authorizers |
 | `Client` convenience methods | Return the result type, not a tuple; `startToolCall` replaces the `RequestContext` overload of `callTool`; `initialize()` is removed | Read the result's properties |
 | `Client.connect(transport:)` | Returns `Client.ConnectionInfo`, whose `serverInfo` is optional | Unwrap `serverInfo` |
 | `Version.latest` | Renamed `Version.latestHandshake`; the old name is deprecated | Rename |
@@ -33,12 +35,15 @@ the enums that became open structs, and `HTTPClientAuthorizer`.
 | `Client` | Connects at 2026-07-28 by default, with a fallback to `initialize` | Nothing, or opt out |
 | `Version.supported` | Lists 2026-07-28 | Read `Version.handshake` for the `initialize` revisions |
 | Handlers | Undecodable parameters fail with -32602, not -32603 | Update tests that check the code |
-| Client handlers | Run outside the receive loop; at most 4 server-to-client requests at once | Remove `Task` wrappers that worked around the old loop, if you like |
+| Client handlers | Run outside the receive loop; at most 4 server-to-client requests at once; a server `ping` is answered | Remove `Task` wrappers that worked around the old loop, if you like |
+| `Client` connection | Pending requests fail with `connectionClosed` when the transport ends its stream; `connect(transport:)` on a connected client disconnects the previous transport | Handle `connectionClosed` where requests waited forever |
 | `.stateless(version)` | No retry with another version | Use `.automatic` for negotiation |
 | `.none(clientID:)` | A plain client ID is pre-registered: no dynamic registration | Pass `""` to register |
+| `StatelessHTTPServerTransport` with an `initializeHook` | Handshake requests other than `initialize` are refused with -32600 unless a `statelessRequestHook` is set | Set a `statelessRequestHook` |
+| `data:` URL strings | Arrive as sent instead of rewritten as base64 `data:` URLs | Nothing |
 | HTTP transports | New error bodies, status codes and streaming | See below |
 | `HTTPClientTransport` | Default per-host connection limit 64; POST streams resume per stream; SSE on Linux | Raise `httpMaximumConnectionsPerHost` in custom configurations |
-| Package | Requires Swift 6.1 tools; depends on swift-crypto, no longer on eventsource | Use Xcode 16.3 or later; resolve packages again |
+| Package | Requires Swift 6.1 tools; depends on swift-crypto, no longer on eventsource; swift-docc-plugin `from: "1.4.0"` instead of its `main` branch | Use Xcode 16.3 or later; resolve packages again |
 
 ## Breaking changes
 
@@ -94,7 +99,12 @@ Decoding an error response changed for these codes:
 | -32602 with `data.uri` and no `data.detail` | `invalidParams(_:)` | `resourceNotFound(uri:message:)` |
 | -32002 with `data.uri` | `serverError` | `resourceNotFound(uri:message:)` |
 | -32020, -32021, -32022 | `serverError` | the new cases |
-| -32603 without `data.detail` | `internalError(nil)` | `internalError(message)`; a bare "Internal error" stays `internalError(nil)` |
+| -32700, -32600, -32601, -32602 without `data.detail` | the message as the detail: `methodNotFound("Method not found")` | the message less the case's own text: `methodNotFound(nil)`, and `methodNotFound("x")` for "Method not found: x" |
+| -32603 without `data.detail` | `internalError(nil)` | `internalError(message)` less the "Internal error: " prefix; a bare "Internal error" stays `internalError(nil)` |
+
+A decoded standard error now equals the error that was sent, and encodes
+the same message again; the previous release added the case's text a second
+time (`Method not found: Method not found`).
 
 `connectionClosed` and `transportError` are local errors only: transports
 throw them, and they are never decoded from the wire.
@@ -200,11 +210,13 @@ minor release can add values (`VERSIONING.md`):
 
 `.clientSecretBasic(clientID:clientSecret:)`, `.valid(info)`, `.url` and the
 others are written as before, and `==` works as before. A `switch` needs a
-`default`, and a pattern that binds associated values does not compile:
+`default`. A pattern that binds associated values does not compile:
 `TokenEndpointAuthentication` has `clientID` and `methodName`, and
-`BearerTokenValidationResult` has `tokenInfo`, the `BearerTokenInfo` of a
-`.valid(info)` result. The two `Mode` types decode a mode the SDK does not know
-instead of failing.
+`BearerTokenValidationResult`, which validators return, has `tokenInfo`, the
+`BearerTokenInfo` of a `.valid(info)` result. `Elicitation.Mode(rawValue:)` and `ToolChoice.Mode(rawValue:)` are no
+longer optional, and the two `Mode` types decode a mode the SDK does not know
+instead of failing. `PrivateKeyJWTSigningAlgorithm` has no public initializer:
+use `.ES256`.
 
 %include Examples/Snippets/Guides/Migration.swift migration-open-struct
 
@@ -305,6 +317,9 @@ The error's `code` is -32001 instead of -32603. A server handler that calls
 another server through a `Client` and lets such an error propagate now answers
 its own caller with -32001 and `Transport error: …` instead of -32603; catch it
 and throw the error the caller should see.
+The `debugDescription` of `HTTPStatusError` names the response headers
+without their values, so logging the error does not print cookies or
+authentication challenges; read the values from `headers`.
 
 %include Examples/Snippets/Guides/Migration.swift migration-http-errors
 
@@ -318,6 +333,19 @@ the URL). Return `["Authorization": value]` where the old method returned
 `requestModifier`, for the final URL and method; they replace an
 `Authorization` header the modifier set. A thrown error fails the request with
 `transportError(_:)` carrying that error.
+
+The transport now calls the new requirement
+`handleChallenge(statusCode:headers:endpoint:operationKey:sentAuthorization:session:)`
+with the `Authorization` header the challenged request carried. It returns an
+`HTTPChallengeResult`: `retry`, as the Bool method returns, and
+`isDPoPNonceRetry`, whether the retry only answers a DPoP `use_dpop_nonce`
+challenge, which the transport allows once per request without counting it
+against `maxAuthorizationAttempts`. Its default calls
+`handleChallenge(statusCode:headers:endpoint:operationKey:session:)` and reads
+the nonce challenge with `DefaultOAuthWWWAuthenticateParser`, so custom
+authorizers compile and behave as before. An authorizer that implements it can
+tell a challenge for a token another request has already replaced from one for
+the current token, and decide which challenge is a nonce retry.
 
 `OAuthAccessToken` has a new stored property, `keyThumbprint`, with a
 defaulted initializer parameter; tokens saved by the previous release decode
@@ -380,6 +408,17 @@ client sends `initialize`. Clients that open many short connections to such
 servers, or that connect to a server that does not answer, use `.handshake`
 or a shorter `discoveryTimeout`.
 
+### `data:` URL strings
+
+The SDK no longer rewrites a `data:` URL string when it passes a message
+through `Value`: the client and server message decoders, batches,
+type-erased requests and responses, handler results, `_meta` accessors and
+error data keep the string as written. A text block, a URI or an icon `src`
+such as `data:,hi` arrives as sent; the previous release delivered
+`data:text/plain;base64,aGk=`. A `Value` field the application decodes, such
+as a tool argument or `structuredContent`, still holds `.data(mimeType:_:)`
+for such a string, which encodes as a base64 `data:` URL.
+
 ### Handlers
 
 - A request whose parameters do not decode fails with -32602
@@ -407,16 +446,32 @@ or a shorter `discoveryTimeout`.
   is delivered at once, after the queued progress notifications of its own
   request. Server-to-client requests at 2025-11-25 run concurrently, each in
   its own task, at most `Configuration.maxConcurrentServerRequests` (4) at
-  once, and `notifications/cancelled` from the server cancels the task. The
-  previous release ran every handler on the receive loop, so a handler that
-  awaited a request on the same client never returned.
+  once, and `notifications/cancelled` from the server cancels the task; a
+  cancelled handler counts against the limit until it returns. The previous
+  release ran every handler on the receive loop, so a handler that awaited a
+  request on the same client never returned.
+- The client answers a server `ping` at once with an empty result, outside
+  that limit. The previous release answered -32601. A `Ping` handler
+  registered with `withMethodHandler` still answers it instead.
+- When the transport finishes its receive stream (a stdio server exits, for
+  example), the client does what `disconnect()` does and fails every pending
+  request, and a `connect(transport:)` in progress, with `connectionClosed`,
+  or with the stream's error, wrapped in `transportError` unless it is an
+  `MCPError`. The previous release kept reading the finished stream, so they
+  waited forever.
+- `connect(transport:)` on a connected client disconnects the previous
+  transport first; its pending requests fail with
+  `internalError("Client disconnected")`. The previous release replaced the
+  transport and left the old message loop running.
 - Cancelling the task that awaits `RequestContext.value` cancels the request.
 - A request is registered before `send(_:)` returns. `cancelRequest(_:reason:)`
   right after `send` always ends the request; a request cancelled before it
   was sent is not sent.
 - `withBatch(body:)` requests get the 2026-07-28 `_meta` envelope, header
   parameters and the multi round-trip loop. On a stateless connection they
-  are sent one by one. When the closure throws, its requests fail.
+  are sent one by one. When the closure throws, its requests fail. When the
+  connection closes or is replaced while the closure runs, the batch is not
+  sent and `withBatch` throws `connectionClosed`.
 - `.stateless(version)` no longer retries with another version on -32022:
   it connects at `version` or throws.
 
@@ -435,7 +490,19 @@ or a shorter `discoveryTimeout`.
 
 - Notifications that a handler sends for its request are no longer dropped.
   When the client accepts `text/event-stream`, the response is an SSE stream
-  that carries them and ends with the response.
+  that carries them and ends with the response. On handshake requests this
+  includes the list-changed and resource-updated notifications the handler
+  sends.
+- A handshake request other than `initialize` runs the
+  `statelessRequestHook`, with no client info or capabilities: without a
+  session, nothing ties it to the `initialize` that passed the
+  `initializeHook`. A server with an `initializeHook` and no
+  `statelessRequestHook` refuses such requests with -32600. The previous
+  release ran the hook for `initialize` only and served the requests that
+  followed. Set a `statelessRequestHook` that applies the same checks.
+- A `notifications/cancelled` that the transport honors ends the cancelled
+  request's HTTP response without a JSON-RPC response: 202 Accepted with no
+  body, or the end of its SSE stream.
 - At 2026-07-28, JSON-RPC errors use HTTP status codes: 404 for -32601; 400
   for -32600, -32602 and -32020 to -32022; 200 for other errors. On
   handshake requests, -32022 is 400 and other errors keep 200.
@@ -496,6 +563,13 @@ session ended.
   Apple platforms. The previous release read each response only once the
   server ended it, dropped SSE bodies and opened no GET stream, so streamed
   results, server-to-client requests and notifications did not arrive.
+- An SSE line, or the data of one event, longer than 16 MiB fails the request
+  with `internalError`. An event that the body ends before its closing blank
+  line is discarded.
+- A 404 to the GET stream of a session stops the stream, which is not
+  reopened; the previous release kept reopening it with the expired session
+  ID. The session ID is kept, so the next request carries it, receives the
+  server's 404 and reports `isSessionExpired` to its caller.
 
 ### Authorization
 
@@ -521,9 +595,23 @@ session ended.
 - fall back to `/authorize`, `/token` and `/register` at the server's origin
   only when a 2025-03-26 server answers 404 or 410 for every metadata URL;
   the previous release also did so after network errors and 5xx;
+- keep the stored tokens and fail the challenge with the error when the
+  metadata needed to refresh a rejected token cannot be read (a network
+  error, an unexpected status) or the read is cancelled, instead of clearing
+  them and starting a new authorization;
+- renew a token proactively (`proactiveRefreshWindowSeconds`) at most once
+  per token: when the renewal fails, the next 401 recovers. A token issued
+  for less than the window is renewed halfway between its issue and 30
+  seconds before its expiry. The previous release refreshed before every
+  request while the token was within the window, also after a failure;
 - handle concurrent challenges one at a time. `InMemoryTokenStorage` is now
   thread-safe; custom `TokenStorage` implementations are called from several
-  tasks.
+  tasks. A challenge that waited for one that failed and left no usable
+  token fails with the same error instead of running the flow again (one
+  prompt for a cancelled authorization), and a waiting request can be
+  cancelled;
+- register again on the next flow when dynamic client registration throws.
+  The previous release did not try again until the authorizer was recreated;
 - treat a `.none(clientID:)` client ID that is not empty and not a URL as
   pre-registered: no dynamic registration happens. Pass `.none(clientID: "")`
   to register. The previous release registered and replaced the ID;
@@ -531,6 +619,16 @@ session ended.
   redirects only to `https` hosts that are not private addresses, and to a
   loopback host only from a loopback host, and follow
   no redirect for token and registration requests;
+- count as private the IPv6 addresses that embed a private IPv4 address as
+  IPv4-translated (`::ffff:0:0:0/96`) or 6to4 (`2002::/16`), and the
+  local-use NAT64 prefix `64:ff9b:1::/48`. A host with `:` that is not an
+  IPv6 address (`fc00::1::2`), an embedded IPv4 address that is not a
+  canonical dotted quad (`[::ffff:012.0.0.1]`), brackets around anything but
+  an IPv6 address (`[127.0.0.1]`) and a numeric host with a trailing dot
+  (`10.0.0.1.`) are refused instead of passing as host names;
+- accept `http://[::1]` as a loopback URL, as `http://127.0.0.1`, for the MCP
+  endpoint, the redirect URI and redirect targets. The previous release
+  refused it;
 - no longer block host names that begin with `fc`, `fd` or `fe8` through
   `fe8b`: only IP literals are checked;
 - compute PKCE challenges and sign `private_key_jwt` assertions with
@@ -548,6 +646,69 @@ The `MCP` target depends on swift-crypto (`3.0.0..<5.0.0`). It seals `requestSta
 `private_key_jwt` assertions. It no longer depends on eventsource:
 `HTTPClientTransport` parses server-sent events itself. Code that imported
 `EventSource` through the SDK declares the dependency itself.
+
+The manifest requires swift-docc-plugin `from: "1.4.0"` instead of its `main`
+branch. SwiftPM refuses a version-based requirement on a package whose
+manifest has a branch-based dependency, so a package that depends on a
+released `MCP` version now resolves.
+
+### Fixes on `main` after 0.12.1
+
+These commits on `main` (`a0ae212..234e412`) are part of 1.0.0:
+
+- `Data.parseDataURL(_:)` takes `;base64` from the header only:
+  `data:text/plain,hello;base64,world` is a text URL, where the previous
+  release returned `nil` (#309). A payload without `;base64` decodes every
+  percent-escaped byte, so `%FF` no longer makes it fail (#310). `Value`
+  decodes such strings as `.data(mimeType:_:)`.
+- `client_secret_basic` percent-encodes the client ID and secret
+  (`application/x-www-form-urlencoded`, RFC 6749 §2.3.1) before the Base64
+  step; the previous release sent them verbatim, so a credential with `:`,
+  `@`, `%`, `+` or non-ASCII characters could reach the server altered
+  (#300).
+- Every character of a PKCE code verifier is equally likely; the first
+  character of the alphabet was slightly more likely (#303).
+- The default `authorizationRedirectURI`, a random loopback port, documents
+  that the port is not bound until the callback server starts; prefer a
+  fixed port or a custom URL scheme in production (#302).
+- `DefaultOAuthWWWAuthenticateParser` unescapes every quoted pair in a
+  quoted parameter value (`\X` is `X`, RFC 7230 §3.2.6); the previous
+  release unescaped only `\"`, so `\\` stayed two characters (#305).
+- `NetworkTransport` with reconnection disabled cancels its `NWConnection`
+  when the receive loop ends with an error. The previous release did not,
+  so a connection the peer closed kept its socket in `CLOSE_WAIT` until the
+  process exited. After five consecutive empty reads on a connection
+  that is no longer ready, the receive stream finishes with
+  `connectionClosed` and the connection is cancelled, where the receive loop
+  ended and `receive()` kept waiting (#283). The transport then also counts
+  as disconnected and stops its heartbeats, which the previous release kept
+  sending to the closed connection (#326).
+- `NetworkTransport` clears the connection's state update handler on the
+  actor's executor when a connection attempt ends. The previous release also
+  cleared it from the state stream's termination callback, on any thread, a
+  data race (#301).
+- `StdioTransport.disconnect()` waits for the read loop and the sends in
+  progress, then turns `O_NONBLOCK` off again on each descriptor that was
+  blocking at `connect()` and still refers to the same file, and then
+  finishes the receive stream. The previous release left both descriptors
+  non-blocking, which also affects other users of the process's stdin and
+  stdout. A send in progress throws `transportError` (ENOTCONN) before its
+  next write once `disconnect()` is called, and `connect()` waits for a
+  `disconnect()` in progress (#297).
+
+Three commits add API, listed in [New opt-in features](#new-opt-in-features):
+`Server.init` takes `description`, `websiteUrl` and `icons` (#258),
+`Value.numberValue` (#226), and `Value.init(_:)` takes any `Encodable`
+instead of `Codable` (#227).
+
+The other commits change no behavior: notification handlers are appended in
+place (#118), the client calls `send(request).value` instead of an internal
+helper (#304), the server reuses one encoder and decoder (#299), a
+`NetworkTransport` test checks the transport instead of its mock (#311), the
+conformance server spaces its progress notifications 50 ms apart instead of
+50 µs (#329), `Package.resolved` pins swift-nio 2.100.0, which only the conformance server
+and the HTTP server example use (#325), and the README, agent guidance, CI and
+CODEOWNERS changed (#155, #294, #306, #308, #318, #320, #331, #333).
 
 ## New opt-in features
 
@@ -569,10 +730,14 @@ The `MCP` target depends on swift-crypto (`3.0.0..<5.0.0`). It seals `requestSta
 | Request headers (SEP-2243) | `MCPRequestHeaders`, `Tool.headerParameters()`, `Transport.send(_:additionalHeaders:)`, with a default, and `HTTPClientTransport.send(_:additionalHeaders:)` | [protocol.md](protocol.md#request-headers-sep-2243), [custom transports](protocol.md#custom-transports) |
 | HTTP routing | `HTTPRequest.statelessProtocolVersion` | [protocol.md](protocol.md#routing-both-eras-on-one-endpoint) |
 | Per-request transport streams | `Transport.send(_:relatedRequestID:)`, with a default | [protocol.md](protocol.md#custom-transports) |
+| Gate requests without `initialize` | `statelessRequestHook` of `Server.start(transport:initializeHook:statelessRequestHook:)`, `Server.StatelessRequestHook` | [server.md](server.md#the-initialize-hook) |
+| Abort a request's POST | `HTTPClientTransport.cancelRequest(_:)` | [protocol.md](protocol.md#http-client) |
 | Capability extensions | `extensions` on both capability structs | [server.md](server.md#capabilities-and-extensions) |
 | Log level order | `LogLevel: Comparable` | [server.md](server.md#logging) |
 | OAuth | `OAuthConfiguration.ApplicationType`, `OAuthAuthorizationCodeFlow.ExpectedIssuer` | [protocol.md](protocol.md#authorization) |
 | Enterprise-managed authorization, workload identity | `OAuthConfiguration.enterpriseManaged(...)`, `GrantType.jwtBearer`, `assertionProvider`, `OAuthTokenExchange` | [protocol.md](protocol.md#enterprise-managed-authorization) |
 | DPoP-bound tokens | `OAuthConfiguration.dpop`, `OAuthConfiguration.DPoP`, `DPoPSigningKey`, `OAuthAccessToken.keyThumbprint`, `HTTPHeaderName.dpop`, `HTTPClientAuthorizer.didReceiveResponse(headers:for:)` | [protocol.md](protocol.md#dpop) |
 | Replay store size | `StatefulHTTPServerTransport(eventStoreCapacity:)` | [protocol.md](protocol.md#transports) |
+| Server metadata | `Server.init(name:version:title:description:websiteUrl:icons:instructions:capabilities:configuration:requestStateProtection:)`: sent in the `initialize` result and, at 2026-07-28, in `_meta["io.modelcontextprotocol/serverInfo"]` of every result, with `data:` icon URLs as written | [server.md](server.md#creating-a-server) |
+| `Value` | `Value.numberValue` (`.int` or `.double` as `Double`); `Value.init(_:)` takes any `Encodable`, not only `Codable` | [server.md](server.md#calling-tools) |
 

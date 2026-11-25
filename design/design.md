@@ -1,9 +1,9 @@
 # MCP Swift SDK design
 
 This document records the design of the `MCP` Swift package and the reasons behind it. It covers
-0.13.0, which adds the 2026-07-28 revision of the
+1.x, which adds the 2026-07-28 revision of the
 [Model Context Protocol](https://modelcontextprotocol.io) next to the `initialize`-based revisions
-(2025-11-25 and earlier). The base of 0.13.0 is `main` at `2a44bfd` (the 0.12 line).
+(2025-11-25 and earlier). The base of 1.0.0 is `main` at `234e412` (the 0.12 line).
 
 Feature notes go deeper on single topics:
 
@@ -166,7 +166,7 @@ public struct HandlerContext: Sendable {
 Why a task-local:
 
 - The handler signature stays `(M.Parameters) async throws -> M.Result`. Per-request data was
-  added in 0.13.0 without changing `withMethodHandler`.
+  added in 1.0.0 without changing `withMethodHandler`.
 - The SDK reads the same value: `Server.notify` and server-to-client requests pass
   `currentHandlerContext?.id` as `relatedRequestID`, `Server.log` gates on `logLevel`, the MRTR
   wrapper reads `isStateless` and `clientCapabilities`, and `RequestStateProtection.principal`
@@ -193,7 +193,7 @@ public protocol Transport: Actor {
 
 - A transport moves whole JSON-RPC messages as `Data`. Framing (newline-delimited stdio, HTTP
   bodies, SSE events) is the transport's job; parsing is the client's or server's job.
-- `send(_:relatedRequestID:)` was added in 0.13.0 with a default implementation, so
+- `send(_:relatedRequestID:)` was added in 1.0.0 with a default implementation, so
   existing custom transports compile unchanged. Transports with per-request streams use the id
   to deliver progress, log and server-to-client messages on the stream of the request that
   produced them (SEP-1699 behavior at 2025-11-25).
@@ -253,8 +253,10 @@ Defaults: localhost `OriginValidator`, `AcceptHeaderValidator`, `ContentTypeVali
 - A non-2xx reply with a JSON-RPC response body is delivered as a response, so the client sees
   the -32020/-32022 error instead of an HTTP error.
 
-`Client` reaches these features by downcasting its transport to `HTTPClientTransport`. A custom
-HTTP client transport does not get header parameters or abort-based cancellation.
+`Client` hands the `Mcp-Param-*` headers to any transport through the `Transport` requirement
+`send(_:additionalHeaders:)`, whose default ignores them. It reaches the other features by
+downcasting its transport to `HTTPClientTransport`, so a custom HTTP client transport does not
+get abort-based cancellation.
 
 ## JSON-RPC types
 
@@ -475,7 +477,7 @@ Registration is by method, not by tool. There is no tool registry, so a feature 
 tool's schema asks the application's `tools/list` handler. `Mcp-Param-*` validation does this
 ([request_headers.md](request_headers.md)).
 
-## Breaking changes in 0.13.0
+## Breaking changes in 1.0.0
 
 Each change and the reason for it. [docs/migration.md](../docs/migration.md) has before/after code.
 
@@ -501,6 +503,12 @@ Each change and the reason for it. [docs/migration.md](../docs/migration.md) has
 | `OAuthAuthorizationError`, `GrantType`, `TokenEndpointAuthentication`, `PrivateKeyJWTSigningAlgorithm`, `BearerTokenValidationResult`, `Elicitation.Mode`, `ToolChoice.Mode` become structs | Their sets grew during 0.x or have registries; as structs, 1.x minors can add values. Static members keep construction and catch patterns compiling. The policy is in `VERSIONING.md` (Enums and open types). |
 | Content blocks, `InputRequest`, `InputResponse`, `CreateElicitation.Parameters` gain `.unknown`; `MCPError.Code` | A peer on a later revision sent a block or request the SDK could not decode, and the whole result failed. Users match these with associated values, so they stay enums, frozen apart from the catch-all. |
 | `HTTPClientTransport` throws `transportError(HTTPStatusError)` and `transportError(OAuthAuthorizationError)` | Callers matched message strings to tell a session expiry from a rate limit, and could not read the OAuth error at all. |
+| `Client` convenience methods return result types; `startToolCall` replaces the `RequestContext` overload of `callTool`; `Client.initialize()` is removed | Tuples dropped `structuredContent`, `_meta` and the cache hints, and two `callTool` overloads differed only in return type. |
+| `Client.connect(transport:)` returns `Client.ConnectionInfo`, with an optional `serverInfo` | At 2026-07-28 `serverInfo` is optional; the client used to invent an empty one. |
+| `Version.latest` is renamed `Version.latestHandshake` | It is the newest revision `initialize` requests, not the newest supported one. |
+| `Tool.Content` cases have defaults for `annotations` and `_meta`; the deprecated short forms are removed | One spelling per block. |
+| `Server.start(transport:)` keeps handlers registered before it; built-in `logging/setLevel` | `start` replaced the application's handlers, and a server with `logging` answered -32601. |
+| Swift 6.1 tools; `Package@swift-6.0.swift` is removed | No CI job used Swift 6.0, and the 2026-07-28 work no longer compiled with it. |
 
 Layout changes that do not affect the API: fixtures moved from `Sources/MCPConformance` to
 `conformance/everything-*`, and baselines from `conformance-baseline*.yml` to
@@ -508,7 +516,7 @@ Layout changes that do not affect the API: fixtures moved from `Sources/MCPConfo
 
 ## Alternatives considered
 
-Decided during 0.13.0, from the change history and the comparison with the Python
+Decided during the 1.0 work, from the change history and the comparison with the Python
 and Go SDKs:
 
 - **Version string comparisons at call sites.** Replaced by `ProtocolProfile` flags, so a new
@@ -541,9 +549,10 @@ Implied by the design, not recorded as separate decisions:
 - A slow notification handler delays later notifications and the responses queued behind
   them. Running notification handlers concurrently, as the Python SDK does, would lose the
   ordering of progress before results.
-- `Client` downcasts to `HTTPClientTransport` for header parameters and cancellation. A transport
-  capability protocol would let custom transports opt in.
-- `Server.Info` built by `Server.init` carries only name, version and title, so
-  `description`, `websiteUrl` and `icons` cannot be set through the initializer.
+- `Client` hands the `Mcp-Param-*` headers to any transport through
+  `Transport.send(_:additionalHeaders:)`, but still downcasts to `HTTPClientTransport` to cancel
+  a request at 2026-07-28, to pass on the negotiated or discovered protocol version, and to
+  extend a request's timeout while a sign-in runs. A transport capability protocol would let
+  custom transports opt in.
 - The type-erasure round trip through JSON on every request could be replaced by direct
   decoding from the received bytes.

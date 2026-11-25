@@ -57,11 +57,11 @@ New to the SDK: start with the [quick start](quick_start.md).
 
 ## Backwards compatibility
 
-- [Migration guide](migration.md): breaking and behavior changes from 0.12 to 0.13.0.
+- [Migration guide](migration.md): breaking and behavior changes from 0.12.1 to 1.0.0.
 - [Rough edges](rough_edges.md): known API decisions kept for compatibility, and what is not implemented.
 
 ## More
 
 - [Examples](../Examples): runnable hello and HTTP servers, and the snippet sources.
 - [Design notes](../design/design.md): why the SDK is built the way it is.
-- [Roadmap](../ROADMAP.md), [versioning](../VERSIONING.md), [dependency policy](../DEPENDENCY_POLICY.md), [contributing](../CONTRIBUTING.md).
+- [Roadmap](../ROADMAP.md), [changelog](../CHANGELOG.md), [versioning](../VERSIONING.md), [dependency policy](../DEPENDENCY_POLICY.md), [contributing](../CONTRIBUTING.md).

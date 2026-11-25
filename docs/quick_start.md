@@ -13,14 +13,13 @@ platforms are macOS 13, iOS 16, Mac Catalyst 16,
 watchOS 9, tvOS 16 and visionOS 1. On Linux, the stdio transport needs glibc
 or musl.
 
-Add the package and the `MCP` product to `Package.swift`. While the package is
-0.x, a minor release may break source compatibility
-([VERSIONING.md](../VERSIONING.md)), so depend on a release with
-`.upToNextMinor(from:)`, or use `branch:` to track a branch:
+Add the package and the `MCP` product to `Package.swift`. Releases follow
+Semantic Versioning ([VERSIONING.md](../VERSIONING.md)): depend on a release
+with `.upToNextMajor(from:)`, or use `branch:` to track a branch:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", .upToNextMinor(from: "0.13.0"))
+    .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", .upToNextMajor(from: "1.0.0"))
 ],
 targets: [
     .executableTarget(

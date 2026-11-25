@@ -19,7 +19,7 @@ The server must reject a request whose headers are missing or disagree with the 
 - Servers validate them before a handler runs.
 - One codec for values on both sides, so that what the client encodes the server decodes to the
   same string.
-- No change to the `Transport` protocol.
+- No source change for existing `Transport` conformers.
 
 ## Design
 
@@ -131,8 +131,11 @@ header that disagrees with `_meta` ([stateless.md](stateless.md)).
   or changing lists, and there is no invalidation signal inside one request.
 - **Checking parameter headers in the transport.** The transport has no access to handlers.
   The check runs in `Server`, where `HandlerContext.httpContext` provides the headers.
-- **Adding headers through the `Transport` protocol.** Rejected to keep custom transports
-  unchanged. `Client` downcasts to `HTTPClientTransport` instead.
+- **Downcasting to `HTTPClientTransport`.** Replaced by `Transport.send(_:additionalHeaders:)`.
+  With the downcast, a wrapping transport (a logger, a decorator) or a custom Streamable HTTP
+  transport received a `tools/call` without its headers, and a conforming server answered -32020.
+  The requirement has a default that ignores the headers, so existing conformers compile
+  unchanged.
 - **Lenient Base64 decoding.** Rejected. Canonical-only decoding means one header text per
   value, so comparisons are exact.
 
@@ -142,5 +145,6 @@ header that disagrees with `_meta` ([stateless.md](stateless.md)).
   them answers -32020. The client could list tools on demand.
 - The server calls the `tools/list` handler on every stateless `tools/call` with arguments. Cost
   is linear in the number of pages before the tool.
-- `Client` sends parameter headers only through `HTTPClientTransport`.
+- A custom transport whose `send(_:additionalHeaders:)` keeps the default sends no parameter
+  headers.
 - Annotations under `$ref`, `allOf`, `anyOf` or `oneOf` are not found.
