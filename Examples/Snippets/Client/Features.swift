@@ -97,6 +97,9 @@ func connectWithElicitation(transport: any Transport) async throws -> Client {
                 return .init(action: .decline)
             }
             return .init(action: .accept)
+        case .unknown:
+            // A mode from a later revision.
+            return .init(action: .decline)
         }
     }
     try await client.connect(transport: transport)

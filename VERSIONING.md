@@ -41,9 +41,9 @@ Held for a major:
 - Removing or renaming a public declaration.
 - Changing a signature, a return type, or a protocol requirement, including adding a
   requirement without a default implementation.
-- Adding a case to a public enum (for example `MCPError` or `OAuthAuthorizationError`). The
-  package is built without library evolution, so client `switch` statements are exhaustive and
-  stop compiling.
+- Adding a case to a public enum ([Enums and open types](#enums-and-open-types)). The package is
+  built without library evolution, so client `switch` statements are exhaustive and stop
+  compiling.
 - Changing documented behavior so that working code stops working.
 - Changing wire behavior for a revision that already shipped: messages sent, validation applied,
   error codes returned.
@@ -59,13 +59,43 @@ Allowed in a minor:
 
 - New declarations, new types, new protocol requirements with default implementations.
 - New parameters with default values on functions that are not protocol requirements.
-- New members on structs.
+- New members on structs, including new static members of an open type.
 - Support for a new protocol revision that leaves the defaults unchanged.
 - Bug fixes that make the SDK match its documentation or the specification. When such a fix
   changes wire behavior that clients may rely on, it is called out in the release notes.
 - Deprecations.
 
 Allowed in a patch: bug fixes that change no public API.
+
+## Enums and open types
+
+Every public enum is one of three kinds, and its documentation says which:
+
+| Kind | Promise | When the protocol adds a value |
+|---|---|---|
+| Frozen enum | No case is added in a minor release; switch exhaustively | Cannot happen: an external definition closes the set |
+| Enum with an `unknown` case | No case is added in a minor release | It arrives through the `unknown` case; a minor release may add a typed accessor |
+| Open type (a struct) | New static members in minor releases; a `switch` needs a `default` | A new static member |
+
+| Kind | Types |
+|---|---|
+| Frozen | `ID`, `ProgressToken`, `Value`, `LogLevel`, `Prompt.Message.Role`, `Sampling.Message.Role`, `Resource.Annotations.Audience`, `CreateElicitation.Result.Action`, `Sampling.ContextInclusion`, `Elicitation.RequestSchema.SchemaType`, `Icon.Theme`, `CompletionReference`, `Sampling.Message.Content`, `OAuthConfiguration.ApplicationType`, `OAuthConfiguration.PrivateKeyJWTAssertionError`, `OAuthConfiguration.EnterpriseIdentityProvider.Endpoint`, `Client.ProtocolMode`, `HTTPResponse`, `AcceptHeaderValidator.Mode` |
+| `unknown` case | `Tool.Content`, `Prompt.Message.Content`, `Sampling.Message.Content.ContentBlock`, `Sampling.ToolResultContent.ContentBlock`, `InputRequest`, `InputResponse`, `CreateElicitation.Parameters`; `MCPError`, where `serverError(code:message:data:)` plays that role |
+| Open | `OAuthAuthorizationError` and its `Code`, `MCPError.Code`, `OAuthConfiguration.GrantType`, `OAuthConfiguration.TokenEndpointAuthentication`, `OAuthConfiguration.PrivateKeyJWTSigningAlgorithm`, `BearerTokenValidationResult`, `Elicitation.Mode`, `CreateSamplingMessage.ToolChoice.Mode`, `ResultType`, `CacheScope` |
+
+How a type is classified:
+
+1. Its values are closed by an external definition (JSON-RPC 2.0, the JSON data model,
+   RFC 5424, OpenID Connect, CSS) or by the SDK's own structure: frozen.
+2. Otherwise it is extensible when its values grew between 2024-11-05 and 2026-07-28, or a
+   registry or a pending SEP adds more.
+3. An extensible type without associated values, or one that users only construct: open type.
+4. An extensible type that users pattern-match with associated values (errors, content): an
+   enum with an `unknown` case, which keeps those patterns working.
+
+Enums without cases (`Version`, `MetaKey`, `HTTPHeaderName`, the `Method` types) are
+namespaces; new members are additions. A type added in 1.x for a growing set starts as an open
+type.
 
 ## Specification revisions and releases
 

@@ -761,7 +761,17 @@ public actor Server {
             return .sampling(try await ask(CreateSamplingMessage.request(params)))
         case .listRoots:
             return .roots(try await ask(ListRoots.request()))
+        case .unknown(let method, let params):
+            return .unknown(try await ask(Request<UnknownInputRequest>(method: method, params: params)).value)
         }
+    }
+
+    /// A bridged input request of a method the SDK does not know: its
+    /// result is kept as received, with `data:` URL strings as written.
+    private enum UnknownInputRequest: Method {
+        static var name: String { "" }
+        typealias Parameters = Value
+        typealias Result = Value.Preserved
     }
 
     /// Sends one bridged request to the client. A client error fails the
@@ -776,7 +786,7 @@ public actor Server {
                 Task { await self.withdraw(request.id) }
             }
         } catch let error as MCPError {
-            throw MCPError.internalError("The client failed \(M.name): \(error.localizedDescription)")
+            throw MCPError.internalError("The client failed \(request.method): \(error.localizedDescription)")
         }
     }
 

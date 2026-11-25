@@ -66,6 +66,8 @@ public struct HTTPValidationContext: Sendable {
 /// - GET requests always require `text/event-stream`
 public struct AcceptHeaderValidator: HTTPRequestValidator {
     /// The response mode determines which content types are required.
+    ///
+    /// Frozen: no case is added in 1.x (the two response modes of the HTTP transports).
     public enum Mode: Sendable {
         /// POST requires both `application/json` and `text/event-stream`.
         case sseRequired
@@ -387,23 +389,50 @@ public struct ProtectedResourceMetadataValidator: HTTPRequestValidator {
 
 // MARK: - OAuth Bearer Validator
 
-/// Result produced by ``BearerTokenValidator`` when validating an access token.
-public enum BearerTokenValidationResult: Sendable, Equatable {
+/// Result produced by ``BearerTokenValidator/TokenValidator`` when validating an access
+/// token.
+///
+/// Create one with a static member, such as ``valid(_:)``. New results can appear in a minor
+/// release.
+public struct BearerTokenValidationResult: Sendable, Equatable {
+    enum Outcome: Sendable, Equatable {
+        case valid(BearerTokenInfo)
+        case insufficientScope(requiredScopes: Set<String>, errorDescription: String?)
+        case invalidToken(errorDescription: String?)
+        case malformedRequest(errorDescription: String?)
+    }
+
+    let outcome: Outcome
+
+    /// The claims of a ``valid(_:)`` result; `nil` for every other result.
+    public var tokenInfo: BearerTokenInfo? {
+        if case .valid(let info) = outcome { return info }
+        return nil
+    }
+
     /// Access token is valid for this request, with its extracted claims.
     ///
     /// Supply a ``BearerTokenInfo`` with `audience` and `expiresAt` populated so that
     /// ``BearerTokenValidator`` can enforce expiry and audience checks automatically.
     /// Pass `BearerTokenInfo()` (all `nil`) to delegate all enforcement to the caller.
-    case valid(BearerTokenInfo)
+    public static func valid(_ info: BearerTokenInfo) -> Self {
+        Self(outcome: .valid(info))
+    }
 
     /// Access token is missing required privileges, and new scopes are required.
-    case insufficientScope(requiredScopes: Set<String>, errorDescription: String? = nil)
+    public static func insufficientScope(requiredScopes: Set<String>, errorDescription: String? = nil) -> Self {
+        Self(outcome: .insufficientScope(requiredScopes: requiredScopes, errorDescription: errorDescription))
+    }
 
     /// Access token is invalid or expired.
-    case invalidToken(errorDescription: String? = nil)
+    public static func invalidToken(errorDescription: String? = nil) -> Self {
+        Self(outcome: .invalidToken(errorDescription: errorDescription))
+    }
 
     /// Authorization request is malformed.
-    case malformedRequest(errorDescription: String? = nil)
+    public static func malformedRequest(errorDescription: String? = nil) -> Self {
+        Self(outcome: .malformedRequest(errorDescription: errorDescription))
+    }
 }
 
 /// Validates OAuth 2.1 Bearer authorization for protected MCP HTTP endpoints.
@@ -526,7 +555,7 @@ public struct BearerTokenValidator: HTTPRequestValidator {
             )
         }
 
-        switch tokenValidator(parsedToken, request, context) {
+        switch tokenValidator(parsedToken, request, context).outcome {
         case .valid(let info):
             // Expiry check
             if let exp = info.expiresAt, exp <= Date() {

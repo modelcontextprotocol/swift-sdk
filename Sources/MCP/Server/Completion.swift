@@ -46,6 +46,8 @@ public struct ResourceReference: Hashable, Codable, Sendable {
 }
 
 /// A reference type for completion requests (either prompt or resource)
+///
+/// Frozen: no case is added in 1.x (`ref/prompt` and `ref/resource` in every revision).
 public enum CompletionReference: Hashable, Codable, Sendable {
     /// References a prompt by name
     case prompt(PromptReference)

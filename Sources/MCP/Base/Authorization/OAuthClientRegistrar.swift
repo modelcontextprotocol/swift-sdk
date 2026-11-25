@@ -46,9 +46,10 @@ struct OAuthClientRegistrar: Sendable {
         response: OAuthClientRegistrationResponse,
         updatedAuthentication: OAuthConfiguration.TokenEndpointAuthentication
     )? {
-        guard case .none(let clientID) = configuration.authentication else {
+        guard case .none = configuration.authentication.method else {
             return nil
         }
+        let clientID = configuration.authentication.clientID
 
         let hasClientIDMetadataDocument = isHTTPSURLWithPath(clientID)
         let supportsClientIDMetadataDocument = asMetadata.clientIDMetadataDocumentSupported == true
@@ -89,16 +90,12 @@ struct OAuthClientRegistrar: Sendable {
 
         let grantTypes: [String]
         let responseTypes: [String]
-        switch configuration.grantType {
-        case .authorizationCode:
+        if configuration.grantType == .authorizationCode {
             grantTypes = [OAuthGrantTypeValue.authorizationCode, OAuthGrantTypeValue.refreshToken]
             responseTypes = [OAuthParameterName.code]
-        case .clientCredentials:
-            grantTypes = [OAuthGrantTypeValue.clientCredentials]
-            responseTypes = []
-        case .jwtBearer:
-            // The authorizer does not register for this grant.
-            grantTypes = [OAuthGrantTypeValue.jwtBearer]
+        } else {
+            // The authorizer does not register for the jwt-bearer grant.
+            grantTypes = [configuration.grantType.rawValue]
             responseTypes = []
         }
 
@@ -159,22 +156,7 @@ struct OAuthClientRegistrar: Sendable {
         from registration: OAuthClientRegistrationResponse,
         current: OAuthConfiguration.TokenEndpointAuthentication
     ) -> OAuthConfiguration.TokenEndpointAuthentication {
-        switch current {
-        case .none:
-            return .none(clientID: registration.clientID)
-        case .clientSecretBasic(_, let currentSecret):
-            return .clientSecretBasic(
-                clientID: registration.clientID,
-                clientSecret: registration.clientSecret ?? currentSecret
-            )
-        case .clientSecretPost(_, let currentSecret):
-            return .clientSecretPost(
-                clientID: registration.clientID,
-                clientSecret: registration.clientSecret ?? currentSecret
-            )
-        case .privateKeyJWT(_, let factory):
-            return .privateKeyJWT(clientID: registration.clientID, assertionFactory: factory)
-        }
+        current.registered(clientID: registration.clientID, clientSecret: registration.clientSecret)
     }
 
     // MARK: - CIMD Helpers

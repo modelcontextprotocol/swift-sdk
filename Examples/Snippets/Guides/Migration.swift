@@ -66,3 +66,29 @@ func makeHandshakeClient() -> Client {
         configuration: .init(protocolMode: .handshake))
 }
 // endsnippet
+
+// snippet: migration-oauth-error
+/// Reads an authorization failure. A static member matches a code; the details
+/// are properties.
+func describeAuthorizationError(_ error: any Error) -> String {
+    switch error {
+    case OAuthAuthorizationError.dpopRequired:
+        return "Set OAuthConfiguration.dpop"
+    case let error as OAuthAuthorizationError where error.code == .tokenRequestFailed:
+        return "Token request failed: \(error.statusCode ?? 0) \(error.oauthError ?? "")"
+    default:
+        return error.localizedDescription
+    }
+}
+// endsnippet
+
+// snippet: migration-open-struct
+/// A `switch` over an open struct needs a `default`.
+func describeGrant(_ grantType: OAuthConfiguration.GrantType) -> String {
+    switch grantType {
+    case .authorizationCode: return "interactive"
+    case .clientCredentials, .jwtBearer: return "machine to machine"
+    default: return grantType.rawValue
+    }
+}
+// endsnippet

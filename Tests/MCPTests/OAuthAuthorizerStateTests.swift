@@ -24,6 +24,8 @@ final class RecordingTokenClient: OAuthTokenRequesting, @unchecked Sendable {
     private var issued = 0
     /// Grant types answered with HTTP 400 `invalid_grant`.
     var refusedGrants: Set<String> = []
+    /// An HTTP status, without an `error` member, that refresh requests get.
+    var refreshStatus: Int?
     var expiresIn = 3600
     var delay: Duration = .zero
     /// Answers without `refresh_token`, as RFC 6749 §6 allows.
@@ -48,6 +50,9 @@ final class RecordingTokenClient: OAuthTokenRequesting, @unchecked Sendable {
             return issued
         }
         if delay > .zero { try await Task.sleep(for: delay) }
+        if grant == "refresh_token", let refreshStatus {
+            throw OAuthAuthorizationError.tokenRequestFailed(statusCode: refreshStatus, oauthError: nil)
+        }
         if let grant, refusedGrants.contains(grant) {
             throw OAuthAuthorizationError.tokenRequestFailed(statusCode: 400, oauthError: "invalid_grant")
         }
@@ -293,6 +298,20 @@ struct OAuthAuthorizerStateTests {
         discovery.authorizationServerMetadataError = nil
         #expect(try await challenge(authorizer, sent: "Bearer persisted"))
         #expect(tokens.calls.map(\.refreshToken) == ["persisted-refresh"])
+    }
+
+    @Test("A timed-out or rate-limited refresh keeps the stored tokens", arguments: [408, 429])
+    func throttledRefreshKeepsTokens(status: Int) async throws {
+        let storage = InMemoryTokenStorage()
+        let tokens = RecordingTokenClient()
+        let authorizer = makeAuthorizer(discovery: discovery(listing: serverA), tokens: tokens, storage: storage)
+        #expect(try await challenge(authorizer, sent: nil))
+        tokens.refreshStatus = status
+        await #expect(throws: OAuthAuthorizationError.self) {
+            _ = try await challenge(authorizer, sent: "Bearer token-1")
+        }
+        #expect(storage.load()?.refreshToken == "refresh-1")
+        #expect(tokens.calls.map(\.grantType) == ["client_credentials", "refresh_token"])
     }
 
     @Test("Challenges waiting for an authorization that fails fail with its error", .timeLimit(.minutes(1)))

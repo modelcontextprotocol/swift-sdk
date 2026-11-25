@@ -105,6 +105,8 @@ enum JSONRPCErrorStatus {
 ///     // Use response.bodyData for the body
 /// }
 /// ```
+///
+/// Frozen: no case is added in 1.x (a new case would need changes in every server adapter, so it is a major release).
 public enum HTTPResponse: Sendable {
     /// 202 Accepted, no body. Used for notifications and client responses.
     case accepted(headers: [String: String] = [:])

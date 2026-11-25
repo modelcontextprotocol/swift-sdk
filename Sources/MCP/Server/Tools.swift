@@ -112,6 +112,8 @@ public struct Tool: Hashable, Codable, Sendable {
     }
 
     /// Content types that can be returned by a tool
+    ///
+    /// No other case is added in 1.x: a kind from a later revision is ``unknown(type:_:)``.
     public enum Content: Hashable, Codable, Sendable {
         /// Text content
         case text(text: String, annotations: Resource.Annotations?, _meta: Metadata?)
@@ -127,6 +129,9 @@ public struct Tool: Hashable, Codable, Sendable {
             mimeType: String? = nil,
             annotations: Resource.Annotations? = nil
         )
+        /// A block of a type the SDK does not know, from a later revision: its
+        /// `type` and the whole block as received. It is encoded as received.
+        case unknown(type: String, Value)
 
         /// Deprecated compatibility factory for older call sites that used `.text("...")` and `.text("...", metadata: ...)`.
         @available(*, deprecated, message: "Use .text(text:annotations:_meta:) instead.")
@@ -220,12 +225,15 @@ public struct Tool: Hashable, Codable, Sendable {
                     uri: uri, name: name, title: title, description: description,
                     mimeType: mimeType, annotations: annotations)
             default:
-                throw DecodingError.dataCorruptedError(
-                    forKey: .type, in: container, debugDescription: "Unknown tool content type")
+                self = .unknown(type: type, try UnknownBlock.decode(from: decoder))
             }
         }
 
         public func encode(to encoder: Encoder) throws {
+            if case .unknown(let type, let block) = self {
+                try UnknownBlock.encode(block, kind: type, to: encoder)
+                return
+            }
             var container = encoder.container(keyedBy: CodingKeys.self)
 
             switch self {
@@ -260,6 +268,8 @@ public struct Tool: Hashable, Codable, Sendable {
                 try container.encodeIfPresent(description, forKey: .description)
                 try container.encodeIfPresent(mimeType, forKey: .mimeType)
                 try container.encodeIfPresent(annotations, forKey: .annotations)
+            case .unknown:
+                return
             }
         }
     }

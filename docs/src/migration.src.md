@@ -6,8 +6,8 @@ on the wire, and the new opt-in features.
 Under the package's 0.x rules ([VERSIONING.md](../VERSIONING.md)), 0.13.0 is
 the major version that carries them.
 Most code compiles unchanged; the breaking changes are in `MCPError`,
-`HTTPResponse`, `Client.Capabilities.experimental`, `OAuthAuthorizationError`
-and `HTTPClientAuthorizer`.
+`HTTPResponse`, `Client.Capabilities.experimental`, `OAuthAuthorizationError`,
+the enums that became open structs, and `HTTPClientAuthorizer`.
 
 ## Summary
 
@@ -17,8 +17,10 @@ and `HTTPClientAuthorizer`.
 | `MCPError` decoding | -32000 and -32001 decode as `serverError`; -32602 with `data.uri` as `resourceNotFound` | Match the new cases |
 | `HTTPResponse` | `.data` and `.error` have new associated values | Update patterns |
 | `Client.Capabilities.experimental` | `[String: String]?` became `[String: Value]?` | Pass `Value`s |
-| `OAuthAuthorizationError` | Eight new cases | Update exhaustive `switch` statements |
-| `OAuthConfiguration.GrantType` | New case `.jwtBearer` | Update exhaustive `switch` statements |
+| `OAuthAuthorizationError` | A struct with a `code`, not an enum; eight new codes | Read details from properties instead of binding associated values |
+| `GrantType`, `TokenEndpointAuthentication`, `PrivateKeyJWTSigningAlgorithm` | Structs, not enums; new grant type `.jwtBearer` | Add a `default` to `switch` statements |
+| `BearerTokenValidationResult`, `Elicitation.Mode`, `ToolChoice.Mode` | Structs, not enums | Add a `default` to `switch` statements |
+| Content blocks, `InputRequest`, `InputResponse`, `CreateElicitation.Parameters` | New case `.unknown` for kinds from a later revision | Add it, or a `default`, to `switch` statements |
 | `HTTPClientAuthorizer` | `authorizationHeader(for:)` became `authorizationHeaders(for:method:)` | Update custom authorizers |
 | `OAuthWWWAuthenticateParsing` | New requirement `parseChallenge(scheme:from:)`, with a default | Nothing |
 | `Server` | Serves 2026-07-28 requests by default | Nothing, or opt out |
@@ -69,6 +71,11 @@ After:
 send structured data with an implementation-defined code:
 
 %include Examples/Snippets/Guides/Migration.swift migration-error-data
+
+The cases of `MCPError` are frozen from now on. A code a later revision adds
+arrives as `serverError(code:message:data:)`, and gets a constant in
+`MCPError.Code`, not a case: compare `error.errorCode` with the constant, or
+write `catch MCPError.Code.unsupportedProtocolVersion`.
 
 ### `MCPError` decoding
 
@@ -136,17 +143,77 @@ compile; variables of type `[String: String]` do not.
 
 ### `OAuthAuthorizationError`
 
-Eight cases are new: `authorizationResponseIssuerMismatch(expected:actual:)`,
+`OAuthAuthorizationError` is a struct, modeled on Foundation's `URLError`. Its
+`code` says what failed, and properties carry the details: `statusCode`,
+`oauthError`, `context`, `url`, `clientID`, `detail`, `expected` and
+`actual`. Each former case is a static member with the same name, and the
+cases that had associated values are also static functions with the same
+labels, so `throw .tokenRequestFailed(statusCode: 400, oauthError: nil)` and
+`catch OAuthAuthorizationError.dpopRequired` compile unchanged. A pattern
+matches by code alone: `catch OAuthAuthorizationError.tokenRequestFailed`
+catches every failed token request. A pattern that binds associated values does
+not compile; read the properties instead. A pattern built with values still
+compiles, but its values are ignored:
+`catch OAuthAuthorizationError.tokenRequestFailed(statusCode: 401, oauthError: nil)`
+now catches every failed token request, whatever its status. Compare
+`statusCode` or `oauthError` in a `where` clause instead.
+
+Before:
+
+```swift
+} catch OAuthAuthorizationError.tokenRequestFailed(let status, let error) {
+```
+
+After:
+
+%include Examples/Snippets/Guides/Migration.swift migration-oauth-error
+
+Eight codes are new: `authorizationResponseIssuerMismatch`,
 `authorizationResponseMissingIssuer`, `assertionProviderMissing`,
-`issuedTokenTypeMismatch(expected:actual:)`, `authorizationServerNotConfigured`,
-`assertionAudienceMismatch(expected:actual:)`, `dpopRequired` and
-`dpopAlgorithmUnsupported(supported:)`. Add them, or a `default`, to
-exhaustive `switch` statements. See [Authorization](#authorization).
+`issuedTokenTypeMismatch`, `authorizationServerNotConfigured`,
+`assertionAudienceMismatch`, `dpopRequired` and `dpopAlgorithmUnsupported`.
+More can appear in a minor release, so a `switch` needs a `default`. See
+[Authorization](#authorization).
 
-### `OAuthConfiguration.GrantType`
+### Open structs
 
-`GrantType` has a new case, `.jwtBearer`. A `switch` over `grantType` needs it,
-or a `default`.
+These enums became structs with one static member per former case, so that a
+minor release can add values (`VERSIONING.md`):
+
+| Type | Why it grows |
+|---|---|
+| `OAuthConfiguration.GrantType` | `.jwtBearer` is new; device code (RFC 8628) is a likely next one |
+| `OAuthConfiguration.TokenEndpointAuthentication` | The IANA registry has more methods |
+| `OAuthConfiguration.PrivateKeyJWTSigningAlgorithm` | ES256 only today |
+| `BearerTokenValidationResult` | Server-side DPoP adds results |
+| `Elicitation.Mode` | `url` arrived at 2025-11-25 |
+| `CreateSamplingMessage.ToolChoice.Mode` | Follows the vocabularies of model APIs |
+
+`.clientSecretBasic(clientID:clientSecret:)`, `.valid(info)`, `.url` and the
+others are written as before, and `==` works as before. A `switch` needs a
+`default`, and a pattern that binds associated values does not compile:
+`TokenEndpointAuthentication` has `clientID` and `methodName`, and
+`BearerTokenValidationResult` has `tokenInfo`, the `BearerTokenInfo` of a
+`.valid(info)` result. The two `Mode` types decode a mode the SDK does not know
+instead of failing.
+
+%include Examples/Snippets/Guides/Migration.swift migration-open-struct
+
+### Unknown kinds
+
+These enums have a new case for a kind the SDK does not know, so that a client
+or server talking to a peer on a later revision decodes the message instead of
+failing it:
+
+| Enum | New case | Before |
+|---|---|---|
+| `Tool.Content`, `Prompt.Message.Content`, `Sampling.Message.Content.ContentBlock`, `Sampling.ToolResultContent.ContentBlock` | `.unknown(type:_:)`: the `type` and the whole block as received | the whole result failed to decode |
+| `InputRequest` | `.unknown(method:params:)`; the client fulfills it with the handler registered for the method | the input-required result failed to decode |
+| `InputResponse` | `.unknown(_:)`: a result of another shape | decoded as a sampling result, and failed |
+| `CreateElicitation.Parameters` | `.unknown(mode:_:)` | the request failed to decode |
+
+A block or request is encoded as it was received. An exhaustive `switch` needs
+the new case or a `default`; these enums gain no other case in 1.x.
 
 ### `HTTPClientAuthorizer`
 
@@ -384,6 +451,7 @@ It seals `requestState` with AES-GCM, computes PKCE challenges and signs
 | Discovery | `ServerDiscover` | [protocol.md](protocol.md#discovery-and-protocol-modes) |
 | Notification streams | `Client.listen(_:)`, `Client.Subscription`, `unsubscribeFromResource(uri:)`, `subscribedResourceURIs`, `Server.closeSubscriptions()`, `SubscriptionFilter` | [client.md](client.md#notifications-and-subscriptions) |
 | Multi round-trip requests | `.inputRequired(_:requestState:_meta:)`, `InputRequest`, `InputResponse`, `Client.Configuration.multiRoundTrip` | [server.md](server.md#multi-round-trip-requests) |
+| Error codes | `MCPError.Code`, `MCPError.errorCode` | [`MCPError` cases](#mcperror-cases) |
 | Sealed request state | `Server.init(requestStateProtection:)`, `RequestStateProtection`, `AESGCMRequestStateCodec`, `RequestStateCodec` | [server.md](server.md#protecting-requeststate) |
 | Cache hints | `CacheableResult`, `ttlMs`, `cacheScope`, `CacheHint`, `Server.Configuration.cacheHints` | [server.md](server.md#cacheable-results) |
 | Result type | `ResultType`, `resultType` on the three input-capable results | [server.md](server.md#multi-round-trip-requests) |

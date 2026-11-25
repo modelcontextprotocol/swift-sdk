@@ -13,6 +13,8 @@ import class Foundation.JSONEncoder
 ///
 /// The client fulfills it as it would fulfill the same request sent by the
 /// server, and returns the outcome as an ``InputResponse`` under the same key.
+///
+/// No other case is added in 1.x: a kind from a later revision is ``unknown(method:params:)``.
 public enum InputRequest: Hashable, Sendable {
     /// `elicitation/create`: ask the user for input.
     case elicitation(CreateElicitation.Parameters)
@@ -20,6 +22,10 @@ public enum InputRequest: Hashable, Sendable {
     case sampling(CreateSamplingMessage.Parameters)
     /// `roots/list`: ask for the client's roots.
     case listRoots
+    /// A request the SDK does not know, from a later revision: its method and
+    /// `params`. The client fulfills it with the handler registered for the
+    /// method, if any.
+    case unknown(method: String, params: Value)
 
     /// The method of the request.
     public var method: String {
@@ -27,6 +33,7 @@ public enum InputRequest: Hashable, Sendable {
         case .elicitation: return CreateElicitation.name
         case .sampling: return CreateSamplingMessage.name
         case .listRoots: return ListRoots.name
+        case .unknown(let method, _): return method
         }
     }
 
@@ -42,10 +49,17 @@ public enum InputRequest: Hashable, Sendable {
         switch self {
         case .elicitation(let params):
             guard let elicitation = capabilities.elicitation else { return false }
-            if case .url = params { return elicitation.url != nil }
-            return true
+            switch params {
+            case .url: return elicitation.url != nil
+            // An empty declaration means form, as the wire decoder reads it.
+            case .form: return elicitation.form != nil || elicitation.url == nil
+            // The SDK does not know which sub-capability the mode needs.
+            case .unknown: return true
+            }
         case .sampling: return capabilities.sampling != nil
         case .listRoots: return capabilities.roots != nil
+        // The SDK does not know which capability it needs.
+        case .unknown: return true
         }
     }
 
@@ -54,23 +68,25 @@ public enum InputRequest: Hashable, Sendable {
         switch self {
         case .elicitation(let params):
             var elicitation = capabilities.elicitation ?? .init(form: nil)
-            if case .url = params {
-                elicitation.url = .init()
-            } else {
-                elicitation.form = .init()
+            switch params {
+            case .url: elicitation.url = .init()
+            case .form: elicitation.form = .init()
+            case .unknown: break
             }
             capabilities.elicitation = elicitation
         case .sampling: capabilities.sampling = capabilities.sampling ?? .init()
         case .listRoots: capabilities.roots = capabilities.roots ?? .init()
+        case .unknown: break
         }
     }
 
-    /// The `params` of the request.
+    /// The `params` of the request, with strings as written.
     func params() throws -> Value {
         switch self {
-        case .elicitation(let params): return try Value(params)
-        case .sampling(let params): return try Value(params)
+        case .elicitation(let params): return try Value.preservingStrings(params)
+        case .sampling(let params): return try Value.preservingStrings(params)
         case .listRoots: return [:]
+        case .unknown(_, let params): return params
         }
     }
 }
@@ -91,8 +107,8 @@ extension InputRequest: Codable {
         case ListRoots.name:
             self = .listRoots
         default:
-            throw DecodingError.dataCorruptedError(
-                forKey: .method, in: container, debugDescription: "Unsupported input request method \(method)")
+            let params = try container.decodeIfPresent(Value.Preserved.self, forKey: .params)
+            self = .unknown(method: method, params: params?.value ?? [:])
         }
     }
 
@@ -103,6 +119,7 @@ extension InputRequest: Codable {
         case .elicitation(let params): try container.encode(params, forKey: .params)
         case .sampling(let params): try container.encode(params, forKey: .params)
         case .listRoots: try container.encode(Empty(), forKey: .params)
+        case .unknown(_, let params): try container.encode(params, forKey: .params)
         }
     }
 }
@@ -111,11 +128,18 @@ extension InputRequest: Codable {
 ///
 /// On the wire it is the plain result of the request. Decoding tells the
 /// kinds apart by shape: `roots` for roots, `action` for elicitation,
-/// otherwise sampling.
+/// `content` or `model` for sampling, otherwise ``unknown(_:)``. A result
+/// with one of these keys that does not decode as that kind is also
+/// ``unknown(_:)``, so a handler that reads ``elicitation``, ``sampling`` or
+/// ``roots`` gets `nil` for a malformed result.
+///
+/// No other case is added in 1.x: a kind from a later revision is ``unknown(_:)``.
 public enum InputResponse: Hashable, Sendable {
     case elicitation(CreateElicitation.Result)
     case sampling(CreateSamplingMessage.Result)
     case roots(ListRoots.Result)
+    /// The result of a request the SDK does not know, as received.
+    case unknown(Value)
 
     /// The elicitation result, if this is one.
     public var elicitation: CreateElicitation.Result? {
@@ -135,26 +159,41 @@ public enum InputResponse: Hashable, Sendable {
         return nil
     }
 
-    /// Decodes the result of a request of `method`.
+    /// Decodes the result of a request of `method`, with strings as
+    /// written: the response is sent on as the handler returned it.
     init(method: String, result: Value) throws {
         switch method {
-        case CreateElicitation.name: self = .elicitation(try CreateElicitation.Result(decoding: result))
-        case CreateSamplingMessage.name: self = .sampling(try CreateSamplingMessage.Result(decoding: result))
-        case ListRoots.name: self = .roots(try ListRoots.Result(decoding: result))
-        default: throw MCPError.invalidParams("Unsupported input request method \(method)")
+        case CreateElicitation.name:
+            self = .elicitation(try CreateElicitation.Result(decoding: result, preservingStrings: true))
+        case CreateSamplingMessage.name:
+            self = .sampling(try CreateSamplingMessage.Result(decoding: result, preservingStrings: true))
+        case ListRoots.name: self = .roots(try ListRoots.Result(decoding: result, preservingStrings: true))
+        default: self = .unknown(result)
         }
     }
 }
 
 extension InputResponse: Codable {
+    private enum ShapeKeys: String, CodingKey {
+        case roots, action, content, model
+    }
+
     public init(from decoder: Decoder) throws {
-        let object = try [String: Value](from: decoder)
-        if object["roots"] != nil {
-            self = .roots(try ListRoots.Result(decoding: Value.object(object)))
-        } else if object["action"] != nil {
-            self = .elicitation(try CreateElicitation.Result(decoding: Value.object(object)))
+        let shape = try decoder.container(keyedBy: ShapeKeys.self)
+        // A known kind decodes from `decoder` itself, not through a `Value`,
+        // so a `data:` URL string is read once, as for any other type. A
+        // result of a later kind may share a key with a known one: it is
+        // unknown when it does not decode as the kind its shape suggests.
+        if shape.contains(.roots), let result = try? ListRoots.Result(from: decoder) {
+            self = .roots(result)
+        } else if shape.contains(.action), let result = try? CreateElicitation.Result(from: decoder) {
+            self = .elicitation(result)
+        } else if shape.contains(.content) || shape.contains(.model),
+            let result = try? CreateSamplingMessage.Result(from: decoder)
+        {
+            self = .sampling(result)
         } else {
-            self = .sampling(try CreateSamplingMessage.Result(decoding: Value.object(object)))
+            self = .unknown(try Value.Preserved(from: decoder).value)
         }
     }
 
@@ -163,6 +202,7 @@ extension InputResponse: Codable {
         case .elicitation(let result): try result.encode(to: encoder)
         case .sampling(let result): try result.encode(to: encoder)
         case .roots(let result): try result.encode(to: encoder)
+        case .unknown(let value): try value.encode(to: encoder)
         }
     }
 }
@@ -234,9 +274,12 @@ enum MRTR {
 }
 
 extension Decodable {
-    /// Decodes a value from its JSON `Value`.
-    init(decoding value: Value) throws {
+    /// Decodes a value from its JSON `Value`. With `preservingStrings`, a
+    /// `data:` URL string in a `Value` field stays a string.
+    init(decoding value: Value, preservingStrings: Bool = false) throws {
         let data = try JSONEncoder().encode(value)
-        self = try JSONDecoder().decode(Self.self, from: data)
+        let decoder = JSONDecoder()
+        if preservingStrings { decoder.userInfo[.valuePreservesStrings] = true }
+        self = try decoder.decode(Self.self, from: data)
     }
 }

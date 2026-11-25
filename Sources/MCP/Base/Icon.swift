@@ -8,6 +8,8 @@ import Foundation
 /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/schema#icon
 public struct Icon: Hashable, Codable, Sendable {
     /// The theme this icon is designed for.
+    ///
+    /// Frozen: no case is added in 1.x (the values of CSS `prefers-color-scheme`).
     public enum Theme: String, Hashable, Codable, Sendable {
         /// Icon is designed for light backgrounds
         case light

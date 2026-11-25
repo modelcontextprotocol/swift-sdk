@@ -53,8 +53,9 @@ public enum InputResponse: Hashable, Sendable, Codable {  // the plain result
 ```
 
 An input response on the wire does not name its method. Decoding picks the kind by shape: an
-object with `roots` is a roots result, one with `action` an elicitation result, anything else a
-sampling result.
+object with `roots` is a roots result, one with `action` an elicitation result, one with `content`
+or `model` a sampling result. Anything else, and an object with one of these keys that does not
+decode as that kind (a result of a later kind may reuse the key), is `.unknown`.
 
 ### Parameters and results
 
@@ -100,7 +101,10 @@ await server.withMethodHandler(CallTool.self) { params in
 | Outgoing | state sealed; result returned to the client | the bridge fulfills the requests and calls the handler again |
 
 The capability check uses the request's `clientCapabilities`: elicitation needs `elicitation`
-(and `elicitation.url` for URL mode), sampling needs `sampling`, roots needs `roots`.
+(`elicitation.url` for URL mode; `elicitation.form`, or a declaration with neither, which the
+decoder reads as form, for form mode; any declaration for a mode the SDK does not know), sampling
+needs `sampling`, roots needs `roots`. For an unknown mode, `requiredCapabilities` names
+`elicitation` with no sub-capability.
 
 The bridge, for handshake clients:
 

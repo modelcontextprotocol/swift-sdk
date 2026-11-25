@@ -655,6 +655,8 @@ func runElicitationSEP1034ClientDefaults(_ args: [String]) async throws {
             message = formParams.message
         case .url(let urlParams):
             message = urlParams.message
+        case .unknown:
+            return CreateElicitation.Result(action: .decline)
         }
 
         logger.debug("Elicitation handler invoked", metadata: [

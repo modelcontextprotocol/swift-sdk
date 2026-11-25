@@ -26,6 +26,10 @@ public struct URLElicitationInfo: Codable, Hashable, Sendable {
 }
 
 /// A model context protocol error.
+///
+/// The cases are frozen for 1.x. An error whose code has no case of its own,
+/// including a code a later revision adds, is a ``serverError(code:message:data:)``;
+/// ``errorCode`` and the constants of ``Code`` identify it.
 public enum MCPError: Swift.Error, Sendable {
     // Standard JSON-RPC 2.0 errors (-32700 to -32603)
     case parseError(String?)  // -32700
@@ -223,6 +227,64 @@ extension MCPError: CustomDebugStringConvertible {
         }
     }
 
+}
+
+// MARK: Codes
+
+extension MCPError {
+    /// A JSON-RPC error code. A later revision's codes are added as constants in a minor
+    /// release, not as cases of ``MCPError``.
+    public struct Code: RawRepresentable, Hashable, Sendable, CustomStringConvertible,
+        ExpressibleByIntegerLiteral
+    {
+        public let rawValue: Int
+
+        public init(rawValue: Int) {
+            self.rawValue = rawValue
+        }
+
+        public init(integerLiteral value: Int) {
+            self.rawValue = value
+        }
+
+        public var description: String { String(rawValue) }
+
+        /// Invalid JSON: -32700.
+        public static let parseError: Code = -32700
+        /// The JSON is not a valid request: -32600.
+        public static let invalidRequest: Code = -32600
+        /// The method does not exist or is not available: -32601.
+        public static let methodNotFound: Code = -32601
+        /// Invalid method parameters, and a missing resource (SEP-2164): -32602.
+        public static let invalidParams: Code = -32602
+        /// An internal JSON-RPC error: -32603.
+        public static let internalError: Code = -32603
+        /// The SDK's ``MCPError/connectionClosed``; an implementation-defined server error
+        /// on the wire: -32000.
+        public static let connectionClosed: Code = -32000
+        /// The SDK's ``MCPError/transportError(_:)``; an implementation-defined server error
+        /// on the wire: -32001.
+        public static let transportError: Code = -32001
+        /// Missing or mismatched HTTP headers: -32020.
+        public static let headerMismatch: Code = -32020
+        /// Undeclared client capabilities: -32021.
+        public static let missingRequiredClientCapabilities: Code = -32021
+        /// An unsupported protocol version: -32022.
+        public static let unsupportedProtocolVersion: Code = -32022
+        /// URL elicitations to complete first: -32042.
+        public static let urlElicitationRequired: Code = -32042
+    }
+
+    /// The error's ``code`` as a ``Code``.
+    public var errorCode: Code { Code(rawValue: code) }
+}
+
+extension MCPError.Code {
+    /// Whether `error` is an ``MCPError`` with code `code`, so that
+    /// `catch MCPError.Code.unsupportedProtocolVersion` matches by code.
+    public static func ~= (code: Self, error: any Swift.Error) -> Bool {
+        (error as? MCPError)?.errorCode == code
+    }
 }
 
 // MARK: Codable
