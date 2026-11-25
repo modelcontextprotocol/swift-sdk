@@ -231,6 +231,10 @@ public actor Server {
         /// Completions capabilities
         public var completions: Completions?
         /// Logging capabilities
+        ///
+        /// > Important: Logging is deprecated by the specification (SEP-2577) and can be removed in
+        ///   the first revision released on or after 2027-07-28. It works on every revision that has
+        ///   it. To migrate, log to stderr (stdio) or use OpenTelemetry.
         public var logging: Logging?
         /// Prompts capabilities
         public var prompts: Prompts?
@@ -1847,6 +1851,7 @@ public actor Server {
     ///   break the rules for tool uses and tool results. The SDK checks these
     ///   before it sends the request.
     /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/client/sampling
+    @available(*, deprecated, message: "Sampling is deprecated by the specification (SEP-2577) and can be removed in the first revision released on or after 2027-07-28. To migrate, call the API of an LLM provider from the server.")
     public func requestSampling(
         messages: [Sampling.Message],
         modelPreferences: Sampling.ModelPreferences? = nil,
@@ -2008,6 +2013,7 @@ public actor Server {
     ///   - data: Arbitrary JSON-serializable data for the log message
     /// - Throws: MCPError if the server is not connected
     /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/server/utilities/logging/
+@available(*, deprecated, message: "Logging is deprecated by the specification (SEP-2577) and can be removed in the first revision released on or after 2027-07-28. To migrate, log to stderr (stdio) or use OpenTelemetry.")
     public func log(
         level: LogLevel,
         logger: String? = nil,
@@ -2036,6 +2042,7 @@ public actor Server {
     ///   - data: Any codable data for the log message
     /// - Throws: MCPError if the server is not connected or encoding fails
     /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/server/utilities/logging/
+    @available(*, deprecated, message: "Logging is deprecated by the specification (SEP-2577) and can be removed in the first revision released on or after 2027-07-28. To migrate, log to stderr (stdio) or use OpenTelemetry.")
     public func log<T: Codable>(
         level: LogLevel,
         logger: String? = nil,
@@ -2056,6 +2063,7 @@ public actor Server {
     /// - Returns: Array of Root objects representing accessible directories/files
     /// - Throws: MCPError if the client doesn't support roots or request fails
     /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/client/roots
+    @available(*, deprecated, message: "Roots is deprecated by the specification (SEP-2577) and can be removed in the first revision released on or after 2027-07-28. To migrate, pass directories or files in tool arguments, resource URIs or server configuration.")
     public func listRoots() async throws -> [Root] {
         guard connection != nil else {
             throw MCPError.internalError("Server connection not initialized")
@@ -2374,6 +2382,10 @@ public actor Server {
                             request, http: http, context: handlerContext, listing: &listing)
                     {
                         return AnyMethod.response(id: request.id, error: mismatch)
+                    }
+
+                    if let declared = handlerContext.clientCapabilities {
+                        DeprecationNotices.current.log(forClient: declared, to: await self.logger)
                     }
 
                     var context = handlerContext
@@ -2767,6 +2779,9 @@ public actor Server {
             if let hook = initializeHook {
                 try await hook(params.clientInfo, params.capabilities)
             }
+            // The request context has no client capabilities yet; behind a
+            // sessionless transport it never has them (SEP-2577).
+            DeprecationNotices.current.log(forClient: params.capabilities, to: await self.logger)
 
             let clientRequestedVersion = params.protocolVersion
             let negotiatedProtocolVersion =

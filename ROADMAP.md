@@ -149,8 +149,8 @@ A change that implements a SEP updates its row.
 | 2549 | TTL for list results | Standards | Implemented | [2026-07-28 core](#2026-07-28-core) |
 | 2567 | Sessionless MCP | Standards | Implemented | `StatelessHTTPServerTransport` has no session. Lists that do not vary per client are the server's duty. |
 | 2575 | Stateless MCP | Standards | Implemented | [2026-07-28 core](#2026-07-28-core) |
-| 2577 | Deprecate roots, sampling and logging | Standards | Planned | The features work on every revision that has them; the API does not mark them deprecated yet. |
-| 2596 | Feature lifecycle and deprecation policy | Process | Planned | The policy needs no code. The deprecations it makes (the `includeContext` values `thisServer` and `allServers`, HTTP+SSE) are not marked yet. |
+| 2577 | Deprecate roots, sampling and logging | Standards | Implemented | The features work on every revision that has them. Their entry points are `@available(*, deprecated)`; types and capabilities carry a note. A notice is logged once when the peer declares a deprecated capability. [Deprecated by the specification](docs/rough_edges.md#deprecated-by-the-specification) |
+| 2596 | Feature lifecycle and deprecation policy | Process | Implemented | The policy needs no code; its Tier 1 SDK obligations are met as for SEP-2577. The `includeContext` values `thisServer` and `allServers` are `@available(*, deprecated)`. HTTP+SSE was never implemented. [Deprecated by the specification](docs/rough_edges.md#deprecated-by-the-specification) |
 | 2640 | Skills | Extensions | Implemented | [Skills](#skills) |
 | 2663 | Tasks extension | Extensions | Implemented | [Tasks](#tasks) |
 | 3398 | Release cycle updates (Accepted) | Process | Not applicable | Process. |

@@ -36,6 +36,10 @@ public actor Client {
         /// ``Client/setLoggingLevel(_:)`` does. ``Client/setLoggingLevel(_:)``
         /// does not change it, so assigning the value it already has does
         /// nothing: a level set with ``Client/setLoggingLevel(_:)`` stays.
+        ///
+        /// > Important: Logging is deprecated by the specification (SEP-2577) and can be removed in
+        ///   the first revision released on or after 2027-07-28. It works on every revision that has
+        ///   it. To migrate, log to stderr (stdio) or use OpenTelemetry.
         public var logLevel: LogLevel?
 
         /// How long ``ProtocolMode/automatic`` waits for the answer to
@@ -392,12 +396,21 @@ public actor Client {
         }
 
         /// Whether the client supports sampling
+        ///
+        /// > Important: Sampling is deprecated by the specification (SEP-2577) and can be removed
+        ///   in the first revision released on or after 2027-07-28. It works on every revision that
+        ///   has it. To migrate, call the API of an LLM provider from the server.
         public var sampling: Sampling?
         /// Whether the client supports elicitation
         public var elicitation: Elicitation?
         /// Experimental features supported by the client
         public var experimental: [String: Value]?
         /// Whether the client supports roots
+        ///
+        /// > Important: Roots is deprecated by the specification (SEP-2577) and can be removed in
+        ///   the first revision released on or after 2027-07-28. It works on every revision that has
+        ///   it. To migrate, pass directories or files in tool arguments, resource URIs or server
+        ///   configuration.
         public var roots: Capabilities.Roots?
         /// Protocol extensions supported by the client, keyed by extension
         /// identifier (for example `io.modelcontextprotocol/tasks`), with
@@ -1996,6 +2009,7 @@ public actor Client {
         let result = try await send(request).value
 
         self.serverCapabilities = result.capabilities
+        await logDeprecationNotices(result.capabilities)
         self.negotiatedProtocolVersion = result.protocolVersion
         self.serverInfo = result.serverInfo
         self.instructions = result.instructions
@@ -2182,9 +2196,16 @@ public actor Client {
         return try await context.value
     }
 
+    /// Logs a notice the first time a server declares a capability the
+    /// specification deprecates (SEP-2577).
+    private func logDeprecationNotices(_ capabilities: Server.Capabilities) async {
+        DeprecationNotices.current.log(forServer: capabilities, to: await logger)
+    }
+
     /// Records a `server/discover` result as the connection state.
     private func adopt(_ result: ServerDiscover.Result, version: String) async {
         serverCapabilities = result.capabilities
+        await logDeprecationNotices(result.capabilities)
         negotiatedProtocolVersion = version
         serverInfo = result.serverInfo
         instructions = result.instructions
@@ -2451,6 +2472,7 @@ public actor Client {
     /// - Parameter handler: A closure that processes sampling requests and returns completions
     /// - Returns: Self for method chaining
     /// - SeeAlso: https://modelcontextprotocol.io/docs/concepts/sampling#how-sampling-works
+    @available(*, deprecated, message: "Sampling is deprecated by the specification (SEP-2577) and can be removed in the first revision released on or after 2027-07-28. To migrate, call the API of an LLM provider from the server.")
     @discardableResult
     public func withSamplingHandler(
         _ handler:
@@ -2491,6 +2513,7 @@ public actor Client {
     /// - Parameter handler: A closure that returns the list of available roots
     /// - Returns: Self for method chaining
     /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/client/roots
+    @available(*, deprecated, message: "Roots is deprecated by the specification (SEP-2577) and can be removed in the first revision released on or after 2027-07-28. To migrate, pass directories or files in tool arguments, resource URIs or server configuration.")
     @discardableResult
     public func withRootsHandler(
         _ handler: @escaping @Sendable () async throws -> [Root]
@@ -2508,6 +2531,7 @@ public actor Client {
     ///
     /// - Throws: MCPError if the client is not connected
     /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/client/roots
+    @available(*, deprecated, message: "Roots is deprecated by the specification (SEP-2577) and can be removed in the first revision released on or after 2027-07-28. To migrate, pass directories or files in tool arguments, resource URIs or server configuration.")
     public func notifyRootsChanged() async throws {
         if isStateless { return }
         let notification = RootsListChangedNotification.message()
@@ -2526,6 +2550,7 @@ public actor Client {
     /// - Parameter level: The minimum log level to receive
     /// - Throws: MCPError if the client is not connected or if the server doesn't support logging
     /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/server/utilities/logging/
+    @available(*, deprecated, message: "Logging is deprecated by the specification (SEP-2577) and can be removed in the first revision released on or after 2027-07-28. To migrate, log to stderr (stdio) or use OpenTelemetry.")
     public func setLoggingLevel(_ level: LogLevel) async throws {
         try validateServerCapability(\.logging, "Logging")
         if !isStateless {

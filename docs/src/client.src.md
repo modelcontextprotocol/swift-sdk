@@ -176,6 +176,8 @@ Errors:
 
 ## Roots
 
+Roots, sampling and logging are deprecated by the specification (SEP-2577). They work on every revision that has them; see [Deprecated by the specification](rough_edges.md#deprecated-by-the-specification).
+
 Roots tell the server which directories or files the user made available. Declare the `roots` capability and register a handler that returns the current list. The SDK does not infer capabilities from handlers.
 
 %include Examples/Snippets/Client/Features.swift roots

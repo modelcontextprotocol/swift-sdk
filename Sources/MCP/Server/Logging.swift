@@ -8,6 +8,10 @@ import Foundation
 /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/server/utilities/logging/
 ///
 /// Frozen: no case is added in 1.x (the eight RFC 5424 severities).
+///
+/// > Important: Logging is deprecated by the specification (SEP-2577) and can be removed in the
+///   first revision released on or after 2027-07-28. It works on every revision that has it. To
+///   migrate, log to stderr (stdio) or use OpenTelemetry.
 public enum LogLevel: String, Hashable, Codable, Sendable, CaseIterable {
     /// Detailed debugging information
     case debug
@@ -31,6 +35,10 @@ public enum LogLevel: String, Hashable, Codable, Sendable, CaseIterable {
 
 /// To configure the minimum log level, clients MAY send a `logging/setLevel` request.
 /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/server/utilities/logging/
+///
+/// > Important: Logging is deprecated by the specification (SEP-2577) and can be removed in the
+///   first revision released on or after 2027-07-28. It works on every revision that has it. To
+///   migrate, log to stderr (stdio) or use OpenTelemetry.
 public enum SetLoggingLevel: Method {
     public static let name = "logging/setLevel"
 
@@ -52,6 +60,10 @@ public enum SetLoggingLevel: Method {
 
 /// Servers send log messages using `notifications/message` notifications.
 /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/server/utilities/logging/
+///
+/// > Important: Logging is deprecated by the specification (SEP-2577) and can be removed in the
+///   first revision released on or after 2027-07-28. It works on every revision that has it. To
+///   migrate, log to stderr (stdio) or use OpenTelemetry.
 public struct LogMessageNotification: Notification {
     public static let name = "notifications/message"
 

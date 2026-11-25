@@ -24,6 +24,8 @@ each change that breaks source code.
 | `OAuthAuthorizationError` | A struct with a `code`, not an enum; eight new codes | Read details from properties instead of binding associated values |
 | `GrantType`, `TokenEndpointAuthentication`, `PrivateKeyJWTSigningAlgorithm` | Structs, not enums; new grant type `.jwtBearer` | Add a `default` to `switch` statements; write `.ES256` instead of `init(rawValue:)` |
 | `BearerTokenValidationResult`, `Elicitation.Mode`, `ToolChoice.Mode` | Structs, not enums; `Mode(rawValue:)` is not optional | Add a `default` to `switch` statements; drop the optional binding |
+| Roots, sampling and logging | Deprecated by the specification (SEP-2577): the entry points are `@available(*, deprecated)`, and a notice is logged once when the peer declares them | Nothing now; plan the migration in [rough_edges.md](rough_edges.md#deprecated-by-the-specification) |
+| `includeContext` | `.thisServer` and `.allServers` are deprecated (SEP-2596) | Omit `includeContext`, or use `.none` |
 | `ToolChoice(mode:)` | Takes a `Mode`; the initializer with an optional mode is deprecated | Pass a mode. `.init(mode: .none)` is now the `none` mode, not `nil` (`auto`) |
 | Content blocks, `InputRequest`, `InputResponse`, `CreateElicitation.Parameters` | New case `.unknown` for kinds from a later revision | Add it, or a `default`, to `switch` statements |
 | `HTTPClientAuthorizer` | `authorizationHeader(for:)` became `authorizationHeaders(for:method:)`; new requirement `handleChallenge(statusCode:headers:endpoint:operationKey:sentAuthorization:session:)`, returning `HTTPChallengeResult`, with a default that calls the Bool method | Update custom authorizers |

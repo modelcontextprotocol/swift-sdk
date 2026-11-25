@@ -133,5 +133,14 @@ Behavior that can break working code ([docs/migration.md](docs/migration.md#beha
 ### Deprecations
 
 - `Version.latest`: use `Version.latestHandshake`.
+- Roots, sampling and logging, deprecated by the specification (SEP-2577): `Server.requestSampling`,
+  `listRoots`, `log(level:logger:data:)`; `Client.withSamplingHandler`, `withRootsHandler`,
+  `notifyRootsChanged`, `setLoggingLevel`. They work on every revision that has them. The server
+  logs a notice the first time a client declares `roots` or `sampling`, the client when a server
+  declares `logging`.
+- `Sampling.ContextInclusion.thisServer` and `.allServers` (SEP-2596): omit `includeContext`, or
+  use `.none`.
+- The list, with the migrations:
+  [docs/rough_edges.md](docs/rough_edges.md#deprecated-by-the-specification).
 - `CreateSamplingMessage.ToolChoice.init(mode:)` with an optional mode: pass a `Mode`. With an
   optional parameter, `.none` is `nil`, which is `auto`.

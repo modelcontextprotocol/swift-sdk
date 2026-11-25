@@ -5,6 +5,10 @@ import Foundation
 /// security and privacy.
 ///
 /// - SeeAlso: https://modelcontextprotocol.io/docs/concepts/sampling#how-sampling-works
+///
+/// > Important: Sampling is deprecated by the specification (SEP-2577) and can be removed in the
+///   first revision released on or after 2027-07-28. It works on every revision that has it. To
+///   migrate, call the API of an LLM provider from the server.
 public enum Sampling {
     /// A message in the conversation history.
     public struct Message: Hashable, Sendable {
@@ -152,12 +156,18 @@ public enum Sampling {
     /// Context inclusion options for sampling requests
     ///
     /// Frozen: no case is added in 1.x (soft-deprecated at 2025-11-25, so it can only shrink).
+    ///
+    /// `thisServer` and `allServers` are deprecated by the specification
+    /// (SEP-2596). They are removed no later than sampling. Omit
+    /// `includeContext`, or use ``none``. They still decode and encode.
     public enum ContextInclusion: String, Hashable, Codable, Sendable {
         /// No additional context
         case none
         /// Include context from the requesting server
+        @available(*, deprecated, message: "Deprecated by the specification (SEP-2596): omit includeContext, or use .none")
         case thisServer
         /// Include context from all connected MCP servers
+        @available(*, deprecated, message: "Deprecated by the specification (SEP-2596): omit includeContext, or use .none")
         case allServers
     }
 
@@ -486,6 +496,10 @@ extension Sampling.ToolResultContent.ContentBlock: Codable {
 
 /// To request sampling from a client, servers send a `sampling/createMessage` request.
 /// - SeeAlso: https://modelcontextprotocol.io/docs/concepts/sampling#how-sampling-works
+///
+/// > Important: Sampling is deprecated by the specification (SEP-2577) and can be removed in the
+///   first revision released on or after 2027-07-28. It works on every revision that has it. To
+///   migrate, call the API of an LLM provider from the server.
 public enum CreateSamplingMessage: Method {
     public static let name = "sampling/createMessage"
 
