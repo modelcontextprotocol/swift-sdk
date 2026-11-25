@@ -4,7 +4,10 @@
  * HTTP server that wraps the MCP conformance server for testing with the
  * official conformance framework.
  *
- * Usage: mcp-http-server [--port PORT]
+ * Usage: mcp-everything-server [--port PORT] | --stdio
+ *
+ * `--stdio` serves the same server over stdin and stdout, for interop tests
+ * with other SDKs' clients (interop/README.md).
  */
 
 import Foundation
@@ -413,13 +416,13 @@ func createConformanceServer(state: ServerState, transport: any Transport) async
         .init(resources: [
             Resource(name: "Static Text Resource", uri: "test://static-text", description: "A simple static text resource", mimeType: "text/plain"),
             Resource(name: "Static Binary Resource", uri: "test://static-binary", description: "A simple static binary resource", mimeType: "application/octet-stream"),
-            Resource(name: "Watched Resource", uri: "test://watched", description: "A resource that can be subscribed to for updates", mimeType: "text/plain"),
+            Resource(name: "Watched Resource", uri: "test://watched-resource", description: "A resource that can be subscribed to for updates", mimeType: "text/plain"),
         ])
     }
 
     await server.withMethodHandler(ListResourceTemplates.self) { _ in
         .init(templates: [
-            Resource.Template(uriTemplate: "test://template/{id}", name: "Template Resource", description: "A resource template with URI parameters", mimeType: "text/plain"),
+            Resource.Template(uriTemplate: "test://template/{id}/data", name: "Template Resource", description: "A resource template with URI parameters", mimeType: "text/plain"),
         ])
     }
 
@@ -432,13 +435,14 @@ func createConformanceServer(state: ServerState, transport: any Transport) async
                 return .init(contents: [.text("Failed to decode binary data", uri: params.uri)])
             }
             return .init(contents: [.binary(imageData, uri: params.uri, mimeType: "application/octet-stream")])
-        case "test://watched":
+        case "test://watched-resource":
             let content = await state.watchedResourceContent
             return .init(contents: [.text(content, uri: params.uri)])
         default:
-            if params.uri.hasPrefix("test://template/") {
-                let id = String(params.uri.dropFirst("test://template/".count))
-                return .init(contents: [.text("Template resource with id: \(id)", uri: params.uri)])
+            // test://template/{id}/data
+            let parts = params.uri.split(separator: "/", omittingEmptySubsequences: false)
+            if params.uri.hasPrefix("test://template/"), parts.count == 5, parts[4] == "data", !parts[3].isEmpty {
+                return .init(contents: [.text("Template resource with id: \(parts[3])", uri: params.uri)])
             }
             throw MCPError.resourceNotFound(uri: params.uri)
         }
@@ -514,6 +518,13 @@ func createConformanceServer(state: ServerState, transport: any Transport) async
 struct MCPHTTPServer {
     static func run() async throws {
         let args = CommandLine.arguments
+        if args.contains("--stdio") {
+            let transport = StdioTransport()
+            let server = await createConformanceServer(state: ServerState(), transport: transport)
+            try await server.start(transport: transport)
+            await server.waitUntilCompleted()
+            return
+        }
         var port = 3001
 
         for (index, arg) in args.enumerated() {
@@ -567,6 +578,6 @@ struct MCPHTTPServer {
 do {
     try await MCPHTTPServer.run()
 } catch {
-    print(error)
+    FileHandle.standardError.write(Data("\(error)\n".utf8))
     exit(1)
 }

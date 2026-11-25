@@ -299,14 +299,15 @@ with `Bad request` (400), `Session expired` or `Endpoint not found` (404),
 `Request timeout` (408), `Too many requests` (429), or `Server error: <status>`
 (5xx). A 404 with a session drops the session ID. The client does not
 initialize a new session on its own; after `Session expired`, connect a new
-client.
+client. The Go and Python clients behave the same way.
 
 A POST response stream that ends before its response, and that the transport
 cannot resume, fails its request with -32603: `The server closed the response
 stream without a response or an event ID to resume from` (the stream had no
 event IDs), or `The response stream could not be resumed` (the server refused
 the GET with `Last-Event-ID`, or closed the stream 10 times). The server keeps
-no events for replay. At 2026-07-28 there is no resumption, and the message is
+no events for replay; the Go SDK's server, for example, has no event store by
+default. At 2026-07-28 there is no resumption, and the message is
 `The server closed the response stream without a response`.
 
 ### Era mix-ups

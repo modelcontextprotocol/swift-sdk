@@ -145,7 +145,8 @@ code block in the docs:
 | `design/` | Design notes: the overall design and one note per feature |
 | `Examples/` | Runnable examples and doc snippets |
 | `conformance/` | Fixtures and baselines for the [MCP conformance suite](https://github.com/modelcontextprotocol/conformance) |
-| `scripts/` | Conformance runner and scorer, docs weaver |
+| `interop/` | Interop matrix against the Go and Python SDKs, and its [results](interop/RESULTS.md) |
+| `scripts/` | Conformance and interop runners, conformance scorer, docs weaver |
 
 ## Project
 

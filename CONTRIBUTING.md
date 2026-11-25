@@ -98,6 +98,12 @@ Rules:
 - CI runs the three legs and the tier score for both revisions on pushes and pull requests to
   `main`.
 
+## Interop
+
+`scripts/run-interop.sh` runs the Swift SDK's clients and servers against pinned releases of the
+Go and Python SDKs (needs Go and `uv`). Run it after protocol or transport changes, and record a
+changed outcome with `--update-results`. Details: [interop/README.md](interop/README.md).
+
 ## Documentation
 
 | What | Where | How |
