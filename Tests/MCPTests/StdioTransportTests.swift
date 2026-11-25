@@ -118,12 +118,38 @@ struct StdioTransportTests {
         let replacementFlags = fcntl(replacementWriter.rawValue, F_GETFL)
         #expect(fcntl(replacementWriter.rawValue, F_SETFL, replacementFlags | O_NONBLOCK) == 0)
 
-        try output.close()
+        // dup2 closes `output` and reuses its number in one step, so a test running in
+        // parallel cannot be given that number in between.
         #expect(dup2(replacementWriter.rawValue, output.rawValue) == output.rawValue)
         defer { _ = close(output.rawValue) }
 
         await transport.disconnect()
         #expect(fcntl(output.rawValue, F_GETFL) & O_NONBLOCK != 0)
+    }
+
+    @Test("Connect and disconnect over a socket pair")
+    func testSocketPair() async throws {
+        // Node.js gives a child process socket pairs, not pipes, as stdin and stdout;
+        // on Darwin their st_dev is negative.
+        #if canImport(Glibc)
+            let stream = Int32(SOCK_STREAM.rawValue)
+        #else
+            let stream = SOCK_STREAM
+        #endif
+        var input: [Int32] = [0, 0]
+        var output: [Int32] = [0, 0]
+        #expect(socketpair(AF_UNIX, stream, 0, &input) == 0)
+        #expect(socketpair(AF_UNIX, stream, 0, &output) == 0)
+        defer { for fd in input + output { _ = close(fd) } }
+
+        let transport = StdioTransport(
+            input: FileDescriptor(rawValue: input[0]), output: FileDescriptor(rawValue: output[0]),
+            logger: nil)
+        try await transport.connect()
+        try await transport.send(Data("{}".utf8))
+        await transport.disconnect()
+        #expect(fcntl(input[0], F_GETFL) & O_NONBLOCK == 0)
+        #expect(fcntl(output[0], F_GETFL) & O_NONBLOCK == 0)
     }
 
     @Test("Failed connect restores the input descriptor mode")

@@ -10,13 +10,13 @@ private struct FixedSessionIDGenerator: SessionIDGenerator {
     func generateSessionID() -> String { sessionID }
 }
 
-private func makeInitializeBody(id: String = "1") -> Data {
+private func makeInitializeBody(id: String = "1", protocolVersion: String = "2025-11-25") -> Data {
     let json: [String: Any] = [
         "jsonrpc": "2.0",
         "id": id,
         "method": "initialize",
         "params": [
-            "protocolVersion": "2025-11-25",
+            "protocolVersion": protocolVersion,
             "capabilities": [:] as [String: Any],
             "clientInfo": ["name": "test", "version": "1.0"],
         ] as [String: Any],
@@ -284,6 +284,36 @@ struct StatefulHTTPServerTransportTests {
         if case .stream(let stream, _) = response {
             Task { for try await _ in stream {} }
         }
+        await transport.disconnect()
+    }
+
+    @Test(
+        "Initialize primes its stream by the negotiated revision",
+        arguments: [
+            ("2026-07-28", true), ("2025-11-25", true), ("2025-03-26", true),
+            ("2024-11-05", false), ("2024-01-01", false),
+        ])
+    func testInitializePriming(requested: String, primed: Bool) async throws {
+        let transport = makeStatefulTransport()
+        try await transport.connect()
+        let response = await transport.handleRequest(
+            makeStatefulPOSTRequest(body: makeInitializeBody(protocolVersion: requested)))
+        guard case .stream(let stream, _) = response else {
+            Issue.record("Expected .stream response, got \(response)")
+            return
+        }
+        // Nothing answers the request, so the only possible chunk is the priming event.
+        let reader = Task { () -> String? in
+            for try await chunk in stream { return String(decoding: chunk, as: UTF8.self) }
+            return nil
+        }
+        let timer = Task {
+            try await Task.sleep(for: .milliseconds(300))
+            reader.cancel()
+        }
+        let first = try? await reader.value
+        timer.cancel()
+        #expect((first?.hasPrefix("id:") ?? false) == primed, "first chunk: \(first ?? "none")")
         await transport.disconnect()
     }
 

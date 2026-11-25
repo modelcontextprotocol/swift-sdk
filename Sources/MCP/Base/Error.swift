@@ -34,11 +34,21 @@ public enum MCPError: Swift.Error, Sendable {
     case invalidParams(String?)  // -32602
     case internalError(String?)  // -32603
 
-    // Server errors (-32000 to -32099)
-    case serverError(code: Int, message: String)
+    /// An error with an implementation-defined or unrecognized code.
+    case serverError(code: Int, message: String, data: Value? = nil)
 
     // MCP specific errors
-    case urlElicitationRequired(message: String, elicitations: [URLElicitationInfo])  // -32042
+
+    /// The requested resource does not exist (SEP-2164): -32602 with `data.uri`.
+    case resourceNotFound(uri: String, message: String? = nil)
+    /// HTTP headers are missing, malformed or do not match the request body: -32020.
+    case headerMismatch(String?)
+    /// The request needs client capabilities it did not declare: -32021.
+    case missingRequiredClientCapabilities(Client.Capabilities, message: String? = nil)
+    /// The server does not serve the requested protocol version: -32022.
+    case unsupportedProtocolVersion(supported: [String], requested: String? = nil)
+    /// The server needs the user to complete URL elicitations first: -32042.
+    case urlElicitationRequired(message: String, elicitations: [URLElicitationInfo])
 
     // Transport specific errors
     case connectionClosed
@@ -52,10 +62,44 @@ public enum MCPError: Swift.Error, Sendable {
         case .methodNotFound: return -32601
         case .invalidParams: return -32602
         case .internalError: return -32603
-        case .serverError(let code, _): return code
+        case .serverError(let code, _, _): return code
+        case .resourceNotFound: return -32602
+        case .headerMismatch: return -32020
+        case .missingRequiredClientCapabilities: return -32021
+        case .unsupportedProtocolVersion: return -32022
         case .urlElicitationRequired: return -32042
         case .connectionClosed: return -32000
         case .transportError: return -32001
+        }
+    }
+
+    /// The `data` member sent with the error, if any.
+    public var data: Value? {
+        switch self {
+        case .parseError(let detail),
+            .invalidRequest(let detail),
+            .methodNotFound(let detail),
+            .invalidParams(let detail),
+            .internalError(let detail),
+            .headerMismatch(let detail):
+            return detail.map { ["detail": .string($0)] }
+        case .serverError(_, _, let data):
+            return data
+        case .resourceNotFound(let uri, _):
+            return ["uri": .string(uri)]
+        case .missingRequiredClientCapabilities(let capabilities, _):
+            return ["requiredCapabilities": (try? Value.preservingStrings(capabilities)) ?? [:]]
+        case .unsupportedProtocolVersion(let supported, let requested):
+            var data: [String: Value] = ["supported": .array(supported.map { .string($0) })]
+            if let requested { data["requested"] = .string(requested) }
+            return .object(data)
+        case .urlElicitationRequired(_, let elicitations):
+            let items = elicitations.map { (try? Value.preservingStrings($0)) ?? .null }
+            return ["elicitations": .array(items)]
+        case .connectionClosed:
+            return nil
+        case .transportError(let error):
+            return ["error": .string(error.localizedDescription)]
         }
     }
 
@@ -89,8 +133,18 @@ extension MCPError: LocalizedError {
             return "Invalid params" + (detail.map { ": \($0)" } ?? "")
         case .internalError(let detail):
             return "Internal error" + (detail.map { ": \($0)" } ?? "")
-        case .serverError(_, let message):
+        case .serverError(_, let message, _):
             return "Server error: \(message)"
+        case .resourceNotFound(let uri, let message):
+            return message ?? "Resource not found: \(uri)"
+        case .headerMismatch(let detail):
+            return "Header mismatch" + (detail.map { ": \($0)" } ?? "")
+        case .missingRequiredClientCapabilities(_, let message):
+            return message ?? "Missing required client capabilities"
+        case .unsupportedProtocolVersion(let supported, let requested):
+            let prefix = requested.map { "Unsupported protocol version \($0)" }
+                ?? "Unsupported protocol version"
+            return prefix + "; supported: " + supported.joined(separator: ", ")
         case .urlElicitationRequired(let message, _):
             return "URL elicitation required: \(message)"
         case .connectionClosed:
@@ -114,6 +168,14 @@ extension MCPError: LocalizedError {
             return "Internal JSON-RPC error"
         case .serverError:
             return "Server-defined error occurred"
+        case .resourceNotFound:
+            return "The requested resource does not exist"
+        case .headerMismatch:
+            return "The HTTP headers do not match the request body"
+        case .missingRequiredClientCapabilities:
+            return "The request needs client capabilities that were not declared"
+        case .unsupportedProtocolVersion:
+            return "The server does not support the requested protocol version"
         case .urlElicitationRequired:
             return "The server requires user authentication or input via external URL"
         case .connectionClosed:
@@ -133,6 +195,8 @@ extension MCPError: LocalizedError {
             return "Check the method name and ensure it is supported by the server"
         case .invalidParams:
             return "Verify the parameters match the method's expected parameters"
+        case .unsupportedProtocolVersion(let supported, _):
+            return supported.first.map { "Retry with protocol version \($0)" }
         case .urlElicitationRequired(_, let elicitations):
             if let first = elicitations.first {
                 return "Visit \(first.url) to complete the required authentication or input"
@@ -168,113 +232,98 @@ extension MCPError: Codable {
         case code, message, data
     }
 
+    /// The `message` member sent on the wire.
+    private var wireMessage: String {
+        switch self {
+        case .serverError(_, let message, _), .urlElicitationRequired(let message, _):
+            return message
+        default:
+            return errorDescription ?? "Unknown error"
+        }
+    }
+
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(code, forKey: .code)
-
-        // Encode additional data if available
-        switch self {
-        case .parseError(let detail),
-            .invalidRequest(let detail),
-            .methodNotFound(let detail),
-            .invalidParams(let detail),
-            .internalError(let detail):
-            try container.encode(errorDescription ?? "Unknown error", forKey: .message)
-            if let detail = detail {
-                try container.encode(["detail": detail], forKey: .data)
-            }
-        case .serverError(_, _):
-            // No additional data for server errors
-            try container.encode(errorDescription ?? "Unknown error", forKey: .message)
-            break
-        case .urlElicitationRequired(let message, let elicitations):
-            // Encode the raw message so decode can round-trip without prefix doubling
-            try container.encode(message, forKey: .message)
-            // Encode elicitations array as structured data
-            let elicitationsData = elicitations.map { info -> [String: Value] in
-                return [
-                    "mode": .string(info.mode),
-                    "elicitationId": .string(info.elicitationId),
-                    "url": .string(info.url),
-                    "message": .string(info.message)
-                ]
-            }
-            try container.encode(
-                ["elicitations": Value.array(elicitationsData.map { .object($0) })],
-                forKey: .data
-            )
-        case .connectionClosed:
-            try container.encode(errorDescription ?? "Unknown error", forKey: .message)
-        case .transportError(let error):
-            try container.encode(errorDescription ?? "Unknown error", forKey: .message)
-            try container.encode(
-                ["error": error.localizedDescription],
-                forKey: .data
-            )
-        }
+        try container.encode(wireMessage, forKey: .message)
+        try container.encodeIfPresent(data, forKey: .data)
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let code = try container.decode(Int.self, forKey: .code)
         let message = try container.decode(String.self, forKey: .message)
-        let data = try container.decodeIfPresent([String: Value].self, forKey: .data)
+        let data = try container.decodeIfPresent(Value.self, forKey: .data)
+        let fields = data?.objectValue
 
-        // Helper to extract detail from data, falling back to message if needed
-        let unwrapDetail: (String?) -> String? = { fallback in
-            guard let detailValue = data?["detail"] else { return fallback }
-            if case .string(let str) = detailValue { return str }
-            return fallback
+        // The detail the standard cases put in `data`, else the message.
+        let detail: (String?) -> String? = { fallback in
+            fields?["detail"]?.stringValue ?? fallback
         }
+        // Without `data.detail`, the message less the text the case adds
+        // itself, so a decoded error encodes the message it was sent with.
+        let detailOrMessage: (String) -> String? = { text in
+            if message == text { return detail(nil) }
+            if message.hasPrefix(text + ": ") {
+                return detail(String(message.dropFirst(text.count + 2)))
+            }
+            return detail(message)
+        }
+        // A message equal to the case's own text for `message: nil` is `nil`.
+        let customMessage: (String) -> String? = { text in message == text ? nil : message }
+        // An application sees `.data` for a `data:` URL in `data`, as in any
+        // other decoded `Value`.
+        let serverData = data?.decodingDataURLs
 
         switch code {
         case -32700:
-            self = .parseError(unwrapDetail(message))
+            self = .parseError(detailOrMessage("Parse error: Invalid JSON"))
         case -32600:
-            self = .invalidRequest(unwrapDetail(message))
+            self = .invalidRequest(detailOrMessage("Invalid Request"))
         case -32601:
-            self = .methodNotFound(unwrapDetail(message))
-        case -32602:
-            self = .invalidParams(unwrapDetail(message))
+            self = .methodNotFound(detailOrMessage("Method not found"))
+        case -32602, -32002:
+            if fields?["detail"] == nil, let uri = fields?["uri"]?.stringValue {
+                self = .resourceNotFound(
+                    uri: uri, message: customMessage("Resource not found: \(uri)"))
+            } else if code == -32602 {
+                self = .invalidParams(detailOrMessage("Invalid params"))
+            } else {
+                self = .serverError(code: code, message: message, data: serverData)
+            }
         case -32603:
-            self = .internalError(unwrapDetail(nil))
+            self = .internalError(detail(nil))
+        case -32020:
+            self = .headerMismatch(detailOrMessage("Header mismatch"))
+        case -32021:
+            // Without a readable `requiredCapabilities`, the error keeps its
+            // data: an empty set would read as nothing to declare.
+            if let required = fields?["requiredCapabilities"].flatMap({
+                try? JSONDecoder().decode(Client.Capabilities.self, from: JSONEncoder().encode($0))
+            }) {
+                self = .missingRequiredClientCapabilities(
+                    required, message: customMessage("Missing required client capabilities"))
+            } else {
+                self = .serverError(code: code, message: message, data: serverData)
+            }
+        case -32022:
+            let supported = fields?["supported"]?.arrayValue?.compactMap(\.stringValue) ?? []
+            self = .unsupportedProtocolVersion(
+                supported: supported, requested: fields?["requested"]?.stringValue)
         case -32042:
-            // Extract elicitations array from data
             var elicitations: [URLElicitationInfo] = []
-            if case .array(let items) = data?["elicitations"] {
-                for item in items {
-                    if case .object(let dict) = item,
-                       case .string(let mode) = dict["mode"],
-                       case .string(let elicitationId) = dict["elicitationId"],
-                       case .string(let url) = dict["url"],
-                       case .string(let msg) = dict["message"] {
-                        elicitations.append(URLElicitationInfo(
-                            mode: mode,
-                            elicitationId: elicitationId,
-                            url: url,
-                            message: msg))
-                    }
+            for item in fields?["elicitations"]?.arrayValue ?? [] {
+                if let info = try? JSONDecoder().decode(
+                    URLElicitationInfo.self, from: JSONEncoder().encode(item))
+                {
+                    elicitations.append(info)
                 }
             }
             self = .urlElicitationRequired(message: message, elicitations: elicitations)
-        case -32000:
-            self = .connectionClosed
-        case -32001:
-            // Extract underlying error string if present
-            let underlyingErrorString =
-                data?["error"].flatMap { val -> String? in
-                    if case .string(let str) = val { return str }
-                    return nil
-                } ?? message
-            self = .transportError(
-                NSError(
-                    domain: "org.jsonrpc.error",
-                    code: code,
-                    userInfo: [NSLocalizedDescriptionKey: underlyingErrorString]
-                )
-            )
         default:
-            self = .serverError(code: code, message: message)
+            // -32000 and -32001 are used by the SDK for local transport errors
+            // only; on the wire they are implementation-defined server errors.
+            self = .serverError(code: code, message: message, data: serverData)
         }
     }
 }
@@ -289,8 +338,16 @@ extension MCPError: Equatable {
         case (.methodNotFound(let a), .methodNotFound(let b)): return a == b
         case (.invalidParams(let a), .invalidParams(let b)): return a == b
         case (.internalError(let a), .internalError(let b)): return a == b
-        case (.serverError(let c1, let m1), .serverError(let c2, let m2)):
+        case (.serverError(let c1, let m1, let d1), .serverError(let c2, let m2, let d2)):
+            return c1 == c2 && m1 == m2 && d1 == d2
+        case (.resourceNotFound(let u1, let m1), .resourceNotFound(let u2, let m2)):
+            return u1 == u2 && m1 == m2
+        case (.headerMismatch(let a), .headerMismatch(let b)): return a == b
+        case (.missingRequiredClientCapabilities(let c1, let m1),
+            .missingRequiredClientCapabilities(let c2, let m2)):
             return c1 == c2 && m1 == m2
+        case (.unsupportedProtocolVersion(let s1, let r1), .unsupportedProtocolVersion(let s2, let r2)):
+            return s1 == s2 && r1 == r2
         case (.urlElicitationRequired(let m1, let e1), .urlElicitationRequired(let m2, let e2)):
             return m1 == m2 && e1 == e2
         case (.connectionClosed, .connectionClosed): return true
@@ -317,8 +374,20 @@ extension MCPError: Hashable {
             hasher.combine(detail)
         case .internalError(let detail):
             hasher.combine(detail)
-        case .serverError(_, let message):
+        case .serverError(_, let message, let data):
             hasher.combine(message)
+            hasher.combine(data)
+        case .resourceNotFound(let uri, let message):
+            hasher.combine(uri)
+            hasher.combine(message)
+        case .headerMismatch(let detail):
+            hasher.combine(detail)
+        case .missingRequiredClientCapabilities(let capabilities, let message):
+            hasher.combine(capabilities)
+            hasher.combine(message)
+        case .unsupportedProtocolVersion(let supported, let requested):
+            hasher.combine(supported)
+            hasher.combine(requested)
         case .urlElicitationRequired(let message, let elicitations):
             hasher.combine(message)
             hasher.combine(elicitations)

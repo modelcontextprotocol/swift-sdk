@@ -17,13 +17,15 @@ struct AnyPendingRequest: Sendable {
         _resume = { result in
             switch result {
             case .success(let value):
-                if let typedValue = value as? T {
-                    request.continuation.resume(returning: typedValue)
-                } else if let value = value as? Value,
+                // A result decoded from the wire keeps `data:` URL strings;
+                // the typed decode turns those in `Value` fields into `.data`.
+                if let value = value as? Value,
                     let data = try? JSONEncoder().encode(value),
                     let decoded = try? JSONDecoder().decode(T.self, from: data)
                 {
                     request.continuation.resume(returning: decoded)
+                } else if let typedValue = value as? T {
+                    request.continuation.resume(returning: typedValue)
                 } else {
                     request.continuation.resume(throwing: TypeMismatchError())
                 }

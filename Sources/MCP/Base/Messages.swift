@@ -20,6 +20,10 @@ extension Value: NotRequired {
 // MARK: -
 
 /// A method that can be used to send requests and receive responses.
+///
+/// `Parameters` must encode as a JSON object. When the request carries
+/// `_meta`, the parameters are re-encoded through ``Value`` to merge it, so
+/// their numbers must fit `Int` or `Double`.
 public protocol Method: Sendable {
     /// The parameters of the method.
     associatedtype Parameters: Codable, Hashable, Sendable = Empty
@@ -38,9 +42,10 @@ struct AnyMethod: Method, Sendable {
 
 extension Method where Parameters == Empty {
     public static func request(
-        id: ID = .random
+        id: ID = .random,
+        _meta: Metadata? = nil
     ) -> Request<Self> {
-        Request(id: id, method: name, params: Empty())
+        Request(id: id, method: name, params: Empty(), _meta: _meta)
     }
 }
 
@@ -54,9 +59,10 @@ extension Method {
     /// Create a request with the given parameters.
     public static func request(
         id: ID = .random,
-        _ parameters: Self.Parameters
+        _ parameters: Self.Parameters,
+        _meta: Metadata? = nil
     ) -> Request<Self> {
-        Request(id: id, method: name, params: parameters)
+        Request(id: id, method: name, params: parameters, _meta: _meta)
     }
 
     /// Create a response with the given result.
@@ -86,15 +92,28 @@ public struct Request<M: Method>: Hashable, Identifiable, Codable, Sendable {
     public let method: String
     /// The request parameters.
     public let params: M.Parameters
+    /// Request-level metadata, sent as `params._meta`.
+    ///
+    /// Merged with any `_meta` the parameters encode themselves; on a key
+    /// conflict the parameters win. Decoding fills it from `params._meta`,
+    /// so a decoded request whose parameters model `_meta` holds the same
+    /// keys twice: equality with a request built without `_meta` fails, and
+    /// a key is removed from the wire only by clearing it in both.
+    ///
+    /// When it is set, the parameters are re-encoded through ``Value``, so
+    /// an integer beyond `Int` or a decimal beyond `Double` loses precision.
+    public var _meta: Metadata?
 
     init(
         id: ID = .random,
         method: String,
-        params: M.Parameters
+        params: M.Parameters,
+        _meta: Metadata? = nil
     ) {
         self.id = id
         self.method = method
         self.params = params
+        self._meta = _meta
     }
 
     private enum CodingKeys: String, CodingKey, CaseIterable {
@@ -106,8 +125,40 @@ public struct Request<M: Method>: Hashable, Identifiable, Codable, Sendable {
         try container.encode(jsonrpc, forKey: .jsonrpc)
         try container.encode(id, forKey: .id)
         try container.encode(method, forKey: .method)
-        try container.encode(params, forKey: .params)
+        if let meta = _meta, !meta.fields.isEmpty {
+            try container.encode(try mergingMeta(meta, into: params), forKey: .params)
+        } else {
+            try container.encode(params, forKey: .params)
+        }
     }
+}
+
+/// Decodes only `_meta` from a parameters object.
+private struct MetaProbe: Decodable {
+    let _meta: Metadata?
+}
+
+/// Encodes `params` as a JSON object with `meta` merged into its `_meta`;
+/// keys already present in the encoded `_meta` win.
+private func mergingMeta<P: Codable>(_ meta: Metadata, into params: P) throws -> Value {
+    var object: [String: Value]
+    // Through `Value`, but strings stay strings: a `data:` URL argument is
+    // sent as given.
+    switch try Value.preservingStrings(params) {
+    case .object(let fields): object = fields
+    case .null: object = [:]
+    default:
+        throw EncodingError.invalidValue(
+            params,
+            EncodingError.Context(
+                codingPath: [], debugDescription: "Parameters with _meta must encode as an object"))
+    }
+    var merged = meta.fields
+    if case .object(let own) = object["_meta"] {
+        merged.merge(own) { _, own in own }
+    }
+    object["_meta"] = .object(merged)
+    return .object(object)
 }
 
 extension Request {
@@ -120,6 +171,7 @@ extension Request {
         }
         id = try container.decode(ID.self, forKey: .id)
         method = try container.decode(String.self, forKey: .method)
+        _meta = (try? container.decodeIfPresent(MetaProbe.self, forKey: .params))??._meta
 
         if M.Parameters.self is NotRequired.Type {
             // For NotRequired parameters, use decodeIfPresent or init()
@@ -158,6 +210,7 @@ extension AnyRequest {
     init<T: Method>(_ request: Request<T>) throws {
         let encoder = JSONEncoder()
         let decoder = JSONDecoder()
+        decoder.userInfo[.valuePreservesStrings] = true
 
         let data = try encoder.encode(request)
         self = try decoder.decode(AnyRequest.self, from: data)
@@ -184,7 +237,8 @@ final class TypedRequestHandler<M: Method>: RequestHandlerBox, @unchecked Sendab
         let encoder = JSONEncoder()
         let decoder = JSONDecoder()
 
-        // Create a concrete request from the type-erased one
+        // Create a concrete request from the type-erased one; here `data:`
+        // URL strings in `Value` fields become `.data`.
         let data = try encoder.encode(request)
         let request = try decoder.decode(Request<M>.self, from: data)
 
@@ -194,9 +248,7 @@ final class TypedRequestHandler<M: Method>: RequestHandlerBox, @unchecked Sendab
         // Convert result to AnyMethod response
         switch response.result {
         case .success(let result):
-            let resultData = try encoder.encode(result)
-            let resultValue = try decoder.decode(Value.self, from: resultData)
-            return Response(id: response.id, result: resultValue)
+            return Response(id: response.id, result: try Value.preservingStrings(result))
         case .failure(let error):
             return Response(id: response.id, error: error)
         }
@@ -279,11 +331,9 @@ extension AnyResponse {
     init<T: Method>(_ response: Response<T>) throws {
         switch response.result {
         case .success(let result):
-            let data = try JSONEncoder().encode(result)
-            let resultValue = try JSONDecoder().decode(Value.self, from: data)
             self = Response<AnyMethod>(
                 id: response.id,
-                result: .success(resultValue)
+                result: .success(try Value.preservingStrings(result))
             )
         case .failure(let error):
             self = Response<AnyMethod>(
@@ -326,10 +376,22 @@ public struct Message<N: Notification>: Hashable, Codable, Sendable {
     public let method: String
     /// The notification parameters.
     public let params: N.Parameters
+    /// Notification-level metadata, sent as `params._meta`.
+    ///
+    /// Merged with any `_meta` the parameters encode themselves; on a key
+    /// conflict the parameters win. Decoding fills it from `params._meta`,
+    /// so a decoded notification whose parameters model `_meta` holds the
+    /// same keys twice: equality with a message built without `_meta` fails,
+    /// and a key is removed from the wire only by clearing it in both.
+    ///
+    /// When it is set, the parameters are re-encoded through ``Value``, so
+    /// an integer beyond `Int` or a decimal beyond `Double` loses precision.
+    public var _meta: Metadata?
 
-    public init(method: String, params: N.Parameters) {
+    public init(method: String, params: N.Parameters, _meta: Metadata? = nil) {
         self.method = method
         self.params = params
+        self._meta = _meta
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -340,7 +402,9 @@ public struct Message<N: Notification>: Hashable, Codable, Sendable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(jsonrpc, forKey: .jsonrpc)
         try container.encode(method, forKey: .method)
-        if N.Parameters.self != Empty.self {
+        if let meta = _meta, !meta.fields.isEmpty {
+            try container.encode(try mergingMeta(meta, into: params), forKey: .params)
+        } else if N.Parameters.self != Empty.self {
             try container.encode(params, forKey: .params)
         }
     }
@@ -353,6 +417,7 @@ public struct Message<N: Notification>: Hashable, Codable, Sendable {
                 forKey: .jsonrpc, in: container, debugDescription: "Invalid JSON-RPC version")
         }
         method = try container.decode(String.self, forKey: .method)
+        _meta = (try? container.decodeIfPresent(MetaProbe.self, forKey: .params))??._meta
 
         if N.Parameters.self is NotRequired.Type {
             // For NotRequired parameters, use decodeIfPresent or init()

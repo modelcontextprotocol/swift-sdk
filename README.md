@@ -525,6 +525,19 @@ do {
 }
 ```
 
+`MCPError.code` and `MCPError.data` expose the JSON-RPC `code` and `data`
+members. Protocol errors have dedicated cases:
+
+| Case | Code | `data` |
+|---|---|---|
+| `resourceNotFound(uri:)` | -32602 | `{"uri": ...}` |
+| `headerMismatch` | -32020 | `{"detail": ...}` |
+| `missingRequiredClientCapabilities` | -32021 | `{"requiredCapabilities": ...}` |
+| `unsupportedProtocolVersion(supported:requested:)` | -32022 | `{"supported": [...], "requested": ...}` |
+| `urlElicitationRequired` | -32042 | `{"elicitations": [...]}` |
+
+Any other code decodes as `serverError(code:message:data:)`.
+
 ### Cancellation
 
 Either side can cancel an in-progress request and handle incoming cancellations gracefully:
@@ -866,7 +879,7 @@ await server.withMethodHandler(ReadResource.self) { params in
         return .init(contents: [Resource.Content.text(statusJson, uri: params.uri, mimeType: "application/json")])
 
     default:
-        throw MCPError.invalidParams("Unknown resource URI: \(params.uri)")
+        throw MCPError.resourceNotFound(uri: params.uri)
     }
 }
 

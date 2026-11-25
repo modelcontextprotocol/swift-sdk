@@ -116,19 +116,28 @@ public actor Server {
         public var resources: Resources?
         /// Tools capabilities
         public var tools: Tools?
+        /// Experimental features supported by the server
+        public var experimental: [String: Value]?
+        /// Protocol extensions supported by the server, keyed by extension
+        /// identifier, with extension-defined settings (SEP-2133).
+        public var extensions: [String: Value]?
 
         public init(
             completions: Completions? = nil,
             logging: Logging? = nil,
             prompts: Prompts? = nil,
             resources: Resources? = nil,
-            tools: Tools? = nil
+            tools: Tools? = nil,
+            experimental: [String: Value]? = nil,
+            extensions: [String: Value]? = nil
         ) {
             self.completions = completions
             self.logging = logging
             self.prompts = prompts
             self.resources = resources
             self.tools = tools
+            self.experimental = experimental
+            self.extensions = extensions
         }
     }
 
@@ -148,7 +157,13 @@ public actor Server {
         e.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         return e
     }()
-    private let decoder = JSONDecoder()
+    /// Decodes incoming messages with `data:` URL strings kept as strings;
+    /// handlers get `.data` from their own typed decode.
+    private let decoder: JSONDecoder = {
+        let decoder = JSONDecoder()
+        decoder.userInfo[.valuePreservesStrings] = true
+        return decoder
+    }()
 
     /// The server name
     public nonisolated var name: String { serverInfo.name }
@@ -1071,6 +1086,7 @@ extension Server.Batch: Codable {
 
         let encoder = JSONEncoder()
         let decoder = JSONDecoder()
+        decoder.userInfo[.valuePreservesStrings] = true
 
         var items: [Item] = []
         for item in try container.decode([Value].self) {

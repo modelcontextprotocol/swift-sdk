@@ -25,6 +25,21 @@ public enum Value: Hashable, Sendable {
         }
     }
 
+    /// Creates a `Value` that encodes to the same JSON as `value`: strings,
+    /// including `data:` URLs, stay strings.
+    static func preservingStrings<T: Encodable>(_ value: T) throws -> Value {
+        if let valueAsValue = value as? Value { return valueAsValue }
+        let decoder = JSONDecoder()
+        decoder.userInfo[.valuePreservesStrings] = true
+        return try decoder.decode(Value.self, from: JSONEncoder().encode(value))
+    }
+
+    /// The value a plain `JSONDecoder` gives for the JSON this value encodes
+    /// to: `data:` URL strings become `.data`.
+    var decodingDataURLs: Value {
+        (try? JSONDecoder().decode(Value.self, from: JSONEncoder().encode(self))) ?? self
+    }
+
     /// Returns whether the value is `null`.
     public var isNull: Bool {
         return self == .null
@@ -107,6 +122,12 @@ public enum Value: Hashable, Sendable {
 
 // MARK: - Codable
 
+extension CodingUserInfoKey {
+    /// When `true` in a decoder's `userInfo`, ``Value`` decodes `data:` URL
+    /// strings as `.string` instead of `.data`.
+    static let valuePreservesStrings = CodingUserInfoKey(rawValue: "mcp.value.preservesStrings")!
+}
+
 extension Value: Codable {
     public init(from decoder: Decoder) throws {
         let container = try decoder.singleValueContainer()
@@ -120,7 +141,8 @@ extension Value: Codable {
         } else if let value = try? container.decode(Double.self) {
             self = .double(value)
         } else if let value = try? container.decode(String.self) {
-            if Data.isDataURL(string: value),
+            if decoder.userInfo[.valuePreservesStrings] as? Bool != true,
+                Data.isDataURL(string: value),
                 case let (mimeType, data)? = Data.parseDataURL(value)
             {
                 self = .data(mimeType: mimeType, data)
