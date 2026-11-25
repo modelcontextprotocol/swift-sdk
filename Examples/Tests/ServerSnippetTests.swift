@@ -447,3 +447,48 @@ struct ServerSnippetTests {
         await server.stop()
     }
 }
+
+@Suite("Skill snippets")
+struct SkillSnippetTests {
+    @Test("Skills from a directory: listed, loaded and read", arguments: eras)
+    func directory(mode: Client.ProtocolMode) async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("skills-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let skill = root.appendingPathComponent("pdf-processing")
+        try FileManager.default.createDirectory(
+            at: skill.appendingPathComponent("references"), withIntermediateDirectories: true)
+        try Data("---\nname: pdf-processing\ndescription: Fill PDF forms\n---\n".utf8)
+            .write(to: skill.appendingPathComponent("SKILL.md"))
+        try Data("Fields".utf8).write(to: skill.appendingPathComponent("references/FORMS.md"))
+        try Data("not a skill".utf8).write(to: root.appendingPathComponent("README.md"))
+
+        let server = try await makeSkillsServer(directory: root)
+        let client = try await connect(server, mode: mode)
+        let skills = try await client.listAllSkills()
+        #expect(skills.map(\.uri) == ["skill://pdf-processing/SKILL.md"])
+        let loaded = try await client.loadSkill(try #require(skills.first))
+        #expect(try await loaded.read("references/FORMS.md") == Data("Fields".utf8))
+        let directory = try await client.readResourceDirectory(uri: "skill://pdf-processing")
+        #expect(directory.resources.map(\.name) == ["SKILL.md", "references"])
+        await client.disconnect()
+        await server.stop()
+    }
+
+    @Test("A package in memory and a generated skill", arguments: eras)
+    func packageAndCatalog(mode: Client.ProtocolMode) async throws {
+        let refunds = try makeRefundsSkill()
+        #expect(refunds.skill.uri == "skill://acme/billing/refunds/SKILL.md")
+
+        let server = Server(name: "reports", version: "1", capabilities: .init(resources: .init()))
+        await server.withSkills(DailyReportSkill())
+        let client = try await connect(server, mode: mode)
+        #expect(try await client.listAllSkills().isEmpty)
+        let entry = try await client.getSkill(uri: DailyReportSkill.uri)
+        #expect(entry.resources == .dynamic)
+        await #expect(throws: SkillVerificationError.self) { try await client.loadSkill(entry) }
+        let loaded = try await client.loadSkill(entry, options: .init(allowsDynamic: true))
+        #expect(loaded.content.contains("Sales:"))
+        await client.disconnect()
+        await server.stop()
+    }
+}

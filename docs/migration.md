@@ -45,7 +45,7 @@ each change that breaks source code.
 | `data:` URL strings | Arrive as sent instead of rewritten as base64 `data:` URLs | Nothing |
 | HTTP transports | New error bodies, status codes and streaming | See below |
 | `HTTPClientTransport` | Default per-host connection limit 64; POST streams resume per stream; SSE on Linux | Raise `httpMaximumConnectionsPerHost` in custom configurations |
-| Package | Requires Swift 6.1 tools; depends on swift-crypto, no longer on eventsource; swift-docc-plugin `from: "1.4.0"` instead of its `main` branch | Use Xcode 16.3 or later; resolve packages again |
+| Package | Requires Swift 6.1 tools; depends on swift-crypto and Yams, no longer on eventsource; swift-docc-plugin `from: "1.4.0"` instead of its `main` branch | Use Xcode 16.3 or later; resolve packages again |
 
 ## Breaking changes
 
@@ -757,7 +757,8 @@ The package requires Swift 6.1 tools (Xcode 16.3 or later):
 `Package@swift-6.0.swift` is removed.
 
 The `MCP` target depends on swift-crypto (`3.0.0..<5.0.0`). It seals `requestState` with AES-GCM, computes PKCE challenges and signs
-`private_key_jwt` assertions. It no longer depends on eventsource:
+`private_key_jwt` assertions. It depends on Yams (`from: "6.0.0"`), which
+parses the YAML frontmatter of skills. It no longer depends on eventsource:
 `HTTPClientTransport` parses server-sent events itself. Code that imported
 `EventSource` through the SDK declares the dependency itself.
 
@@ -837,6 +838,7 @@ CODEOWNERS changed (#155, #294, #306, #308, #318, #320, #331, #333).
 | Discovery | `ServerDiscover` | [protocol.md](protocol.md#discovery-and-protocol-modes) |
 | Notification streams | `Client.listen(_:)`, `Client.Subscription`, `unsubscribeFromResource(uri:)`, `subscribedResourceURIs`, `Server.closeSubscriptions()`, `SubscriptionFilter` | [client.md](client.md#notifications-and-subscriptions) |
 | Multi round-trip requests | `.inputRequired(_:requestState:_meta:)`, `InputRequest`, `InputResponse`, `Client.Configuration.multiRoundTrip` | [server.md](server.md#multi-round-trip-requests) |
+| Skills (SEP-2640) | `Server.withSkills(_:listInResources:)`, `SkillCatalog`, `SkillPackage`, `InMemorySkillCatalog`, `Client.listSkills(cursor:)`, `getSkill(uri:)`, `loadSkill(_:options:)`, `LoadedSkill` | [server.md](server.md#skills), [client.md](client.md#skills) |
 | Tasks (SEP-1686, SEP-2663) | `Server.withTasks(_:)`, `TaskManager`, `HandlerContext.runAsTask(ttl:pollInterval:_:)`, `TaskContext`, `Tool.Execution`, `Client.Configuration.tasks`, `TaskHandle`, `TaskSnapshot`, `SubscriptionFilter.taskIds` | [server.md](server.md#tasks), [client.md](client.md#tasks) |
 | Error codes | `MCPError.Code`, `MCPError.errorCode` | [`MCPError` cases](#mcperror-cases) |
 | Sealed request state | `Server.init(requestStateProtection:)`, `RequestStateProtection`, `AESGCMRequestStateCodec`, `RequestStateCodec` | [server.md](server.md#protecting-requeststate) |

@@ -615,6 +615,53 @@ do {
 
 To receive `notifications/tasks` at 2026-07-28, name the tasks in `SubscriptionFilter.taskIds` when you [listen](#listening-by-hand); at 2025-11-25 the server sends `notifications/tasks/status` on its own. Register `onNotification(TaskUpdatedNotification.self)` or `onNotification(TaskStatusNotification.self)` to see them.
 
+## Skills
+
+A server that declares the skills extension (SEP-2640) serves skills: directories of files with a `SKILL.md` that teaches the model a workflow. The client lists them, and loads one when the model needs it:
+
+```swift
+/// Builds a registry from the listing, then loads one skill and reads the
+/// file it refers to.
+func answerRefund(_ client: Client) async throws -> String? {
+    // The listing alone: names, descriptions and manifests, no file content.
+    let skills = try await client.listAllSkills()
+    guard let entry = skills.first(where: { $0.name == "refunds" }) else { return nil }
+    do {
+        // Reads SKILL.md, and checks its size, digest and frontmatter.
+        let skill = try await client.loadSkill(entry)
+        // Read when needed, and verified the same way.
+        let template = try await skill.read("examples/email.md")
+        return skill.content + "\n" + String(decoding: template, as: UTF8.self)
+    } catch let error as SkillVerificationError {
+        // Not what the listing promised, or the skill changed since: the
+        // current entry is one skills/get away.
+        print("Refused \(error.uri): \(error.reason)")
+        return nil
+    }
+}
+```
+
+| Call | Method | Notes |
+|---|---|---|
+| `listSkills(cursor:)`, `listAllSkills()` | `skills/list` | Entries: the `SKILL.md` URI, the frontmatter, the files with digests and sizes. The listing may be empty or partial |
+| `getSkill(uri:)` | `skills/get` | The entry of one skill, listed or not; -32602 for a URI that is not a skill |
+| `readResourceDirectory(uri:cursor:)` | `resources/directory/read` | Only when the server declares `directoryRead` |
+| `loadSkill(_:options:)`, `loadSkill(uri:options:)` | `resources/read` of `SKILL.md` | Verified; see below |
+
+Each throws -32601 without a request when the server does not declare the extension (`serverSkills` is `nil`), or `directoryRead` for directory reads.
+
+`loadSkill` reads the skill's `SKILL.md`, and nothing else, then checks it against the entry: its length against `size`, its SHA-256 against `digest`, and its YAML frontmatter, field by field, against the entry's `frontmatter`. The `LoadedSkill` it returns holds the entry and the verified content. `read(_:)` resolves a path against the skill's root, fetches the file and verifies it the same way; a file the entry does not list, or a path that leaves the skill, is refused without a request. For a dynamic skill, `read(uri:)` refuses a URI outside the root, or with a `.` or `..` segment (`%2e%2e` too). `directory(_:)` lists a directory from the entry. Nothing is fetched on connection or on listing.
+
+`SkillVerificationError.reason` says what failed: `sizeMismatch`, `digestMismatch`, `frontmatterMismatch`, `unlistedFile`, `invalidEntry` (no valid `resources`, or a manifest without the `SKILL.md`, with a file outside the skill's root or with a negative size), `dynamicSkill`, `tooLarge` or `unreadable`. A digest or size mismatch can also mean the skill changed since the listing: get the current entry with `getSkill(uri:)` and load again.
+
+| `Client.SkillLoading` | Default | Effect |
+|---|---|---|
+| `allowsDynamic` | `false` | Load skills whose `resources` is `dynamic`. Their content has no digests; reads count against 16 MiB |
+| `acceptsYAML11Frontmatter` | `false` | Also accept frontmatter that matches when read as YAML 1.1, from a server that used PyYAML |
+| `enforcesLimits` | `true` | Refuse skills of more than 512 files or 16 MiB |
+
+The SDK verifies; the host decides. Ask the user before a skill is used, and bind the approval to `Skill.manifestFingerprint`, which changes when any file does. Identify a skill by the server and its URI, never by its name: two servers, or two skills of one server, may share a name. A `SKILL.md` read with plain `readResource(uri:)` is not a loaded skill.
+
 ## Notifications and subscriptions
 
 `onNotification(_:handler:)` registers a handler for one notification type. Several handlers per type are allowed; they run in registration order, and an error thrown by one is logged.

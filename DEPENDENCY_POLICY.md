@@ -11,6 +11,7 @@ constrain their resolution as little as possible. Related: [VERSIONING.md](VERSI
 | [swift-system](https://github.com/apple/swift-system) | `SystemPackage` | `from: "1.0.0"` | `MCP`, `MCPTests`, `HelloClient` | file descriptors and `Errno` for `StdioTransport` and `MCPError`, where the platform has no `System` module |
 | [swift-log](https://github.com/apple/swift-log) | `Logging` | `from: "1.5.0"` | `MCP`, tests, fixtures, examples | `Logger` on every transport, client and server |
 | [swift-crypto](https://github.com/apple/swift-crypto) | `Crypto` | `"3.0.0"..<"5.0.0"` | `MCP` | AES-256-GCM, HKDF-SHA256 and SHA-256 for `requestState` sealing; SHA-256 for PKCE; P-256 for `private_key_jwt` and DPoP proofs |
+| [Yams](https://github.com/jpsim/Yams) | `Yams` | `from: "6.0.0"` | `MCP` | YAML parsing of `SKILL.md` frontmatter (SEP-2640) |
 | [swift-nio](https://github.com/apple/swift-nio) | `NIOCore`, `NIOPosix`, `NIOHTTP1` | `from: "2.65.0"` | `MCPConformanceServer`, `HTTPServerExample` only | HTTP server in the fixture and the example |
 | [swift-docc-plugin](https://github.com/swiftlang/swift-docc-plugin) | plugin | `from: "1.4.0"` | none | `swift package generate-documentation` |
 
@@ -21,7 +22,14 @@ Notes:
 - swift-crypto was added in 1.0.0 for `requestState` sealing
   ([design/mrtr.md](design/mrtr.md)). Its range spans majors 3 and 4; the APIs used (`AES.GCM`,
   `HKDF`, `SHA256`, `SymmetricKey`, `P256.Signing`) exist in both. CI resolves 4.x. OAuth uses
-  it for PKCE and `private_key_jwt`, so those work on Linux too.
+  it for PKCE, `private_key_jwt` and DPoP proofs, so those work on Linux too.
+- Yams was added in 1.0.0 for skills: a `SKILL.md` starts with YAML frontmatter, which a server
+  turns into the JSON of a skill entry and a client compares with that entry before it loads the
+  skill ([design/skills.md](design/skills.md)). Foundation has no YAML parser. Yams (MIT,
+  maintained since 2016) wraps libyaml, which it compiles in as C (`CYaml`); it has no package
+  dependencies and builds on every platform of the manifest. Its types do not appear in the
+  public API: the SDK composes the node tree and converts it itself, with the YAML 1.2 core
+  schema. 6.0.0 is the floor: it made `YamlError` `Sendable`, which the SDK matches on.
 - eventsource, a dependency of 0.12, is removed. It was the SSE parser of
   `HTTPClientTransport` on Apple platforms only. Its current release declares async-http-client
   and swift-nio as package dependencies and needs Swift 6.1 tools. The transport parses

@@ -202,8 +202,8 @@ The tier score passes a scenario when it has at least one `SUCCESS` and no `FAIL
 Since alpha.11 every scenario carries a `wire-schema-valid` check: every message the SDK sends
 is validated against the negotiated revision's JSON schema. alpha.12 validates a
 `resultType: "task"` result only as a generic result (not against `CallToolResult`), gives
-server scenarios a 30 s timeout, and adds the skills scenarios (`sep-2640-*`; they SKIP until
-a fixture declares `io.modelcontextprotocol/skills`).
+server scenarios a 30 s timeout, and adds the skills scenarios (`sep-2640-*`, default leg; a
+scenario SKIPs when its fixture does not declare `io.modelcontextprotocol/skills`).
 
 ## The 2026-07-28 upgrade
 
@@ -245,6 +245,25 @@ types; `TaskSnapshot`'s internal `generation` picks the encoding.
   (`ClientTasks.swift`, `TaskHandle`); v1 augmentation from `toolTaskSupport`.
 - Tests: `Tests/MCPTests/TaskTests.swift`; the default conformance leg's `tasks-*` scenarios;
   the interop `tasks` profile (Swift and TypeScript at 2025-11-25).
+
+## Skills (SEP-2640)
+
+`io.modelcontextprotocol/skills` (`design/skills.md`). `Base/SkillFrontmatter.swift` (internal)
+extracts and parses `SKILL.md` frontmatter with Yams, converting the node tree itself with the
+YAML 1.2 core schema the harness's `yaml` npm package uses (`.yaml11` opt-in), on a 16 MiB-stack
+thread (Yams recursion), bounded (64 KiB, 10,000 nodes). `scripts/frontmatter-corpus.mjs`
+regenerates `Tests/MCPTests/Generated/FrontmatterCorpus.swift` from the harness install;
+`fuzz/FuzzFrontmatter`. `Base/SkillTypes.swift`: `Skill`, `SkillResource`, `ListSkills`,
+`GetSkill`, `ReadResourceDirectory`, `SkillsSettings`.
+- Server (`Server/Skills.swift`): `withSkills(catalog)`; `SkillCatalog` protocol;
+  `SkillPackage` (validated, digests); `InMemorySkillCatalog`. `Server.skillResources`
+  answers `resources/read` of skill files before the app's handler and merges `resources/list`
+  (first page: the app's and the catalog's; `SkillListingCursor` carries both). Gating in `StatelessRequests.isDeclared`; cache hints via
+  `cacheableMethods`.
+- Client (`Client/ClientSkills.swift`): `listSkills`, `getSkill`, `readResourceDirectory`,
+  `loadSkill` (size, digest, frontmatter; `SkillVerificationError`), `LoadedSkill.read`.
+- Fixtures: everything-server serves `pdf-processing` and `acme/billing/refunds`;
+  everything-client lists (`no-prefetch`) or loads (`verify-*`). Default leg only.
 
 ## Interop
 

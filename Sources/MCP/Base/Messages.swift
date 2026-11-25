@@ -286,6 +286,7 @@ final class TypedRequestHandler<M: Method>: RequestHandlerBox, @unchecked Sendab
         // Convert result to AnyMethod response
         switch response.result {
         case .success(let result):
+            // Strings as written: the result is sent as the handler made it.
             return Response(id: response.id, result: try Value.preservingStrings(result))
         case .failure(let error):
             return Response(id: response.id, error: error)

@@ -68,6 +68,7 @@ func createConformanceServer(state: ServerState, transport: any Transport) async
     )
 
     await server.withTasks(conformanceTasks)
+    await server.withSkills(conformanceSkills)
 
     // Tools
     await server.withMethodHandler(ListTools.self) { _ in

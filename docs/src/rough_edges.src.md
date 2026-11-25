@@ -40,11 +40,16 @@ will change in a later major version.
 
 | Item | Status |
 |---|---|
-| The `io.modelcontextprotocol/tasks` extension (`tasks-*` conformance scenarios) | Implemented ([ROADMAP.md](../ROADMAP.md#planned)). Not scored for any tier. |
-| The experimental tasks of 2025-11-25 (SEP-1686) | Implemented for `tools/call` ([ROADMAP.md](../ROADMAP.md#planned)). Tasks hosted by the client (task-augmented sampling and elicitation) are not implemented. |
-| The `io.modelcontextprotocol/skills` extension (`sep-2640-*` conformance scenarios) | Planned ([ROADMAP.md](../ROADMAP.md#planned)). Not scored for any tier; the scenarios SKIP. |
+| Tasks hosted by the client (2025-11-25 task-augmented sampling and elicitation) | Not implemented; 2026-07-28 removes them. |
+| A verified cache for skill files | Not implemented; see [design/skills.md](../design/skills.md#open-questions). |
 | DPoP: algorithms other than ES256 | Not implemented. Proofs are ES256 with a P-256 `DPoPSigningKey`. |
 | An OpenID Connect sign-in helper for enterprise-managed authorization | Not planned. `enterpriseManaged` takes the user's ID token from the application. |
 
 The capability structs carry `extensions`, so an application can declare and
-read extension settings. Of these extensions the SDK implements tasks so far.
+read extension settings. The SDK implements these, none of them scored for a
+conformance tier:
+
+| Extension | SDK | Conformance |
+|---|---|---|
+| `io.modelcontextprotocol/tasks` (SEP-2663), and the experimental tasks of 2025-11-25 (SEP-1686) | [Tasks](server.md#tasks) | The 10 `tasks-*` server scenarios; 2025-11-25 against the TypeScript SDK in the interop `tasks` profile |
+| `io.modelcontextprotocol/skills` (SEP-2640) | [Skills](server.md#skills) | The 3 `sep-2640-*` server and 4 client scenarios |

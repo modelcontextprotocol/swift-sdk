@@ -21,5 +21,6 @@ let package = Package(
         .executableTarget(name: "FuzzSSE", dependencies: [mcp]),
         .executableTarget(name: "FuzzStatelessHTTP", dependencies: [mcp]),
         .executableTarget(name: "FuzzStatefulHTTP", dependencies: [mcp]),
+        .executableTarget(name: "FuzzFrontmatter", dependencies: [mcp]),
     ]
 )

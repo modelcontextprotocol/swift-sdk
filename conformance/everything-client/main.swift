@@ -762,6 +762,10 @@ nonisolated(unsafe) let scenarioHandlers: [String: ScenarioHandler] = [
     "http-custom-headers": runHTTPCustomHeadersScenario,
     "http-invalid-tool-headers": runHTTPInvalidToolHeadersScenario,
     "sep-2322-client-request-state": runMultiRoundTripClientScenario,
+    "sep-2640-client-no-prefetch": runSkillsListingScenario,
+    "sep-2640-client-verify-digest": runSkillsLoadingScenario,
+    "sep-2640-client-verify-size": runSkillsLoadingScenario,
+    "sep-2640-client-verify-frontmatter": runSkillsLoadingScenario,
 ]
 
 // MARK: - Error Types
