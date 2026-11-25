@@ -18,7 +18,8 @@ const HEADERS = {
   default: [
     "Expected failures for the bare '--suite all' leg: every scenario shipped",
     "with the pinned harness, each at the harness's default wire. This is the",
-    "only leg that reaches extension-tagged scenarios (tasks-*, auth/dpop*).",
+    "only leg that reaches extension-tagged scenarios (tasks-*, the sep-2640-*",
+    "skills scenarios and the auth/ extensions).",
   ],
   "2025-11-25": [
     "Expected failures at the 2025-11-25 wire ('--suite all --spec-version",

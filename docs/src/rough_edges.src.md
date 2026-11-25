@@ -41,7 +41,8 @@ will change in a later major version.
 | Item | Status |
 |---|---|
 | The `io.modelcontextprotocol/tasks` extension (`tasks-*` conformance scenarios) | Planned ([ROADMAP.md](../ROADMAP.md#planned)). Not scored for any tier; listed in `conformance/baseline.yml`. |
-| The experimental tasks of 2025-11-25 (SEP-1686) | Not planned. SEP-2663 removes them. |
+| The experimental tasks of 2025-11-25 (SEP-1686) | Planned for `tools/call` ([ROADMAP.md](../ROADMAP.md#planned)). Tasks hosted by the client (task-augmented sampling and elicitation) are deferred. |
+| The `io.modelcontextprotocol/skills` extension (`sep-2640-*` conformance scenarios) | Planned ([ROADMAP.md](../ROADMAP.md#planned)). Not scored for any tier; the scenarios SKIP. |
 | DPoP: algorithms other than ES256 | Not implemented. Proofs are ES256 with a P-256 `DPoPSigningKey`. |
 | An OpenID Connect sign-in helper for enterprise-managed authorization | Not planned. `enterpriseManaged` takes the user's ID token from the application. |
 

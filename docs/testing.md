@@ -260,7 +260,7 @@ The SDK is tested against the
 [MCP conformance suite](https://github.com/modelcontextprotocol/conformance).
 `scripts/run-conformance.sh` builds the fixtures `mcp-everything-client` and
 `mcp-everything-server` (sources in [`conformance/`](../conformance)) and runs
-the harness `@modelcontextprotocol/conformance@0.2.0-alpha.11`. The harness
+the harness `@modelcontextprotocol/conformance@0.2.0-alpha.12`. The harness
 and its dependency tree are pinned by
 [`scripts/conformance-harness/package-lock.json`](../scripts/conformance-harness/package-lock.json)
 and installed with `npm ci` into `.build/conformance-harness`; set
@@ -279,7 +279,7 @@ $ scripts/run-conformance.sh --requirements 2026-07-28
 |---|---|---|
 | `--spec-version 2025-11-25` | every scenario, at the handshake wire | `conformance/baseline.2025-11-25.yml` |
 | `--spec-version 2026-07-28` | every scenario, at the stateless wire | `conformance/baseline.2026-07-28.yml` |
-| no option | every scenario, at the harness's default wire; the only leg with extension scenarios such as `tasks-*` | `conformance/baseline.yml` |
+| no option | every scenario, at the harness's default wire; the only leg with extension scenarios such as `tasks-*` and the skills `sep-2640-*` | `conformance/baseline.yml` |
 | `--requirements <revision>` | the frozen requirement set of the tier check | none; any scored failure fails |
 
 Each baseline lists the known failures, one `<scenario>:<check-id>` entry per

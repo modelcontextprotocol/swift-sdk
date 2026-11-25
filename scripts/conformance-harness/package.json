@@ -3,6 +3,6 @@
   "private": true,
   "description": "Pins the MCP conformance harness and its dependency tree for scripts/run-conformance.sh.",
   "dependencies": {
-    "@modelcontextprotocol/conformance": "0.2.0-alpha.11"
+    "@modelcontextprotocol/conformance": "0.2.0-alpha.12"
   }
 }

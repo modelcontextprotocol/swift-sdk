@@ -159,9 +159,11 @@ Other 2026-07-28 foundations: `MCPError` has `data` plus `resourceNotFound(uri:)
 ## Conformance: the baseline ratchet
 
 `scripts/run-conformance.sh` is the single entry point for CI and developer machines. It
-runs `@modelcontextprotocol/conformance` pinned exactly to `0.2.0-alpha.11` (2026-07-28 exists
-only in the `0.2.0-alpha.*` line) through `npx`. To bypass a private npm registry,
-`export npm_config_registry=https://registry.npmjs.org`.
+runs `@modelcontextprotocol/conformance` pinned exactly to `0.2.0-alpha.12` (2026-07-28 exists
+only in the `0.2.0-alpha.*` line). The harness and its dependency tree are locked by
+`scripts/conformance-harness/package-lock.json` and installed with `npm ci` into
+`.build/conformance-harness`; `CONFORMANCE_PKG` runs another version through `npx`. To bypass
+a private npm registry, `export npm_config_registry=https://registry.npmjs.org`.
 
 ```bash
 scripts/run-conformance.sh --spec-version 2025-11-25   # stateful handshake wire
@@ -182,7 +184,7 @@ Every leg runs `--suite all`, which includes `pending` and `draft` scenarios.
 |---|---|
 | `--spec-version 2025-11-25` | `conformance/baseline.2025-11-25.yml` |
 | `--spec-version 2026-07-28` | `conformance/baseline.2026-07-28.yml` |
-| bare (default wire) | `conformance/baseline.yml`; the only leg that reaches extension scenarios (`tasks-*` and the `auth/` extensions) |
+| bare (default wire) | `conformance/baseline.yml`; the only leg that reaches extension scenarios (`tasks-*`, the skills `sep-2640-*` and the `auth/` extensions) |
 | `--requirements <rev>` | none; scores the frozen set `conformance tier-check` uses |
 
 Baselines are generated, not hand-edited (`--update-baseline`, via
@@ -197,8 +199,11 @@ down.
 The tier score passes a scenario when it has at least one `SUCCESS` and no `FAILURE` check
 (`scripts/conformance-score.mjs`). Tier 1 needs 100% for every claimed revision.
 
-alpha.11 adds a `wire-schema-valid` check to every scenario: every message the SDK sends is
-validated against the negotiated revision's JSON schema.
+Since alpha.11 every scenario carries a `wire-schema-valid` check: every message the SDK sends
+is validated against the negotiated revision's JSON schema. alpha.12 validates a
+`resultType: "task"` result only as a generic result (not against `CallToolResult`), gives
+server scenarios a 30 s timeout, and adds the skills scenarios (`sep-2640-*`; they SKIP until
+a fixture declares `io.modelcontextprotocol/skills`).
 
 ## The 2026-07-28 upgrade
 
