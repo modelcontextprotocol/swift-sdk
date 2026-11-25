@@ -724,6 +724,107 @@ struct StatelessHTTPTests {
             statelessRequest(#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#, version: nil))
         #expect(try names(legacy) == ["echo", "route", "broken"])
     }
+
+    // MARK: subscriptions/listen
+
+    @Test("listen streams carry the client's id and end when the client goes away")
+    func testListenOverHTTP() async throws {
+        let server = Server(
+            name: "listen", version: "1.0", capabilities: .init(tools: .init(listChanged: true)))
+        let transport = try await start(server)
+        defer { Task { await server.stop() } }
+
+        let response = await transport.handleRequest(
+            statelessRequest(
+                #"{"jsonrpc":"2.0","id":"L1","method":"subscriptions/listen","params":\#(statelessParams(#""notifications":{"toolsListChanged":true,"promptsListChanged":true}"#))}"#
+            ))
+        guard case .stream(let stream, _) = response else {
+            Issue.record("Expected an SSE stream, got \(response.statusCode)")
+            return
+        }
+
+        func event(_ chunk: Data) throws -> Value {
+            let text = String(decoding: chunk, as: UTF8.self)
+            let line = try #require(text.split(separator: "\n").first { $0.hasPrefix("data:") })
+            return try JSONDecoder().decode(Value.self, from: Data(line.dropFirst(5).utf8))
+        }
+
+        let (received, receivedContinuation) = AsyncStream<Value>.makeStream()
+        let reader = Task {
+            for try await chunk in stream { receivedContinuation.yield(try event(chunk)) }
+        }
+        var events: [Value] = []
+        for await value in received {
+            events.append(value)
+            if events.count == 1 { try await server.notify(ToolListChangedNotification.message()) }
+            if events.count == 2 { break }
+        }
+        // The client goes away while the stream is open.
+        reader.cancel()
+        expectWire(
+            events[0],
+            matches: try wireJSON(
+                #"{"method":"notifications/subscriptions/acknowledged","params":{"notifications":{"toolsListChanged":true},"_meta":{"io.modelcontextprotocol/subscriptionId":"L1"}}}"#
+            ))
+        expectWire(
+            events[1],
+            matches: try wireJSON(
+                #"{"method":"notifications/tools/list_changed","params":{"_meta":{"io.modelcontextprotocol/subscriptionId":"L1"}}}"#
+            ))
+
+        // The server's listen handler ends.
+        var open = await server.openSubscriptionCount
+        for _ in 0..<200 where open > 0 {
+            try await Task.sleep(for: .milliseconds(5))
+            open = await server.openSubscriptionCount
+        }
+        #expect(open == 0)
+    }
+
+    @Test("listen without text/event-stream in Accept is refused with 406")
+    func testListenNeedsSSE() async throws {
+        let server = Server(
+            name: "listen", version: "1.0", capabilities: .init(tools: .init(listChanged: true)))
+        let transport = try await start(server)
+        defer { Task { await server.stop() } }
+
+        let response = await transport.handleRequest(
+            statelessRequest(
+                #"{"jsonrpc":"2.0","id":"L2","method":"subscriptions/listen","params":\#(statelessParams(#""notifications":{"toolsListChanged":true}"#))}"#,
+                accept: "application/json"))
+        #expect(response.statusCode == 406)
+        expectWire(try bodyJSON(response), matches: try wireJSON(#"{"id":"L2","error":{"code":-32600}}"#))
+        #expect(await server.openSubscriptionCount == 0)
+    }
+
+    @Test("Open SSE streams carry keep-alive comments")
+    func testKeepAlive() async throws {
+        let server = Server(
+            name: "listen", version: "1.0", capabilities: .init(tools: .init(listChanged: true)))
+        let transport = StatelessHTTPServerTransport(
+            validationPipeline: StandardValidationPipeline(validators: [
+                AcceptHeaderValidator(mode: .jsonOnly), ContentTypeValidator(), ProtocolVersionValidator(),
+            ]),
+            keepAliveInterval: .milliseconds(20))
+        try await server.start(transport: transport)
+        defer { Task { await server.stop() } }
+
+        let response = await transport.handleRequest(
+            statelessRequest(
+                #"{"jsonrpc":"2.0","id":"L3","method":"subscriptions/listen","params":\#(statelessParams(#""notifications":{"toolsListChanged":true}"#))}"#
+            ))
+        guard case .stream(let stream, _) = response else {
+            Issue.record("Expected an SSE stream, got \(response.statusCode)")
+            return
+        }
+        var chunks: [String] = []
+        for try await chunk in stream {
+            chunks.append(String(decoding: chunk, as: UTF8.self))
+            if chunks.filter({ $0 == ": keep-alive\n\n" }).count == 2 { break }
+        }
+        #expect(chunks.first?.contains("notifications/subscriptions/acknowledged") == true)
+        #expect(chunks.filter { $0 == ": keep-alive\n\n" }.count == 2)
+    }
 }
 
 /// Counts `tools/list` handler calls.

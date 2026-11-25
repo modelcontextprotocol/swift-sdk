@@ -325,6 +325,9 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     }
 
     private var requestState: RequestState?
+    /// The request being answered; cancelled when the client disconnects so
+    /// that long-lived streams end.
+    private var requestTask: Task<Void, Never>?
 
     init(app: HTTPApp) {
         self.app = app
@@ -346,10 +349,16 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             requestState = nil
 
             nonisolated(unsafe) let ctx = context
-            Task { @MainActor in
+            requestTask = Task { @MainActor in
                 await self.handleRequest(state: state, context: ctx)
             }
         }
+    }
+
+    func channelInactive(context: ChannelHandlerContext) {
+        requestTask?.cancel()
+        requestTask = nil
+        context.fireChannelInactive()
     }
 
     // MARK: - Request Processing

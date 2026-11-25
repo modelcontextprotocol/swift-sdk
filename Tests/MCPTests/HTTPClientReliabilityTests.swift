@@ -372,3 +372,37 @@ struct HTTPClientConnectionLimitTests {
     }
 
 #endif
+
+#if swift(>=6.1) && !os(Linux)
+    @Suite("HTTP client listen requests")
+    struct HTTPClientListenTimeoutTests {
+        @Test("A subscriptions/listen POST has a long idle timeout; other POSTs keep the default")
+        func listenTimeout() async throws {
+            let key = UUID().uuidString
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [IsolatedMockURLProtocol.self]
+            configuration.httpAdditionalHeaders = [IsolatedMockURLProtocol.sessionKeyHeader: key]
+            let endpoint = URL(string: "http://127.0.0.1:9/mcp")!
+            let timeouts = TimeoutLog()
+            await IsolatedMockURLProtocol.setHandler(key: key) { request in
+                await timeouts.add(request.timeoutInterval)
+                return (
+                    HTTPURLResponse(url: endpoint, statusCode: 202, httpVersion: "HTTP/1.1", headerFields: [:])!,
+                    Data()
+                )
+            }
+            let transport = HTTPClientTransport(endpoint: endpoint, configuration: configuration, streaming: false)
+            try await transport.connect()
+            try await transport.send(Data(#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#.utf8))
+            try await transport.send(
+                Data(#"{"jsonrpc":"2.0","id":1,"method":"subscriptions/listen","params":{"notifications":{}}}"#.utf8))
+            #expect(await timeouts.values == [60, HTTPClientTransport.listenIdleTimeout])
+            await transport.disconnect()
+        }
+    }
+
+    private actor TimeoutLog {
+        private(set) var values: [TimeInterval] = []
+        func add(_ value: TimeInterval) { values.append(value) }
+    }
+#endif

@@ -1,6 +1,7 @@
 import Logging
 
 import struct Foundation.Data
+import struct Foundation.UUID
 import struct Foundation.Date
 import class Foundation.JSONDecoder
 import class Foundation.JSONEncoder
@@ -239,6 +240,37 @@ public actor Client {
     public private(set) var serverInfo: Server.Info?
     /// The server instructions
     private var instructions: String?
+    /// The background `subscriptions/listen` stream (2026-07-28): the list
+    /// changes the client has handlers for, and the subscribed resources.
+    private(set) var notificationStream: Subscription?
+    /// The filter requested for `notificationStream`.
+    private var notificationStreamRequest: SubscriptionFilter?
+    /// The filter of the stream being opened, or of the open one; `nil` when none.
+    private var notificationStreamFilter: SubscriptionFilter?
+    /// Incremented on each change, so stale openings are discarded.
+    private var notificationStreamGeneration = 0
+    /// Failures in a row to open or keep the stream; sets the retry delay.
+    private(set) var notificationStreamFailures = 0
+    /// When the background stream, or the one it replaced, was opened.
+    private var notificationStreamSince: ContinuousClock.Instant?
+    /// The pending reopen of a stream that failed.
+    private var notificationStreamRetry: Task<Void, Never>?
+    /// Replaced background streams that have not ended yet. Their
+    /// notifications are delivered while the client still wants them: one
+    /// the server sent before it registered the successor exists only on
+    /// the replaced stream, so a notification sent during the overlap may
+    /// arrive twice.
+    private var retiredNotificationStreams: Set<ID> = []
+    /// Resource URIs subscribed at 2026-07-28, in subscription order.
+    private(set) var subscribedResources: [String] = []
+    /// The subscribed URIs that `subscribeToResource` added and no stream has
+    /// served yet; one is dropped when the last call waiting for it is cancelled.
+    private var unservedResources: Set<String> = []
+    /// `subscribeToResource` calls waiting for a stream that names their URI.
+    private(set) var resourceWaiters: [(id: UUID, uri: String, continuation: CheckedContinuation<Void, Swift.Error>)] = []
+    /// Waiters for `subscriptions/listen` acknowledgements, by request id.
+    private var listenAcknowledgements:
+        [ID: AsyncStream<Result<SubscriptionFilter, Swift.Error>>.Continuation] = [:]
     /// `x-mcp-header` arguments of listed tools, by tool name.
     private(set) var toolHeaderParameters: [String: [MCPRequestHeaders.Parameter]] = [:]
     /// Whether the connection uses a stateless revision (2026-07-28 and later),
@@ -344,6 +376,12 @@ public actor Client {
             await self.logger?.debug("Client message handling loop task is terminating.")
         }
 
+        // Acknowledgements of subscriptions/listen streams
+        await self.onNotification(SubscriptionsAcknowledgedNotification.self) { message in
+            guard let id = message._meta?.subscriptionID else { return }
+            await self.acknowledge(id, message.params.notifications)
+        }
+
         // Register cancellation notification handler
         await self.onNotification(CancelledNotification.self) { message in
 
@@ -367,19 +405,42 @@ public actor Client {
         }
 
         // Open the protocol connection
+        let result: Initialize.Result
         switch configuration.protocolMode {
         case .handshake:
-            return try await _initialize()
+            result = try await _initialize()
         case .automatic:
-            return try await discoverOrInitialize(Version.stateless[0], fallback: true)
+            result = try await discoverOrInitialize(Version.stateless[0], fallback: true)
         case .stateless(let version):
-            return try await discoverOrInitialize(version, fallback: false)
+            result = try await discoverOrInitialize(version, fallback: false)
         }
+        refreshNotificationStream()
+        return result
     }
 
     /// Disconnect the client and cancel all pending requests
     public func disconnect() async {
         await logger?.debug("Initiating client disconnect...")
+
+        // Close the listen stream while the connection is still open.
+        let stream = notificationStream
+        notificationStream = nil
+        notificationStreamRequest = nil
+        notificationStreamFilter = nil
+        notificationStreamGeneration += 1
+        notificationStreamFailures = 0
+        notificationStreamSince = nil
+        notificationStreamRetry?.cancel()
+        notificationStreamRetry = nil
+        retiredNotificationStreams = []
+        subscribedResources = []
+        unservedResources = []
+        let waiters = resourceWaiters
+        resourceWaiters = []
+        for waiter in waiters {
+            waiter.continuation.resume(throwing: MCPError.internalError("Client disconnected"))
+        }
+        await stream?.cancel()
 
         // Part 1: Inside actor - Grab state and clear internal references
         let taskToCancel = self.task
@@ -390,6 +451,15 @@ public actor Client {
         self.connection = nil
         self.pendingRequests = [:]  // Use empty dictionary literal
         self.toolHeaderParameters = [:]
+
+        // A subscribeToResource call made while the stream was closing.
+        subscribedResources = []
+        unservedResources = []
+        let lateWaiters = resourceWaiters
+        resourceWaiters = []
+        for waiter in lateWaiters {
+            waiter.continuation.resume(throwing: MCPError.internalError("Client disconnected"))
+        }
 
         // Part 2: Outside actor - Resume continuations, disconnect transport, await task
 
@@ -428,6 +498,9 @@ public actor Client {
         handler: @escaping @Sendable (Message<N>) async throws -> Void
     ) async -> Self {
         notificationHandlers[N.name, default: []].append(TypedNotificationHandler(handler))
+        if Self.listChangeMethods.contains(N.name) {
+            refreshNotificationStream()
+        }
         return self
     }
 
@@ -552,6 +625,299 @@ public actor Client {
         return RequestContext(requestID: request.id, requestTask: requestTask)
     }
 
+    // MARK: - Subscriptions (2026-07-28)
+
+    /// An open `subscriptions/listen` stream.
+    ///
+    /// Notifications on the stream are delivered to the handlers registered
+    /// with ``Client/onNotification(_:handler:)``.
+    public struct Subscription: Sendable {
+        /// The JSON-RPC id of the listen request; notifications on the
+        /// stream carry it in `_meta["io.modelcontextprotocol/subscriptionId"]`.
+        public let id: ID
+        /// The notification types the server agreed to send.
+        public let notifications: SubscriptionFilter
+
+        private let client: Client
+        private let request: RequestContext<SubscriptionsListen.Result>
+
+        init(
+            id: ID, notifications: SubscriptionFilter, client: Client,
+            request: RequestContext<SubscriptionsListen.Result>
+        ) {
+            self.id = id
+            self.notifications = notifications
+            self.client = client
+            self.request = request
+        }
+
+        /// Closes the stream.
+        public func cancel() async {
+            try? await client.cancelRequest(id, reason: "Subscription cancelled")
+        }
+
+        /// Waits for the stream to end. Returns when the server closes it
+        /// gracefully; throws when it fails or is cancelled.
+        public func finished() async throws {
+            _ = try await request.value
+        }
+    }
+
+    private static let listChangeMethods: Set<String> = [
+        ToolListChangedNotification.name, PromptListChangedNotification.name,
+        ResourceListChangedNotification.name,
+    ]
+
+    /// What the background stream listens for: the list changes the server
+    /// sends and the client has a handler for, and the subscribed resources.
+    private var wantedNotifications: SubscriptionFilter {
+        func wants(_ method: String, _ declared: Bool?) -> Bool? {
+            declared == true && notificationHandlers[method]?.isEmpty == false ? true : nil
+        }
+        return SubscriptionFilter(
+            toolsListChanged: wants(ToolListChangedNotification.name, serverCapabilities?.tools?.listChanged),
+            promptsListChanged: wants(
+                PromptListChangedNotification.name, serverCapabilities?.prompts?.listChanged),
+            resourcesListChanged: wants(
+                ResourceListChangedNotification.name, serverCapabilities?.resources?.listChanged),
+            resourceSubscriptions: subscribedResources.isEmpty ? nil : subscribedResources)
+    }
+
+    /// The first delay before a background stream that ended is reopened; it
+    /// doubles while streams keep ending, up to ``notificationStreamMaxDelay``.
+    static let notificationStreamBaseDelay: Duration = .seconds(1)
+    static let notificationStreamMaxDelay: Duration = .seconds(60)
+
+    /// Whether the transport can read the streamed responses of
+    /// `subscriptions/listen`.
+    private var streamsResponses: Bool {
+        HTTPClientTransport.streamsResponses || !(connection is HTTPClientTransport)
+    }
+
+    /// Opens, replaces or closes the background stream so that it matches
+    /// the registered handlers and subscribed resources (2026-07-28). The
+    /// stream opens in the background; a replaced stream closes once its
+    /// successor is acknowledged, and stays open when the successor fails.
+    private func refreshNotificationStream() {
+        guard isStateless, connection != nil, streamsResponses else { return }
+        let wanted = wantedNotifications
+        let none = SubscriptionFilter()
+        guard wanted != (notificationStreamFilter ?? none) else { return }
+        notificationStreamRetry?.cancel()
+        notificationStreamRetry = nil
+        notificationStreamGeneration += 1
+        let generation = notificationStreamGeneration
+        guard wanted != none else {
+            if let previous = notificationStream { retire(previous) }
+            notificationStream = nil
+            notificationStreamRequest = nil
+            notificationStreamFilter = nil
+            return
+        }
+        notificationStreamFilter = wanted
+        Task { await self.openNotificationStream(wanted, generation: generation) }
+    }
+
+    private func openNotificationStream(_ wanted: SubscriptionFilter, generation: Int) async {
+        let opened: Subscription
+        do {
+            opened = try await listen(wanted)
+        } catch {
+            guard generation == notificationStreamGeneration else { return }
+            await logger?.warning(
+                "Could not open the notification stream", metadata: ["error": "\(error)"])
+            // Keep the stream that works.
+            notificationStreamFilter = notificationStreamRequest
+            failResourceWaiters(requested: wanted, error: error)
+            notificationStreamFailures += 1
+            scheduleNotificationStreamRetry()
+            return
+        }
+        let current = generation == notificationStreamGeneration
+        // A superseded opening still serves until its successor is
+        // acknowledged, unless a stream is open or none is wanted.
+        guard current || (notificationStream == nil && wantedNotifications != SubscriptionFilter()) else {
+            await opened.cancel()
+            return
+        }
+        if current {
+            // The previous stream may have ended meanwhile, which cleared the
+            // filter and scheduled a reopen; this stream serves what is wanted.
+            notificationStreamFilter = wanted
+            notificationStreamRetry?.cancel()
+            notificationStreamRetry = nil
+        } else if notificationStreamFilter == nil {
+            notificationStreamFilter = wanted
+        }
+        let previous = notificationStream
+        if previous == nil { notificationStreamSince = .now }
+        notificationStream = opened
+        notificationStreamRequest = wanted
+        if let previous { retire(previous) }
+        resolveResourceWaiters(requested: wanted, honored: opened.notifications)
+        Task {
+            _ = try? await opened.finished()
+            self.notificationStreamEnded(id: opened.id)
+        }
+    }
+
+    /// Closes a replaced background stream. Until it ends, its
+    /// notifications the client no longer wants are dropped.
+    private func retire(_ stream: Subscription) {
+        retiredNotificationStreams.insert(stream.id)
+        Task {
+            await stream.cancel()
+            self.forgetRetired(stream.id)
+        }
+    }
+
+    private func forgetRetired(_ id: ID) {
+        retiredNotificationStreams.remove(id)
+    }
+
+    /// Forgets a background stream that ended and reopens it after a delay,
+    /// also when the server ended it with its result, as it does when it
+    /// stops for a restart. The delay keeps growing while streams end sooner
+    /// than ``notificationStreamMaxDelay`` after opening.
+    private func notificationStreamEnded(id: ID) {
+        guard notificationStream?.id == id else { return }
+        notificationStream = nil
+        notificationStreamRequest = nil
+        notificationStreamFilter = nil
+        if notificationStreamSince.map({ .now - $0 >= Self.notificationStreamMaxDelay }) == true {
+            notificationStreamFailures = 0
+        }
+        notificationStreamSince = nil
+        notificationStreamFailures += 1
+        scheduleNotificationStreamRetry()
+    }
+
+    /// Retries ``refreshNotificationStream()`` after the backoff delay.
+    private func scheduleNotificationStreamRetry() {
+        guard notificationStreamRetry == nil,
+            wantedNotifications != (notificationStreamFilter ?? SubscriptionFilter())
+        else { return }
+        let delay = Self.notificationStreamDelay(failures: notificationStreamFailures)
+        notificationStreamRetry = Task {
+            guard (try? await Task.sleep(for: delay)) != nil else { return }
+            self.retryNotificationStream()
+        }
+    }
+
+    private func retryNotificationStream() {
+        notificationStreamRetry = nil
+        refreshNotificationStream()
+    }
+
+    /// The delay before reopening after `failures` failures in a row.
+    static func notificationStreamDelay(failures: Int) -> Duration {
+        let exponent = min(max(failures - 1, 0), 16)
+        return min(notificationStreamBaseDelay * (1 << exponent), notificationStreamMaxDelay)
+    }
+
+    /// Completes the `subscribeToResource` calls for the URIs `requested`
+    /// named. URIs the server did not honor fail and are unsubscribed.
+    private func resolveResourceWaiters(requested: SubscriptionFilter, honored: SubscriptionFilter) {
+        let named = Set(requested.resourceSubscriptions ?? [])
+        let served = Set(honored.resourceSubscriptions ?? [])
+        let refused = named.subtracting(served)
+        unservedResources.subtract(named)
+        if !refused.isEmpty {
+            subscribedResources.removeAll { refused.contains($0) }
+            if wantedNotifications == SubscriptionFilter() {
+                refreshNotificationStream()  // closes the stream
+            } else {
+                // The open stream already serves what remains.
+                notificationStreamFilter = wantedNotifications
+            }
+        }
+        var waiting: [(id: UUID, uri: String, continuation: CheckedContinuation<Void, Swift.Error>)] = []
+        for waiter in resourceWaiters {
+            if served.contains(waiter.uri) {
+                waiter.continuation.resume()
+            } else if refused.contains(waiter.uri) {
+                waiter.continuation.resume(
+                    throwing: MCPError.invalidRequest("The server does not send updates for \(waiter.uri)"))
+            } else {
+                waiting.append(waiter)
+            }
+        }
+        resourceWaiters = waiting
+    }
+
+    /// Fails the `subscribeToResource` calls whose URI only `requested`, a
+    /// stream that could not be opened, named. Established subscriptions
+    /// stay, so a stream that failed keeps being reopened for them.
+    private func failResourceWaiters(requested: SubscriptionFilter, error: Swift.Error) {
+        let served = Set(notificationStream?.notifications.resourceSubscriptions ?? [])
+        let failed = Set(requested.resourceSubscriptions ?? [])
+            .intersection(resourceWaiters.map(\.uri))
+            .subtracting(served)
+        guard !failed.isEmpty else { return }
+        subscribedResources.removeAll { failed.contains($0) }
+        unservedResources.subtract(failed)
+        var waiting: [(id: UUID, uri: String, continuation: CheckedContinuation<Void, Swift.Error>)] = []
+        for waiter in resourceWaiters {
+            if failed.contains(waiter.uri) {
+                waiter.continuation.resume(throwing: error)
+            } else {
+                waiting.append(waiter)
+            }
+        }
+        resourceWaiters = waiting
+    }
+
+    /// Opens a `subscriptions/listen` stream (2026-07-28, SEP-2575) and waits
+    /// for the server to acknowledge it.
+    ///
+    /// At protocol 2026-07-28, list-changed and resource-updated notifications
+    /// are sent only on these streams. Register handlers with
+    /// ``onNotification(_:handler:)`` before listening.
+    ///
+    /// - Throws: ``MCPError/invalidRequest(_:)`` on handshake connections,
+    ///   or the server's error.
+    public func listen(_ notifications: SubscriptionFilter) async throws -> Subscription {
+        guard isStateless else {
+            throw MCPError.invalidRequest(
+                "\(SubscriptionsListen.name) requires protocol version 2026-07-28 or later")
+        }
+        guard streamsResponses else {
+            throw MCPError.internalError(
+                "\(SubscriptionsListen.name) needs a streamed response, which HTTPClientTransport does not read on Linux")
+        }
+        let request = SubscriptionsListen.request(.init(notifications: notifications))
+        // The acknowledgement, or the request ending before one arrives.
+        let (outcomes, outcome) = AsyncStream<Result<SubscriptionFilter, Swift.Error>>.makeStream()
+        listenAcknowledgements[request.id] = outcome
+        defer { listenAcknowledgements[request.id] = nil }
+
+        let context = try send(request)
+        Task {
+            do {
+                _ = try await context.value
+                outcome.yield(
+                    .failure(MCPError.internalError("\(SubscriptionsListen.name) ended before it was acknowledged")))
+            } catch {
+                outcome.yield(.failure(error))
+            }
+        }
+        var honored: SubscriptionFilter?
+        for await result in outcomes {
+            honored = try result.get()
+            break
+        }
+        guard let honored else {
+            // The caller was cancelled while waiting.
+            try? await cancelRequest(request.id)
+            throw CancellationError()
+        }
+        return Subscription(id: request.id, notifications: honored, client: self, request: context)
+    }
+
+    private func acknowledge(_ id: ID, _ notifications: SubscriptionFilter) {
+        listenAcknowledgements[id]?.yield(.success(notifications))
+    }
+
     /// Cancel a request by sending a CancelledNotification to the server.
     ///
     /// According to the MCP specification, cancellation is advisory:
@@ -573,6 +939,12 @@ public actor Client {
         // This ensures any response that arrives after cancellation is ignored
         if let pendingRequest = removePendingRequest(id: requestID) {
             pendingRequest.resume(throwing: CancellationError())
+        }
+
+        // At 2026-07-28 over HTTP, closing the response stream cancels the request.
+        if isStateless, let http = connection as? HTTPClientTransport {
+            await http.cancelRequest(requestID)
+            return
         }
 
         // Send cancellation notification to server
@@ -995,10 +1367,105 @@ public actor Client {
         return (resources: result.resources, nextCursor: result.nextCursor)
     }
 
+    /// Asks for `notifications/resources/updated` when the resource at `uri` changes.
+    ///
+    /// On handshake connections this sends `resources/subscribe`. At
+    /// 2026-07-28 the URI joins the background `subscriptions/listen`
+    /// stream, which is replaced by one that names it; this returns once the
+    /// server acknowledges that stream. Subscribing again to a subscribed URI
+    /// does nothing. Cancelling the calling task ends the wait with
+    /// `CancellationError`; the URI is dropped again when no stream has
+    /// served it yet and no other call waits for it.
+    ///
+    /// - Throws: ``MCPError/invalidRequest(_:)`` when the server does not
+    ///   send updates for `uri`, or the error that kept the stream from
+    ///   opening.
     public func subscribeToResource(uri: String) async throws {
         try validateServerCapability(\.resources?.subscribe, "Resource subscription")
-        let request = ResourceSubscribe.request(.init(uri: uri))
-        _ = try await send(request).value
+        guard isStateless else {
+            let request = ResourceSubscribe.request(.init(uri: uri))
+            _ = try await send(request).value
+            return
+        }
+        guard connection != nil else { throw MCPError.internalError("Client disconnected") }
+        guard streamsResponses else {
+            throw MCPError.internalError(
+                "Resource subscriptions at 2026-07-28 need streamed responses, which HTTPClientTransport does not read on Linux")
+        }
+        if subscribedResourceURIs.contains(uri) { return }
+        try Task.checkCancellation()
+        if !subscribedResources.contains(uri) {
+            subscribedResources.append(uri)
+            unservedResources.insert(uri)
+        }
+        let waiter = UUID()
+        try await withTaskCancellationHandler { () async throws -> Void in
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Swift.Error>) in
+                addResourceWaiter(waiter, uri: uri, continuation: continuation)
+            }
+        } onCancel: {
+            Task { await self.abandonResourceWaiter(waiter, uri: uri) }
+        }
+    }
+
+    /// Records a `subscribeToResource` call and reopens the stream for it.
+    private func addResourceWaiter(
+        _ id: UUID, uri: String, continuation: CheckedContinuation<Void, Swift.Error>
+    ) {
+        guard !Task.isCancelled else {
+            // The cancellation handler drops the URI; opening a stream for
+            // it now would only be replaced again.
+            continuation.resume(throwing: CancellationError())
+            return
+        }
+        resourceWaiters.append((id: id, uri: uri, continuation: continuation))
+        refreshNotificationStream()
+    }
+
+    /// Ends a `subscribeToResource` call whose task was cancelled. Once no
+    /// call waits for the URI, it is dropped if no stream has served it yet.
+    private func abandonResourceWaiter(_ id: UUID, uri: String) {
+        if let index = resourceWaiters.firstIndex(where: { $0.id == id }) {
+            resourceWaiters.remove(at: index).continuation.resume(throwing: CancellationError())
+        }
+        guard unservedResources.contains(uri), !resourceWaiters.contains(where: { $0.uri == uri })
+        else { return }
+        unservedResources.remove(uri)
+        subscribedResources.removeAll { $0 == uri }
+        refreshNotificationStream()
+    }
+
+    /// Stops `notifications/resources/updated` for the resource at `uri`.
+    ///
+    /// On handshake connections this sends `resources/unsubscribe`. At
+    /// 2026-07-28 the background stream is replaced by one without the URI;
+    /// updates may arrive until the server acknowledges the replacement. It
+    /// does nothing when the URI is not subscribed.
+    public func unsubscribeFromResource(uri: String) async throws {
+        guard isStateless else {
+            try validateServerCapability(\.resources?.subscribe, "Resource subscription")
+            let request = ResourceUnsubscribe.request(.init(uri: uri))
+            _ = try await send(request).value
+            return
+        }
+        guard subscribedResources.contains(uri) else { return }
+        subscribedResources.removeAll { $0 == uri }
+        unservedResources.remove(uri)
+        var waiting: [(id: UUID, uri: String, continuation: CheckedContinuation<Void, Swift.Error>)] = []
+        for waiter in resourceWaiters {
+            if waiter.uri == uri {
+                waiter.continuation.resume(throwing: CancellationError())
+            } else {
+                waiting.append(waiter)
+            }
+        }
+        resourceWaiters = waiting
+        refreshNotificationStream()
+    }
+
+    /// The subscribed URIs the open background stream serves (2026-07-28).
+    public var subscribedResourceURIs: Set<String> {
+        Set(notificationStream?.notifications.resourceSubscriptions ?? []).intersection(subscribedResources)
     }
 
     public func listResourceTemplates(cursor: String? = nil) async throws -> (
@@ -1279,6 +1746,13 @@ public actor Client {
             "Processing notification",
             metadata: ["method": "\(message.method)"])
 
+        // A replaced background stream may carry what its successor does not.
+        if let stream = message._meta?.subscriptionID, retiredNotificationStreams.contains(stream),
+            !wantsNotification(message)
+        {
+            return
+        }
+
         // Find notification handlers for this method
         guard let handlers = notificationHandlers[message.method] else { return }
 
@@ -1294,6 +1768,20 @@ public actor Client {
                         "error": "\(error)",
                     ])
             }
+        }
+    }
+
+    /// Whether the background stream still asks for `message`.
+    private func wantsNotification(_ message: Message<AnyNotification>) -> Bool {
+        let wanted = wantedNotifications
+        switch message.method {
+        case ToolListChangedNotification.name: return wanted.toolsListChanged == true
+        case PromptListChangedNotification.name: return wanted.promptsListChanged == true
+        case ResourceListChangedNotification.name: return wanted.resourcesListChanged == true
+        case ResourceUpdatedNotification.name:
+            guard case .string(let uri)? = message.params.objectValue?["uri"] else { return false }
+            return subscribedResources.contains(uri)
+        default: return true
         }
     }
 

@@ -21,11 +21,6 @@ server:
   - "input-required-result-tampered-state:sep-2322-reject-tampered-state"
   - "input-required-result-validate-input:sep-2322-error-on-protocol-error"
   - "input-required-result-validate-input:sep-2322-validate-input-responses"
-  - "server-stateless:sep-2575-server-honors-notification-filter"
-  - "server-stateless:sep-2575-server-sends-prompts-list-changed-on-subscription"
-  - "server-stateless:sep-2575-server-sends-subscription-ack"
-  - "server-stateless:sep-2575-server-sends-tools-list-changed-on-subscription"
-  - "server-stateless:sep-2575-server-tags-subscription-id"
 client:
   - "auth/authorization-server-migration:sep-2352-reregister-on-as-change"
   - "auth/authorization-server-migration:sep-837-application-type-present"

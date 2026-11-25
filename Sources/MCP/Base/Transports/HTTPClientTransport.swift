@@ -101,6 +101,11 @@ public actor HTTPClientTransport: Transport {
     /// ``disconnect()`` and by an outgoing `notifications/cancelled`.
     private var inFlightPosts: [String: Task<Void, Swift.Error>] = [:]
 
+    /// Requests passed to ``cancelRequest(_:)`` before their POST started,
+    /// oldest first, at most ``maxCancelledBeforeSend``.
+    private var cancelledBeforeSend: [String] = []
+    static let maxCancelledBeforeSend = 64
+
     /// The bounds applied to a server's SSE `retry:` value, in milliseconds.
     static let retryIntervalBounds = 10...60_000
 
@@ -275,6 +280,7 @@ public actor HTTPClientTransport: Transport {
         // resume, end now instead of sleeping on a server-chosen delay.
         for task in inFlightPosts.values { task.cancel() }
         inFlightPosts.removeAll()
+        cancelledBeforeSend.removeAll()
 
         session.invalidateAndCancel()
         messageContinuation.finish()
@@ -325,6 +331,10 @@ public actor HTTPClientTransport: Transport {
     public func send(_ data: Data, additionalHeaders: [String: String]) async throws {
         let message = OutgoingMessage(data)
         if let id = message.requestID {
+            if let cancelled = cancelledBeforeSend.firstIndex(of: id) {
+                cancelledBeforeSend.remove(at: cancelled)
+                throw CancellationError()
+            }
             let task = Task { try await self.post(message, additionalHeaders: additionalHeaders) }
             inFlightPosts[id] = task
             defer { inFlightPosts[id] = nil }
@@ -343,12 +353,37 @@ public actor HTTPClientTransport: Transport {
         try await post(message, additionalHeaders: additionalHeaders)
     }
 
+    /// Whether POST responses are read as streams. On Linux the transport
+    /// reads whole bodies, so a `subscriptions/listen` response never
+    /// arrives before the stream ends.
+    #if os(Linux)
+        package static let streamsResponses = false
+    #else
+        package static let streamsResponses = true
+    #endif
+
+    /// The idle timeout of `subscriptions/listen` POSTs. A server may send
+    /// nothing for a long time on such a stream.
+    static let listenIdleTimeout: TimeInterval = 3600
+
     /// Aborts the POST that carries request `id`, closing its response stream.
     ///
     /// At protocol 2026-07-28 this is how a request is cancelled: the server
-    /// sees the client disconnect.
+    /// sees the client disconnect. When the request's POST has not started
+    /// yet, the next ``send(_:)`` of that request throws `CancellationError`
+    /// instead of posting it; the transport remembers the most recent such
+    /// ids only.
     public func cancelRequest(_ id: ID) {
-        inFlightPosts[id.description]?.cancel()
+        let key = id.description
+        if let post = inFlightPosts[key] {
+            post.cancel()
+            return
+        }
+        guard !cancelledBeforeSend.contains(key) else { return }
+        cancelledBeforeSend.append(key)
+        if cancelledBeforeSend.count > Self.maxCancelledBeforeSend {
+            cancelledBeforeSend.removeFirst()
+        }
     }
 
     private func post(_ message: OutgoingMessage, additionalHeaders: [String: String]) async throws {
@@ -387,6 +422,9 @@ public actor HTTPClientTransport: Transport {
             )
             request.addValue(ContentType.json, forHTTPHeaderField: HTTPHeaderName.contentType)
             request.httpBody = message.data
+            if message.method == SubscriptionsListen.name {
+                request.timeoutInterval = Self.listenIdleTimeout
+            }
 
             if let version {
                 request.addValue(version, forHTTPHeaderField: HTTPHeaderName.protocolVersion)

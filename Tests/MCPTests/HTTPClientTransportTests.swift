@@ -214,6 +214,32 @@ import Testing
             #expect(receivedData == responseData)
         }
 
+        @Test("A request cancelled before its POST starts is not sent", .httpClientTransportSetup)
+        func testCancelBeforeSend() async throws {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [MockURLProtocol.self]
+            let transport = HTTPClientTransport(
+                endpoint: testEndpoint, configuration: configuration, streaming: false, logger: nil)
+            try await transport.connect()
+            defer { Task { await transport.disconnect() } }
+
+            await MockURLProtocol.requestHandlerStorage.setHandler { [testEndpoint] _ in
+                let response = HTTPURLResponse(
+                    url: testEndpoint, statusCode: 200, httpVersion: "HTTP/1.1",
+                    headerFields: ["Content-Type": "application/json"])!
+                return (response, Data(#"{"jsonrpc":"2.0","result":{},"id":7}"#.utf8))
+            }
+            let request = Data(#"{"jsonrpc":"2.0","method":"tools/list","id":7}"#.utf8)
+
+            await transport.cancelRequest(.number(7))
+            await #expect(throws: CancellationError.self) { try await transport.send(request) }
+            #expect(await MockURLProtocol.requestHandlerStorage.callCount(for: testEndpoint) == 0)
+
+            // The cancellation applies to one send only.
+            try await transport.send(request)
+            #expect(await MockURLProtocol.requestHandlerStorage.callCount(for: testEndpoint) == 1)
+        }
+
         @Test("Send and Receive Session ID", .httpClientTransportSetup)
         func testSendAndReceiveSessionID() async throws {
             let configuration = URLSessionConfiguration.ephemeral

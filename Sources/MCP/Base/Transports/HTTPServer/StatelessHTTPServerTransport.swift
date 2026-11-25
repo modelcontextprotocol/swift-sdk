@@ -29,6 +29,11 @@ import Logging
 ///   response: 202 Accepted, or the end of its SSE stream.
 /// - At most ``maxBufferedMessages`` messages are buffered per request for a
 ///   slow client; older notifications are dropped first, never the response.
+/// - An open SSE stream carries a `: keep-alive` comment every
+///   `keepAliveInterval` (15 seconds by default), so that idle streams such
+///   as `subscriptions/listen` are not closed by client or proxy timeouts.
+/// - `subscriptions/listen` without `text/event-stream` in `Accept` is
+///   answered with 406: its notifications need an SSE stream.
 ///
 /// ## Usage
 ///
@@ -92,6 +97,13 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
     /// In-flight requests keyed by the internal id given to the server.
     private var exchanges: [String: Exchange] = [:]
 
+    /// The interval of `: keep-alive` comments on open SSE streams; `nil`
+    /// sends none.
+    public let keepAliveInterval: Duration?
+
+    /// An SSE comment line: ignored by clients, keeps the connection busy.
+    static let keepAliveComment = Data(": keep-alive\n\n".utf8)
+
     // MARK: - Init
 
     /// Creates a new stateless HTTP server transport.
@@ -100,11 +112,15 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
     ///   - validationPipeline: Custom validation pipeline. If `nil`, uses sensible defaults:
     ///     origin validation (localhost), Accept header (JSON required), Content-Type,
     ///     and protocol version validation.
+    ///   - keepAliveInterval: The interval of `: keep-alive` comments on
+    ///     open SSE streams; `nil` sends none.
     ///   - logger: Optional logger. If `nil`, a no-op logger is used.
     public init(
         validationPipeline: (any HTTPRequestValidationPipeline)? = nil,
+        keepAliveInterval: Duration? = .seconds(15),
         logger: Logger? = nil
     ) {
+        self.keepAliveInterval = keepAliveInterval
         self.validationPipeline = validationPipeline ?? StandardValidationPipeline(validators: [
             OriginValidator.localhost(),
             AcceptHeaderValidator(mode: .jsonOnly),
@@ -165,8 +181,9 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
                 return
             }
             let rewritten = JSONRPCMessageFields.replacingIDReadingErrorCode(in: data, with: exchange.clientID)
-            exchange.outgoing.yield(
-                .response(rewritten?.data ?? data, errorCode: rewritten?.errorCode))
+            let response = JSONRPCMessageFields.replacingSubscriptionID(
+                in: rewritten?.data ?? data, internalID: id, with: exchange.clientID)
+            exchange.outgoing.yield(.response(response, errorCode: rewritten?.errorCode))
             exchange.outgoing.finish()
 
         case .notification(let method), .request(_, let method):
@@ -178,7 +195,11 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
                 )
                 return
             }
-            exchange.outgoing.yield(.message(data))
+            // A subscriptions/listen stream is identified by the client's id.
+            exchange.outgoing.yield(
+                .message(
+                    JSONRPCMessageFields.replacingSubscriptionID(
+                        in: data, internalID: related, with: exchange.clientID)))
         }
     }
 
@@ -287,6 +308,14 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
             if let mismatch = Self.versionHeaderError(request, metaVersion: fields.metaProtocolVersion) {
                 return .error(statusCode: 400, mismatch, id: requestID)
             }
+            if case .request(_, SubscriptionsListen.name) = messageKind,
+                !(request.header(HTTPHeaderName.accept) ?? "").contains(ContentType.sse)
+            {
+                return .error(
+                    statusCode: 406,
+                    .invalidRequest("\(SubscriptionsListen.name) requires Accept: \(ContentType.sse)"),
+                    id: requestID)
+            }
             return await handleJSONRPCRequest(
                 normalized,
                 clientID: requestID,
@@ -370,12 +399,14 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
 
         let acceptsSSE = (request.header(HTTPHeaderName.accept) ?? "").contains(ContentType.sse)
         let logger = self.logger
+        let keepAliveInterval = self.keepAliveInterval
         // The adapter cancels this task when the client goes away before the
         // response is decided: cancel the request, as for a closed SSE stream.
         return await withTaskCancellationHandler {
             await respond(
                 to: outgoing, internalID: internalID, clientID: clientID,
-                isStateless: isStateless, acceptsSSE: acceptsSSE, logger: logger)
+                isStateless: isStateless, acceptsSSE: acceptsSSE, keepAliveInterval: keepAliveInterval,
+                logger: logger)
         } onCancel: {
             Task { await self.abandon(internalID) }
         }
@@ -385,11 +416,13 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
     /// the HTTP response: JSON, or an SSE stream once a notification arrives.
     private func respond(
         to outgoing: AsyncStream<Outgoing>, internalID: String, clientID: ID,
-        isStateless: Bool, acceptsSSE: Bool, logger: Logger
+        isStateless: Bool, acceptsSSE: Bool, keepAliveInterval: Duration?, logger: Logger
     ) async -> HTTPResponse {
         await withCheckedContinuation { (decision: CheckedContinuation<HTTPResponse, Never>) in
             Task {
                 var stream: AsyncThrowingStream<Data, Swift.Error>.Continuation?
+                var keepAlive: Task<Void, Never>?
+                defer { keepAlive?.cancel() }
                 for await message in outgoing {
                     switch message {
                     case .response(let data, let errorCode):
@@ -417,8 +450,17 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
                         if stream == nil {
                             let (sse, sseContinuation) = AsyncThrowingStream<Data, Swift.Error>
                                 .makeStream(bufferingPolicy: .bufferingNewest(Self.maxBufferedMessages))
+                            let heartbeat = keepAliveInterval.map { interval in
+                                Task {
+                                    while (try? await Task.sleep(for: interval)) != nil {
+                                        sseContinuation.yield(Self.keepAliveComment)
+                                    }
+                                }
+                            }
+                            keepAlive = heartbeat
                             // The client went away: cancel the request.
                             sseContinuation.onTermination = { termination in
+                                heartbeat?.cancel()
                                 if case .cancelled = termination {
                                     Task { await self.abandon(internalID) }
                                 }
@@ -448,7 +490,8 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
         }
     }
 
-    /// Forgets a request whose client went away and cancels it in the server.
+    /// Forgets a request whose client went away and cancels it in the
+    /// server, so that long-lived handlers such as `subscriptions/listen` end.
     private func abandon(_ internalID: String) {
         guard let exchange = exchanges.removeValue(forKey: internalID) else { return }
         exchange.outgoing.finish()
@@ -622,6 +665,33 @@ enum JSONRPCMessageFields {
             let params: Params?
         }
         return (try? JSONDecoder().decode(Cancelled.self, from: data))?.params?.requestId
+    }
+
+    /// The message with `_meta["io.modelcontextprotocol/subscriptionId"]` of
+    /// its `params` or `result` replaced when it equals `internalID`.
+    /// Returns `data` unchanged otherwise.
+    static func replacingSubscriptionID(in data: Data, internalID: String, with id: ID) -> Data {
+        guard data.range(of: Data(internalID.utf8)) != nil,
+            var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return data }
+        var changed = false
+        for member in ["params", "result"] {
+            guard var object = json[member] as? [String: Any],
+                var meta = object["_meta"] as? [String: Any],
+                meta[MetaKey.subscriptionID] as? String == internalID
+            else { continue }
+            switch id {
+            case .string(let string): meta[MetaKey.subscriptionID] = string
+            case .number(let number): meta[MetaKey.subscriptionID] = number
+            }
+            object["_meta"] = meta
+            json[member] = object
+            changed = true
+        }
+        guard changed,
+            let rewritten = try? JSONSerialization.data(withJSONObject: json, options: [.withoutEscapingSlashes])
+        else { return data }
+        return rewritten
     }
 
     /// `params._meta["io.modelcontextprotocol/protocolVersion"]`, if it is a

@@ -267,8 +267,15 @@ if result.capabilities.resources?.subscribe == true {
         let updatedContents = try await client.readResource(uri: uri)
         print("Updated resource content received")
     }
+
+    // Later
+    try await client.unsubscribeFromResource(uri: "resource://example")
 }
 ```
+
+On 2026-07-28 connections, `subscribeToResource` adds the URI to the
+client's background `subscriptions/listen` stream and `unsubscribeFromResource`
+removes it (see [Notification Streams](#notification-streams)).
 
 ### Prompts
 
@@ -1581,6 +1588,85 @@ On stateless connections, tools with invalid annotations are left out of
 `tools/list` on both sides: the server does not list them and the client
 discards them. `MCPRequestHeaders` exposes the value encoding and annotation
 rules.
+
+#### Notification Streams
+
+At 2026-07-28 there is no standalone GET stream and no `resources/subscribe`.
+A client opens a `subscriptions/listen` stream for the notifications it wants
+(SEP-2575). `Server` serves these streams itself:
+
+- The first message on a stream is `notifications/subscriptions/acknowledged`,
+  with the requested types the server supports: list changes for the
+  capabilities it declares with `listChanged`, and resource updates when it
+  declares `resources.subscribe`.
+- `server.notify(_:)` delivers `notifications/{tools,prompts,resources}/list_changed`
+  and `notifications/resources/updated` to every stream that asked for them,
+  from every caller. Each one carries
+  `_meta["io.modelcontextprotocol/subscriptionId"]`. Without an `initialize`
+  session, these notifications are sent only on listen streams.
+  `server.notify(_:to:)` reaches only the streams whose caller's
+  `HandlerContext` matches.
+- `withSubscriptionAuthorizer(_:)` sees each requested filter with the
+  caller's `HandlerContext` before the acknowledgement, and returns the filter
+  to serve or throws to refuse the stream. Without it, any caller may listen
+  to any resource URI.
+- `Server.Configuration.maxSubscriptionStreams` (1000) caps the open streams
+  (-32600 beyond it), and `maxResourceSubscriptions` (256) the URIs of one
+  stream (-32602 beyond it, as for a URI longer than 4096 bytes). Duplicate
+  URIs are dropped.
+- A stream ends when the client disconnects or cancels, or when the server
+  calls `closeSubscriptions()` or `stop()`, which send the listen result.
+  `stop()` waits until those results are sent before it closes the transport.
+- `StatelessHTTPServerTransport` refuses a listen request whose `Accept` lacks
+  `text/event-stream` with 406, and sends a `: keep-alive` SSE comment on
+  open streams every `keepAliveInterval` (15 seconds).
+
+On stateless connections, `Client` opens these streams itself:
+
+- The client keeps one background stream for the list changes it has
+  handlers for (`ToolListChangedNotification`, `PromptListChangedNotification`,
+  `ResourceListChangedNotification`, when the server declares `listChanged`)
+  and for the subscribed resources.
+- Registering a handler or subscribing replaces the stream with a wider one,
+  and the old stream closes once the new one is acknowledged. When the new
+  stream cannot be opened, the old one stays open. Until a replaced stream
+  ends, its notifications that the client still wants are delivered and the
+  rest are dropped.
+- **Resource updates:** `subscribeToResource(uri:)` returns once the server
+  acknowledges a stream that names the URI, and throws when it does not serve
+  it; `unsubscribeFromResource(uri:)` replaces the stream with one without it.
+  `subscribedResourceURIs` lists the URIs the open stream serves.
+- A stream that ends, on an error or because the server closed it with its
+  result, is reopened after 1 second, then after delays that double up to 60
+  seconds. The delay is reset only when a stream ends after staying open for
+  at least 60 seconds.
+- Listen POSTs have an idle timeout of one hour instead of the session's
+  `timeoutIntervalForRequest`.
+- `disconnect()` closes the stream.
+- On Linux, `HTTPClientTransport` reads whole response bodies, so `listen(_:)`
+  and `subscribeToResource(uri:)` throw at 2026-07-28 and no background
+  stream is opened.
+
+Use `listen(_:)` to open a stream with a filter of your choice:
+
+```swift
+// Server: publish a change to every interested stream
+try await server.notify(ToolListChangedNotification.message())
+
+// Client (stateless connection): this handler alone opens a list-change stream
+await client.onNotification(ToolListChangedNotification.self) { _ in
+    // Fetch the tool list again
+}
+
+// Or open one explicitly
+let subscription = try await client.listen(.init(toolsListChanged: true))
+print(subscription.notifications)  // what the server agreed to send
+// ...
+await subscription.cancel()
+```
+
+Over HTTP, cancelling a request at 2026-07-28 closes its response stream;
+`Client.cancelRequest(_:reason:)` does this for HTTP connections.
 
 ### Custom Transport Implementation
 
