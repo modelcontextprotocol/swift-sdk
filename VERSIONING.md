@@ -28,9 +28,9 @@ own. [Kubernetes](https://github.com/kubernetes/kubernetes) works the same way.
 - A fix lands on `main` first. It is then cherry-picked (`git cherry-pick -x`) onto each release
   branch that ships it, in a pull request into that branch. A fix for code that only a release
   branch has goes straight to that branch, and its pull request says why.
-- `X.Y.0` is tagged on a commit that `main` has too, so on `main` the `api-breakage` job compares
-  with the newest minor version. Patch tags exist only on their release branch, and there the job
-  compares with the newest patch.
+- Releases are tagged on their release branch, `X.Y.0` included. The `api-breakage` job compares
+  a release branch with the newest release in its history, and every other branch, `main`
+  included, with the newest release on any branch.
 - CI runs on pull requests into, and pushes to, `main` and every `release-*` branch.
 
 ## The public API
