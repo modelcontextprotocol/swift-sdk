@@ -300,6 +300,111 @@ public struct Tool: Hashable, Codable, Sendable {
     var taskSupport: TaskSupport { execution?.taskSupport ?? .forbidden }
 }
 
+// MARK: - Tool names (SEP-986)
+
+extension Tool {
+    /// The longest tool name the specification recommends.
+    static let maximumNameLength = 128
+
+    /// Whether `name` has the format the specification recommends for tool
+    /// names: 1 to 128 characters, each an ASCII letter (`A-Z`, `a-z`), a
+    /// digit, `_`, `-` or `.`.
+    ///
+    /// The specification says SHOULD, so the SDK does not refuse other names.
+    /// It logs a warning when a server lists a tool with such a name.
+    /// Names are case-sensitive: `getUser` and `GetUser` are two names.
+    public static func isValidName(_ name: String) -> Bool {
+        nameProblem(name) == nil
+    }
+
+    /// Why `name` does not have the recommended format, or `nil`.
+    ///
+    /// A name longer than `maximumNameLength` bytes is reported for its
+    /// length without listing its characters, and at most
+    /// `maximumListedCharacters` characters are listed: a server can send
+    /// names of any length, and checking one stays linear in its length.
+    static func nameProblem(_ name: String) -> String? {
+        if name.isEmpty { return "the name is empty" }
+        let length = name.utf8.count
+        if length > maximumNameLength {
+            // A name with the format is ASCII, so a longer one has too many
+            // characters or characters other than ASCII.
+            if name.utf8.allSatisfy({ $0 < 0x80 }) {
+                return "the name has \(length) characters, more than \(maximumNameLength)"
+            }
+            return "the name has characters other than A-Z, a-z, 0-9, _, - and ., and \(length) bytes in UTF-8"
+        }
+        var invalid: [Unicode.Scalar] = []
+        var seen: Set<Unicode.Scalar> = []
+        for scalar in name.unicodeScalars where !isNameCharacter(scalar) && seen.insert(scalar).inserted {
+            invalid.append(scalar)
+            if invalid.count == maximumListedCharacters { break }
+        }
+        if !invalid.isEmpty {
+            let list = invalid.map { MCPRequestHeaders.sanitized(String($0)) }.map { "\"\($0)\"" }
+            return "the name has characters other than A-Z, a-z, 0-9, _, - and .: "
+                + list.joined(separator: ", ")
+        }
+        return nil
+    }
+
+    /// The most invalid characters a name problem lists.
+    static let maximumListedCharacters = 8
+
+    private static func isNameCharacter(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar {
+        case "A"..."Z", "a"..."z", "0"..."9", "_", "-", ".": return true
+        default: return false
+        }
+    }
+}
+
+/// Tool names that were logged as invalid or duplicate, so that each is
+/// logged once. Kept to `limit` names: a server that makes up names cannot
+/// make the set grow without bound.
+struct ToolNameWarnings: Sendable {
+    /// Bounded keys of the logged names (see `key(_:_:)`).
+    private(set) var logged: Set<String> = []
+    private let limit = 1000
+
+    /// The warnings for `names` not logged before: one for each name with the
+    /// wrong format and, when `checkDuplicates` is set, one for each name that
+    /// appears more than once.
+    mutating func warnings(for names: [String], checkDuplicates: Bool) -> [(name: String, problem: String)] {
+        var result: [(name: String, problem: String)] = []
+        var seen: Set<String> = []
+        for name in names {
+            let format = Self.key("format", name)
+            if canRecord(format), let problem = Tool.nameProblem(name) {
+                logged.insert(format)
+                result.append((name, problem))
+            }
+            if checkDuplicates, !seen.insert(name).inserted {
+                let duplicate = Self.key("duplicate", name)
+                if canRecord(duplicate) {
+                    logged.insert(duplicate)
+                    result.append((name, "the name is listed more than once; tool names should be unique within a server"))
+                }
+            }
+        }
+        return result
+    }
+
+    private func canRecord(_ key: String) -> Bool {
+        logged.count < limit && !logged.contains(key)
+    }
+
+    /// The key of `name` for `kind`: the name itself when it is short, and a
+    /// prefix, the length and a hash otherwise, so that a long name is not
+    /// kept.
+    static func key(_ kind: String, _ name: String) -> String {
+        let length = name.utf8.count
+        guard length > Tool.maximumNameLength else { return kind + ":" + name }
+        let prefix = String(decoding: name.utf8.prefix(Tool.maximumNameLength), as: UTF8.self)
+        return "\(kind):\(prefix)...\(length):\(name.hashValue)"
+    }
+}
+
 // MARK: -
 
 /// To discover available tools, clients send a `tools/list` request.

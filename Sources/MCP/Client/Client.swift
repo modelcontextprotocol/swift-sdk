@@ -504,6 +504,8 @@ public actor Client {
     private(set) var toolHeaderParameters: [String: [MCPRequestHeaders.Parameter]] = [:]
     /// The `execution.taskSupport` of each listed tool, for 2025-11-25 augmentation.
     private(set) var toolTaskSupport: [String: TaskSupport] = [:]
+    /// Tool names logged as invalid (SEP-986).
+    private var toolNameWarnings = ToolNameWarnings()
     /// Task pollers waiting for the next poll, by task id then token; a task
     /// notification wakes them early.
     private var taskWakeups: [String: [Int: ResponseSlot<Void>]] = [:]
@@ -689,6 +691,7 @@ public actor Client {
         self.connection = transport
         toolHeaderParameters = [:]
         logLevel = configuration.logLevel
+        toolNameWarnings = ToolNameWarnings()
         try await transport.connect()
         guard connectionGeneration == generation else {
             throw MCPError.internalError("Client disconnected")
@@ -2015,6 +2018,12 @@ public actor Client {
     /// logging awaits the transport's logger, and a `tools/call` sent
     /// meanwhile must find every tool of the page.
     private func recordTools(_ result: ListTools.Result, firstPage: Bool) async -> ListTools.Result? {
+        // Names are not refused: the specification says SHOULD (SEP-986).
+        for (name, problem) in toolNameWarnings.warnings(for: result.tools.map(\.name), checkDuplicates: false) {
+            await logger?.warning(
+                "The server listed a tool whose name does not follow the specification (SEP-986): \(problem)",
+                metadata: ["tool": "\(MCPRequestHeaders.sanitized(name))"])
+        }
         if firstPage { toolTaskSupport = [:] }
         for tool in result.tools { toolTaskSupport[tool.name] = tool.taskSupport }
         guard let version = negotiatedProtocolVersion, Version.profile(for: version).usesStandardHeaders

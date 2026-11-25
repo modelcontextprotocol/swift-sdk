@@ -649,11 +649,12 @@ struct StatelessTaskServerTests {
     func expiry() async throws {
         let server = try await TaskServer()
         defer { Task { await server.stop() } }
-        let created = try await server.call("slow", ["ttlMs": 100])
+        // A ttl long enough for the first tasks/get on a loaded machine.
+        let created = try await server.call("slow", ["ttlMs": 1000])
         let id = try #require(created["taskId"]?.stringValue)
-        #expect(created["ttlMs"] == 100)
+        #expect(created["ttlMs"] == 1000)
         #expect(try await server.get(id)["taskId"] == .string(id))
-        try await Task.sleep(for: .milliseconds(150))
+        try await Task.sleep(for: .milliseconds(1100))
         #expect(try await server.errorCode(GetTask.name, ["taskId": .string(id)]) == -32602)
     }
 
