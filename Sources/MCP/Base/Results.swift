@@ -31,6 +31,10 @@ public struct ResultType: RawRepresentable, Hashable, Codable, Sendable,
 
     /// The server needs input from the client before it can finish (SEP-2322).
     public static let inputRequired: ResultType = "input_required"
+
+    /// The server runs the request as a task; the result describes the task
+    /// (SEP-2663).
+    public static let task: ResultType = "task"
 }
 
 /// Who may reuse a cached result (SEP-2549).

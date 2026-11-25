@@ -392,4 +392,58 @@ struct ServerSnippetTests {
         #expect(await !client.isStateless)
         #expect(try await client.listTools().tools.count == 3)
     }
+
+    // MARK: Tasks
+
+    @Test("Tasks: the report tool runs as a task, and inline for a client without tasks", arguments: eras)
+    func tasks(mode: Client.ProtocolMode) async throws {
+        for configured in [true, false] {
+            let server = await makeReportServer(tasks: TaskManager(configuration: .init(pollInterval: .milliseconds(10))))
+            let client = try await connect(
+                server, mode: mode, capabilities: .init(elicitation: .init()),
+                configuration: .init(tasks: configured ? .init(minimumPollInterval: .milliseconds(5), augmentation: .whenSupported) : nil)
+            ) { client in
+                await client.withElicitationHandler { _ in .init(action: .accept, content: ["drafts": true]) }
+            }
+            _ = try await client.listTools()
+            if !configured, mode != .handshake {
+                // Inline at 2026-07-28 the work cannot ask for input.
+                #expect(await code { _ = try await client.callTool(name: "report") } == -32021)
+            } else {
+                let created = try await client.startToolCall(name: "report").value
+                #expect((created.task != nil) == configured, "configured: \(configured)")
+                #expect(text(try await client.callTool(name: "report").content) == "Report with drafts")
+            }
+            await client.disconnect()
+            await server.stop()
+        }
+    }
+
+    @Test("Tasks: a principal binds tasks to callers; an external job completes its task")
+    func taskManagerAndExternalJob() async throws {
+        let manager = makeTaskManager { request in request.header("Authorization") }
+        #expect(manager.configuration.maxActiveTasksPerPrincipal == 10)
+        #expect(manager.bindsPrincipals)
+        let context = Server.HandlerContext(
+            id: 1, httpContext: HTTPRequest(method: "POST", headers: ["Authorization": "alice"]))
+        #expect(manager.owner(of: context) == "alice")
+
+        let jobs = TaskManager()
+        let server = Server(name: "jobs", version: "1", capabilities: .init(tools: .init()))
+        await server.withTasks(jobs)
+        await server.withMethodHandler(ListTools.self) { _ in
+            .init(tools: [Tool(name: "export", description: nil, inputSchema: [:], execution: .init(taskSupport: .required))])
+        }
+        await server.withMethodHandler(CallTool.self) { params in
+            try await startExternalJob(params.name, manager: jobs) { name, done in
+                Task { await done("\(name) exported") }
+            }
+        }
+        let client = try await connect(
+            server, mode: .automatic,
+            configuration: .init(tasks: .init(minimumPollInterval: .milliseconds(5))))
+        #expect(text(try await client.callTool(name: "export").content) == "export exported")
+        await client.disconnect()
+        await server.stop()
+    }
 }

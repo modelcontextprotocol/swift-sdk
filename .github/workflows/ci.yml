@@ -120,7 +120,7 @@ jobs:
           if-no-files-found: ignore
 
   # The matrix must match interop/RESULTS.md on macOS and on Linux. On Linux,
-  # scripts/ci/lib.sh installs Go and uv with scripts/ci/deps-linux.sh.
+  # scripts/ci/lib.sh installs Go, uv and Node with scripts/ci/deps-linux.sh.
   interop:
     name: Interop (${{ matrix.os }})
     timeout-minutes: 45
@@ -141,6 +141,10 @@ jobs:
           go-version: "1.25"
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
         if: runner.os == 'macOS'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        if: runner.os == 'macOS'
+        with:
+          node-version: "22"
       - name: Run interop
         run: scripts/ci/run-jobs.sh --strict interop
       - name: Upload interop report

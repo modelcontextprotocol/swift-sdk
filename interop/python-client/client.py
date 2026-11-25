@@ -9,7 +9,7 @@ one JSON object per line: a "meta" line, then one line per check.
 Profiles: everything, advanced (concurrency, cancellation, notifications,
 subscriptions, transport edges), connect (--expect-era
 handshake|stateless|unsupported), session (--pause-file; the runner restarts
-the server), tool.
+the server), tasks (task tools of the Swift everything-server), tool.
 """
 
 from __future__ import annotations
@@ -638,6 +638,37 @@ async def run_advanced(battery: Battery, watched_updates: bool) -> None:
             group.cancel_scope.cancel()
 
 
+# The tasks checks of an SDK with a tasks runtime; the Python SDK has none.
+TASK_RUNTIME_CHECKS = [
+    "task-create", "task-input", "task-partial-input", "task-tool-error", "task-protocol-error", "task-cancel",
+    "task-mrtr-composition", "task-list",
+]
+
+
+async def run_tasks(battery: Battery) -> None:
+    """Checks that a client that does not use tasks can call the task tools."""
+    for check_id in TASK_RUNTIME_CHECKS:
+        emit({"check": check_id, "status": "skip", "detail": "the Python SDK has no tasks runtime"})
+
+    async def inline() -> str:
+        r = await battery.call("slow_compute", {"seconds": 0, "label": "interop"})
+        require(not r.is_error and "Computed interop" in texts(r.content), f"unexpected result: {texts(r.content)}")
+        return texts(r.content)
+
+    await battery.check("task-tool-inline", inline)
+
+    async def refused() -> str:
+        expected = -32021 if battery.era == "stateless" else -32601
+        try:
+            r = await battery.call("failing_job")
+        except MCPError as e:
+            require(e.code == expected, f"code {e.code}, expected {expected}")
+            return f"JSON-RPC error {e.code}"
+        raise AssertionError(f"returned {texts(r.content)}")
+
+    await battery.check("task-required-refused", refused)
+
+
 async def run_session(battery: Battery, options: argparse.Namespace, target: Any, mode: str) -> None:
     async def before() -> str:
         return texts((await battery.call("test_simple_text")).content)
@@ -676,7 +707,7 @@ async def main() -> int:
     parser.add_argument("--url")
     parser.add_argument("--era", default="auto", choices=["auto", "handshake", "stateless"])
     parser.add_argument("--profile", default="everything",
-                        choices=["everything", "advanced", "connect", "session", "tool"])
+                        choices=["everything", "advanced", "connect", "session", "tasks", "tool"])
     parser.add_argument("--expect-era", default="", choices=["", "handshake", "stateless", "unsupported"])
     parser.add_argument("--watched-updates", action="store_true")
     parser.add_argument("--pause-file", default="")
@@ -747,6 +778,8 @@ async def main() -> int:
                 await battery.check("tools-list", tools_list)
             elif options.profile == "session":
                 await run_session(battery, options, target, mode)
+            elif options.profile == "tasks":
+                await run_tasks(battery)
             elif options.profile == "tool":
                 await battery.run_tool(options.tool, json.loads(options.args), options.expect)
             else:

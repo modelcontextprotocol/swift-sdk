@@ -33,7 +33,7 @@ import (
 var (
 	urlFlag     = flag.String("url", "", "streamable HTTP endpoint")
 	eraFlag     = flag.String("era", "auto", "handshake, stateless or auto")
-	profileFlag = flag.String("profile", "everything", "everything or tool")
+	profileFlag = flag.String("profile", "everything", "everything, advanced, connect, session, tasks or tool")
 	toolFlag    = flag.String("tool", "", "tool profile: tool name")
 	argsFlag    = flag.String("args", "{}", "tool profile: JSON arguments")
 	expectFlag  = flag.String("expect", "", "tool profile: expected text")
@@ -131,6 +131,49 @@ func (b *battery) meta() mcp.Meta {
 func (b *battery) call(ctx context.Context, name string, args map[string]any) (*mcp.CallToolResult, error) {
 	params := &mcp.CallToolParams{Meta: b.meta(), Name: name, Arguments: args}
 	return b.cs.CallTool(ctx, params)
+}
+
+// taskRuntimeChecks are the tasks checks of an SDK with a tasks runtime;
+// the Go SDK has none.
+var taskRuntimeChecks = []string{
+	"task-create", "task-input", "task-partial-input", "task-tool-error", "task-protocol-error", "task-cancel",
+	"task-mrtr-composition", "task-list",
+}
+
+// runTasks checks that a client that does not use tasks can call the task
+// tools of the Swift everything-server.
+func (b *battery) runTasks() {
+	for _, id := range taskRuntimeChecks {
+		emit(map[string]any{"check": id, "status": "skip", "detail": "the Go SDK has no tasks runtime"})
+	}
+	b.check("task-tool-inline", "", func(ctx context.Context) (string, error) {
+		res, err := b.call(ctx, "slow_compute", map[string]any{"seconds": 0, "label": "interop"})
+		if err != nil {
+			return "", err
+		}
+		if res.IsError || !strings.Contains(texts(res.Content), "Computed interop") {
+			return "", fmt.Errorf("unexpected result: %s", texts(res.Content))
+		}
+		return texts(res.Content), nil
+	})
+	b.check("task-required-refused", "", func(ctx context.Context) (string, error) {
+		expected := int64(-32601)
+		if b.era == "stateless" {
+			expected = -32021
+		}
+		res, err := b.call(ctx, "failing_job", nil)
+		var rpcErr *jsonrpc.Error
+		if errors.As(err, &rpcErr) {
+			if int64(rpcErr.Code) != expected {
+				return "", fmt.Errorf("code %d, expected %d", rpcErr.Code, expected)
+			}
+			return fmt.Sprintf("JSON-RPC error %d", rpcErr.Code), nil
+		}
+		if err != nil {
+			return "", err
+		}
+		return "", fmt.Errorf("returned %s", texts(res.Content))
+	})
 }
 
 func texts(content []mcp.Content) string {
@@ -954,6 +997,9 @@ func main() {
 	switch *profileFlag {
 	case "advanced":
 		b.runAdvanced()
+		return
+	case "tasks":
+		b.runTasks()
 		return
 	case "connect":
 		b.check("tools-list", "", func(ctx context.Context) (string, error) {

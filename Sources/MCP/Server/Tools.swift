@@ -23,6 +23,20 @@ public struct Tool: Hashable, Codable, Sendable {
     public let outputSchema: Value?
     /// Metadata fields for the tool (see spec for _meta usage)
     public var _meta: Metadata?
+    /// How the tool runs: whether it may run as a task. Sent to clients at
+    /// protocol 2025-11-25 only; the server reads it at every revision.
+    public var execution: Execution?
+
+    /// How a tool runs.
+    public struct Execution: Hashable, Codable, Sendable {
+        /// Whether the tool may run as a task; `nil` means ``TaskSupport/forbidden``.
+        public var taskSupport: TaskSupport?
+
+        /// Creates the execution properties of a tool.
+        public init(taskSupport: TaskSupport? = nil) {
+            self.taskSupport = taskSupport
+        }
+    }
 
     /// Annotations that provide display-facing and operational information for a Tool.
     ///
@@ -100,7 +114,8 @@ public struct Tool: Hashable, Codable, Sendable {
         annotations: Annotations = nil,
         outputSchema: Value? = nil,
         icons: [Icon]? = nil,
-        _meta: Metadata? = nil
+        _meta: Metadata? = nil,
+        execution: Execution? = nil
     ) {
         self.name = name
         self.title = title
@@ -110,6 +125,7 @@ public struct Tool: Hashable, Codable, Sendable {
         self.annotations = annotations
         self._meta = _meta
         self.icons = icons
+        self.execution = execution
     }
 
     /// Content types that can be returned by a tool
@@ -248,6 +264,7 @@ public struct Tool: Hashable, Codable, Sendable {
         case annotations
         case icons
         case _meta
+        case execution
     }
 
     public init(from decoder: Decoder) throws {
@@ -261,6 +278,7 @@ public struct Tool: Hashable, Codable, Sendable {
             try container.decodeIfPresent(Tool.Annotations.self, forKey: .annotations) ?? .init()
         icons = try container.decodeIfPresent([Icon].self, forKey: .icons)
         _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
+        execution = try? container.decodeIfPresent(Execution.self, forKey: .execution)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -275,7 +293,11 @@ public struct Tool: Hashable, Codable, Sendable {
         }
         try container.encodeIfPresent(icons, forKey: .icons)
         try container.encodeIfPresent(_meta, forKey: ._meta)
+        try container.encodeIfPresent(execution, forKey: .execution)
     }
+
+    /// Whether the tool may run as a task.
+    var taskSupport: TaskSupport { execution?.taskSupport ?? .forbidden }
 }
 
 // MARK: -
@@ -379,19 +401,25 @@ public enum CallTool: Method {
         /// The `requestState` of the previous round, echoed unchanged.
         public var requestState: String?
 
+        /// Asks the server to run the call as a task (2025-11-25). Ignored at
+        /// 2026-07-28, where the server decides.
+        public var task: TaskMetadata?
+
         /// Creates the parameters of a `tools/call` request.
         public init(
             name: String,
             arguments: [String: Value]? = nil,
             meta: Metadata? = nil,
             inputResponses: [String: InputResponse]? = nil,
-            requestState: String? = nil
+            requestState: String? = nil,
+            task: TaskMetadata? = nil
         ) {
             self._meta = meta
             self.name = name
             self.arguments = arguments
             self.inputResponses = inputResponses
             self.requestState = requestState
+            self.task = task
         }
 
         private enum CodingKeys: String, CodingKey {
@@ -400,6 +428,7 @@ public enum CallTool: Method {
             case arguments
             case inputResponses
             case requestState
+            case task
         }
 
         public init(from decoder: Decoder) throws {
@@ -409,6 +438,7 @@ public enum CallTool: Method {
             arguments = try container.decodeIfPresent([String: Value].self, forKey: .arguments)
             inputResponses = try MRTR.decodeInputResponses(container, forKey: .inputResponses)
             requestState = try container.decodeIfPresent(String.self, forKey: .requestState)
+            task = try container.decodeIfPresent(TaskMetadata.self, forKey: .task)
         }
 
         public func encode(to encoder: Encoder) throws {
@@ -418,11 +448,13 @@ public enum CallTool: Method {
             try container.encodeIfPresent(arguments, forKey: .arguments)
             try container.encodeIfPresent(inputResponses, forKey: .inputResponses)
             try container.encodeIfPresent(requestState, forKey: .requestState)
+            try container.encodeIfPresent(task, forKey: .task)
         }
     }
 
-    /// The result of a tool call: its content, or, at 2026-07-28, a request
-    /// for more input (see `inputRequired(_:requestState:_meta:)`).
+    /// The result of a tool call: its content; at 2026-07-28, a request for
+    /// more input (see `inputRequired(_:requestState:_meta:)`); or the task
+    /// that runs the call (see ``task``).
     public struct Result: Hashable, Codable, Sendable {
         /// The unstructured content of the result.
         public let content: [Tool.Content]
@@ -442,6 +474,11 @@ public enum CallTool: Method {
         /// Opaque state the client echoes on the next round. The server
         /// SDK seals it before it leaves the server.
         public var requestState: String?
+
+        /// The task that runs the call, when the server runs it as one
+        /// (SEP-1686, SEP-2663). The result then has no content: read the
+        /// outcome through the task. Set by the server SDK.
+        public internal(set) var task: TaskSnapshot?
 
         private var declaredResultType: ResultType?
 
@@ -493,18 +530,46 @@ public enum CallTool: Method {
             return result
         }
 
-        /// ``ResultType/inputRequired`` when the server asks for input.
+        /// The result that creates `task`, in the task's form.
+        static func creating(_ task: TaskSnapshot) -> Result {
+            var result = Result()
+            result.task = task.withoutOutcome
+            if task.generation == .v2 { result.task?._meta = nil }
+            result.declaredResultType = task.generation == .v2 ? .task : nil
+            return result
+        }
+
+        /// ``ResultType/inputRequired`` when the server asks for input,
+        /// ``ResultType/task`` when it runs the call as a task.
         public var resultType: ResultType {
-            MRTR.resultType(
+            if task != nil { return .task }
+            return MRTR.resultType(
                 declared: declaredResultType, inputRequests: inputRequests, requestState: requestState)
         }
 
         private enum CodingKeys: String, CodingKey, CaseIterable {
             case content, structuredContent, isError, _meta
-            case resultType, inputRequests, requestState
+            case resultType, inputRequests, requestState, task
         }
 
         public func encode(to encoder: Encoder) throws {
+            if let task {
+                switch task.generation {
+                case .v2:
+                    // Flat: the task's members beside `resultType`.
+                    var flat = task
+                    flat._meta = nil
+                    try flat.encode(to: encoder)
+                    var container = encoder.container(keyedBy: CodingKeys.self)
+                    try container.encode(ResultType.task, forKey: .resultType)
+                    try container.encodeIfPresent(_meta, forKey: ._meta)
+                case .v1:
+                    var container = encoder.container(keyedBy: CodingKeys.self)
+                    try container.encode(task, forKey: .task)
+                    try container.encodeIfPresent(_meta, forKey: ._meta)
+                }
+                return
+            }
             var container = encoder.container(keyedBy: CodingKeys.self)
             if resultType == .inputRequired {
                 try container.encode(resultType, forKey: .resultType)
@@ -524,6 +589,21 @@ public enum CallTool: Method {
             declaredResultType = MRTR.declared(
                 try container.decodeIfPresent(ResultType.self, forKey: .resultType))
             _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
+            if declaredResultType == .task || (declaredResultType == nil && container.contains(.task)
+                && !container.contains(.content))
+            {
+                // 2026-07-28: the task's members are the result's; 2025-11-25:
+                // they are under `task`.
+                task =
+                    declaredResultType == .task
+                    ? try TaskSnapshot(from: decoder).withoutOutcome
+                    : try container.decode(TaskSnapshot.self, forKey: .task)
+                if declaredResultType == .task { task?._meta = nil }
+                content = []
+                structuredContent = nil
+                isError = nil
+                return
+            }
             if declaredResultType == .inputRequired {
                 inputRequests = try container.decodeIfPresent(
                     [String: InputRequest].self, forKey: .inputRequests)

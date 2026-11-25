@@ -4,8 +4,9 @@ import Foundation
 /// at protocol 2026-07-28 and later (SEP-2243).
 ///
 /// - `Mcp-Method` carries the JSON-RPC method of every POST.
-/// - `Mcp-Name` carries `params.name` of `tools/call` and `prompts/get`, and
-///   `params.uri` of `resources/read`.
+/// - `Mcp-Name` carries `params.name` of `tools/call` and `prompts/get`,
+///   `params.uri` of `resources/read`, and `params.taskId` of `tasks/get`,
+///   `tasks/update` and `tasks/cancel` (SEP-2663).
 /// - `Mcp-Param-<Name>` mirrors a `tools/call` argument whose input schema
 ///   property has `"x-mcp-header": "<Name>"`.
 ///
@@ -14,7 +15,8 @@ import Foundation
 public enum MCPRequestHeaders {
     /// The `Mcp-Method` header: the JSON-RPC method of the request.
     public static let method = "Mcp-Method"
-    /// The `Mcp-Name` header: the tool or prompt name, or the resource URI.
+    /// The `Mcp-Name` header: the tool or prompt name, the resource URI, or
+    /// the task identifier.
     public static let name = "Mcp-Name"
     /// The prefix of `Mcp-Param-<Name>` headers, which mirror tool arguments.
     public static let parameterPrefix = "Mcp-Param-"
@@ -76,18 +78,22 @@ public enum MCPRequestHeaders {
     // MARK: - Standard headers
 
     /// The `Mcp-Name` value of a request: `params.name` for `tools/call` and
-    /// `prompts/get`, `params.uri` for `resources/read`.
+    /// `prompts/get`, `params.uri` for `resources/read`, `params.taskId` for
+    /// `tasks/get`, `tasks/update` and `tasks/cancel`.
     public static func nameValue(method: String, params: Value?) -> String? {
         let object = params?.objectValue
-        return nameValue(method: method, name: object?["name"]?.stringValue, uri: object?["uri"]?.stringValue)
+        return nameValue(
+            method: method, name: object?["name"]?.stringValue, uri: object?["uri"]?.stringValue,
+            taskID: object?["taskId"]?.stringValue)
     }
 
-    /// The `Mcp-Name` value of a request from its `params.name` and
-    /// `params.uri`.
-    static func nameValue(method: String, name: String?, uri: String?) -> String? {
+    /// The `Mcp-Name` value of a request from its `params.name`,
+    /// `params.uri` and `params.taskId`.
+    static func nameValue(method: String, name: String?, uri: String?, taskID: String?) -> String? {
         switch method {
         case CallTool.name, GetPrompt.name: return name
         case ReadResource.name: return uri
+        case GetTask.name, UpdateTask.name, CancelTask.name: return taskID
         default: return nil
         }
     }

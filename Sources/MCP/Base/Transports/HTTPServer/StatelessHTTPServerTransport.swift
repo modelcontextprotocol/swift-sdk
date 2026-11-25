@@ -582,11 +582,12 @@ enum JSONRPCMessageFields {
         let method: String?
         let name: String?
         let uri: String?
+        let taskId: String?
         let protocolVersion: String?
         let errorCode: Int?
 
         private enum Keys: String, CodingKey {
-            case id, method, params, error, _meta, code, name, uri
+            case id, method, params, error, _meta, code, name, uri, taskId
             case protocolVersion = "io.modelcontextprotocol/protocolVersion"
         }
 
@@ -597,6 +598,7 @@ enum JSONRPCMessageFields {
             let params = try? container.nestedContainer(keyedBy: Keys.self, forKey: .params)
             name = try? params?.decodeIfPresent(String.self, forKey: .name)
             uri = try? params?.decodeIfPresent(String.self, forKey: .uri)
+            taskId = try? params?.decodeIfPresent(String.self, forKey: .taskId)
             let meta = try? params?.nestedContainer(keyedBy: Keys.self, forKey: ._meta)
             // An empty version is malformed, like one that is not a string:
             // read it as absent, so `Server` answers -32602 for both.
@@ -621,7 +623,8 @@ enum JSONRPCMessageFields {
     struct RequestFields {
         var id: ID?
         var method: String?
-        /// The `Mcp-Name` value: `params.name` or `params.uri` by method.
+        /// The `Mcp-Name` value: `params.name`, `params.uri` or
+        /// `params.taskId` by method.
         var nameValue: String?
         var metaProtocolVersion: String?
     }
@@ -634,7 +637,8 @@ enum JSONRPCMessageFields {
             id: probe?.id == .string("") ? nil : probe?.id,
             method: probe?.method,
             nameValue: probe?.method.flatMap {
-                MCPRequestHeaders.nameValue(method: $0, name: probe?.name, uri: probe?.uri)
+                MCPRequestHeaders.nameValue(
+                    method: $0, name: probe?.name, uri: probe?.uri, taskID: probe?.taskId)
             },
             metaProtocolVersion: probe?.protocolVersion)
     }

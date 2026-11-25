@@ -1214,7 +1214,8 @@ struct OutgoingMessage: Sendable {
     let requestID: String?
     /// The method name, as sent.
     let method: String?
-    /// The `Mcp-Name` value: `params.name` or `params.uri` by method.
+    /// The `Mcp-Name` value: `params.name`, `params.uri` or `params.taskId`
+    /// by method.
     let nameValue: String?
     /// `params._meta["io.modelcontextprotocol/protocolVersion"]`.
     let protocolVersion: String?
@@ -1234,7 +1235,9 @@ struct OutgoingMessage: Sendable {
         let params = json?["params"] as? [String: Any]
         self.method = method
         self.nameValue = method.flatMap {
-            MCPRequestHeaders.nameValue(method: $0, name: params?["name"] as? String, uri: params?["uri"] as? String)
+            MCPRequestHeaders.nameValue(
+                method: $0, name: params?["name"] as? String, uri: params?["uri"] as? String,
+                taskID: params?["taskId"] as? String)
         }
         self.requestID = json.flatMap { json in
             json["method"] is String ? JSONRPCMessageKind.extractID(from: json) : nil

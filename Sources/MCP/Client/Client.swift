@@ -54,6 +54,15 @@ public actor Client {
         /// request is refused with -32603.
         public var maxConcurrentServerRequests: Int
 
+        /// Whether the client uses tasks (SEP-1686, SEP-2663); `nil`, the
+        /// default, uses none.
+        ///
+        /// When set, the client declares the `io.modelcontextprotocol/tasks`
+        /// extension in each 2026-07-28 request, so a server may run a tool
+        /// call as a task. ``Client/callTool(name:arguments:meta:)`` drives a
+        /// task it gets back to its result either way.
+        public var tasks: Tasks?
+
         /// Creates a client configuration.
         public init(
             strict: Bool = false,
@@ -61,7 +70,8 @@ public actor Client {
             logLevel: LogLevel? = nil,
             discoveryTimeout: Duration? = .seconds(10),
             multiRoundTrip: MultiRoundTrip = .init(),
-            maxConcurrentServerRequests: Int = 4
+            maxConcurrentServerRequests: Int = 4,
+            tasks: Tasks? = nil
         ) {
             self.strict = strict
             self.protocolMode = protocolMode
@@ -69,10 +79,12 @@ public actor Client {
             self.discoveryTimeout = discoveryTimeout
             self.multiRoundTrip = multiRoundTrip
             self.maxConcurrentServerRequests = maxConcurrentServerRequests
+            self.tasks = tasks
         }
 
         private enum CodingKeys: String, CodingKey {
             case strict, protocolMode, logLevel, discoveryTimeout, multiRoundTrip, maxConcurrentServerRequests
+            case tasks
         }
 
         /// Decodes a configuration; keys added after `strict` are optional.
@@ -87,6 +99,7 @@ public actor Client {
             multiRoundTrip = try container.decodeIfPresent(MultiRoundTrip.self, forKey: .multiRoundTrip) ?? .init()
             maxConcurrentServerRequests =
                 try container.decodeIfPresent(Int.self, forKey: .maxConcurrentServerRequests) ?? 4
+            tasks = try container.decodeIfPresent(Tasks.self, forKey: .tasks)
         }
 
         public func encode(to encoder: Encoder) throws {
@@ -97,6 +110,123 @@ public actor Client {
             try container.encode(discoveryTimeout, forKey: .discoveryTimeout)
             try container.encode(multiRoundTrip, forKey: .multiRoundTrip)
             try container.encode(maxConcurrentServerRequests, forKey: .maxConcurrentServerRequests)
+            try container.encodeIfPresent(tasks, forKey: .tasks)
+        }
+
+        /// How the client uses tasks.
+        public struct Tasks: Hashable, Codable, Sendable {
+            /// The shortest wait between two polls of a task, whatever the
+            /// server suggests.
+            public var minimumPollInterval: Duration
+            /// The longest wait between two polls of a task.
+            public var maximumPollInterval: Duration
+            /// The wait between polls when the server suggests none.
+            public var defaultPollInterval: Duration
+            /// When to ask for a task at 2025-11-25, where the client decides.
+            public var augmentation: Augmentation
+            /// The lifetime to ask for at 2025-11-25; `nil` leaves it to the server.
+            public var requestedTTL: Duration?
+
+            /// When the client asks the server to run a tool call as a task
+            /// (2025-11-25). It asks only when the server declares
+            /// `tasks.requests.tools.call` and lists the tool with an
+            /// `execution.taskSupport` that allows it; a tool the client has
+            /// not listed on this connection is called without a task.
+            ///
+            /// Open to values this SDK does not know, which act as
+            /// ``whenRequired``.
+            public struct Augmentation: RawRepresentable, Hashable, Codable, Sendable,
+                ExpressibleByStringLiteral, CustomStringConvertible
+            {
+                public let rawValue: String
+
+                public init(rawValue: String) {
+                    self.rawValue = rawValue
+                }
+
+                public init(stringLiteral value: String) {
+                    self.rawValue = value
+                }
+
+                public init(from decoder: Decoder) throws {
+                    rawValue = try decoder.singleValueContainer().decode(String.self)
+                }
+
+                public func encode(to encoder: Encoder) throws {
+                    var container = encoder.singleValueContainer()
+                    try container.encode(rawValue)
+                }
+
+                public var description: String { rawValue }
+
+                /// Only for tools that require tasks. The default.
+                public static let whenRequired: Augmentation = "whenRequired"
+                /// For every tool that may run as a task.
+                public static let whenSupported: Augmentation = "whenSupported"
+                /// Never: a tool that requires tasks then fails with -32601.
+                public static let never: Augmentation = "never"
+
+                /// Whether to ask for a task for a tool with `support`.
+                func augments(_ support: TaskSupport) -> Bool {
+                    switch self {
+                    case .never: return false
+                    case .whenSupported: return support == .optional || support == .required
+                    default: return support == .required
+                    }
+                }
+            }
+
+            /// Creates task options.
+            public init(
+                minimumPollInterval: Duration = .milliseconds(100),
+                maximumPollInterval: Duration = .seconds(30),
+                defaultPollInterval: Duration = .seconds(1),
+                augmentation: Augmentation = .whenRequired,
+                requestedTTL: Duration? = nil
+            ) {
+                self.minimumPollInterval = minimumPollInterval
+                self.maximumPollInterval = maximumPollInterval
+                self.defaultPollInterval = defaultPollInterval
+                self.augmentation = augmentation
+                self.requestedTTL = requestedTTL
+            }
+
+            private enum CodingKeys: String, CodingKey {
+                case minimumPollInterval, maximumPollInterval, defaultPollInterval, augmentation, requestedTTL
+            }
+
+            public func encode(to encoder: Encoder) throws {
+                var container = encoder.container(keyedBy: CodingKeys.self)
+                try container.encode(minimumPollInterval, forKey: .minimumPollInterval)
+                try container.encode(maximumPollInterval, forKey: .maximumPollInterval)
+                try container.encode(defaultPollInterval, forKey: .defaultPollInterval)
+                try container.encode(augmentation, forKey: .augmentation)
+                try container.encodeIfPresent(requestedTTL, forKey: .requestedTTL)
+            }
+
+            /// Decodes the options; missing keys take their defaults.
+            public init(from decoder: Decoder) throws {
+                let container = try decoder.container(keyedBy: CodingKeys.self)
+                let defaults = Tasks()
+                minimumPollInterval =
+                    try container.decodeIfPresent(Duration.self, forKey: .minimumPollInterval)
+                    ?? defaults.minimumPollInterval
+                maximumPollInterval =
+                    try container.decodeIfPresent(Duration.self, forKey: .maximumPollInterval)
+                    ?? defaults.maximumPollInterval
+                defaultPollInterval =
+                    try container.decodeIfPresent(Duration.self, forKey: .defaultPollInterval)
+                    ?? defaults.defaultPollInterval
+                augmentation =
+                    try container.decodeIfPresent(Augmentation.self, forKey: .augmentation) ?? defaults.augmentation
+                requestedTTL = try container.decodeIfPresent(Duration.self, forKey: .requestedTTL)
+            }
+
+            /// The wait before the next poll, from the server's suggestion.
+            func pollInterval(suggested milliseconds: Int?) -> Duration {
+                let suggested = milliseconds.map { Duration.milliseconds($0) } ?? defaultPollInterval
+                return min(max(suggested, minimumPollInterval), maximumPollInterval)
+            }
         }
 
         /// How the client answers input-required results (SEP-2322).
@@ -372,6 +502,21 @@ public actor Client {
         [ID: AsyncStream<Result<SubscriptionFilter, Swift.Error>>.Continuation] = [:]
     /// `x-mcp-header` arguments of listed tools, by tool name.
     private(set) var toolHeaderParameters: [String: [MCPRequestHeaders.Parameter]] = [:]
+    /// The `execution.taskSupport` of each listed tool, for 2025-11-25 augmentation.
+    private(set) var toolTaskSupport: [String: TaskSupport] = [:]
+    /// Task pollers waiting for the next poll, by task id then token; a task
+    /// notification wakes them early.
+    private var taskWakeups: [String: [Int: ResponseSlot<Void>]] = [:]
+    private var nextTaskWakeup = 0
+    /// `tools/call` requests awaiting their response.
+    private(set) var pendingToolCalls: Set<ID> = []
+    /// `tools/call` requests cancelled before their response arrived, oldest
+    /// first: a late response that creates a task gets `tasks/cancel`.
+    private var abandonedToolCalls: [ID] = []
+    /// Tasks notified while no poller waited, oldest first, at most
+    /// ``maxNotifiedTasks``: the next wait for one ends at once.
+    private var notifiedTasks: [String] = []
+    private static let maxNotifiedTasks = 256
     /// Whether the connection uses a stateless revision (2026-07-28 and later),
     /// where every request carries its `_meta` envelope.
     public var isStateless: Bool {
@@ -437,6 +582,7 @@ public actor Client {
     /// for them run in the inbound queue, like any other.
     private static let inlineNotifications: Set<String> = [
         CancelledNotification.name, SubscriptionsAcknowledgedNotification.name,
+        TaskStatusNotification.name, TaskUpdatedNotification.name,
     ]
     // Add reusable JSON encoder/decoder
     private let encoder = JSONEncoder()
@@ -695,15 +841,19 @@ public actor Client {
         let task: Task<Void, Never>?
         let pendingRequests: [AnyPendingRequest]
         let resourceWaiters: [CheckedContinuation<Void, Swift.Error>]
+        let taskWakeups: [ResponseSlot<Void>]
 
-        /// Fails the requests and `subscribeToResource` calls that waited
-        /// for the connection.
+        /// Fails the requests, `subscribeToResource` calls and task pollers
+        /// that waited for the connection.
         func fail(with error: Swift.Error) {
             for request in pendingRequests {
                 request.resume(throwing: error)
             }
             for waiter in resourceWaiters {
                 waiter.resume(throwing: error)
+            }
+            for slot in taskWakeups {
+                slot.resolve(.failure(error))
             }
         }
     }
@@ -741,16 +891,24 @@ public actor Client {
         connectionGeneration += 1
         let closed = ClosedConnection(
             transport: connection, task: task, pendingRequests: Array(pendingRequests.values),
-            resourceWaiters: closeNotificationStream().waiters)
+            resourceWaiters: closeNotificationStream().waiters,
+            taskWakeups: taskWakeups.values.flatMap(\.values))
 
         self.task = nil
         self.connection = nil
         self.pendingRequests = [:]
+        pendingToolCalls = []
+        abandonedToolCalls = []
         for cancel in roundTripCancellers.values { cancel() }
         roundTripCancellers = [:]
         roundTrips = [:]
         cancelledRoundTrips = []
         self.toolHeaderParameters = [:]
+        // The next server may declare other tools, and sends its own task
+        // notifications.
+        toolTaskSupport = [:]
+        taskWakeups = [:]
+        notifiedTasks = []
         self.unsentRequests = []
 
         // Stop the handlers. They are not awaited: disconnect may be called
@@ -975,7 +1133,7 @@ public actor Client {
     }
 
     /// Runs the registered handlers for input requests, concurrently.
-    private func fulfillInputRequests(_ requests: [String: InputRequest]) async throws
+    func fulfillInputRequests(_ requests: [String: InputRequest]) async throws
         -> [String: InputResponse]
     {
         var calls: [(String, InputRequest, RequestHandlerBox, AnyRequest)] = []
@@ -1036,6 +1194,7 @@ public actor Client {
         let slot = ResponseSlot<M.Result>()
         pendingRequests[request.id] = AnyPendingRequest(slot)
         unsentRequests.insert(request.id)
+        if M.name == CallTool.name { pendingToolCalls.insert(request.id) }
         if Client.isHandlingNotification {
             immediateResponses.insert(request.id)
         }
@@ -1423,6 +1582,11 @@ public actor Client {
             inRoundTrip = true
         }
 
+        if pendingToolCalls.remove(requestID) != nil {
+            abandonedToolCalls.append(requestID)
+            if abandonedToolCalls.count > 256 { abandonedToolCalls.removeFirst() }
+        }
+
         // Remove the pending request and resume with cancellation error
         // This ensures any response that arrives after cancellation is ignored
         if let pendingRequest = removePendingRequest(id: requestID) {
@@ -1468,6 +1632,7 @@ public actor Client {
     private func removePendingRequest(id: ID) -> AnyPendingRequest? {
         immediateResponses.remove(id)
         progressTokens[id] = nil
+        pendingToolCalls.remove(id)
         return pendingRequests.removeValue(forKey: id)
     }
 
@@ -1530,6 +1695,15 @@ public actor Client {
                 let params = Self.decode(message.params, as: SubscriptionsAcknowledgedNotification.Parameters.self)
             else { return }
             acknowledge(id, params.notifications)
+        case TaskStatusNotification.name, TaskUpdatedNotification.name:
+            guard let id = message.params.objectValue?["taskId"]?.stringValue else { return }
+            let waiting = taskWakeups.removeValue(forKey: id) ?? [:]
+            if waiting.isEmpty {
+                if !notifiedTasks.contains(id) { notifiedTasks.append(id) }
+                if notifiedTasks.count > Self.maxNotifiedTasks { notifiedTasks.removeFirst() }
+            } else {
+                for slot in waiting.values { slot.resolve(.success(())) }
+            }
         case CancelledNotification.name:
             guard let params = Self.decode(message.params, as: CancelledNotification.Parameters.self) else { return }
             await logger?.debug(
@@ -1547,6 +1721,47 @@ public actor Client {
         default:
             break
         }
+    }
+
+    /// Forgets the notifications of a task no one drives any more.
+    func endDriving(_ id: String) {
+        notifiedTasks.removeAll { $0 == id }
+    }
+
+    /// Waits for `timeout`, or less when a notification for the task arrives
+    /// or arrived since the last wait.
+    ///
+    /// - Throws: The connection's error when it closes during the wait, and
+    ///   ``MCPError/connectionClosed`` when it closed before.
+    func waitForTask(_ id: String, timeout: Duration) async throws {
+        if let index = notifiedTasks.firstIndex(of: id) {
+            notifiedTasks.remove(at: index)
+            return
+        }
+        guard connection != nil else { throw MCPError.connectionClosed }
+        nextTaskWakeup += 1
+        let token = nextTaskWakeup
+        let slot = ResponseSlot<Void>()
+        taskWakeups[id, default: [:]][token] = slot
+        defer {
+            taskWakeups[id]?[token] = nil
+            if taskWakeups[id]?.isEmpty == true { taskWakeups[id] = nil }
+        }
+        let timer = Task {
+            try? await Task.sleep(for: timeout)
+            slot.resolve(.success(()))
+        }
+        defer { timer.cancel() }
+        try await withTaskCancellationHandler {
+            try await slot.value()
+        } onCancel: {
+            slot.resolve(.failure(CancellationError()))
+        }
+    }
+
+    /// The number of task pollers waiting for their next poll.
+    func taskPollerCount() -> Int {
+        taskWakeups.values.reduce(0) { $0 + $1.count }
     }
 
     // MARK: - Batching
@@ -1780,6 +1995,8 @@ public actor Client {
     /// logging awaits the transport's logger, and a `tools/call` sent
     /// meanwhile must find every tool of the page.
     private func recordTools(_ result: ListTools.Result, firstPage: Bool) async -> ListTools.Result? {
+        if firstPage { toolTaskSupport = [:] }
+        for tool in result.tools { toolTaskSupport[tool.name] = tool.taskSupport }
         guard let version = negotiatedProtocolVersion, Version.profile(for: version).usesStandardHeaders
         else { return nil }
         var recorded = firstPage ? [:] : toolHeaderParameters
@@ -1810,7 +2027,13 @@ public actor Client {
     private func requestMeta(version: String, merging existing: Metadata?) -> Metadata {
         var meta = Metadata()
         meta.protocolVersion = version
-        meta.clientCapabilities = capabilities
+        var declared = capabilities
+        if configuration.tasks != nil, Version.profile(for: version).usesTasksExtension {
+            var extensions = declared.extensions ?? [:]
+            if extensions[ExtensionID.tasks] == nil { extensions[ExtensionID.tasks] = [:] }
+            declared.extensions = extensions
+        }
+        meta.clientCapabilities = declared
         meta.clientInfo = clientInfo
         meta.logLevel = logLevel
         if let existing {
@@ -2111,9 +2334,11 @@ public actor Client {
     /// Calls a tool on the server (`tools/call`).
     ///
     /// When the server asks for input, the client answers with its handlers
-    /// (``Configuration/multiRoundTrip``) and returns the final result. To
-    /// cancel the call or read its request ID, use
-    /// ``startToolCall(name:arguments:meta:)``.
+    /// (``Configuration/multiRoundTrip``) and returns the final result. When
+    /// the server runs the call as a task, the client polls the task,
+    /// answers its input requests with the same handlers, and returns the
+    /// task's result; see ``TaskHandle/result()``. To cancel the call or read
+    /// its request ID, use ``startToolCall(name:arguments:meta:)``.
     ///
     /// - Parameters:
     ///   - name: The name of the tool to call.
@@ -2130,8 +2355,10 @@ public actor Client {
         meta: Metadata? = nil
     ) async throws -> CallTool.Result {
         try validateServerCapability(\.tools, "Tools")
-        let request = CallTool.request(.init(name: name, arguments: arguments, meta: meta))
-        return try Self.complete(try await send(request).value, CallTool.name)
+        let request = CallTool.request(toolCall(name: name, arguments: arguments, meta: meta))
+        let result = try Self.complete(try await send(request).value, CallTool.name)
+        guard let task = result.task else { return result }
+        return try await self.task(task).result()
     }
 
     /// Starts a tool call and returns at once, with the call's ``RequestContext``.
@@ -2139,14 +2366,30 @@ public actor Client {
     /// Await `value` for the result, or pass `requestID` to
     /// ``cancelRequest(_:reason:)``; cancelling the task that awaits `value`
     /// cancels the call too. Unlike ``callTool(name:arguments:meta:)``, an
-    /// input-required result is returned as is when multi round-trip is off.
+    /// input-required result is returned as is when multi round-trip is off,
+    /// and a result that creates a task is returned as is: pass its
+    /// `task` to ``task(_:)`` to follow it.
     public func startToolCall(
         name: String,
         arguments: [String: Value]? = nil,
         meta: Metadata? = nil
     ) throws -> RequestContext<CallTool.Result> {
         try validateServerCapability(\.tools, "Tools")
-        return try send(CallTool.request(.init(name: name, arguments: arguments, meta: meta)))
+        return try send(CallTool.request(toolCall(name: name, arguments: arguments, meta: meta)))
+    }
+
+    /// The parameters of a tool call, with `task` when the call should run as
+    /// a task (2025-11-25, ``Configuration/Tasks-swift.struct/augmentation``).
+    private func toolCall(name: String, arguments: [String: Value]?, meta: Metadata?) -> CallTool.Parameters {
+        var params = CallTool.Parameters(name: name, arguments: arguments, meta: meta)
+        if let options = configuration.tasks,
+            let version = negotiatedProtocolVersion, Version.profile(for: version).usesTaskAugmentation,
+            serverCapabilities?.tasks?.requests?.tools?.call != nil,
+            let support = toolTaskSupport[name], options.augmentation.augments(support)
+        {
+            params.task = TaskMetadata(ttl: options.requestedTTL?.wholeMilliseconds)
+        }
+        return params
     }
 
     /// Rejects an input-required result, returned when multi round-trip is disabled.
@@ -2326,6 +2569,18 @@ public actor Client {
         await logger?.trace(
             "Processing response",
             metadata: ["id": "\(response.id)"])
+
+        pendingToolCalls.remove(response.id)
+        if let index = abandonedToolCalls.firstIndex(of: response.id) {
+            abandonedToolCalls.remove(at: index)
+            // The call was cancelled after the server created a task for it.
+            if case .success(let value) = response.result,
+                let taskID = value.objectValue?["taskId"]?.stringValue
+                    ?? value.objectValue?["task"]?.objectValue?["taskId"]?.stringValue
+            {
+                Task { try? await self.cancelTask(taskID) }
+            }
+        }
 
         // Attempt to remove the pending request using the response ID.
         // Resume with the response only if it hadn't yet been removed.

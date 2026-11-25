@@ -21,7 +21,9 @@ fi
 OUT="$ROOT/.build/fuzz"
 mkdir -p "$OUT/artifacts"
 ci_step "swift build (fuzz/, -sanitize=fuzzer,address)"
-FLAGS=(-c debug --package-path "$ROOT/fuzz" --scratch-path "$OUT/build"
+# A cached build manifest misses source files added to the MCP package,
+# which this package depends on by path.
+FLAGS=(-c debug --package-path "$ROOT/fuzz" --scratch-path "$OUT/build" --disable-build-manifest-caching
     -Xswiftc -sanitize=fuzzer,address -Xswiftc -parse-as-library -Xswiftc -enable-testing)
 swift build "${FLAGS[@]}"
 BIN="$(swift build "${FLAGS[@]}" --show-bin-path)"

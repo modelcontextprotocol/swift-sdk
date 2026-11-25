@@ -35,6 +35,19 @@ lifecycle and [docs/migration.md](docs/migration.md) for upgrading.
 | Error codes -32020, -32021, -32022 | | `MCPError.headerMismatch`, `.missingRequiredClientCapabilities`, `.unsupportedProtocolVersion` | [design.md](design/design.md#error-model) |
 | Protocol profiles | | `Version.profile(for:)`, `ProtocolProfile` | [design.md](design/design.md#the-dual-era-model) |
 
+### Tasks
+
+| Revision | SEP | API | Design |
+|---|---|---|---|
+| 2026-07-28: the `io.modelcontextprotocol/tasks` extension (server-directed tasks, `tasks/get`, `tasks/update`, `tasks/cancel`, `notifications/tasks` on `subscriptions/listen`, -32021 gating, `Mcp-Name` routing) | SEP-2663 | `Server.withTasks(_:)`, `HandlerContext.runAsTask(ttl:pollInterval:_:)`, `TaskManager`, `Client.Configuration.tasks`, `TaskHandle`, `SubscriptionFilter.taskIds` | [tasks.md](design/tasks.md) |
+| 2025-11-25: experimental tasks for `tools/call` (`task` parameter, `Tool.execution`, `tasks/get`, `tasks/result`, `tasks/list`, `tasks/cancel`, `notifications/tasks/status`, progress for the task's lifetime) | SEP-1686 | the same, with `Client.Configuration.Tasks.augmentation` | [tasks.md](design/tasks.md) |
+
+One task store (`TaskStore`, in-memory by default) is behind both wire forms. Earlier revisions
+have no tasks: the work runs inline. The server passes the 10 `tasks-*` conformance scenarios;
+the harness has none for 2025-11-25, which the interop `tasks` profile checks against the
+TypeScript SDK. Tasks hosted by the client (2025-11-25 task-augmented sampling and elicitation)
+are not implemented.
+
 ### Authorization
 
 | Feature | Reference | API |
@@ -59,29 +72,12 @@ Details: [design/auth.md](design/auth.md).
 ## Planned
 
 Not implemented yet. The conformance harness exercises these only in the default leg, as
-extension scenarios that do not count toward a tier; their failing checks are the entries in
+extension scenarios that do not count toward a tier; their failing checks would be entries in
 [conformance/baseline.yml](conformance/baseline.yml).
 
 | Item | Reference | Baseline entries |
 |---|---|---|
-| Tasks extension `io.modelcontextprotocol/tasks` | SEP-2663 | 25 (server, `tasks-*`) |
-| Experimental tasks of 2025-11-25 | SEP-1686 | none: the harness has no 2025-11-25 tasks scenarios |
 | Skills extension `io.modelcontextprotocol/skills` | SEP-2640 | 0: the 7 `sep-2640-*` scenarios (3 server, 4 client) SKIP while no fixture declares the extension |
-
-Tasks scope: every revision that defines tasks.
-
-- 2026-07-28: SEP-2663 (server-directed; flat `CreateTaskResult` with `resultType: "task"`;
-  `tasks/get`, `tasks/update`, `tasks/cancel`; -32021 gating; `Mcp-Name` routing;
-  `notifications/tasks` on `subscriptions/listen`). `tasks/result`, `tasks/list` and the `task`
-  request parameter stay removed there.
-- 2025-11-25: SEP-1686 for `tools/call` (the `task` request parameter, `Tool.execution`,
-  `tasks/get`, `tasks/result`, `tasks/list`, `tasks/cancel`, `notifications/tasks/status`).
-  Tasks hosted by the client (task-augmented sampling and elicitation) are deferred.
-- Earlier revisions define no tasks: the work runs inline.
-- Server: one task store (`TaskStore` protocol, in-memory default) behind both wire forms;
-  tool handlers that run as a task.
-- Client: `callTool` drives a returned task to its result at either revision, and a low-level
-  task handle.
 
 Skills scope: wire types, a `SkillCatalog` that serves skills through `skills/list`,
 `skills/get`, `resources/read` and `resources/directory/read`, and a client loader that
@@ -104,6 +100,6 @@ that release.
 |---|---|
 | `--spec-version 2025-11-25` | 0 / 0 |
 | `--spec-version 2026-07-28` | 0 / 0 |
-| default | 25 / 0, extension scenarios only (tasks); the skills scenarios SKIP |
+| default | 0 / 0; the skills scenarios SKIP |
 
 How the legs work: [conformance/README.md](conformance/README.md).

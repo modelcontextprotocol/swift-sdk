@@ -11,6 +11,7 @@
 //   advanced    concurrency, cancellation, notifications, subscriptions, transport edges
 //   connect     era negotiation only; --expect-era handshake|stateless|unsupported
 //   session     2025-11-25 session expiry: --pause-file F; the runner restarts the server
+//   tasks       tasks (SEP-1686, SEP-2663) against the Swift everything-server
 //   tool        one tool call, for the SDKs' example servers
 //
 // INTEROP_LOG=trace (or debug, info) logs the HTTP transport on stderr.
@@ -598,7 +599,143 @@ func answer(_ schema: Elicitation.RequestSchema) -> [String: Value] {
 
 // MARK: - Main
 
-func makeClient(_ options: Options, _ counters: Counters) async -> Client {
+// MARK: - Tasks
+
+/// The tasks the checks created, for `task-list`.
+actor TaskIDs {
+    private(set) var all: [String] = []
+    func add(_ id: String) { all.append(id) }
+}
+
+extension Battery {
+    /// The tasks profile. `client` uses tasks; the common checks use a
+    /// second client that does not.
+    func runTasks(_ options: Options) async {
+        // The client augments 2025-11-25 calls by the tools' listed task support.
+        let tools = Set((try? await client.listTools().tools.map(\.name)) ?? [])
+        @Sendable func needs(_ name: String) throws {
+            if !tools.contains(name) { throw Skip("the server has no \(name)") }
+        }
+        let ids = TaskIDs()
+        await check("task-create") {
+            try needs("slow_compute")
+            let created = try await client.startToolCall(
+                name: "slow_compute", arguments: ["seconds": 1, "label": "interop"]
+            ).value
+            guard let task = created.task else { throw Failure("no task: \(kinds(created.content))") }
+            await ids.add(task.taskId)
+            try require(task.status == .working, "status \(task.status)")
+            let result = try await client.task(task).result()
+            try require(text(result.content).contains("Computed interop"), text(result.content))
+            return "\(task.status) -> \(text(result.content))"
+        }
+        await check("task-input") {
+            try needs("confirm_delete")
+            let before = await counters.get("elicitation")
+            let result = try await callTool("confirm_delete", ["filename": "interop.txt"])
+            try require(await counters.get("elicitation") > before, "elicitation handler not called")
+            try require(text(result.content) == "Deleted interop.txt", text(result.content))
+            return text(result.content)
+        }
+        await check("task-partial-input") {
+            try needs("multi_input")
+            let before = await counters.get("elicitation")
+            let result = try await callTool("multi_input")
+            let calls = await counters.get("elicitation") - before
+            try require(calls == 2, "\(calls) elicitation calls")
+            return text(result.content)
+        }
+        await check("task-tool-error") {
+            try needs("failing_job")
+            let result = try await callTool("failing_job")
+            try require(result.isError == true, "isError \(String(describing: result.isError))")
+            return text(result.content)
+        }
+        await check("task-protocol-error") {
+            try needs("protocol_error_job")
+            do {
+                let result = try await callTool("protocol_error_job")
+                throw Failure("returned \(text(result.content))")
+            } catch let error as MCPError {
+                try require(error.code == -32603, "code \(error.code)")
+                return "JSON-RPC error \(error.code)"
+            }
+        }
+        await check("task-cancel") {
+            try needs("slow_compute")
+            let created = try await client.startToolCall(
+                name: "slow_compute", arguments: ["seconds": 60, "label": "interop-cancel"]
+            ).value
+            guard let task = created.task else { throw Failure("no task") }
+            await ids.add(task.taskId)
+            try await client.cancelTask(task.taskId)
+            let status = try await client.getTask(task.taskId).status
+            try require(status == .cancelled, "status \(status)")
+            do {
+                _ = try await client.task(task).result()
+                throw Failure("the cancelled task returned a result")
+            } catch is TaskCancelledError {
+                return "cancelled"
+            }
+        }
+        await check("task-mrtr-composition", only: .stateless) {
+            try needs("test_tool_with_task")
+            let result = try await callTool("test_tool_with_task")
+            try require(text(result.content) == "Hello, interop!", text(result.content))
+            return text(result.content)
+        }
+
+        await check("task-list", only: .handshake) {
+            guard await client.serverCapabilities?.tasks?.list != nil else {
+                throw Skip("the server does not declare tasks.list")
+            }
+            var listed: Set<String> = []
+            var cursor: String?
+            repeat {
+                let page = try await client.listTasks(cursor: cursor)
+                listed.formUnion(page.tasks.map(\.taskId))
+                cursor = page.nextCursor
+            } while cursor != nil
+            let missing = await ids.all.filter { !listed.contains($0) }
+            try require(missing.isEmpty, "missing \(missing)")
+            return "\(listed.count) tasks"
+        }
+
+        // A client that does not use tasks.
+        let plainCounters = Counters()
+        let plain = await makeClient(options, plainCounters)
+        let connection: Connection
+        do {
+            connection = try Connection(options)
+            _ = try await withTimeout(timeout) { try await plain.connect(transport: connection.transport) }
+        } catch {
+            for id in ["task-tool-inline", "task-required-refused"] {
+                emit(["check": id, "status": "fail", "detail": "second client: \(error)"])
+            }
+            return
+        }
+        defer { connection.close() }
+        await check("task-tool-inline") {
+            let result = try await plain.callTool(name: "slow_compute", arguments: ["seconds": 0, "label": "interop"])
+            try require(result.task == nil, "a task for a client without tasks")
+            try require(text(result.content).contains("Computed interop"), text(result.content))
+            return text(result.content)
+        }
+        await check("task-required-refused") {
+            let expected = era == .stateless ? -32021 : -32601
+            do {
+                let result = try await plain.callTool(name: "failing_job")
+                throw Failure("returned \(text(result.content))")
+            } catch let error as MCPError {
+                try require(error.code == expected, "code \(error.code), expected \(expected)")
+                return "JSON-RPC error \(error.code)"
+            }
+        }
+        await plain.disconnect()
+    }
+}
+
+func makeClient(_ options: Options, _ counters: Counters, tasks: Bool = false) async -> Client {
     let mode: Client.ProtocolMode =
         switch options.era {
         case "handshake": .handshake
@@ -608,7 +745,9 @@ func makeClient(_ options: Options, _ counters: Counters) async -> Client {
     let client = Client(
         name: "swift-interop-client", version: "1.0.0",
         capabilities: .init(sampling: .init(), elicitation: .init(form: .init()), roots: .init(listChanged: false)),
-        configuration: .init(protocolMode: mode, logLevel: .debug))
+        configuration: .init(
+            protocolMode: mode, logLevel: .debug,
+            tasks: tasks ? .init(minimumPollInterval: .milliseconds(50), augmentation: .whenSupported) : nil))
     await client.onNotification(LogMessageNotification.self) { _ in await counters.add("logs") }
     await client.onNotification(ProgressNotification.self) { message in
         await counters.add("progress")
@@ -698,7 +837,7 @@ func run() async throws -> Int32 {
     }
 
     let counters = Counters()
-    let client = await makeClient(options, counters)
+    let client = await makeClient(options, counters, tasks: options.profile == "tasks")
     let connection = try Connection(options)
     defer { connection.close() }
 
@@ -754,6 +893,8 @@ func run() async throws -> Int32 {
         await battery.runTool(options)
     case "advanced":
         await battery.runAdvanced()
+    case "tasks":
+        await battery.runTasks(options)
     case "connect":
         await battery.check("tools-list") { "\(try await client.listTools().tools.count) tools" }
     case "session":

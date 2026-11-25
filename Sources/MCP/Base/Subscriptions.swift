@@ -11,18 +11,23 @@ public struct SubscriptionFilter: Hashable, Codable, Sendable {
     public var resourcesListChanged: Bool?
     /// Receive `notifications/resources/updated` for these resource URIs.
     public var resourceSubscriptions: [String]?
+    /// Receive `notifications/tasks` for these tasks (the tasks extension,
+    /// SEP-2663).
+    public var taskIds: [String]?
 
     /// Creates a filter. A `nil` type is not requested.
     public init(
         toolsListChanged: Bool? = nil,
         promptsListChanged: Bool? = nil,
         resourcesListChanged: Bool? = nil,
-        resourceSubscriptions: [String]? = nil
+        resourceSubscriptions: [String]? = nil,
+        taskIds: [String]? = nil
     ) {
         self.toolsListChanged = toolsListChanged
         self.promptsListChanged = promptsListChanged
         self.resourcesListChanged = resourcesListChanged
         self.resourceSubscriptions = resourceSubscriptions
+        self.taskIds = taskIds
     }
 }
 
@@ -105,6 +110,8 @@ enum SubscriptionEvent: Hashable, Sendable {
     case promptsListChanged
     case resourcesListChanged
     case resourceUpdated(uri: String)
+    /// A task changed; `snapshot` is the task as `tasks/get` returns it.
+    case task(id: String, snapshot: Value)
 
     /// The event a notification announces, if it belongs on listen streams.
     /// Only a resource-updated notification's parameters are read.
@@ -142,14 +149,18 @@ enum SubscriptionEvent: Hashable, Sendable {
         case .promptsListChanged: return filter.promptsListChanged == true
         case .resourcesListChanged: return filter.resourcesListChanged == true
         case .resourceUpdated(let uri): return filter.resourceSubscriptions?.contains(uri) == true
+        case .task(let id, _): return filter.taskIds?.contains(id) == true
         }
     }
 
-    /// Whether a stream with `filter`, whose resource URIs are `resources`,
-    /// receives this event.
-    func matches(_ filter: SubscriptionFilter, resources: Set<String>) -> Bool {
-        if case .resourceUpdated(let uri) = self { return resources.contains(uri) }
-        return matches(filter)
+    /// Whether a stream with `filter`, whose resource URIs are `resources`
+    /// and task ids `tasks`, receives this event.
+    func matches(_ filter: SubscriptionFilter, resources: Set<String>, tasks: Set<String> = []) -> Bool {
+        switch self {
+        case .resourceUpdated(let uri): return resources.contains(uri)
+        case .task(let id, _): return tasks.contains(id)
+        default: return matches(filter)
+        }
     }
 
     /// The notification for this event on the stream `subscriptionID`.
@@ -165,6 +176,8 @@ enum SubscriptionEvent: Hashable, Sendable {
             return Message(method: ResourceListChangedNotification.name, params: [:], _meta: meta)
         case .resourceUpdated(let uri):
             return Message(method: ResourceUpdatedNotification.name, params: ["uri": .string(uri)], _meta: meta)
+        case .task(_, let snapshot):
+            return Message(method: TaskUpdatedNotification.name, params: snapshot, _meta: meta)
         }
     }
 }
