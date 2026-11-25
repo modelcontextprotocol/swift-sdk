@@ -256,7 +256,7 @@ struct OutgoingMessageTests {
     }
 }
 
-#if swift(>=6.1) && !os(Linux)
+#if swift(>=6.1)
     @Suite("HTTP error bodies")
     struct HTTPErrorBodyTests {
         let endpoint = URL(string: "http://127.0.0.1:9/mcp")!
@@ -411,7 +411,7 @@ struct OutgoingMessageTests {
     }
 #endif
 
-#if swift(>=6.1) && !os(Linux)
+#if swift(>=6.1)
     /// Never answers `server/discover`, answers `initialize`, and records
     /// when the `server/discover` request is stopped.
     private final class UnansweredDiscoverProtocol: URLProtocol, @unchecked Sendable {

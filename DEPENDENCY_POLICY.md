@@ -10,7 +10,6 @@ constrain their resolution as little as possible. Related: [VERSIONING.md](VERSI
 |---|---|---|---|---|
 | [swift-system](https://github.com/apple/swift-system) | `SystemPackage` | `from: "1.0.0"` | `MCP`, `MCPTests`, `HelloClient` | file descriptors and `Errno` for `StdioTransport` and `MCPError`, where the platform has no `System` module |
 | [swift-log](https://github.com/apple/swift-log) | `Logging` | `from: "1.5.0"` | `MCP`, tests, fixtures, examples | `Logger` on every transport, client and server |
-| [eventsource](https://github.com/mattt/eventsource) | `EventSource` | `from: "1.1.0"` | `MCP` on Apple platforms only | SSE parsing in `HTTPClientTransport` |
 | [swift-crypto](https://github.com/apple/swift-crypto) | `Crypto` | `"3.0.0"..<"5.0.0"` | `MCP` | AES-256-GCM, HKDF-SHA256 and SHA-256 for `requestState` sealing; SHA-256 for PKCE; P-256 for `private_key_jwt` and DPoP proofs |
 | [swift-nio](https://github.com/apple/swift-nio) | `NIOCore`, `NIOPosix`, `NIOHTTP1` | `from: "2.65.0"` | `MCPConformanceServer`, `HTTPServerExample` only | HTTP server in the fixture and the example |
 | [swift-docc-plugin](https://github.com/swiftlang/swift-docc-plugin) | plugin | `from: "1.4.0"` | none | `swift package generate-documentation` |
@@ -18,15 +17,19 @@ constrain their resolution as little as possible. Related: [VERSIONING.md](VERSI
 Notes:
 
 - swift-nio and swift-docc-plugin are declared only in `Package.swift`. `Package@swift-6.0.swift`
-  declares swift-system, swift-log, eventsource and swift-crypto.
-- swift-docc-plugin 1.4.0 is the oldest release that works with current DocC: earlier ones pass
-  `--index`, which `docc convert` no longer accepts.
+  declares swift-system, swift-log and swift-crypto.
 - No target of the `MCP` library product depends on swift-nio. HTTP server transports take and
   return `HTTPRequest`/`HTTPResponse`, so applications choose their own HTTP server.
 - swift-crypto was added in 0.13.0 for `requestState` sealing
   ([design/mrtr.md](design/mrtr.md)). Its range spans majors 3 and 4; the APIs used (`AES.GCM`,
   `HKDF`, `SHA256`, `SymmetricKey`, `P256.Signing`) exist in both. CI resolves 4.x. OAuth uses
   it for PKCE and `private_key_jwt`, so those work on Linux too.
+- eventsource, a dependency of 0.12, is removed. It was the SSE parser of
+  `HTTPClientTransport` on Apple platforms only. Its current release declares async-http-client
+  and swift-nio as package dependencies and needs Swift 6.1 tools. The transport parses
+  `text/event-stream` itself (`ServerSentEventParser`), the same way on every platform.
+- swift-docc-plugin 1.4.0 is the oldest release that works with current DocC: earlier ones pass
+  `--index`, which `docc convert` no longer accepts.
 - `Package.resolved` is committed. It records the versions CI builds with; it does not constrain
   consumers.
 - Types from dependencies appear in the public API in two places: `Logger` (swift-log) on every
@@ -43,7 +46,7 @@ The issue answers:
    existing dependency is not enough.
 2. Who maintains it, its release history, and its license (compatible with Apache 2.0 and MIT).
 3. Which platforms it supports. It must support every platform in the manifests, or be
-   conditional with `.when(platforms:)` as eventsource is.
+   conditional with `.when(platforms:)`.
 4. Whether its types would appear in the public API. They should not.
 5. What it adds to the dependency graph (transitive packages).
 
@@ -88,9 +91,9 @@ From the manifests:
 | `Package.swift` | 6.1 | library, tests, conformance fixtures, examples, snippet targets |
 | `Package@swift-6.0.swift` | 6.0 | library and tests only |
 
-CI builds with Swift 6.1 (Xcode 16.3 on macOS 15, swift 6.1.0 on Ubuntu, the 6.1.2 static Linux
-SDK) and with the default Xcode of `macos-latest`. No CI job uses Swift 6.0 tools, so the 6.0
-manifest is checked only by hand.
+CI builds with Swift 6.1 (Xcode 16.3 on macOS 15; `swift:6.1-rhel-ubi9` and `swift:6.1-noble`
+on Linux; the 6.1.2 static Linux SDK) and with the default Xcode of `macos-latest`. No CI job
+uses Swift 6.0 tools, so the 6.0 manifest is checked only by hand.
 
 Keep the two manifests' dependency lists for `MCP` and `MCPTests` in sync. A platform floor or
 tools version is raised only in a major release.

@@ -7,7 +7,6 @@ import PackageDescription
 var dependencies: [Package.Dependency] = [
     .package(url: "https://github.com/apple/swift-system.git", from: "1.0.0"),
     .package(url: "https://github.com/apple/swift-log.git", from: "1.5.0"),
-    .package(url: "https://github.com/mattt/eventsource.git", from: "1.1.0"),
     .package(url: "https://github.com/apple/swift-crypto.git", "3.0.0"..<"5.0.0"),
 ]
 
@@ -16,9 +15,6 @@ var targetDependencies: [Target.Dependency] = [
     .product(name: "SystemPackage", package: "swift-system"),
     .product(name: "Logging", package: "swift-log"),
     .product(name: "Crypto", package: "swift-crypto"),
-    .product(
-        name: "EventSource", package: "eventsource",
-        condition: .when(platforms: [.macOS, .iOS, .tvOS, .visionOS, .watchOS])),
 ]
 
 let package = Package(

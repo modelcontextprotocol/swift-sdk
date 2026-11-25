@@ -192,7 +192,7 @@ struct OAuthJWTBearerGrantTests {
         #expect(await audiences.values == [URL(string: "https://pinned.example.com")!])
     }
 
-    #if swift(>=6.1) && !os(Linux)
+    #if swift(>=6.1)
         @Test("A rejected grant is reported once, with no retry and no other grant")
         func noRetry() async throws {
             let (session, key) = makeIsolatedSession()
@@ -240,7 +240,7 @@ struct OAuthJWTBearerGrantTests {
     #endif
 }
 
-#if swift(>=6.1) && !os(Linux)
+#if swift(>=6.1)
 
     @Suite("OAuth token exchange (RFC 8693)", .serialized)
     struct OAuthTokenExchangeTests {
@@ -606,8 +606,6 @@ struct OAuthJWTBearerDestinationTests {
         #expect(tokenClient.requestCallCount == 1)
     }
 
-    // IsolatedMockURLProtocol needs the session headers, which Linux does not pass to it.
-    #if !os(Linux)
     @Test("The jwt-bearer grant never uses the 2025-03-26 default endpoints")
     func noDefaultEndpoints() async throws {
         let (session, key) = makeIsolatedSession()
@@ -625,7 +623,6 @@ struct OAuthJWTBearerDestinationTests {
         }
         #expect(!(await requests.values).contains("https://mcp.example.com/token"))
     }
-    #endif
 
     @Test("A token without a refresh token is replaced before it expires")
     func proactiveReacquisition() async throws {
@@ -770,8 +767,6 @@ struct OAuthJWTBearerDestinationTests {
         #expect(storage.load()?.value == token.value)
     }
 
-    // IsolatedMockURLProtocol needs the session headers, which Linux does not pass to it.
-    #if !os(Linux)
     @Test("The identity provider's token endpoint is discovered once")
     func idpEndpointCached() async throws {
         let (session, key) = makeIsolatedSession()
@@ -854,6 +849,5 @@ struct OAuthJWTBearerDestinationTests {
         #expect(try await authorizer.handleChallenge(statusCode: 401, headers: headers401, endpoint: endpoint, session: session))
         #expect(await discoveries.values.count == 1)
     }
-    #endif
 }
 

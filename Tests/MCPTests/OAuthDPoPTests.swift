@@ -706,7 +706,7 @@ struct DPoPAuthorizerTests {
     }
 }
 
-#if swift(>=6.1) && !os(Linux)
+#if swift(>=6.1)
 
     private func json(_ url: URL, _ status: Int, _ object: [String: Any], headers: [String: String] = [:])
         throws -> (HTTPURLResponse, Data)
@@ -1063,6 +1063,75 @@ struct DPoPAuthorizerTests {
             try await transport.send(Data(#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#.utf8))
             #expect(await sent.values.count == 3)
             #expect(authorizer.challenges == 2)
+            await transport.disconnect()
+        }
+
+        @Test("A GET stream's nonce retry does not use up an authorization attempt")
+        func getStreamNonceRetryIsFree() async throws {
+            let notification = #"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#
+            let key = UUID().uuidString
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [IsolatedMockURLProtocol.self]
+            configuration.httpAdditionalHeaders = [IsolatedMockURLProtocol.sessionKeyHeader: key]
+            let gets = Recorder<URLRequest>()
+            await IsolatedMockURLProtocol.setHandler(key: key) { request in
+                await gets.append(request)
+                if await gets.values.count == 1 {
+                    let response = HTTPURLResponse(
+                        url: request.url!, statusCode: 401, httpVersion: "HTTP/1.1",
+                        headerFields: ["WWW-Authenticate": #"DPoP error="use_dpop_nonce""#, "DPoP-Nonce": "n"])!
+                    return (response, Data())
+                }
+                let response = HTTPURLResponse(
+                    url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1",
+                    headerFields: ["Content-Type": "text/event-stream"])!
+                return (response, Data("data: \(notification)\n\n".utf8))
+            }
+            let authorizer = NonceAuthorizer(maxAuthorizationAttempts: 1)
+            let transport = HTTPClientTransport(
+                endpoint: endpoint, configuration: configuration, streaming: true,
+                sseInitializationTimeout: 0.01, authorizer: authorizer)
+            try await transport.connect()
+            // Without the retry the stream would open only on the next
+            // reconnection, after the default 3 s retry interval.
+            let first = await outcome(within: .seconds(2)) {
+                for try await data in await transport.receive() { return String(decoding: data, as: UTF8.self) }
+                return ""
+            }
+            guard case .returned(let message) = first else {
+                Issue.record("The GET stream did not open: \(first)")
+                await transport.disconnect()
+                return
+            }
+            #expect(message == notification)
+            #expect(authorizer.challenges == 1)
+            #expect(await gets.values.prefix(2).allSatisfy { $0.httpMethod == "GET" })
+            await transport.disconnect()
+        }
+
+        @Test("A GET stream's retry the authorizer reports as a nonce retry does not use up an attempt")
+        func getStreamAuthorizerReportsNonceRetry() async throws {
+            let (configuration, gets) = await mockSession { request, count in
+                count == 1
+                    ? HTTPURLResponse(
+                        url: request.url!, statusCode: 401, httpVersion: "HTTP/1.1",
+                        headerFields: ["WWW-Authenticate": #"Bearer error="invalid_token""#])!
+                    : HTTPURLResponse(
+                        url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1",
+                        headerFields: ["Content-Type": "text/event-stream"])!
+            }
+            let transport = HTTPClientTransport(
+                endpoint: endpoint, configuration: configuration, streaming: true,
+                sseInitializationTimeout: 0.01, authorizer: ClassifyingAuthorizer(nonceRetry: true))
+            try await transport.connect()
+            // Without the retry the stream would open only on the next
+            // reconnection, after the default 3 s retry interval.
+            let deadline = ContinuousClock.now + .seconds(2)
+            while await gets.values.count < 2, ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            #expect(await gets.values.count >= 2)
+            #expect(await gets.values.prefix(2).allSatisfy { $0.httpMethod == "GET" })
             await transport.disconnect()
         }
 

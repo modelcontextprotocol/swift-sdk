@@ -132,8 +132,7 @@ One background stream carries everything the client listens for by itself: the l
 have at least one handler and that the server declares with `listChanged`, and the URIs passed to
 `subscribeToResource(uri:)`. `refreshNotificationStream()` runs after `connect`, when
 `onNotification` registers a list-changed handler, and on subscribe and unsubscribe. It does
-nothing on handshake connections, or over `HTTPClientTransport` on Linux, which reads whole
-bodies.
+nothing on handshake connections.
 
 - If the wanted filter equals the current one (open or opening), nothing happens. Otherwise the
   generation counter increments and a background task opens a new stream with `listen`.
@@ -148,11 +147,12 @@ bodies.
   still waiting for a URI that only it named (and unsubscribes those URIs), and schedules a retry.
   Established subscriptions stay: after the stream dropped, a failed reopen keeps them and the
   client keeps reopening with backoff.
-- A stream that fails (an error, not a result) is forgotten and reopened after a delay of 1 s,
-  doubled after each further failure up to 60 s. The failure count is reset when a stream ends
-  with its result, or when it fails after staying open for at least 60 s, not when a stream is
-  acknowledged: a server that acknowledges each stream and drops it at once sees growing delays.
-  A stream the server ends with its result is forgotten and reopened by the next refresh.
+- A stream that ends, with an error or with its result, is forgotten and reopened after a delay
+  of 1 s, doubled after each further end up to 60 s. The count is reset when a stream ends after
+  staying open for at least 60 s, not when a stream is acknowledged: a server that acknowledges
+  each stream and drops or closes it at once sees growing delays. A server ends streams with
+  their result on `stop()` and `closeSubscriptions()`, as for a restart, so those are reopened
+  too.
 
 ### Client: resource subscriptions
 
@@ -179,12 +179,11 @@ transport, and again afterwards for a call made while it was closing. After `dis
   requests. One stream is replaced on each change of the URI set instead.
 - **No reopening of failed streams**, as in the Go SDK. Rejected: a network error or an idle
   timeout would silently stop list-change and resource notifications. Streams the server ends
-  with a result are still not reopened by themselves, so a server that ends streams on purpose
-  sees no reconnect loop.
+  with a result are reopened with the same backoff, so a server that ends streams on purpose
+  sees at most one reopen a minute.
 
 ## Open questions
 
-- A stream the server ends with its result reopens only on the next change.
 - With `bufferingNewest(256)`, a consumer that falls behind on many distinct URIs loses older
   `resources/updated` events, not only duplicates.
 - On handshake connections the SDK does not track `resources/subscribe`. The application

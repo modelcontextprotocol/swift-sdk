@@ -220,7 +220,8 @@ A POST response stream that ends before its response, and that the transport
 cannot resume, fails its request with -32603: `The server closed the response
 stream without a response or an event ID to resume from` (the stream had no
 event IDs), or `The response stream could not be resumed` (the server refused
-the GET with `Last-Event-ID`, or closed the stream 10 times). The server keeps
+the GET with `Last-Event-ID`, or closed the stream 10 times in a row without a
+new message). The server keeps
 no events for replay; the Go SDK's server, for example, has no event store by
 default. At 2026-07-28 there is no resumption, and the message is
 `The server closed the response stream without a response`.

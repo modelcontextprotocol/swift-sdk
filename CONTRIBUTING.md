@@ -151,10 +151,11 @@ A volume can be attached to one running container at a time, so sessions that ru
 need their own `--build-volume` (and a reference volume cannot seed while a session holds it).
 A run with a `--build-volume` other than the default puts its results in `.build/linux/<volume>/`.
 
-Conformance baselines and `interop/RESULTS.md` are shared by macOS and Linux. Jobs that the
-Linux HTTP client fails today are marked `advisory` in `scripts/ci/jobs`: on Linux they run and
-report but do not fail CI. [design/linux.md](design/linux.md) records where and why. When an
-advisory job passes, `run-jobs.sh` says so; mark it `gate`.
+Conformance baselines and `interop/RESULTS.md` are shared by macOS and Linux, and every job
+gates on both. A job that fails on Linux for a known reason can be marked `advisory` in
+`scripts/ci/jobs` (it runs and reports without failing CI) with the reason in
+[design/linux.md](design/linux.md); none is today. When an advisory job passes, `run-jobs.sh`
+says so; mark it `gate`.
 
 ## Documentation
 

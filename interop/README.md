@@ -11,8 +11,8 @@ scripts/run-interop.sh --update-results  # also writes interop/RESULTS.md
 scripts/run-interop.sh --check           # fails when the results differ from RESULTS.md (CI)
 ```
 
-`RESULTS.md` is recorded on macOS and shared with Linux, where the Swift client's HTTP
-rows differ today ([../design/linux.md](../design/linux.md)).
+`RESULTS.md` is recorded on macOS; Linux produces the same rows
+([../design/linux.md](../design/linux.md)).
 
 Needs Swift, Go 1.25 or later, `uv`, `curl`, `sha256sum` or `shasum`, and
 network access on the first run. Nothing else is installed globally: Go

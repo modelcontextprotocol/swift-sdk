@@ -58,19 +58,36 @@
 
         override class func canInit(with request: URLRequest) -> Bool { true }
         override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+        /// Set by `stopLoading()`. swift-corelibs-foundation traps when a
+        /// protocol calls its client for a task it already cancelled, so each
+        /// callback checks it first. The lock is not held during a callback:
+        /// corelibs can call `stopLoading()` from its work queue while a
+        /// callback waits for that queue.
+        private let stateLock = NSLock()
+        private var stopped = false
+
+        private var isStopped: Bool { stateLock.withLock { stopped } }
+
         override func startLoading() {
             Task {
                 do {
                     let (response, data) = try await self.executeHandler(for: request)
+                    guard !isStopped else { return }
                     client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+                    guard !isStopped else { return }
                     client?.urlProtocol(self, didLoad: data)
+                    guard !isStopped else { return }
                     client?.urlProtocolDidFinishLoading(self)
                 } catch {
+                    guard !isStopped else { return }
                     client?.urlProtocol(self, didFailWithError: error)
                 }
             }
         }
-        override func stopLoading() {}
+
+        override func stopLoading() {
+            stateLock.withLock { stopped = true }
+        }
     }
 
     // MARK: - Per-test session factory

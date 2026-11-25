@@ -242,7 +242,7 @@ One job list, two runners. `scripts/ci/jobs` lists every job as
 summary. Add or change a job there, not in a runner.
 
 - **GitHub Actions** (`.github/workflows/ci.yml`): Linux jobs use
-  `swift:6.1-rhel-ubi9`, not Ubuntu (see below).
+  `swift:6.1-rhel-ubi9` and `swift:6.1-noble`.
 - **Desk**: `scripts/ci/run-jobs.sh` on macOS; `scripts/ci-linux.sh <job>|all|--shell` on Linux
   through Apple's `container` (`brew install container && container system start`).
   `scripts/ci/deps-linux.sh` installs Node, Go, uv and ps (dnf or apt) into a derived image;
@@ -252,12 +252,14 @@ summary. Add or change a job there, not in a runner.
   (`.build/linux/<volume>/` with another `--build-volume`);
   `--job-timeout` (default 30 min) stops a hung job.
 
-Linux is not conformant yet, and fixing it is deferred. Baselines and `interop/RESULTS.md`
-are shared by both platforms, so the jobs Linux fails are marked `advisory`: they run, report,
-and do not gate on Linux (every job gates on macOS). The cause is the Linux path of
-`HTTPClientTransport` (`data(for:)`, no SSE parsing, no GET stream); the scenarios and interop
-rows are in `design/linux.md`. On Ubuntu 24.04 (libcurl 8.5) the Linux client also hangs in
-`json-schema-ref-no-deref` at 2026-07-28, so Linux CI uses RHEL UBI 9 images (libcurl 7.76).
+Linux and macOS pass the same jobs: baselines and `interop/RESULTS.md` are shared, and every
+job gates on both (`advisory` exists for a known Linux-only failure; none today).
+`HTTPClientTransport` has one code path: `ResponseBody` (`URLSession.bytes(for:)` on Apple
+platforms, a `StreamingSessionDelegate` data task on swift-corelibs-foundation) and the
+internal `ServerSentEventParser`. On Linux, `URLProtocol` mocks see
+`httpAdditionalHeaders` because the SDK copies them into the request
+(`addingAdditionalHeaders(of:)`), and a mock must not call its client after `stopLoading()`
+(corelibs traps). What differs by design is in `design/linux.md`.
 
 ## Conformance fixtures
 

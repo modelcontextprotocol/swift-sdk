@@ -29,8 +29,8 @@ and `HTTPClientAuthorizer`.
 | `.stateless(version)` | No retry with another version | Use `.automatic` for negotiation |
 | `.none(clientID:)` | A plain client ID is pre-registered: no dynamic registration | Pass `""` to register |
 | HTTP transports | New error bodies, status codes and streaming | See below |
-| `HTTPClientTransport` | Default per-host connection limit 64; POST streams resume per stream | Raise `httpMaximumConnectionsPerHost` in custom configurations |
-| Package | Depends on swift-crypto | Resolve packages again |
+| `HTTPClientTransport` | Default per-host connection limit 64; POST streams resume per stream; SSE on Linux | Raise `httpMaximumConnectionsPerHost` in custom configurations |
+| Package | Depends on swift-crypto, no longer on eventsource | Resolve packages again |
 
 ## Breaking changes
 
@@ -316,6 +316,10 @@ session ended.
   request fails with -32603. The previous release restarted the GET session
   stream with the last event ID of any stream, and a request whose stream the
   server could not replay waited forever.
+- On Linux the transport reads responses as they arrive and handles SSE, as on
+  Apple platforms. The previous release read each response only once the
+  server ended it, dropped SSE bodies and opened no GET stream, so streamed
+  results, server-to-client requests and notifications did not arrive.
 
 ### Authorization
 
@@ -363,7 +367,9 @@ session ended.
 
 The `MCP` target depends on swift-crypto (`3.0.0..<5.0.0`), in both manifests.
 It seals `requestState` with AES-GCM, computes PKCE challenges and signs
-`private_key_jwt` assertions.
+`private_key_jwt` assertions. It no longer depends on eventsource:
+`HTTPClientTransport` parses server-sent events itself. Code that imported
+`EventSource` through the SDK declares the dependency itself.
 
 ## New opt-in features
 

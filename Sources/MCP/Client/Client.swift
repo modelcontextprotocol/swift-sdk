@@ -1099,18 +1099,12 @@ public actor Client {
     static let notificationStreamBaseDelay: Duration = .seconds(1)
     static let notificationStreamMaxDelay: Duration = .seconds(60)
 
-    /// Whether the transport can read the streamed responses of
-    /// `subscriptions/listen`.
-    private var streamsResponses: Bool {
-        HTTPClientTransport.streamsResponses || !(connection is HTTPClientTransport)
-    }
-
     /// Opens, replaces or closes the background stream so that it matches
     /// the registered handlers and subscribed resources (2026-07-28). The
     /// stream opens in the background; a replaced stream closes once its
     /// successor is acknowledged, and stays open when the successor fails.
     private func refreshNotificationStream() {
-        guard isStateless, connection != nil, streamsResponses else { return }
+        guard isStateless, connection != nil else { return }
         let wanted = wantedNotifications
         let none = SubscriptionFilter()
         guard wanted != (notificationStreamFilter ?? none) else { return }
@@ -1294,10 +1288,6 @@ public actor Client {
         guard isStateless else {
             throw MCPError.invalidRequest(
                 "\(SubscriptionsListen.name) requires protocol version 2026-07-28 or later")
-        }
-        guard streamsResponses else {
-            throw MCPError.internalError(
-                "\(SubscriptionsListen.name) needs a streamed response, which HTTPClientTransport does not read on Linux")
         }
         let request = SubscriptionsListen.request(.init(notifications: notifications))
         // The acknowledgement, or the request ending before one arrives.
@@ -1986,10 +1976,6 @@ public actor Client {
             return
         }
         guard connection != nil else { throw MCPError.internalError("Client disconnected") }
-        guard streamsResponses else {
-            throw MCPError.internalError(
-                "Resource subscriptions at 2026-07-28 need streamed responses, which HTTPClientTransport does not read on Linux")
-        }
         if subscribedResourceURIs.contains(uri) { return }
         try Task.checkCancellation()
         if !subscribedResources.contains(uri) {
