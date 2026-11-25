@@ -16,6 +16,23 @@ Depend on the package with `.upToNextMajor(from: "1.0.0")`. Before 1.0 the minor
 the role of the major number; [docs/migration.md](docs/migration.md) lists the changes from
 0.12.1 to 1.0.0.
 
+## Release branches
+
+Each minor version has one branch, `release-MAJOR.MINOR`, and its releases are tags on that
+branch: `release-1.0` carries `1.0.0`, `1.0.1`, `1.0.2`. A patch release needs no branch of its
+own. [Kubernetes](https://github.com/kubernetes/kubernetes) works the same way.
+
+- `main` develops the next minor or major version.
+- `release-X.Y` is cut from `main` for `X.Y.0`. After that it takes bug fixes only, released as
+  patch versions.
+- A fix lands on `main` first. It is then cherry-picked (`git cherry-pick -x`) onto each release
+  branch that ships it, in a pull request into that branch. A fix for code that only a release
+  branch has goes straight to that branch, and its pull request says why.
+- `X.Y.0` is tagged on a commit that `main` has too, so on `main` the `api-breakage` job compares
+  with the newest minor version. Patch tags exist only on their release branch, and there the job
+  compares with the newest patch.
+- CI runs on pull requests into, and pushes to, `main` and every `release-*` branch.
+
 ## The public API
 
 Covered:
