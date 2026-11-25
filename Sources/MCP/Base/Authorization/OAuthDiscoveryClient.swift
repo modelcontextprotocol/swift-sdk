@@ -40,8 +40,10 @@ enum OAuthMetadataFetch<Metadata> {
 }
 
 extension OAuthMetadataFetch {
+    /// Redirects are followed only to `https` hosts that are not private
+    /// addresses.
     static func fetch(
-        _ url: URL, session: URLSession, decode: (Data) throws -> Metadata?
+        _ url: URL, session: URLSession, validator: OAuthURLValidator, decode: (Data) throws -> Metadata?
     ) async throws -> OAuthMetadataFetch {
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
@@ -49,7 +51,7 @@ extension OAuthMetadataFetch {
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await session.data(for: request)
+            (data, response) = try await session.oauthData(for: request, redirects: .validated, validator: validator)
         } catch let error as URLError where error.code == .cancelled {
             throw CancellationError()
         } catch is CancellationError {
@@ -109,7 +111,9 @@ struct OAuthDiscoveryClient: Sendable {
         let decoder = JSONDecoder()
         var unavailable: OAuthMetadataUnavailable?
         for url in candidates {
-            let fetch = try await OAuthMetadataFetch<OAuthProtectedResourceMetadata>.fetch(url, session: session) {
+            let fetch = try await OAuthMetadataFetch<OAuthProtectedResourceMetadata>.fetch(
+                url, session: session, validator: urlValidator
+            ) {
                 let metadata = try decoder.decode(OAuthProtectedResourceMetadata.self, from: $0)
                 return metadata.authorizationServers.isEmpty ? nil : metadata
             }
@@ -171,7 +175,7 @@ struct OAuthDiscoveryClient: Sendable {
                 for: candidateServer)
             {
                 let fetch = try await OAuthMetadataFetch<OAuthAuthorizationServerMetadata>.fetch(
-                    metadataURL, session: session
+                    metadataURL, session: session, validator: urlValidator
                 ) { try decoder.decode(OAuthAuthorizationServerMetadata.self, from: $0) }
                 switch fetch {
                 case .absent:

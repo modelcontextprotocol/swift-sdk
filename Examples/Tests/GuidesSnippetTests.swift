@@ -163,6 +163,7 @@ struct GuidesSnippetTests {
         await server.stop()
     }
 
+
     @Test("Handshake mode stays on initialize with any server")
     func handshakeModeStays() async throws {
         let server = await eraServer()
@@ -189,7 +190,7 @@ struct GuidesSnippetTests {
         let refusing = await eraServer(statelessOnly)
         let (clientEnd, serverEnd) = await InMemoryTransport.createConnectedPair()
         try await refusing.start(transport: serverEnd)
-        let legacy = Client(name: "c", version: "1", configuration: .init(protocolMode: .handshake))
+        let legacy = Client(name: "c", version: "1", configuration: handshakeMode)
         await #expect(throws: MCPError.unsupportedProtocolVersion(
             supported: Version.stateless, requested: Version.v2025_11_25)
         ) {
@@ -578,12 +579,12 @@ struct GuidesSnippetTests {
     func roughErrors() async throws {
         #expect(textContent("x") == .text(text: "x", annotations: nil, _meta: nil))
 
-        // -32603 decodes without its message.
+        // -32603 keeps the message of a peer that sends no `data.detail`.
         let decodedInternal = try JSONDecoder().decode(
             MCPError.self, from: Data(#"{"code":-32603,"message":"boom"}"#.utf8))
-        #expect(decodedInternal == .internalError(nil))
+        #expect(decodedInternal == .internalError("boom"))
 
-        // One server behind the stateless transport accepts one initialize.
+        // One server behind the stateless transport answers every initialize.
         let server = await makeCalculatorServer()
         let transport = StatelessHTTPServerTransport()
         try await server.start(transport: transport)
@@ -595,7 +596,8 @@ struct GuidesSnippetTests {
                     .utf8))
         #expect(await transport.handleRequest(initialize).statusCode == 200)
         let second = await transport.handleRequest(initialize)
-        #expect(errorCode(try body(second)) == -32600)
+        #expect(second.statusCode == 200)
+        #expect(errorCode(try body(second)) == nil)
         await server.stop()
     }
 }

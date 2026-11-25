@@ -131,6 +131,7 @@ struct MCPErrorWireTests {
         arguments: [
             MCPError.parseError(nil), .parseError("x"), .invalidRequest(nil), .invalidRequest("x"),
             .methodNotFound(nil), .methodNotFound("x"), .invalidParams(nil), .invalidParams("x"),
+            .internalError(nil), .internalError("x"),
             .headerMismatch(nil), .headerMismatch("x"), .resourceNotFound(uri: "a://b"),
             .resourceNotFound(uri: "a://b", message: "Gone"),
             .missingRequiredClientCapabilities(.init(sampling: .init())),
@@ -153,6 +154,10 @@ struct MCPErrorWireTests {
 
         let custom = try decode(MCPError.self, ["code": -32601, "message": "Unknown method x/y"])
         #expect(custom == .methodNotFound("Unknown method x/y"))
+
+        let internalError = try decode(MCPError.self, ["code": -32603, "message": "Internal error: boom"])
+        #expect(internalError == .internalError("boom"))
+        #expect(internalError.errorDescription == "Internal error: boom")
     }
 
     @Test("Error data sends data: URL strings as given")

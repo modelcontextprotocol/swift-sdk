@@ -4,9 +4,6 @@ import Foundation
     import FoundationNetworking
 #endif
 
-#if canImport(CryptoKit)
-    import CryptoKit
-#endif
 
 // MARK: - HTTPClientAuthorizer Protocol
 
@@ -964,7 +961,8 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
         if let expiry = clientSecretExpiresAt, Date() >= expiry {
             clientSecretExpiresAt = nil
             clientRegistrationAttempted = false
-            configuration.authentication = .none(clientID: configuration.authentication.clientID)
+            // Register again: the expired client ID is not reused.
+            configuration.authentication = .none(clientID: "")
         }
         // Registered credentials belong to the server that issued them (SEP-2352).
         if let registrationIssuer, let selectedAuthorizationServer,

@@ -42,6 +42,24 @@ struct CancellationTests {
         await server.stop()
     }
 
+    @Test("Cancelling connect does not cancel initialize on the wire")
+    func testCancelledConnectSendsNoCancellation() async throws {
+        let transport = MockTransport()
+        let client = Client(name: "TestClient", version: "1.0", configuration: .handshake)
+        let connecting = Task { try await client.connect(transport: transport) }
+        for _ in 0..<200 where await transport.sentMessages.isEmpty {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        connecting.cancel()
+        await #expect(throws: CancellationError.self) { _ = try await connecting.value }
+        try await Task.sleep(for: .milliseconds(100))
+        let methods = await transport.sentData.compactMap {
+            (try? JSONDecoder().decode(Value.self, from: $0))?.objectValue?["method"]?.stringValue
+        }
+        #expect(methods == [Initialize.name])
+        await client.disconnect()
+    }
+
     @Test("Client receives and processes CancelledNotification")
     func testClientReceivesCancellation() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()

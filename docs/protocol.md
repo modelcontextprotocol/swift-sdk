@@ -46,9 +46,11 @@ try await server.start(transport: transport) { clientInfo, capabilities in
 }
 ```
 
-The hook runs only for `initialize`. Stateless requests do not reach it; check `Server.currentHandlerContext?.clientInfo` in handlers instead.
+The hook runs only for `initialize`. Stateless requests do not reach it; pass a `statelessRequestHook` too, which runs before each of them with the client info and capabilities from its `_meta`, or check `Server.currentHandlerContext?.clientInfo` in handlers. With an initialize hook and no stateless hook, stateless requests are refused with -32022, so clients fall back to `initialize`.
 
-With `Server.Configuration.strict` set (`.strict`), the server rejects requests other than `initialize` and `ping` that arrive before `initialize`, with -32600 "Server is not initialized". The default is lenient. A second `initialize` on one connection fails with -32600 "Server is already initialized".
+With `Server.Configuration.strict` set (`.strict`), the server rejects requests other than `initialize` and `ping` that arrive before `initialize`, with -32600 "Server is not initialized", and ignores notifications other than `notifications/initialized`. The default is lenient. A second `initialize` on one connection fails with -32600 "Server is already initialized". Behind a `StatelessHTTPServerTransport`, which has no connection or session, every `initialize` is answered, the server keeps no client state, and `strict` does not apply to handshake requests. No session ties a later request to the `initialize` that passed the hook, so there the `statelessRequestHook` runs before every other handshake request, with no client info and empty capabilities; with an initialize hook and no stateless hook, those requests are refused with -32600.
+
+A server never answers a notification. A message it cannot read gets a parse error (-32700) with `"id": null`, and an empty batch gets -32600 with `"id": null`.
 
 ### Discovery and protocol modes
 
@@ -60,7 +62,7 @@ At 2026-07-28 there is no handshake. A client may send `server/discover` to lear
 |---|---|
 | `.automatic` (default) | `server/discover` at `Version.stateless[0]`. On -32022 it retries once with the first version in `data.supported` that is in `Version.stateless`. Falls back to `initialize` (see below). |
 | `.handshake` | `initialize` with `Version.latest`. |
-| `.stateless(v)` | `server/discover` at `v`, with the same single retry on -32022. No fallback: the error is thrown. |
+| `.stateless(v)` | `server/discover` at `v`. No retry and no fallback: when the server does not serve `v`, the -32022 error is thrown. |
 
 `.automatic` falls back to `initialize` when:
 
@@ -359,7 +361,7 @@ actor SessionRouter {
 }
 ```
 
-The transport stores every event it sends for replay and drops them only when the session ends. End idle sessions in your router (the example server and the conformance fixture do this on a timer).
+The transport stores the messages it sends for replay, up to `eventStoreCapacity` events (default 1000) and `eventStoreByteCapacity` bytes (default 16 MiB) per session; when the store is full the oldest event is dropped, but the newest is always kept. Priming events are not stored. A resumption finds its stream from the `Last-Event-ID` (`<stream>_<counter>`), so a quiet stream stays resumable while other streams fill the store. It gets HTTP 400 "Invalid Last-Event-ID" only when the ID is unknown or an event of that stream after it was dropped. All events are dropped when the session ends. End idle sessions in your router (the example server and the conformance fixture do this on a timer).
 
 Validation errors:
 
@@ -593,7 +595,7 @@ let server = Server(
 try await server.notify(ToolListChangedNotification.message())
 ```
 
-`notify` publishes list-changed and resource-updated notifications to every matching listen stream, of every caller; `notify(_:to:)` reaches only the streams whose caller's `HandlerContext` the closure accepts. It also sends them on the connection, but only after an `initialize` handshake; at 2026-07-28 they go only to listen streams. Over `StatelessHTTPServerTransport` the transport rewrites the internal request id in `subscriptionId` back to the client's id.
+`notify` publishes list-changed and resource-updated notifications to every matching listen stream, of every caller; `notify(_:to:)` reaches only the streams whose caller's `HandlerContext` the closure accepts. It also sends them on the connection, but only after an `initialize` handshake; at 2026-07-28 they go only to listen streams. Behind `StatelessHTTPServerTransport`, a handler of a handshake request sends them on its request's stream; `notify(_:to:)` does so only when the closure accepts that request's context. Over `StatelessHTTPServerTransport` the transport rewrites the internal request id in `subscriptionId` back to the client's id.
 
 By default any caller may listen to any list change and resource URI. To restrict streams per caller, set an authorizer: it runs before the acknowledgement with the requested filter and the caller's `HandlerContext` (including `httpContext`), and returns the filter to serve or throws an `MCPError` to refuse the stream:
 
@@ -685,7 +687,7 @@ Discovery follows the MCP authorization spec: protected resource metadata (RFC 9
 | `.clientCredentials` (default) | Services without a user | Needs a confidential `authentication`. |
 | `.authorizationCode` | Apps with a user | PKCE with S256 is required; the flow fails with `pkceS256NotSupported` when the server advertises other methods only. The `authorizationDelegate` shows the URL and returns the redirect. |
 
-`TokenEndpointAuthentication`: `.clientSecretBasic`, `.clientSecretPost`, `.none(clientID:)` for public clients, and `.privateKeyJWT(clientID:assertionFactory:)`. `OAuthConfiguration.makePrivateKeyJWTAssertion` builds ES256 assertions (CryptoKit platforms only).
+`TokenEndpointAuthentication`: `.clientSecretBasic`, `.clientSecretPost`, `.none(clientID:)` for public clients, and `.privateKeyJWT(clientID:assertionFactory:)`. `OAuthConfiguration.makePrivateKeyJWTAssertion` builds ES256 assertions.
 
 An interactive client:
 
@@ -720,7 +722,8 @@ let transport = HTTPClientTransport(
 How the client identifies itself, with `.none(clientID:)`:
 
 - **Client ID Metadata Document (CIMD).** When the client ID is an `https` URL with a path and the server metadata has `client_id_metadata_document_supported: true`, the URL is the client ID; no registration happens. If the server does not support CIMD and has no registration endpoint, the flow fails with `cimdNotSupported`. A URL client ID that is not `https` with a path fails with `invalidClientIDMetadataURL` when the server supports CIMD.
-- **Dynamic client registration (RFC 7591).** Otherwise, when the server has a `registration_endpoint`, the authorizer registers with `client_name` (`clientName`, default `"mcp-swift-sdk"`), the redirect URI, the grant and response types, and `application_type` (SEP-837). `applicationType: nil` sends `web` for the authorization code grant with an `https` redirect URI on a non-loopback host, else `native`. The registered credentials replace `authentication` for this authorizer. A registration that fails with an error is tried again in the next flow.
+- **Pre-registered public client.** A client ID that is not empty and not a URL was issued by the authorization server in advance; no registration happens.
+- **Dynamic client registration (RFC 7591).** Otherwise, with an empty client ID or a CIMD URL the server does not accept, when the server has a `registration_endpoint`, the authorizer registers with `client_name` (`clientName`, default `"mcp-swift-sdk"`), the redirect URI, the grant and response types, and `application_type` (SEP-837). `applicationType: nil` sends `web` for the authorization code grant with an `https` redirect URI on a non-loopback host, else `native`. The registered credentials replace `authentication` for this authorizer. A registration that fails with an error is tried again in the next flow.
 - **Pre-registration.** Pass `.clientSecretBasic`, `.clientSecretPost` or `.privateKeyJWT`; no registration happens.
 
 Tokens are kept in a `TokenStorage`. The default `InMemoryTokenStorage` loses them when the process exits. Implement the protocol to persist them, for example in the Keychain. Its methods may be called from several tasks at once:
@@ -861,9 +864,10 @@ await server.withMethodHandler(CallTool.self) { params in
 A malicious server can point OAuth discovery at internal addresses. `OAuthAuthorizer` applies these rules:
 
 - **HTTPS.** The MCP endpoint, resource metadata URLs and authorization server endpoints must be `https`; `http` is accepted only for loopback hosts (`localhost`, `127.0.0.1`, `::1`), and for authorization server endpoints not at all by default. URLs with fragments are rejected.
-- **Private addresses.** `OAuthURLValidator.isPrivateIPHost` rejects literal IP hosts in `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16` (cloud metadata), `100.64.0.0/10`, `fc00::/7` and `fe80::/10`. It is applied to the challenge's `resource_metadata` URL, authorization server candidates (skipped), and the authorization and token endpoints (`privateIPAddressBlocked`).
+- **Private addresses.** `OAuthURLValidator.isPrivateIPHost` parses literal IP hosts with `inet_pton` and rejects `0.0.0.0/8`, `10.0.0.0/8`, `100.64.0.0/10`, `169.254.0.0/16` (cloud metadata), `172.16.0.0/12`, `192.0.0.0/24`, `192.168.0.0/16`, `198.18.0.0/15`, `224.0.0.0/4`, `240.0.0.0/4`, `::`, `fc00::/7`, `fe80::/10`, `fec0::/10` and `ff00::/8`, in any spelling: bracketed, zoned (`%en0`), and IPv4 addresses embedded as IPv4-mapped, IPv4-compatible or NAT64 IPv6. Numeric hosts that are not a canonical dotted quad (`167772161`, `10.1`, `0x0a.0.0.1`, `012.0.0.1`) are rejected too. Host names and loopback addresses are never rejected. It is applied to the challenge's `resource_metadata` URL, authorization server candidates (skipped), and the authorization, token and registration endpoints (`privateIPAddressBlocked`).
+- **Redirects.** Metadata discovery follows a redirect only to an `https` URL, or from loopback `http` to loopback `http`, whose host is not a private address. Token and registration requests, which carry credentials, follow no redirects.
 
-What the SDK does not do: it checks literal IP addresses only, so a host name that resolves to a private address passes, and DNS rebinding is not prevented. The registration endpoint is checked for HTTPS but not for private addresses. Redirects of discovery requests follow `URLSession` rules. Run clients that connect to untrusted servers behind an egress proxy or firewall that blocks internal ranges.
+What the SDK does not do: it checks literal IP addresses only, so a host name that resolves to a private address passes, and DNS rebinding is not prevented. On Linux (swift-corelibs-foundation), which has no per-task delegates, each OAuth request runs in a session with the caller session's configuration and the redirect check as its delegate. Run clients that connect to untrusted servers behind an egress proxy or firewall that blocks internal ranges.
 
 On the server side, `OriginValidator` protects local servers against DNS rebinding of the server itself. Both HTTP server transports use `OriginValidator.localhost()` by default: a present `Host` must be a loopback host (421 otherwise) and a present `Origin` must be a loopback origin (403 otherwise). A deployed server must replace it with `OriginValidator(allowedHosts:allowedOrigins:)`; `.disabled` turns the check off.
 

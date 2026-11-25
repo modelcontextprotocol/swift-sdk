@@ -16,6 +16,12 @@ public struct RequestContext<Output: Sendable & Decodable>: Sendable {
 
     /// Convenience property to await the result.
     ///
+    /// Cancelling the task that awaits it cancels the request, as
+    /// `Client.cancelRequest(_:reason:)` does: it throws `CancellationError`.
+    /// The request is shared, so every task that awaits `value` gets that
+    /// error. To wait from a task that may be cancelled without ending the
+    /// request, await `Task { try await context.value }.value` instead.
+    ///
     /// Example:
     /// ```swift
     /// let context = try await client.send(request)
@@ -23,7 +29,11 @@ public struct RequestContext<Output: Sendable & Decodable>: Sendable {
     /// ```
     public var value: Output {
         get async throws {
-            try await requestTask.value
+            try await withTaskCancellationHandler {
+                try await requestTask.value
+            } onCancel: { [requestTask] in
+                requestTask.cancel()
+            }
         }
     }
 

@@ -170,6 +170,7 @@ Registration runs only when `authentication` is `.none(clientID:)`, once per AS:
 |---|---|
 | AS supports CIMD and `clientID` is a URL but not `https` with a path | `invalidClientIDMetadataURL` |
 | `clientID` is an `https` URL with a path and the AS supports CIMD | no registration; the URL is the client id |
+| `clientID` is not empty and not a URL | no registration; a pre-registered public client |
 | no `registration_endpoint`, `clientID` is a CIMD URL | `cimdNotSupported` |
 | no `registration_endpoint` otherwise | no registration |
 | `registration_endpoint` present | DCR |
@@ -177,8 +178,8 @@ Registration runs only when `authentication` is `.none(clientID:)`, once per AS:
 The DCR body has `client_name`, `application_type`, `grant_types`, `token_endpoint_auth_method`,
 and for the authorization code grant `response_types: ["code"]` and `redirect_uris`. The returned
 `client_id` replaces the configured one. A `client_secret_expires_at` in the past triggers a new
-registration. A registration that throws resets the attempt, so the next flow registers again; a
-server without a registration endpoint is not asked again.
+registration with an empty client ID. A registration that throws resets the attempt, so the next flow
+registers again; a server without a registration endpoint is not asked again.
 
 `application_type` (SEP-837): `OAuthConfiguration.applicationType` when set. Otherwise `web` for
 the authorization code grant with an `https` redirect URI on a non-loopback host, and `native` in
@@ -244,9 +245,6 @@ DNS rebinding is not covered. The redirect URI is validated before the flow star
 
 ## Open questions
 
-- The `private_key_jwt` helper uses CryptoKit. Without it (Linux) it throws
-  `cryptographyUnavailable`. swift-crypto is now a dependency of the library and could provide
-  P-256 there.
 - A missing `authorization_endpoint` throws `tokenEndpointMissing`.
 - `TokenStorage` holds one token, so one authorizer serves one resource.
 - Deferred extensions, not scored for conformance tiers: DPoP (SEP-1932), enterprise-managed

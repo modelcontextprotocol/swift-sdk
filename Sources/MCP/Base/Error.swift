@@ -292,7 +292,7 @@ extension MCPError: Codable {
                 self = .serverError(code: code, message: message, data: serverData)
             }
         case -32603:
-            self = .internalError(detail(nil))
+            self = .internalError(detailOrMessage("Internal error"))
         case -32020:
             self = .headerMismatch(detailOrMessage("Header mismatch"))
         case -32021:

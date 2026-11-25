@@ -11,7 +11,7 @@ constrain their resolution as little as possible. Related: [VERSIONING.md](VERSI
 | [swift-system](https://github.com/apple/swift-system) | `SystemPackage` | `from: "1.0.0"` | `MCP`, `MCPTests`, `HelloClient` | file descriptors and `Errno` for `StdioTransport` and `MCPError`, where the platform has no `System` module |
 | [swift-log](https://github.com/apple/swift-log) | `Logging` | `from: "1.5.0"` | `MCP`, tests, fixtures, examples | `Logger` on every transport, client and server |
 | [eventsource](https://github.com/mattt/eventsource) | `EventSource` | `from: "1.1.0"` | `MCP` on Apple platforms only | SSE parsing in `HTTPClientTransport` |
-| [swift-crypto](https://github.com/apple/swift-crypto) | `Crypto` | `"3.0.0"..<"5.0.0"` | `MCP` | AES-256-GCM, HKDF-SHA256 and SHA-256 for `requestState` sealing; SHA-256 for PKCE |
+| [swift-crypto](https://github.com/apple/swift-crypto) | `Crypto` | `"3.0.0"..<"5.0.0"` | `MCP` | AES-256-GCM, HKDF-SHA256 and SHA-256 for `requestState` sealing; SHA-256 for PKCE; P-256 for `private_key_jwt` |
 | [swift-nio](https://github.com/apple/swift-nio) | `NIOCore`, `NIOPosix`, `NIOHTTP1` | `from: "2.65.0"` | `MCPConformanceServer`, `HTTPServerExample` only | HTTP server in the fixture and the example |
 | [swift-docc-plugin](https://github.com/swiftlang/swift-docc-plugin) | plugin | `branch: "main"` | none | `swift package generate-documentation` |
 
@@ -23,7 +23,8 @@ Notes:
   return `HTTPRequest`/`HTTPResponse`, so applications choose their own HTTP server.
 - swift-crypto was added in this major version for `requestState` sealing
   ([design/mrtr.md](design/mrtr.md)). Its range spans majors 3 and 4; the APIs used (`AES.GCM`,
-  `HKDF`, `SHA256`, `SymmetricKey`) exist in both. CI resolves 4.x.
+  `HKDF`, `SHA256`, `SymmetricKey`, `P256.Signing`) exist in both. CI resolves 4.x. OAuth uses
+  it for PKCE and `private_key_jwt`, so those work on Linux too.
 - `Package.resolved` is committed. It records the versions CI builds with; it does not constrain
   consumers.
 - Types from dependencies appear in the public API in two places: `Logger` (swift-log) on every

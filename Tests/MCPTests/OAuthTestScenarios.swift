@@ -1361,7 +1361,7 @@ import Testing
 
                 let context = OAuthScenarioContext(
                     testEndpoint: testEndpoint,
-                    oauthConfiguration: .init(authentication: .none(clientID: "test-client")),
+                    oauthConfiguration: .init(authentication: .none(clientID: "")),
                     messageData: #"{"jsonrpc":"2.0","method":"ping","id":7}"#.data(using: .utf8)!,
                     expectedErrorSubstring: "400"
                 )
@@ -2214,7 +2214,7 @@ import Testing
 
                 return OAuthScenarioContext(
                     testEndpoint: testEndpoint,
-                    oauthConfiguration: .init(authentication: .none(clientID: "anon")),
+                    oauthConfiguration: .init(authentication: .none(clientID: "")),
                     messageData: #"{"jsonrpc":"2.0","method":"ping","id":93}"#.data(using: .utf8)!,
                     expectedResponseData: firstResponseData,
                     expectedCallCounts: [

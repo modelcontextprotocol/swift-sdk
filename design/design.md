@@ -118,10 +118,24 @@ Message dispatch:
 | Side | Requests | Notifications | Responses |
 |---|---|---|---|
 | `Server` | one unstructured `Task` per request; stored in `pendingRequestTasks` for cancellation | handled in the receive loop, in order | resume the pending continuation |
-| `Client` | handled in the receive loop; the loop waits for the handler | handled in the receive loop, in order | resume the pending continuation |
+| `Client` | one unstructured `Task` per request, at most `maxConcurrentServerRequests` at once (64 more wait, then -32603); a duplicate id gets -32600; at 2026-07-28 -32601; cancelled by `notifications/cancelled` | one at a time, in order, on an inbound queue outside the receive loop | at once, except after the queued progress notifications of the same request; never waiting for requests sent from a notification handler |
 
-The client's in-loop handling of server-to-client requests means a slow sampling or elicitation
-handler delays every later message on that connection. See [Open questions](#open-questions).
+Client requests are registered (`ResponseSlot`) before `send(_:)` returns and handed to the
+transport by a separate task, so a `cancelRequest` always finds them. A request cancelled before
+that task runs is never sent, and no `notifications/cancelled` is sent for it. Cancelling the
+task that awaits `RequestContext.value` cancels the request the same way.
+
+Responses do not wait for notification handlers, so a handler may await any request. A request
+that carries a progress token, while progress handlers are registered, is an exception: its
+response is delivered after the progress notifications of that token already queued, so they
+are handled before its result. The task-local `isHandlingNotification` marks requests sent from
+a notification handler; their responses never wait, so such a handler cannot deadlock on its
+own requests (their progress then arrives after the result). Log notifications are not ordered
+with responses.
+
+The client's own handling of `notifications/cancelled` and
+`notifications/subscriptions/acknowledged` runs in the receive loop: it only updates client
+state. Handlers registered for them run on the inbound queue like any other.
 
 `OAuthAuthorizer` is a `final class` marked `@unchecked Sendable`. Concurrent requests reach it
 from several tasks: its state is behind a lock, and challenges and proactive refreshes run one at
@@ -519,9 +533,9 @@ Implied by the design, not recorded as separate decisions:
 
 ## Open questions
 
-- The client handles server-to-client requests in its receive loop. A handler that waits for
-  another message on the same connection can stall it. Moving these to tasks, as the server
-  does, would change ordering guarantees.
+- A slow notification handler delays later notifications and the responses queued behind
+  them. Running notification handlers concurrently, as the Python SDK does, would lose the
+  ordering of progress before results.
 - `Client` downcasts to `HTTPClientTransport` for header parameters and cancellation. A transport
   capability protocol would let custom transports opt in.
 - `Server.Info` built by `Server.init` carries only name, version and title, so

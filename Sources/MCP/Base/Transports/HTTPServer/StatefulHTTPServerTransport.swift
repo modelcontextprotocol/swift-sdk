@@ -85,14 +85,28 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
 
     // MARK: - Event Store (Resumability)
 
+    /// A message kept for `Last-Event-ID` replay. Its event ID is
+    /// `<streamID>_<counter>`; priming events get an ID but are not stored.
     private struct StoredEvent {
         let streamID: String
-        let eventID: String
-        let message: Data?
+        let counter: Int
+        let message: Data
     }
 
+    /// Stored events, oldest first, from `storedEventsHead`.
     private var storedEvents: [StoredEvent] = []
+    private var storedEventsHead = 0
+    private var storedBytes = 0
+    /// Stored events per stream.
+    private var storedEventCounts: [String: Int] = [:]
+    /// The newest event dropped from each stream that still has events or
+    /// is open. A resumption from before it cannot be served.
+    private var evictedThrough: [String: Int] = [:]
     private var eventCounter: Int = 0
+    /// The most events kept for replay; older events are dropped first.
+    private let eventStoreCapacity: Int
+    /// The most bytes of messages kept for replay.
+    private let eventStoreByteCapacity: Int
 
     // MARK: - Init
 
@@ -107,13 +121,25 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
     ///     protocol version, and session validation.
     ///   - retryInterval: Retry interval in milliseconds for SSE priming events.
     ///     Controls how long clients wait before attempting to reconnect.
+    ///   - eventStoreCapacity: The most SSE events kept for `Last-Event-ID`
+    ///     replay in this session. When it, or `eventStoreByteCapacity`, is
+    ///     reached, the oldest event is dropped; a client that resumes a
+    ///     stream from before one of its dropped events gets HTTP 400.
+    ///     Defaults to 1000; values below 1 are treated as 1.
+    ///   - eventStoreByteCapacity: The most bytes of messages kept for
+    ///     replay in this session. Defaults to 16 MiB. The newest event is
+    ///     always kept.
     ///   - logger: Optional logger. If `nil`, a no-op logger is used.
     public init(
         sessionIDGenerator: any SessionIDGenerator = UUIDSessionIDGenerator(),
         validationPipeline: (any HTTPRequestValidationPipeline)? = nil,
         retryInterval: Int? = nil,
+        eventStoreCapacity: Int = 1000,
+        eventStoreByteCapacity: Int = 16 << 20,
         logger: Logger? = nil
     ) {
+        self.eventStoreCapacity = max(1, eventStoreCapacity)
+        self.eventStoreByteCapacity = max(1, eventStoreByteCapacity)
         self.sessionIDGenerator = sessionIDGenerator
         self.validationPipeline = validationPipeline ?? StandardValidationPipeline(validators: [
             OriginValidator.localhost(),
@@ -504,6 +530,7 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
         httpRequestContexts.removeValue(forKey: requestID)
         streamGenerations[requestID] = nil
         requestSSEContinuations.removeValue(forKey: requestID)?.finish()
+        if storedEventCounts[requestID] == nil { evictedThrough[requestID] = nil }
         logger.debug("Released a cancelled request", metadata: ["requestID": "\(requestID)"])
     }
 
@@ -535,6 +562,7 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
 
         // Response means the request is complete — close the stream
         streamGenerations[requestID] = nil
+        if storedEventCounts[requestID] == nil { evictedThrough[requestID] = nil }
         if let continuation = requestSSEContinuations[requestID] {
             continuation.finish()
             requestSSEContinuations.removeValue(forKey: requestID)
@@ -604,22 +632,69 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
 
     // MARK: - Internal Event Store
 
-    private func storeEvent(streamID: String, message: Data?) -> String {
-        eventCounter += 1
-        let eventID = "\(streamID)_\(eventCounter)"
-        storedEvents.append(StoredEvent(streamID: streamID, eventID: eventID, message: message))
-        return eventID
+    /// The IDs of the events kept for replay, oldest first (for tests).
+    var storedEventIDs: [String] {
+        storedEvents[storedEventsHead...].map { "\($0.streamID)_\($0.counter)" }
     }
 
-    private func replayEventsAfter(_ lastEventID: String) -> (streamID: String, events: [(eventID: String, message: Data)])? {
-        guard let index = storedEvents.firstIndex(where: { $0.eventID == lastEventID }) else {
-            return nil
+    /// Stores `message` for replay on `streamID` and returns its event ID.
+    private func storeEvent(streamID: String, message: Data) -> String {
+        eventCounter += 1
+        storedEvents.append(StoredEvent(streamID: streamID, counter: eventCounter, message: message))
+        storedBytes += message.count
+        storedEventCounts[streamID, default: 0] += 1
+        while storedEvents.count - storedEventsHead > 1,
+            storedEvents.count - storedEventsHead > eventStoreCapacity || storedBytes > eventStoreByteCapacity
+        {
+            evictOldestEvent()
         }
-        let streamID = storedEvents[index].streamID
-        let eventsToReplay = storedEvents[(index + 1)...]
-            .filter { $0.streamID == streamID && $0.message != nil }
-            .map { (eventID: $0.eventID, message: $0.message!) }
-        return (streamID, eventsToReplay)
+        return "\(streamID)_\(eventCounter)"
+    }
+
+    /// A new event ID on `streamID` for an event that is not stored.
+    private func unstoredEventID(streamID: String) -> String {
+        eventCounter += 1
+        return "\(streamID)_\(eventCounter)"
+    }
+
+    private func evictOldestEvent() {
+        let event = storedEvents[storedEventsHead]
+        storedEventsHead += 1
+        storedBytes -= event.message.count
+        let remaining = (storedEventCounts[event.streamID] ?? 1) - 1
+        if remaining > 0 || isOpenStream(event.streamID) {
+            storedEventCounts[event.streamID] = remaining > 0 ? remaining : nil
+            evictedThrough[event.streamID] = event.counter
+        } else {
+            // Nothing of this stream is left to replay.
+            storedEventCounts[event.streamID] = nil
+            evictedThrough[event.streamID] = nil
+        }
+        // Compact once the dropped prefix is large.
+        if storedEventsHead > 256, storedEventsHead * 2 > storedEvents.count {
+            storedEvents.removeFirst(storedEventsHead)
+            storedEventsHead = 0
+        }
+    }
+
+    private func isOpenStream(_ streamID: String) -> Bool {
+        streamID == standaloneStreamID || openRequestIDs.contains(streamID)
+    }
+
+    /// The stream of `lastEventID` and its stored events after it, or `nil`
+    /// when the stream is unknown or an event after it was dropped.
+    private func replayEventsAfter(_ lastEventID: String) -> (streamID: String, events: [(eventID: String, message: Data)])? {
+        guard let separator = lastEventID.lastIndex(of: "_"),
+            let counter = Int(lastEventID[lastEventID.index(after: separator)...]),
+            counter <= eventCounter
+        else { return nil }
+        let streamID = String(lastEventID[..<separator])
+        guard isOpenStream(streamID) || storedEventCounts[streamID] != nil else { return nil }
+        if let evicted = evictedThrough[streamID], evicted > counter { return nil }
+        let events = storedEvents[storedEventsHead...]
+            .filter { $0.streamID == streamID && $0.counter > counter }
+            .map { (eventID: "\($0.streamID)_\($0.counter)", message: $0.message) }
+        return (streamID, events)
     }
 
     // MARK: - SSE Helpers
@@ -631,7 +706,7 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
     ) {
         guard Version.profile(for: protocolVersion).allowsPrimingEvents else { return }
 
-        let primingEventID = storeEvent(streamID: streamID, message: nil)
+        let primingEventID = unstoredEventID(streamID: streamID)
         let primingEvent = SSEEvent.priming(id: primingEventID, retry: retryInterval)
         continuation.yield(primingEvent.formatted())
     }

@@ -307,6 +307,11 @@ public actor Server {
     /// ``Server/currentHandlerContext`` is set, so the hook can read the
     /// originating HTTP request. Throwing refuses the request: an
     /// ``MCPError`` is sent as is, any other error as -32600.
+    ///
+    /// Behind ``StatelessHTTPServerTransport`` it also runs before every
+    /// handshake request other than `initialize`, with `nil` client info and
+    /// empty capabilities: such a request has no session, so the
+    /// `initialize` that passed the initialize hook does not cover it.
     public typealias StatelessRequestHook =
         @Sendable (_ clientInfo: Client.Info?, _ capabilities: Client.Capabilities) async throws -> Void
 
@@ -365,10 +370,13 @@ public actor Server {
     ///   - initializeHook: An optional hook that runs when the client sends an initialize request
     ///   - statelessRequestHook: An optional hook that runs before every
     ///     stateless request (2026-07-28 and later), which never sends
-    ///     `initialize`. When `initializeHook` is set and this hook is not,
+    ///     `initialize`, and behind ``StatelessHTTPServerTransport`` before
+    ///     every handshake request other than `initialize`, which has no
+    ///     session. When `initializeHook` is set and this hook is not,
     ///     stateless requests are refused with -32022, so a gate in
     ///     `initializeHook` cannot be bypassed; clients then fall back to
-    ///     `initialize`.
+    ///     `initialize`. Behind ``StatelessHTTPServerTransport`` handshake
+    ///     requests other than `initialize` are then refused with -32600.
     public func start(
         transport: any Transport,
         initializeHook: (@Sendable (Client.Info, Client.Capabilities) async throws -> Void)? = nil,
@@ -447,12 +455,15 @@ public actor Server {
                     } catch {
                         await logger?.error(
                             "Error processing message", metadata: ["error": "\(error)"])
-                        let response = AnyMethod.response(
-                            id: requestID ?? .random,
-                            error: error as? MCPError
-                                ?? MCPError.internalError(error.localizedDescription)
-                        )
-                        try? await send(response)
+                        let mcpError =
+                            error as? MCPError ?? MCPError.internalError(error.localizedDescription)
+                        if let requestID {
+                            try? await send(AnyMethod.response(id: requestID, error: mcpError))
+                        } else if case .parseError = mcpError {
+                            // A message that could not be read: `"id": null`.
+                            await sendUnattributedError(mcpError)
+                        }
+                        // Notifications are never answered.
                     }
                 }
             } catch {
@@ -697,8 +708,12 @@ public actor Server {
                 stateOnlyDelay = min(stateOnlyDelay * 2, MRTR.stateOnlyMaximumDelay)
             } else {
                 stateOnlyDelay = MRTR.stateOnlyInitialDelay
-                // As at 2026-07-28, whatever `strict` says.
-                try Self.checkCapabilities(requests, method: M.name, declared: context.clientCapabilities)
+                // As at 2026-07-28, whatever `strict` says. A sessionless
+                // request carries no capabilities: the client answers.
+                let sessionless = await isSessionless
+                if context.clientCapabilities != nil || !sessionless {
+                    try Self.checkCapabilities(requests, method: M.name, declared: context.clientCapabilities)
+                }
             }
             let responses = try await fulfill(requests)
             params = params.retrying(
@@ -808,8 +823,10 @@ public actor Server {
     /// List-changed and resource-updated notifications are also delivered to
     /// the matching `subscriptions/listen` streams. At 2026-07-28 they are
     /// sent only there: without an `initialize` session they are not sent on
-    /// the connection. Every caller's matching stream receives them; use
-    /// ``notify(_:to:)`` to reach only some callers.
+    /// the connection. Behind ``StatelessHTTPServerTransport`` a handler of a
+    /// handshake request sends them on its request's stream. Every caller's
+    /// matching stream receives them; use ``notify(_:to:)`` to reach only
+    /// some callers.
     public func notify<N: Notification>(_ notification: Message<N>) async throws {
         try await notify(notification, matching: nil)
     }
@@ -820,6 +837,9 @@ public actor Server {
     ///
     /// On an `initialize` session the notification is also sent on the
     /// connection, as ``notify(_:)`` does: that session has one client.
+    /// Behind ``StatelessHTTPServerTransport`` a handler of a handshake
+    /// request sends it on its request's stream only when `recipients`
+    /// accepts that request's context.
     public func notify<N: Notification>(
         _ notification: Message<N>, to recipients: @escaping @Sendable (HandlerContext) -> Bool
     ) async throws {
@@ -837,7 +857,13 @@ public actor Server {
         let notificationData = try encoder.encode(notification)
         if let event = SubscriptionEvent(notification) {
             publish(event, to: recipients)
-            guard isInitialized else { return }
+            // A handshake handler behind a sessionless transport sends it
+            // on its own request's stream, when `recipients` accepts that
+            // caller: one server serves every client there.
+            let sessionlessHandshake =
+                isSessionless
+                && Server.currentHandlerContext.map { !$0.isStateless && (recipients?($0) ?? true) } == true
+            guard isInitialized || sessionlessHandshake else { return }
         }
         try await connection.send(
             notificationData, relatedRequestID: Server.currentHandlerContext?.id)
@@ -1291,9 +1317,7 @@ public actor Server {
 
         if batch.items.isEmpty {
             // Empty batch is invalid according to JSON-RPC spec
-            let error = MCPError.invalidRequest("Batch array must not be empty")
-            let response = AnyMethod.response(id: .random, error: error)
-            try await send(response)
+            await sendUnattributedError(MCPError.invalidRequest("Batch array must not be empty"))
             return
         }
 
@@ -1403,15 +1427,23 @@ public actor Server {
                     .unsupportedProtocolVersion(
                         supported: configuration.protocolVersions, requested: requested))
             }
-            if configuration.strict {
-                // The client SHOULD NOT send requests other than pings
-                // before the server has responded to the initialize request.
-                switch request.method {
-                case Initialize.name, Ping.name:
-                    break
-                default:
-                    try checkInitialized()
-                }
+            // The client SHOULD NOT send requests other than pings before the
+            // server has responded to the initialize request. Without a
+            // session there is nothing to initialize.
+            if configuration.strict, !isInitialized, !isSessionless,
+                request.method != Initialize.name, request.method != Ping.name
+            {
+                return try await reject(.invalidRequest("Server is not initialized"))
+            }
+            // Without a session, a request is not tied to the `initialize`
+            // that passed the initialize hook: the stateless hook gates it,
+            // and without one it is refused.
+            if isSessionless, request.method != Initialize.name, hasInitializeHook,
+                statelessRequestHook == nil
+            {
+                return try await reject(
+                    .invalidRequest(
+                        "Request refused: without a session the initialize hook cannot gate \(request.method)"))
             }
         case .stateless(let info):
             // An initialize hook gates handshake clients; without a stateless
@@ -1443,6 +1475,15 @@ public actor Server {
             .httpRequestContext(for: request.id)
         let handlerContext: HandlerContext
         switch era {
+        case .handshake where isSessionless:
+            // No session: each request stands alone, and only its
+            // `MCP-Protocol-Version` header says which revision it uses.
+            let header = httpContext?.header(HTTPHeaderName.protocolVersion)
+            handlerContext = HandlerContext(
+                id: request.id, httpContext: httpContext,
+                protocolVersion: header.flatMap { Version.handshake.contains($0) ? $0 : nil },
+                clientCapabilities: nil,
+                clientInfo: nil)
         case .handshake:
             handlerContext = HandlerContext(
                 id: request.id, httpContext: httpContext,
@@ -1457,6 +1498,7 @@ public actor Server {
                 clientInfo: info.clientInfo,
                 logLevel: info.logLevel,
                 isStateless: true)
+            servedStatelessRequest = true
         }
         // Checked in the handler task, after the stateless hook, so it can be
         // cancelled and an unauthorized client cannot trigger it.
@@ -1476,7 +1518,11 @@ public actor Server {
                     value, method: request.method, serverInfo: serverInfo, cacheHint: hint))
         }
 
-        let statelessHook = handlerContext.isStateless ? statelessRequestHook : nil
+        // Sessionless handshake requests, other than `initialize`, pass the
+        // same hook with no client info or capabilities.
+        let gatesRequest =
+            handlerContext.isStateless || (isSessionless && request.method != Initialize.name)
+        let statelessHook = gatesRequest ? statelessRequestHook : nil
 
         // Create a task to handle the request with cancellation support.
         // Set currentHandlerContext as a task local so handlers see it.
@@ -1693,11 +1739,17 @@ public actor Server {
             "Processing notification",
             metadata: ["method": "\(message.method)"])
 
-        if configuration.strict {
-            // Check initialization state unless this is an initialized notification
-            if message.method != InitializedNotification.name {
-                try checkInitialized()
-            }
+        // A strict server ignores notifications of handshake clients before
+        // `initialize`; a notification is never answered, not even with an
+        // error. A connection that served a stateless request has a
+        // 2026-07-28 client, which never initializes, and a cancellation is
+        // always let through.
+        if configuration.strict, !isInitialized, !isSessionless, !servedStatelessRequest,
+            message.method != InitializedNotification.name, message.method != CancelledNotification.name
+        {
+            await logger?.warning(
+                "Notification before initialize ignored", metadata: ["method": "\(message.method)"])
+            return
         }
 
         // Find notification handlers for this method
@@ -1734,15 +1786,33 @@ public actor Server {
         }
     }
 
+    /// Sends an error that answers no known request: `"id": null`
+    /// (JSON-RPC 2.0, section 5).
+    private func sendUnattributedError(_ error: MCPError) async {
+        guard let connection else { return }
+        do {
+            let response = AnyMethod.response(id: .string(""), error: error)
+            guard case .object(var object) = try decoder.decode(Value.self, from: encoder.encode(response))
+            else { return }
+            object["id"] = .null
+            try await connection.send(try encoder.encode(Value.object(object)))
+        } catch {
+            await logger?.error("Failed to send error response", metadata: ["error": "\(error)"])
+        }
+    }
+
     /// The handshake revisions this server serves, newest first.
     private var handshakeVersions: [String] {
         configuration.protocolVersions.filter { Version.handshake.contains($0) }
     }
 
-    private func checkInitialized() throws {
-        guard isInitialized else {
-            throw MCPError.invalidRequest("Server is not initialized")
-        }
+    /// Whether this connection has served a stateless (2026-07-28) request.
+    private var servedStatelessRequest = false
+
+    /// Whether the transport has no connection or session, so that each
+    /// handshake request stands alone (``StatelessHTTPServerTransport``).
+    private var isSessionless: Bool {
+        connection is StatelessHTTPServerTransport
     }
 
     /// Validate the client capabilities.
@@ -1757,6 +1827,9 @@ public actor Server {
             guard let capabilities = Server.currentHandlerContext?.clientCapabilities
                 ?? clientCapabilities
             else {
+                // A sessionless handshake request carries no capabilities:
+                // let the client answer.
+                if isSessionless { return }
                 throw MCPError.methodNotFound("Client capabilities not initialized")
             }
             guard capabilities[keyPath: keyPath] != nil else {
@@ -1770,8 +1843,11 @@ public actor Server {
     ) {
         // Initialize
         withMethodHandler(Initialize.self) { params in
-
-            guard await !self.isInitialized else {
+            // Behind a sessionless transport every client sends its own
+            // `initialize`; the server keeps no per-client state.
+            let sessionless = await self.isSessionless
+            let initialized = await self.isInitialized
+            guard sessionless || !initialized else {
                 throw MCPError.invalidRequest("Server is already initialized")
             }
 
@@ -1792,12 +1868,13 @@ public actor Server {
             let negotiatedProtocolVersion =
                 handshakeVersions.contains(clientRequestedVersion) ? clientRequestedVersion : newest
 
-            // Set initial state with the negotiated protocol version
-            await self.setInitialState(
-                clientInfo: params.clientInfo,
-                clientCapabilities: params.capabilities,
-                protocolVersion: negotiatedProtocolVersion
-            )
+            if !sessionless {
+                await self.setInitialState(
+                    clientInfo: params.clientInfo,
+                    clientCapabilities: params.capabilities,
+                    protocolVersion: negotiatedProtocolVersion
+                )
+            }
 
             return Initialize.Result(
                 protocolVersion: negotiatedProtocolVersion,

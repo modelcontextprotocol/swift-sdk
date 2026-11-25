@@ -65,6 +65,24 @@ import Testing
             #expect(result == nil)
         }
 
+        @Test("A pre-registered plain client ID is not registered again")
+        func testRegisterSkipsPreRegisteredClientID() async throws {
+            let (session, key) = makeIsolatedSession()
+            await IsolatedMockURLProtocol.setHandler(key: key) { _ in
+                Issue.record("the registration endpoint must not be called")
+                let response = HTTPURLResponse(
+                    url: self.registrationEndpoint, statusCode: 201,
+                    httpVersion: nil, headerFields: nil)!
+                return (response, try self.successRegistrationBody())
+            }
+            let result = try await registrar.register(
+                configuration: makeConfig(authentication: .none(clientID: "plain-client-id")),
+                asMetadata: makeASMetadata(registrationEndpoint: registrationEndpoint),
+                session: session
+            )
+            #expect(result == nil)
+        }
+
         // MARK: - CIMD Errors
 
         @Test("Throws when clientID is HTTPS URL with path but server does not support CIMD")

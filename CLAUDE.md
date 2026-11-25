@@ -105,7 +105,16 @@ Client: `Client.Configuration.protocolMode` (`.automatic` default, `.handshake`,
 `.stateless(v)`); `.automatic` retries once on -32022 and falls back to `initialize` on
 other MCP errors; `.stateless(v)` never retries. Tests that exercise the handshake pin
 `.handshake` (`Tests/MCPTests/Helpers/HandshakeConfiguration.swift`). `send` stamps the `_meta` envelope when
-`isStateless`. `HTTPClientTransport` takes `MCP-Protocol-Version` from the message `_meta`,
+`isStateless`. Request lifecycle: `register` puts a `ResponseSlot` in `pendingRequests` before
+`send` returns and `transmit` sends from a task (`unsentRequests`); `withBatch` uses the same
+path. Handlers run off the receive loop: notification handlers run one at a time on the
+inbound queue; responses are delivered at once, except that a response waits for queued
+progress notifications of its own request (`progressTokens`, `parkedResponses`; requests sent
+from a notification handler never wait, via the `isHandlingNotification` task-local). The
+client handles `notifications/cancelled` and the listen acknowledgement itself in the receive
+loop (`handleBuiltIn`). Server-to-client requests run in `incomingRequests` tasks, at most
+`maxConcurrentServerRequests` at once (64 more queued), refused at 2026-07-28 and for a
+duplicate id. Cancelling the task that awaits `RequestContext.value` cancels the request. `HTTPClientTransport` takes `MCP-Protocol-Version` from the message `_meta`,
 delivers JSON-RPC error bodies of non-2xx replies, and `useStatelessProtocol(_:)` drops the
 session and GET stream. A handshake POST stream that ends before its response is resumed
 with a GET carrying that stream's own `Last-Event-ID` (-32603 when it cannot be); at
