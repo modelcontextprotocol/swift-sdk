@@ -19,8 +19,10 @@ public protocol SessionIDGenerator: Sendable {
 /// UUID strings consist of hexadecimal characters and hyphens,
 /// which are all within the valid ASCII range (0x21–0x7E).
 public struct UUIDSessionIDGenerator: SessionIDGenerator {
+    /// Creates a UUID session ID generator.
     public init() {}
 
+    /// Returns a new random UUID string.
     public func generateSessionID() -> String {
         UUID().uuidString
     }
@@ -46,6 +48,7 @@ public struct HTTPRequest: Sendable {
     /// Used by validators that need to match on specific paths.
     public let path: String?
 
+    /// Creates an HTTP request.
     public init(method: String, headers: [String: String] = [:], body: Data? = nil, path: String? = nil) {
         self.method = method
         self.headers = headers
@@ -129,6 +132,7 @@ public enum HTTPResponse: Sendable {
 
     // MARK: - Computed Properties
 
+    /// The HTTP status code of the response.
     public var statusCode: Int {
         switch self {
         case .accepted: 202
@@ -138,6 +142,10 @@ public enum HTTPResponse: Sendable {
         }
     }
 
+    /// The response headers.
+    ///
+    /// For `.error`, `Content-Type: application/json`, `MCP-Session-Id` when
+    /// a session ID is set, and the extra headers.
     public var headers: [String: String] {
         switch self {
         case .accepted(let headers), .ok(let headers), .data(_, _, let headers), .stream(_, let headers):
@@ -194,17 +202,29 @@ public enum HTTPHeaderName {
     public static let dpop = "DPoP"
     /// A server-provided DPoP nonce (RFC 9449 §8).
     public static let dpopNonce = "DPoP-Nonce"
+    /// `MCP-Session-Id`: the session of a handshake-era request.
     public static let sessionID = "MCP-Session-Id"
+    /// `MCP-Protocol-Version`: the protocol revision of a request.
     public static let protocolVersion = "MCP-Protocol-Version"
+    /// `Last-Event-ID`: the last SSE event a client received, for resuming a stream.
     public static let lastEventID = "Last-Event-ID"
+    /// `Accept`: the media types a client accepts.
     public static let accept = "Accept"
+    /// `Content-Type`: the media type of a body.
     public static let contentType = "Content-Type"
+    /// `Authorization`: the credentials of a request.
     public static let authorization = "Authorization"
+    /// `WWW-Authenticate`: the authentication challenge of a 401 or 403 response.
     public static let wwwAuthenticate = "WWW-Authenticate"
+    /// `Origin`: the origin a browser request comes from.
     public static let origin = "Origin"
+    /// `Host`: the host and port a request is addressed to.
     public static let host = "Host"
+    /// `Cache-Control`: caching directives; SSE responses send `no-cache, no-transform`.
     public static let cacheControl = "Cache-Control"
+    /// `Connection`: connection options; SSE responses send `keep-alive`.
     public static let connection = "Connection"
+    /// `Allow`: the methods an endpoint accepts, sent with 405 responses.
     public static let allow = "Allow"
 }
 

@@ -12,6 +12,7 @@ public struct SubscriptionFilter: Hashable, Codable, Sendable {
     /// Receive `notifications/resources/updated` for these resource URIs.
     public var resourceSubscriptions: [String]?
 
+    /// Creates a filter. A `nil` type is not requested.
     public init(
         toolsListChanged: Bool? = nil,
         promptsListChanged: Bool? = nil,
@@ -37,19 +38,23 @@ public struct SubscriptionFilter: Hashable, Codable, Sendable {
 public enum SubscriptionsListen: Method {
     public static let name = "subscriptions/listen"
 
+    /// The parameters of `subscriptions/listen`.
     public struct Parameters: Hashable, Codable, Sendable {
         /// The notification types to receive.
         public var notifications: SubscriptionFilter
 
+        /// Creates listen parameters for the given filter.
         public init(notifications: SubscriptionFilter) {
             self.notifications = notifications
         }
     }
 
+    /// The result of `subscriptions/listen`.
     public struct Result: Hashable, Codable, Sendable {
         /// Carries `io.modelcontextprotocol/subscriptionId`.
         public var _meta: Metadata?
 
+        /// Creates a listen result.
         public init(_meta: Metadata? = nil) {
             self._meta = _meta
         }
@@ -61,10 +66,12 @@ public enum SubscriptionsListen: Method {
 public struct SubscriptionsAcknowledgedNotification: Notification {
     public static let name = "notifications/subscriptions/acknowledged"
 
+    /// The parameters of `notifications/subscriptions/acknowledged`.
     public struct Parameters: Hashable, Codable, Sendable {
         /// The honored subset of the requested filter.
         public var notifications: SubscriptionFilter
 
+        /// Creates acknowledgement parameters for the honored filter.
         public init(notifications: SubscriptionFilter) {
             self.notifications = notifications
         }

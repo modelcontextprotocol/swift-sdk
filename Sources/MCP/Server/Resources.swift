@@ -27,6 +27,7 @@ public struct Resource: Hashable, Codable, Sendable {
     /// Metadata fields for the resource (see spec for _meta usage)
     public var _meta: Metadata?
 
+    /// Creates a resource.
     public init(
         name: String,
         uri: String,
@@ -100,6 +101,7 @@ public struct Resource: Hashable, Codable, Sendable {
         /// Metadata fields (see spec for _meta usage)
         public var _meta: Metadata?
 
+        /// Creates the text contents of the resource at `uri`.
         public static func text(
             _ content: String,
             uri: String,
@@ -109,6 +111,9 @@ public struct Resource: Hashable, Codable, Sendable {
             .init(uri: uri, mimeType: mimeType, text: content, _meta: _meta)
         }
 
+        /// Creates the binary contents of the resource at `uri`.
+        ///
+        /// The data is sent base64-encoded in `blob`.
         public static func binary(
             _ data: Data,
             uri: String,
@@ -195,6 +200,7 @@ public struct Resource: Hashable, Codable, Sendable {
         /// Metadata fields for the template (see spec for _meta usage)
         public var _meta: Metadata?
 
+        /// Creates a resource template.
         public init(
             uriTemplate: String,
             name: String,
@@ -217,6 +223,7 @@ public struct Resource: Hashable, Codable, Sendable {
     }
 
     // A resource annotation.
+    /// Hints about the audience, importance and age of a resource.
     public struct Annotations: Hashable, Codable, Sendable {
         /// The intended audience for this resource.
         ///
@@ -235,6 +242,7 @@ public struct Resource: Hashable, Codable, Sendable {
         /// An ISO 8601 formatted timestamp indicating when the resource was last modified (e.g., "2025-01-12T15:00:58Z").
         public let lastModified: String?
 
+        /// Creates resource annotations.
         public init(
             audience: [Audience]? = nil,
             priority: Double? = nil,
@@ -254,27 +262,36 @@ public struct Resource: Hashable, Codable, Sendable {
 public enum ListResources: Method {
     public static let name: String = "resources/list"
 
+    /// The parameters of `resources/list`.
     public struct Parameters: NotRequired, Hashable, Codable, Sendable {
+        /// The cursor from the `nextCursor` of a previous result, or `nil` for the first page.
         public let cursor: String?
 
+        /// Creates the parameters of a request for the first page.
         public init() {
             self.cursor = nil
         }
 
+        /// Creates the parameters of a request for the page at `cursor`.
         public init(cursor: String) {
             self.cursor = cursor
         }
     }
 
+    /// The result of `resources/list`.
     public struct Result: Hashable, Codable, Sendable, CacheableResult {
+        /// The resources on this page.
         public let resources: [Resource]
+        /// The cursor of the next page, or `nil` on the last page.
         public let nextCursor: String?
+        /// Optional metadata about this result
         public var _meta: Metadata?
         /// How long the result may be reused, in milliseconds (SEP-2549).
         public var ttlMs: Int?
         /// Who may reuse the result (SEP-2549).
         public var cacheScope: CacheScope?
 
+        /// Creates the result of a `resources/list` request.
         public init(
             resources: [Resource],
             nextCursor: String? = nil,
@@ -318,7 +335,9 @@ public enum ListResources: Method {
 public enum ReadResource: Method {
     public static let name: String = "resources/read"
 
+    /// The parameters of `resources/read`.
     public struct Parameters: Hashable, Codable, Sendable {
+        /// The URI of the resource to read.
         public let uri: String
 
         /// The client's responses to the server's input requests, keyed as
@@ -328,6 +347,7 @@ public enum ReadResource: Method {
         /// The `requestState` of the previous round, echoed unchanged.
         public var requestState: String?
 
+        /// Creates the parameters of a `resources/read` request.
         public init(
             uri: String,
             inputResponses: [String: InputResponse]? = nil,
@@ -360,6 +380,7 @@ public enum ReadResource: Method {
     /// The resource contents, or, at 2026-07-28, a request for more input
     /// (see `inputRequired(_:requestState:_meta:)`).
     public struct Result: Hashable, Codable, Sendable, CacheableResult {
+        /// The contents of the resource, empty when the result asks for input.
         public let contents: [Resource.Content]
         /// Optional metadata about this result
         public var _meta: Metadata?
@@ -378,6 +399,7 @@ public enum ReadResource: Method {
 
         private var declaredResultType: ResultType?
 
+        /// Creates a result with the resource contents.
         public init(
             contents: [Resource.Content],
             _meta: Metadata? = nil,
@@ -472,20 +494,29 @@ extension ReadResource.Result: InputRequiringResult {
 public enum ListResourceTemplates: Method {
     public static let name: String = "resources/templates/list"
 
+    /// The parameters of `resources/templates/list`.
     public struct Parameters: NotRequired, Hashable, Codable, Sendable {
+        /// The cursor from the `nextCursor` of a previous result, or `nil` for the first page.
         public let cursor: String?
 
+        /// Creates the parameters of a request for the first page.
         public init() {
             self.cursor = nil
         }
 
+        /// Creates the parameters of a request for the page at `cursor`.
         public init(cursor: String) {
             self.cursor = cursor
         }
     }
 
+    /// The result of `resources/templates/list`.
     public struct Result: Hashable, Codable, Sendable, CacheableResult {
+        /// The resource templates on this page.
+        ///
+        /// On the wire this is `resourceTemplates`.
         public let templates: [Resource.Template]
+        /// The cursor of the next page, or `nil` on the last page.
         public let nextCursor: String?
         /// Optional metadata about this result
         public var _meta: Metadata?
@@ -494,6 +525,7 @@ public enum ListResourceTemplates: Method {
         /// Who may reuse the result (SEP-2549).
         public var cacheScope: CacheScope?
 
+        /// Creates the result of a `resources/templates/list` request.
         public init(
             templates: [Resource.Template],
             nextCursor: String? = nil,
@@ -547,7 +579,9 @@ public struct ResourceListChangedNotification: Notification {
 public enum ResourceSubscribe: Method {
     public static let name: String = "resources/subscribe"
 
+    /// The parameters of `resources/subscribe`.
     public struct Parameters: Hashable, Codable, Sendable {
+        /// The URI of the resource to subscribe to.
         public let uri: String
     }
 
@@ -559,7 +593,9 @@ public enum ResourceSubscribe: Method {
 public enum ResourceUnsubscribe: Method {
     public static let name: String = "resources/unsubscribe"
 
+    /// The parameters of `resources/unsubscribe`.
     public struct Parameters: Hashable, Codable, Sendable {
+        /// The URI of the resource to unsubscribe from.
         public let uri: String
     }
 
@@ -571,9 +607,12 @@ public enum ResourceUnsubscribe: Method {
 public struct ResourceUpdatedNotification: Notification {
     public static let name: String = "notifications/resources/updated"
 
+    /// The parameters of `notifications/resources/updated`.
     public struct Parameters: Hashable, Codable, Sendable {
+        /// The URI of the resource that changed.
         public let uri: String
 
+        /// Creates the parameters for the resource at `uri`.
         public init(uri: String) {
             self.uri = uri
         }

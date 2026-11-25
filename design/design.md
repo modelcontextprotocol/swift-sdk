@@ -14,6 +14,8 @@ Feature notes go deeper on single topics:
 | [subscriptions.md](subscriptions.md) | SEP-2575 `subscriptions/listen` |
 | [mrtr.md](mrtr.md) | SEP-2322 multi round-trip requests and sealed `requestState` |
 | [auth.md](auth.md) | OAuth client architecture |
+| [linux.md](linux.md) | Linux status and what differs there by design |
+| [threat_model.md](threat_model.md) | Trust boundaries, defenses and their limits |
 
 User-facing guides: [docs/README.md](../docs/README.md) (index), [docs/protocol.md](../docs/protocol.md),
 [docs/server.md](../docs/server.md), [docs/client.md](../docs/client.md),
@@ -54,18 +56,17 @@ Non-goals:
 
 ### Products and targets
 
-| Target | Kind | Path | Product | Manifest |
-|---|---|---|---|---|
-| `MCP` | library | `Sources/MCP` | `MCP` | both |
-| `MCPTests` | tests | `Tests/MCPTests` | none | both |
-| `MCPConformanceServer` | executable | `conformance/everything-server` | `mcp-everything-server` | 6.1 only |
-| `MCPConformanceClient` | executable | `conformance/everything-client` | `mcp-everything-client` | 6.1 only |
-| `QuickStartSnippets`, `ServerSnippets`, `ClientSnippets`, `ProtocolSnippets`, `GuidesSnippets` | library targets | `Examples/Snippets/*` | none | 6.1 only |
-| `SnippetTests` | tests | `Examples/Tests` | none | 6.1 only |
-| `HelloServer`, `HelloClient`, `HTTPServerExample` | executables | `Examples/hello-server`, `Examples/hello-client`, `Examples/http-server` | none | 6.1 only |
+| Target | Kind | Path | Product |
+|---|---|---|---|
+| `MCP` | library | `Sources/MCP` | `MCP` |
+| `MCPTests` | tests | `Tests/MCPTests` | none |
+| `MCPConformanceServer` | executable | `conformance/everything-server` | `mcp-everything-server` |
+| `MCPConformanceClient` | executable | `conformance/everything-client` | `mcp-everything-client` |
+| `QuickStartSnippets`, `ServerSnippets`, `ClientSnippets`, `ProtocolSnippets`, `GuidesSnippets` | library targets | `Examples/Snippets/*` | none |
+| `SnippetTests` | tests | `Examples/Tests` | none |
+| `HelloServer`, `HelloClient`, `HTTPServerExample` | executables | `Examples/hello-server`, `Examples/hello-client`, `Examples/http-server` | none |
 
-`Package.swift` uses swift-tools-version 6.1. `Package@swift-6.0.swift` declares only `MCP` and
-`MCPTests` for consumers on Swift 6.0 tools. Keep the two manifests' `MCP` dependencies in sync.
+`Package.swift` uses swift-tools-version 6.1, the minimum Swift for 1.x.
 
 The fixtures and examples build with the package, so `swift build` compiles every snippet that
 `scripts/weave.swift` copies into `docs/`. None of them is a library product, so consumers of

@@ -37,6 +37,7 @@ public struct RequestContext<Output: Sendable & Decodable>: Sendable {
         }
     }
 
+    /// Creates a context for a request and the task that awaits its response.
     public init(requestID: ID, requestTask: Task<Output, Error>) {
         self.requestID = requestID
         self.requestTask = requestTask

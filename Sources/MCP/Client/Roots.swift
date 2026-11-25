@@ -19,6 +19,7 @@ public struct Root: Hashable, Codable, Sendable {
     /// Optional metadata
     public var _meta: Metadata?
 
+    /// Creates a root.
     public init(
         uri: String,
         name: String? = nil,
@@ -59,11 +60,14 @@ public enum ListRoots: Method {
 
     public typealias Parameters = Empty
 
+    /// The result of `roots/list`.
     public struct Result: Hashable, Codable, Sendable {
+        /// The roots the client exposes.
         public let roots: [Root]
         /// Optional metadata about this result
         public var _meta: Metadata?
 
+        /// Creates a `roots/list` result.
         public init(
             roots: [Root],
             _meta: Metadata? = nil

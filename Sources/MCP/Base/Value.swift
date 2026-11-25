@@ -6,13 +6,21 @@ import class Foundation.JSONEncoder
 ///
 /// Frozen: no case is added in 1.x (the cases are the JSON data model, plus `data`).
 public enum Value: Hashable, Sendable {
+    /// JSON `null`.
     case null
+    /// A JSON boolean.
     case bool(Bool)
+    /// A JSON number that is an integer.
     case int(Int)
+    /// A JSON number that is a floating-point value.
     case double(Double)
+    /// A JSON string.
     case string(String)
+    /// Binary data, encoded as a `data:` URL string with its MIME type, if any.
     case data(mimeType: String? = nil, Data)
+    /// A JSON array.
     case array([Value])
+    /// A JSON object.
     case object([String: Value])
 
     /// Create a `Value` from an `Encodable` value.
@@ -304,18 +312,22 @@ extension Value: ExpressibleByDictionaryLiteral {
 // MARK: - ExpressibleByStringInterpolation
 
 extension Value: ExpressibleByStringInterpolation {
+    /// Builds the string of a ``Value/string(_:)`` from an interpolated literal.
     public struct StringInterpolation: StringInterpolationProtocol {
         var stringValue: String
 
+        /// Creates an empty interpolation, reserving capacity for the literal.
         public init(literalCapacity: Int, interpolationCount: Int) {
             self.stringValue = ""
             self.stringValue.reserveCapacity(literalCapacity + interpolationCount)
         }
 
+        /// Appends a literal segment.
         public mutating func appendLiteral(_ literal: String) {
             self.stringValue.append(literal)
         }
 
+        /// Appends the `description` of an interpolated value.
         public mutating func appendInterpolation<T: CustomStringConvertible>(_ value: T) {
             self.stringValue.append(value.description)
         }

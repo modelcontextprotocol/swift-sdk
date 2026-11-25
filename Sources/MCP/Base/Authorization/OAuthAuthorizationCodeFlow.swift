@@ -53,6 +53,7 @@ final class OAuthNoRedirectSessionDelegate: NSObject, URLSessionTaskDelegate,
 /// and extracts the authorization code from the callback redirect URL.
 public struct OAuthAuthorizationCodeFlow: Sendable {
 
+    /// Creates an authorization code flow.
     public init() {}
 
     /// The authorization server that must have issued an authorization
@@ -64,6 +65,7 @@ public struct OAuthAuthorizationCodeFlow: Sendable {
         /// so a response without `iss` is rejected.
         public var isRequired: Bool
 
+        /// Creates the expected issuer of an authorization response.
         public init(issuer: String, isRequired: Bool) {
             self.issuer = issuer
             self.isRequired = isRequired

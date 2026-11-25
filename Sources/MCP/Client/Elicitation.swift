@@ -11,6 +11,7 @@ public enum Elicitation {
         ///
         /// Frozen: no case is added in 1.x (the root of a requested schema is an object).
         public enum SchemaType: String, Hashable, Codable, Sendable {
+            /// A JSON object whose properties are the requested fields.
             case object
         }
 
@@ -25,6 +26,7 @@ public enum Elicitation {
         /// Top-level schema type. Defaults to `object`.
         public var type: SchemaType
 
+        /// Creates a requested schema.
         public init(
             title: String? = nil,
             description: String? = nil,
@@ -90,6 +92,9 @@ public enum CreateElicitation: Method {
             /// Optional metadata
             public var _meta: Metadata?
 
+            /// Creates form elicitation parameters.
+            ///
+            /// A `nil` mode omits `mode` from the wire, which receivers read as `form`.
             public init(
                 message: String,
                 mode: Elicitation.Mode? = nil,
@@ -116,6 +121,7 @@ public enum CreateElicitation: Method {
             /// Optional metadata
             public var _meta: Metadata?
 
+            /// Creates URL elicitation parameters, with `mode` set to `url`.
             public init(
                 message: String,
                 url: String,
@@ -131,13 +137,17 @@ public enum CreateElicitation: Method {
         }
     }
 
+    /// The result of `elicitation/create`.
     public struct Result: Hashable, Codable, Sendable {
         /// Indicates how the user responded to the request.
         ///
         /// Frozen: no case is added in 1.x (unchanged since 2025-06-18).
         public enum Action: String, Hashable, Codable, Sendable {
+            /// The user accepted the request: for a form, with the requested content.
             case accept
+            /// The user explicitly declined the request.
             case decline
+            /// The user dismissed the request without choosing.
             case cancel
         }
 
@@ -148,6 +158,7 @@ public enum CreateElicitation: Method {
         /// Optional metadata about this result
         public var _meta: Metadata?
 
+        /// Creates an elicitation result.
         public init(
             action: Action,
             content: [String: Value]? = nil,
@@ -249,10 +260,12 @@ extension CreateElicitation.Parameters: Codable {
 public struct ElicitationCompleteNotification: Notification {
     public static let name = "notifications/elicitation/complete"
 
+    /// The parameters of `notifications/elicitation/complete`.
     public struct Parameters: Hashable, Codable, Sendable {
         /// The elicitation ID that was completed
         public var elicitationId: String
 
+        /// Creates the parameters for a completed elicitation.
         public init(elicitationId: String) {
             self.elicitationId = elicitationId
         }

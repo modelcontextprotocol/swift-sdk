@@ -71,9 +71,9 @@
 # Node, Go, uv and ps come from scripts/ci/deps-linux.sh, baked into a local
 # derived image that is rebuilt when the script or the base image changes.
 #
-# Results (conformance and interop reports and logs of this run) are copied
-# to .build/linux/<image>-<arch>/ in the working tree. With --update-baseline
-# or --update-results among the arguments, the regenerated
+# Results (conformance and interop reports and logs, fuzz crash inputs of this
+# run) are copied to .build/linux/<image>-<arch>/ in the working tree. With
+# --update-baseline or --update-results among the arguments, the regenerated
 # conformance/baseline*.yml and interop/RESULTS.md are copied back into it.
 #
 # Environment passed through when set: npm_config_registry, GOPROXY,
@@ -412,14 +412,14 @@ EOF
 cat >"$IN/run.sh" <<'EOF'
 . /in/sync.sh
 # The volume keeps results of earlier runs; only this run's are copied out.
-rm -rf .build/conformance .build/interop/results .build/interop/logs .build/interop/report.md
+rm -rf .build/conformance .build/interop/results .build/interop/logs .build/interop/report.md .build/fuzz/artifacts
 status=0
 # In a session of its own, so that what it leaves running, or all of it when
 # the run is interrupted, can be stopped: in a session container nothing else
 # would.
 setsid -w bash -c 'echo $$ >/in/sid; exec "$@"' run "$@" || status=$?
 bash /in/stop.sh
-for dir in conformance interop/results interop/logs; do
+for dir in conformance interop/results interop/logs fuzz/artifacts; do
     [[ -d ".build/$dir" ]] && mkdir -p "/out/$(dirname "$dir")" && cp -R ".build/$dir" "/out/$dir"
 done
 [[ -f .build/interop/report.md ]] && mkdir -p /out/interop && cp .build/interop/report.md /out/interop/

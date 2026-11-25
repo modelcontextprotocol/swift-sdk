@@ -120,6 +120,7 @@ public struct CacheHint: Hashable, Codable, Sendable {
     /// Who may reuse the result.
     public var scope: CacheScope
 
+    /// Creates a cache hint.
     public init(ttlMs: Int, scope: CacheScope) {
         self.ttlMs = ttlMs
         self.scope = scope

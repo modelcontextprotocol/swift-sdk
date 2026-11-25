@@ -265,6 +265,7 @@ public struct BearerTokenInfo: Sendable, Equatable {
     /// `nil` means no expiry information is available and the expiry check is skipped.
     public let expiresAt: Date?
 
+    /// Creates token information.
     public init(
         audience: [String]? = nil,
         scopes: Set<String>? = nil,
@@ -315,6 +316,7 @@ public struct OAuthProtectedResourceServerMetadata: Codable, Sendable {
         case scopesSupported = "scopes_supported"
     }
 
+    /// Creates protected resource metadata.
     public init(
         resource: String,
         authorizationServers: [URL],

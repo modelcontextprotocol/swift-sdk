@@ -60,6 +60,7 @@ public protocol Transport: Actor {
 }
 
 extension Transport {
+    /// Sends data, ignoring `relatedRequestID`.
     public func send(_ data: Data, relatedRequestID: ID?) async throws {
         try await send(data)
     }

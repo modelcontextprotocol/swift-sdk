@@ -55,6 +55,7 @@ public actor Server {
         /// A stream that names more is refused with -32602.
         public var maxResourceSubscriptions: Int
 
+        /// Creates a server configuration.
         public init(
             strict: Bool = false,
             protocolVersions: [String] = Version.stateless + Version.handshake,
@@ -111,6 +112,7 @@ public actor Server {
         /// Optional set of sized icons for display in a user interface
         public let icons: [Icon]?
 
+        /// Creates the server implementation information.
         public init(
             name: String,
             version: String,
@@ -137,6 +139,7 @@ public actor Server {
             /// Whether the list of resources has changed
             public var listChanged: Bool?
 
+            /// Creates the `resources` capability.
             public init(
                 subscribe: Bool? = nil,
                 listChanged: Bool? = nil
@@ -151,6 +154,7 @@ public actor Server {
             /// Whether the server notifies clients when tools change
             public var listChanged: Bool?
 
+            /// Creates the `tools` capability.
             public init(listChanged: Bool? = nil) {
                 self.listChanged = listChanged
             }
@@ -161,6 +165,7 @@ public actor Server {
             /// Whether the server notifies clients when prompts change
             public var listChanged: Bool?
 
+            /// Creates the `prompts` capability.
             public init(listChanged: Bool? = nil) {
                 self.listChanged = listChanged
             }
@@ -168,11 +173,13 @@ public actor Server {
 
         /// Logging capabilities
         public struct Logging: Hashable, Codable, Sendable {
+            /// Creates the `logging` capability, which has no settings.
             public init() {}
         }
 
         /// Completions capabilities
         public struct Completions: Hashable, Codable, Sendable {
+            /// Creates the `completions` capability, which has no settings.
             public init() {}
         }
 
@@ -192,6 +199,7 @@ public actor Server {
         /// identifier, with extension-defined settings (SEP-2133).
         public var extensions: [String: Value]?
 
+        /// Creates server capabilities.
         public init(
             completions: Completions? = nil,
             logging: Logging? = nil,
@@ -263,6 +271,9 @@ public actor Server {
     private var clientLogLevel: LogLevel?
     /// Notification handlers
     private var notificationHandlers: [String: [NotificationHandlerBox]] = [:]
+    /// Whether the built-in `notifications/cancelled` handler is registered:
+    /// once per server, not on every `start`.
+    private var registeredCancellationHandler = false
     /// Pending request tasks (for cancellation support)
     private var pendingRequestTasks: [ID: Task<Response<AnyMethod>, Error>] = [:]
     /// Requests received whose handler task is not registered yet, and
@@ -283,6 +294,10 @@ public actor Server {
     /// `pendingRequests` yet. Removing an id withdraws the request before it
     /// is sent.
     private var unsentRequests: Set<ID> = []
+    /// Incremented by ``stop()``. Work started for a connection that `stop()`
+    /// ended carries the old value: a request received on it is not answered,
+    /// and a request to its client that was not sent yet is not sent.
+    private var connectionGeneration = 0
 
     /// Whether the server is initialized
     private var isInitialized = false
@@ -405,7 +420,10 @@ public actor Server {
         self.hasInitializeHook = initializeHook != nil
         self.statelessRequestHook = statelessRequestHook
         registerDefaultHandlers(initializeHook: initializeHook)
-        registerCancellationHandler()
+        if !registeredCancellationHandler {
+            registeredCancellationHandler = true
+            registerCancellationHandler()
+        }
         try await transport.connect()
 
         await logger?.debug(
@@ -413,6 +431,7 @@ public actor Server {
         )
 
         // Start message handling loop
+        let generation = connectionGeneration
         task = Task {
             do {
                 let stream = await transport.receive()
@@ -434,7 +453,7 @@ public actor Server {
                             // for the client's answer to a bridged input request.
                             Task {
                                 do {
-                                    try await self.handleBatch(batch)
+                                    try await self.handleBatch(batch, generation: generation)
                                 } catch {
                                     await self.logger?.error(
                                         "Error processing batch", metadata: ["error": "\(error)"])
@@ -447,7 +466,8 @@ public actor Server {
                             startingRequests[request.id] = false
                             let isListen = request.method == SubscriptionsListen.name
                             let handling = Task {
-                                _ = try? await self.handleRequest(request, sendResponse: true)
+                                _ = try? await self.handleRequest(
+                                    request, sendResponse: true, generation: generation)
                                 if isListen { self.listenRequests[request.id] = nil }
                             }
                             if isListen { listenRequests[request.id] = handling }
@@ -499,6 +519,11 @@ public actor Server {
     /// ``closeSubscriptions()``, and `stop()` waits until those results are
     /// sent before it closes the transport. A stream that is still being
     /// authorized is refused.
+    ///
+    /// The server can be started again with
+    /// ``start(transport:initializeHook:statelessRequestHook:)``; the next
+    /// connection starts from a fresh handshake, with no client info,
+    /// capabilities or negotiated protocol version from the previous one.
     public func stop() async {
         isStopping = true
         defer { isStopping = false }
@@ -512,19 +537,44 @@ public actor Server {
         task = nil
         clientLogLevel = nil
 
-        // Clear pending requests with errors
+        // Their responses can no longer be sent. The requests of this
+        // connection are not answered from here on, and those whose handler
+        // task is not registered yet do not start one.
+        connectionGeneration += 1
+        let handlerTasks = pendingRequestTasks
+        pendingRequestTasks = [:]
+        for handler in handlerTasks.values { handler.cancel() }
+        startingRequests = [:]
+        toolHeaderLoad?.cancel()
+        invalidateToolHeaders()
+
+        // Clear pending requests with errors. A request not registered yet
+        // fails when it would register.
         let pendingRequestsToCancel = self.pendingRequests
         self.pendingRequests = [:]
+        unsentRequests.removeAll()
         for (_, request) in pendingRequestsToCancel {
             request.resume(throwing: MCPError.internalError("Server disconnected"))
         }
 
-        if let connection = connection {
-            await connection.disconnect()
-        }
+        // The handshake belongs to the connection: after a restart the next
+        // client sends its own `initialize`.
+        isInitialized = false
+        clientInfo = nil
+        clientCapabilities = nil
+        protocolVersion = nil
+        servedStatelessRequest = false
+
+        // Cleared first: nothing is sent on a transport that is disconnecting.
+        let stoppedConnection = connection
         connection = nil
+        await stoppedConnection?.disconnect()
     }
 
+    /// Waits until the message handling loop ends.
+    ///
+    /// The loop ends when the transport stops delivering messages or on
+    /// ``stop()``. Returns at once when the server was not started.
     public func waitUntilCompleted() async {
         await task?.value
     }
@@ -1080,11 +1130,18 @@ public actor Server {
 
         let requestData = try encoder.encode(request)
         let relatedRequestID = Server.currentHandlerContext?.id
+        let generation = connectionGeneration
 
         unsentRequests.insert(request.id)
         let requestTask = Task<M.Result, Error> {
             try await withCheckedThrowingContinuation { continuation in
                 Task {
+                    guard generation == self.connectionGeneration else {
+                        // `stop()` ended the connection before the request was
+                        // registered, and no longer resumes it.
+                        continuation.resume(throwing: MCPError.internalError("Server disconnected"))
+                        return
+                    }
                     guard self.unsentRequests.remove(request.id) != nil else {
                         // Withdrawn before it was registered.
                         continuation.resume(throwing: CancellationError())
@@ -1370,8 +1427,12 @@ public actor Server {
     }
 
     /// Process a batch of requests and/or notifications
-    private func handleBatch(_ batch: Batch) async throws {
+    ///
+    /// - Parameter generation: The ``connectionGeneration`` the batch was
+    ///   received in; nothing is sent once ``stop()`` changed it.
+    private func handleBatch(_ batch: Batch, generation: Int) async throws {
         await logger?.trace("Processing batch request", metadata: ["size": "\(batch.items.count)"])
+        guard generation == connectionGeneration else { return }
 
         if batch.items.isEmpty {
             // Empty batch is invalid according to JSON-RPC spec
@@ -1387,7 +1448,9 @@ public actor Server {
                 switch item {
                 case .request(let request):
                     // For batched requests, collect responses instead of sending immediately
-                    if let response = try await handleRequest(request, sendResponse: false) {
+                    if let response = try await handleRequest(
+                        request, sendResponse: false, generation: generation)
+                    {
                         responses.append(response)
                     }
 
@@ -1406,7 +1469,7 @@ public actor Server {
         }
 
         // Send collected responses if any
-        if !responses.isEmpty {
+        if !responses.isEmpty, generation == connectionGeneration {
             let responseData = try encoder.encode(responses)
 
             guard let connection = connection else {
@@ -1424,10 +1487,13 @@ public actor Server {
     /// - Parameters:
     ///   - request: The request to handle
     ///   - sendResponse: Whether to send the response immediately (true) or return it (false)
+    ///   - generation: The ``connectionGeneration`` the request was received
+    ///     in. Once ``stop()`` changed it, the request is not answered and
+    ///     `nil` is returned.
     /// - Returns: The response when sendResponse is false
-    private func handleRequest(_ request: Request<AnyMethod>, sendResponse: Bool = true)
-        async throws -> Response<AnyMethod>?
-    {
+    private func handleRequest(
+        _ request: Request<AnyMethod>, sendResponse: Bool = true, generation: Int
+    ) async throws -> Response<AnyMethod>? {
         // Check if this is a pre-processed error request (empty method)
         if request.method.isEmpty && !sendResponse {
             // This is a placeholder for an invalid request that couldn't be parsed in batch mode
@@ -1437,11 +1503,17 @@ public actor Server {
             )
         }
 
+        // Received on a connection that `stop()` ended, whose state is gone.
+        guard generation == connectionGeneration else { return nil }
+
         // Until the handler task is registered, a cancellation of this
-        // request is recorded in `startingRequests`.
+        // request is recorded in `startingRequests`. After `stop()` the
+        // entry is gone, or belongs to the next connection.
         var registered = false
         defer {
-            if !registered { startingRequests.removeValue(forKey: request.id) }
+            if !registered, generation == connectionGeneration {
+                startingRequests.removeValue(forKey: request.id)
+            }
         }
 
         await logger?.trace(
@@ -1451,8 +1523,10 @@ public actor Server {
                 "id": "\(request.id)",
             ])
 
-        // Replies with an error without running a handler.
+        // Replies with an error without running a handler; not once `stop()`
+        // ended the connection.
         func reject(_ error: MCPError) async throws -> Response<AnyMethod>? {
+            guard generation == connectionGeneration else { return nil }
             let response = AnyMethod.response(id: request.id, error: error)
             if sendResponse {
                 try await send(response)
@@ -1531,6 +1605,8 @@ public actor Server {
         // that don't carry HTTP context (stdio, in-memory) don't conform.
         let httpContext = await (connection as? any HTTPContextProviding)?
             .httpRequestContext(for: request.id)
+        // `stop()` may have run meanwhile, and a new connection may have started.
+        guard generation == connectionGeneration else { return nil }
         let handlerContext: HandlerContext
         switch era {
         case .handshake where isSessionless:
@@ -1639,13 +1715,18 @@ public actor Server {
             handlerTask.cancel()
         }
 
-        // Ensure cleanup happens regardless of success or failure
+        // Ensure cleanup happens regardless of success or failure. After
+        // `stop()` the entry is gone, or belongs to the next connection.
         defer {
-            pendingRequestTasks.removeValue(forKey: request.id)
+            if generation == connectionGeneration {
+                pendingRequestTasks.removeValue(forKey: request.id)
+            }
         }
 
         do {
             let response = try await handlerTask.value
+            // `stop()` ended the connection while the handler ran.
+            guard generation == connectionGeneration else { return nil }
 
             if sendResponse {
                 try await send(response)
@@ -1657,6 +1738,7 @@ public actor Server {
             // Request was cancelled, don't send a response per MCP spec
             return nil
         } catch {
+            guard generation == connectionGeneration else { return nil }
             // This should not happen as errors are caught in the task
             let mcpError = error as? MCPError ?? MCPError.internalError(error.localizedDescription)
             let response = AnyMethod.response(id: request.id, error: mcpError)
@@ -1899,8 +1981,12 @@ public actor Server {
     private func registerDefaultHandlers(
         initializeHook: (@Sendable (Client.Info, Client.Capabilities) async throws -> Void)?
     ) {
+        // The handlers are stored on the server: capturing it strongly would
+        // keep every started server alive.
+
         // Initialize
-        registerDefault(Initialize.self) { params in
+        registerDefault(Initialize.self) { [weak self] params in
+            guard let self else { throw MCPError.internalError("Server is gone") }
             // Behind a sessionless transport every client sends its own
             // `initialize`; the server keeps no per-client state.
             let sessionless = await self.isSessionless
@@ -1947,20 +2033,23 @@ public actor Server {
 
         // Log level (handshake connections; 2026-07-28 sets it per request)
         if capabilities.logging != nil {
-            registerDefault(SetLoggingLevel.self) { params in
+            registerDefault(SetLoggingLevel.self) { [weak self] params in
+                guard let self else { throw MCPError.internalError("Server is gone") }
                 await self.setClientLogLevel(params.level)
                 return Empty()
             }
         }
 
         // Notification streams (2026-07-28 and later)
-        registerDefault(SubscriptionsListen.self) { params in
-            try await self.serveListen(params)
+        registerDefault(SubscriptionsListen.self) { [weak self] params in
+            guard let self else { throw MCPError.internalError("Server is gone") }
+            return try await self.serveListen(params)
         }
 
         // Discovery (2026-07-28 and later)
-        registerDefault(ServerDiscover.self) { _ in
-            ServerDiscover.Result(
+        registerDefault(ServerDiscover.self) { [weak self] _ in
+            guard let self else { throw MCPError.internalError("Server is gone") }
+            return ServerDiscover.Result(
                 supportedVersions: await self.configuration.protocolVersions,
                 capabilities: await self.capabilities,
                 instructions: self.instructions
@@ -2000,7 +2089,8 @@ public actor Server {
     }
 
     private func registerCancellationHandler() {
-        onNotification(CancelledNotification.self) { message in
+        onNotification(CancelledNotification.self) { [weak self] message in
+            guard let self else { return }
 
             let requestId = message.params.requestId
             let reason = message.params.reason

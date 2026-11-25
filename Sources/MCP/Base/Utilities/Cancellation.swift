@@ -11,6 +11,7 @@ import Foundation
 public struct CancelledNotification: Notification {
     public static let name: String = "notifications/cancelled"
 
+    /// The parameters of `notifications/cancelled`.
     public struct Parameters: Hashable, Codable, Sendable {
         /// The ID of the request to cancel.
         ///
@@ -21,6 +22,7 @@ public struct CancelledNotification: Notification {
         /// An optional human-readable reason for the cancellation.
         public let reason: String?
 
+        /// Creates cancellation parameters.
         public init(requestId: ID? = nil, reason: String? = nil) {
             self.requestId = requestId
             self.reason = reason

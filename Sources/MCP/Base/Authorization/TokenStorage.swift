@@ -24,16 +24,20 @@ public final class InMemoryTokenStorage: TokenStorage, @unchecked Sendable {
     private let lock = NSLock()
     private var token: OAuthAccessToken?
 
+    /// Creates an empty token storage.
     public init() {}
 
+    /// Replaces the stored token.
     public func save(_ token: OAuthAccessToken) {
         lock.withLock { self.token = token }
     }
 
+    /// Returns the stored token, if any.
     public func load() -> OAuthAccessToken? {
         lock.withLock { token }
     }
 
+    /// Removes the stored token.
     public func clear() {
         lock.withLock { token = nil }
     }

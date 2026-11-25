@@ -58,6 +58,7 @@ BIN="$(swift build --show-bin-path)"
 "$BIN/HelloClient" "$BIN/HelloServer"    # stdio smoke test, as in CI
 
 swift package generate-documentation --target MCP --warnings-as-errors
+swift scripts/doc-coverage.swift         # every public declaration has a doc comment
 swift scripts/weave.swift --check
 ```
 
@@ -157,6 +158,20 @@ gates on both. A job that fails on Linux for a known reason can be marked `advis
 [design/linux.md](design/linux.md); none is today. When an advisory job passes, `run-jobs.sh`
 says so; mark it `gate`.
 
+### Fuzzing
+
+`fuzz/` is a separate package of libFuzzer targets: wire decoding, the SSE parser, and both HTTP
+server transports. The HTTP targets also check that each input's server is released. libFuzzer
+ships only with the Linux toolchain, so run it in the container:
+
+```sh
+scripts/ci-linux.sh fuzz                      # the CI job: 60 seconds per target
+scripts/ci-linux.sh -- scripts/ci/fuzz.sh 300 # five minutes per target
+```
+
+An input that crashes is saved in `.build/linux/<image>-<arch>/fuzz/artifacts/`; add it to
+`fuzz/corpus/<target>/` with the fix.
+
 ## Documentation
 
 | What | Where | How |
@@ -176,6 +191,8 @@ says so; mark it `gate`.
   relative link or heading anchor in `docs/` does not resolve, or when a `##` section of
   `protocol.md`, `server.md` or `client.md` is not linked from `docs/README.md`.
 - CI builds DocC with `--warnings-as-errors`. A broken symbol link fails the build.
+- CI runs `swift scripts/doc-coverage.swift`, which lists every public declaration in
+  `Sources/MCP` without a `///` comment, including the cases of public enums.
 - A change in behavior updates the guide, the design note and, for breaking changes,
   [docs/migration.md](docs/migration.md).
 
@@ -220,7 +237,6 @@ more rules and examples for message definitions, concurrency, platform gates, an
 - A new protocol method is a new `Method` type. Keep wire names (`_meta`, `ttlMs`).
 - New public types are `Sendable`. The `MCP` target builds with strict concurrency.
 - Wire changes get a golden test (`expectWire`).
-- Keep `Package.swift` and `Package@swift-6.0.swift` in sync for `MCP` and `MCPTests`.
 
 ## Issues and triage
 

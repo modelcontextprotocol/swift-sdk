@@ -8,11 +8,18 @@
 public enum Initialize: Method {
     public static let name: String = "initialize"
 
+    /// The parameters of `initialize`.
     public struct Parameters: Hashable, Codable, Sendable {
+        /// The protocol revision the client requests.
         public let protocolVersion: String
+        /// The capabilities the client supports.
         public let capabilities: Client.Capabilities
+        /// The name and version of the client implementation.
         public let clientInfo: Client.Info
 
+        /// Creates `initialize` parameters.
+        ///
+        /// `protocolVersion` defaults to ``Version/latestHandshake``.
         public init(
             protocolVersion: String = Version.latestHandshake,
             capabilities: Client.Capabilities,
@@ -41,13 +48,20 @@ public enum Initialize: Method {
         }
     }
 
+    /// The result of `initialize`.
     public struct Result: Hashable, Codable, Sendable {
+        /// The protocol revision the server chose for the session.
         public let protocolVersion: String
+        /// The capabilities the server supports.
         public let capabilities: Server.Capabilities
+        /// The name and version of the server implementation.
         public let serverInfo: Server.Info
+        /// How to use the server, for inclusion in a model prompt.
         public let instructions: String?
+        /// Result metadata.
         public var _meta: Metadata?
 
+        /// Creates an `initialize` result.
         public init(
             protocolVersion: String,
             capabilities: Server.Capabilities,

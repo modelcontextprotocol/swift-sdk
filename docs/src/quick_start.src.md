@@ -6,9 +6,8 @@ from a compiled example in [`Examples/`](../Examples).
 
 ## Installation
 
-The package requires Swift 6.0 or later. `Package.swift` needs Swift 6.1
-tools; `Package@swift-6.0.swift` serves Swift 6.0 tools with the `MCP`
-library only. The minimum platforms are macOS 13, iOS 16, Mac Catalyst 16,
+The package requires Swift 6.1 or later (Xcode 16.3 or later). The minimum
+platforms are macOS 13, iOS 16, Mac Catalyst 16,
 watchOS 9, tvOS 16 and visionOS 1. On Linux, the stdio transport needs glibc
 or musl.
 

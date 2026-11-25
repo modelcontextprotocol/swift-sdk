@@ -52,6 +52,7 @@ import Logging
 /// requests whose ``HTTPRequest/statelessProtocolVersion`` is non-`nil` to
 /// this transport and the rest to a ``StatefulHTTPServerTransport``.
 public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
+    /// The logger of the transport; a no-op logger unless one was passed to `init`.
     public nonisolated let logger: Logger
 
     // MARK: - Dependencies
@@ -139,6 +140,10 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
 
     // MARK: - Transport Conformance
 
+    /// Marks the transport started; it opens no socket, since the framework
+    /// adapter delivers requests through ``handleRequest(_:)``.
+    ///
+    /// - Throws: ``MCPError/internalError(_:)`` when already started.
     public func connect() async throws {
         guard !started else {
             throw MCPError.internalError("Transport already started")
@@ -147,6 +152,8 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
         logger.debug("Stateless HTTP server transport started")
     }
 
+    /// Stops the transport: ends every in-flight exchange and the incoming
+    /// stream; later requests get 404.
     public func disconnect() async {
         terminate()
     }
@@ -203,6 +210,8 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
         }
     }
 
+    /// The JSON-RPC messages that clients POST, each request carrying an
+    /// internal id in place of the client's.
     public func receive() -> AsyncThrowingStream<Data, Swift.Error> {
         incomingStream
     }
@@ -542,6 +551,7 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
 
     // MARK: - HTTPContextProviding
 
+    /// The HTTP request of the in-flight exchange with internal id `id`.
     public func httpRequestContext(for id: ID) -> HTTPRequest? {
         exchanges[id.description]?.request
     }

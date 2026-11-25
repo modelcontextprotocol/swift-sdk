@@ -4,10 +4,13 @@
 public enum ServerDiscover: Method {
     public static let name = "server/discover"
 
+    /// The parameters of `server/discover`.
     public struct Parameters: NotRequired, Hashable, Codable, Sendable {
+        /// Creates empty parameters.
         public init() {}
     }
 
+    /// The result of `server/discover`.
     public struct Result: Hashable, Codable, Sendable, CacheableResult {
         /// The protocol versions the server serves, newest first.
         public let supportedVersions: [String]
@@ -22,6 +25,7 @@ public enum ServerDiscover: Method {
         /// Who may reuse the result (SEP-2549).
         public var cacheScope: CacheScope?
 
+        /// Creates a discovery result.
         public init(
             supportedVersions: [String],
             capabilities: Server.Capabilities,

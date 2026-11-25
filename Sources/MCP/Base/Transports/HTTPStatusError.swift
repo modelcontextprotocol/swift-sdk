@@ -25,6 +25,7 @@ public struct HTTPStatusError: LocalizedError, Hashable, Sendable {
     /// `Mcp-Session-Id`. The transport has dropped the session; connect again.
     public let isSessionExpired: Bool
 
+    /// Creates an HTTP status error.
     public init(statusCode: Int, headers: [String: String] = [:], isSessionExpired: Bool = false) {
         self.statusCode = statusCode
         self.headers = headers

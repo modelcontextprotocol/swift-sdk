@@ -12,8 +12,11 @@ import Foundation
 /// Values that are not printable ASCII, or that have leading or trailing
 /// whitespace, are sent as `=?base64?<Base64 of UTF-8>?=`.
 public enum MCPRequestHeaders {
+    /// The `Mcp-Method` header: the JSON-RPC method of the request.
     public static let method = "Mcp-Method"
+    /// The `Mcp-Name` header: the tool or prompt name, or the resource URI.
     public static let name = "Mcp-Name"
+    /// The prefix of `Mcp-Param-<Name>` headers, which mirror tool arguments.
     public static let parameterPrefix = "Mcp-Param-"
 
     /// The JSON Schema keyword that designates a mirrored argument.
@@ -106,6 +109,7 @@ public enum MCPRequestHeaders {
 
     /// Why an `x-mcp-header` annotation is invalid.
     public struct InvalidAnnotation: Error, CustomStringConvertible, Sendable {
+        /// A readable reason, prefixed with the property path when one applies.
         public let description: String
     }
 

@@ -16,8 +16,6 @@ constrain their resolution as little as possible. Related: [VERSIONING.md](VERSI
 
 Notes:
 
-- swift-nio and swift-docc-plugin are declared only in `Package.swift`. `Package@swift-6.0.swift`
-  declares swift-system, swift-log and swift-crypto.
 - No target of the `MCP` library product depends on swift-nio. HTTP server transports take and
   return `HTTPRequest`/`HTTPResponse`, so applications choose their own HTTP server.
 - swift-crypto was added in 0.13.0 for `requestState` sealing
@@ -86,17 +84,15 @@ From the manifests:
 | visionOS | 1.0 |
 | Linux | glibc or musl (static Linux SDK) |
 
-| Manifest | swift-tools-version | Contents |
-|---|---|---|
-| `Package.swift` | 6.1 | library, tests, conformance fixtures, examples, snippet targets |
-| `Package@swift-6.0.swift` | 6.0 | library and tests only |
+`Package.swift` uses swift-tools-version 6.1, the minimum Swift for 1.x. It declares the
+library, the tests, the conformance fixtures, the examples and the snippet targets.
 
 CI builds with Swift 6.1 (Xcode 16.3 on macOS 15; `swift:6.1-rhel-ubi9` and `swift:6.1-noble`
-on Linux; the 6.1.2 static Linux SDK) and with the default Xcode of `macos-latest`. No CI job
-uses Swift 6.0 tools, so the 6.0 manifest is checked only by hand.
+on Linux; the 6.1.2 static Linux SDK) and with the default Xcode of `macos-latest`.
 
-Keep the two manifests' dependency lists for `MCP` and `MCPTests` in sync. A platform floor or
-tools version is raised only in a major release.
+A platform floor or tools version is raised only in a major release. 1.0 dropped
+`Package@swift-6.0.swift`: no CI job used Swift 6.0, and the 2026-07-28 work no longer
+compiled with it.
 
 ## Update cadence
 

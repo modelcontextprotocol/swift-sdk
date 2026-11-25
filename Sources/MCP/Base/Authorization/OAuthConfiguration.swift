@@ -183,6 +183,7 @@ public struct OAuthConfiguration: Sendable {
     ///
     /// Frozen: no case is added in 1.x (the two ways the helper can fail).
     public enum PrivateKeyJWTAssertionError: LocalizedError, Sendable {
+        /// The requested lifetime, in seconds, is not greater than zero.
         case invalidLifetime(TimeInterval)
         /// Not thrown: signing uses swift-crypto on every platform.
         case cryptographyUnavailable
@@ -303,6 +304,7 @@ public struct OAuthConfiguration: Sendable {
             self.maxScopeUpgradeAttempts = max(1, maxScopeUpgradeAttempts)
         }
 
+        /// The default policy: 3 authorization attempts and 2 scope step-up attempts.
         public static let `default` = RetryPolicy()
     }
 
@@ -336,6 +338,7 @@ public struct OAuthConfiguration: Sendable {
         /// Optional override for the resource indicator used in token requests.
         public let resource: URL?
 
+        /// Creates endpoint overrides. A `nil` value is not overridden.
         public init(
             protectedResourceMetadataURL: URL? = nil,
             authorizationServerURL: URL? = nil,
@@ -348,6 +351,7 @@ public struct OAuthConfiguration: Sendable {
             self.resource = resource
         }
 
+        /// No overrides.
         public static let none = EndpointOverrides()
     }
 
@@ -376,6 +380,7 @@ public struct OAuthConfiguration: Sendable {
         /// Scope set selected by SDK for the pending authorization attempt.
         public let requestedScopes: Set<String>?
 
+        /// Creates an access token provider context.
         public init(
             statusCode: Int,
             endpoint: URL,
@@ -425,6 +430,7 @@ public struct OAuthConfiguration: Sendable {
         /// The scopes the token request asks for, if any.
         public let requestedScopes: Set<String>?
 
+        /// Creates an assertion context.
         public init(audience: URL, resource: URL, tokenEndpoint: URL, requestedScopes: Set<String>?) {
             self.audience = audience
             self.resource = resource

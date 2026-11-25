@@ -120,6 +120,7 @@ public enum Sampling {
             /// Suggested model name/family
             public let name: String?
 
+            /// Creates a model hint.
             public init(name: String? = nil) {
                 self.name = name
             }
@@ -134,6 +135,7 @@ public enum Sampling {
         /// Importance of advanced model capabilities (0-1 normalized)
         public let intelligencePriority: UnitInterval?
 
+        /// Creates model preferences.
         public init(
             hints: [Hint]? = nil,
             costPriority: UnitInterval? = nil,
@@ -191,6 +193,7 @@ public enum Sampling {
         /// Optional metadata
         public var _meta: Metadata?
 
+        /// Creates tool use content.
         public init(id: String, name: String, input: [String: Value], _meta: Metadata? = nil) {
             self.id = id
             self.name = name
@@ -231,6 +234,7 @@ public enum Sampling {
             case unknown(type: String, Value)
         }
 
+        /// Creates tool result content.
         public init(
             toolUseId: String,
             content: [ContentBlock],
@@ -511,6 +515,9 @@ public enum CreateSamplingMessage: Method {
         /// The tool choice mode. If omitted, defaults to `.auto`.
         public let mode: Mode?
 
+        /// Creates a tool choice.
+        ///
+        /// A mode of `.auto` is omitted from the wire, where it is the default.
         public init(mode: Mode? = .auto) {
             self.mode = mode
         }
@@ -532,6 +539,7 @@ public enum CreateSamplingMessage: Method {
         }
     }
 
+    /// The parameters of `sampling/createMessage`.
     public struct Parameters: Hashable, Codable, Sendable {
         /// The conversation history to send to the LLM
         public let messages: [Sampling.Message]
@@ -556,6 +564,7 @@ public enum CreateSamplingMessage: Method {
         /// Provider-specific metadata to pass to the LLM
         public let metadata: [String: Value]?
 
+        /// Creates `sampling/createMessage` parameters.
         public init(
             messages: [Sampling.Message],
             modelPreferences: Sampling.ModelPreferences? = nil,
@@ -583,6 +592,7 @@ public enum CreateSamplingMessage: Method {
         }
     }
 
+    /// The result of `sampling/createMessage`.
     public struct Result: Hashable, Codable, Sendable {
         /// Name of the model used
         public let model: String
@@ -595,6 +605,7 @@ public enum CreateSamplingMessage: Method {
         /// Optional metadata about this result
         public var _meta: Metadata?
 
+        /// Creates a `sampling/createMessage` result.
         public init(
             model: String,
             stopReason: Sampling.StopReason? = nil,
