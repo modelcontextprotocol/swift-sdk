@@ -35,11 +35,13 @@ arrives (`ResponseBody`) and parses `text/event-stream` with its own `ServerSent
 
 A session traps (corelibs) or raises (Apple platforms) when a task is created after it was
 invalidated. `disconnect()` invalidates both sessions through `StreamingSession.Lifetime`: a task
-being created holds the invalidation until it exists, later ones throw, and `connect()` builds new
-sessions. The parser discards an event the body ends before its blank line (a server or proxy
-that cuts the stream), so its `id` never becomes the `Last-Event-ID`; a line, or the data of one
-event, over 16 MiB fails the request without a resumption, and makes the GET stream reconnect
-without `Last-Event-ID`.
+being created holds the invalidation until it exists, later ones throw, and so does `connect()`:
+a transport serves one connection. On Apple platforms the task exists only once `bytes(for:)`
+returns, so `disconnect()` cancels every POST in flight, a notification's too. The parser
+discards an event the body ends before its blank line (a server or proxy that cuts the stream),
+so its `id` never becomes the `Last-Event-ID`; a line, or the data of one event, over 16 MiB
+fails the request without a resumption, and makes the GET stream reconnect without
+`Last-Event-ID`.
 
 Until this change the Linux path used `data(for:)`: it read a response only once the server
 ended it, passed an SSE body to the client as one message (which the client dropped), and never

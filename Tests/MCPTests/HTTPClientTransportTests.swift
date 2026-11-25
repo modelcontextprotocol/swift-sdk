@@ -2611,16 +2611,33 @@ import Testing
             #expect(result.error is MCPError)
         }
 
-        @Test("connect() after disconnect() sends with new sessions")
+        @Test("connect() after disconnect() throws instead of losing messages")
         func reconnect() async throws {
             let transport = await makeTransport { [self] _ in reply(202) }
             let notification = Data(#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#.utf8)
             try await transport.connect()
             try await transport.send(notification)
             await transport.disconnect()
+            await #expect(throws: MCPError.self) { try await transport.connect() }
+        }
+
+        @Test("disconnect() ends a notification's POST that waits for its response")
+        func disconnectEndsNotificationPost() async throws {
+            let gate = AuthorizerGate()
+            let (entered, enteredContinuation) = AsyncStream<Void>.makeStream()
+            let transport = await makeTransport { [self] _ in
+                enteredContinuation.yield()
+                await gate.wait()
+                return reply(202)
+            }
+            let notification = Data(#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#.utf8)
             try await transport.connect()
-            try await transport.send(notification)
+            let send = Task { try await transport.send(notification) }
+            for await _ in entered { break }
             await transport.disconnect()
+            let result = await outcome(within: .seconds(5)) { try await send.value }
+            await gate.open()
+            #expect(result.error != nil)
         }
 
         @Test("A response body requested from a cancelled task fails promptly")
@@ -2696,7 +2713,6 @@ import Testing
             func droppedTransportReleasesSession() async throws {
                 weak var delegate: StreamingSessionDelegate?
                 do {
-                    // The session ID ends the wait for it, which holds the transport.
                     let transport = await makeTransport { [endpoint] _ in
                         (
                             HTTPURLResponse(
@@ -2715,5 +2731,314 @@ import Testing
                 #expect(delegate == nil)
             }
         #endif
+    }
+
+    // A transport the application drops without calling disconnect() is
+    // released, and its GET stream stops.
+
+    /// One test's server: answers POSTs with `postStatus` and each GET as
+    /// `getReply` says, and counts the GETs.
+    private final class ReleaseTestServer: @unchecked Sendable {
+        enum Reply {
+            /// An empty reply with this status.
+            case status(Int)
+            /// A 200 SSE stream with this body, then the end of the stream.
+            case events(String)
+            /// A 200 SSE stream that stays open; ``write(_:)`` sends on it.
+            case open
+            /// No response: the GET waits for its headers until the client
+            /// stops it. Counted as an open stream.
+            case silent
+        }
+
+        let key = UUID().uuidString
+        private let postStatus: Int
+        private let getReply: @Sendable (Int) -> Reply
+        private let lock = NSLock()
+        private var gets = 0
+        private var streams: [ObjectIdentifier: ReleaseTestProtocol] = [:]
+        private var closed = 0
+
+        init(postStatus: Int = 202, getReply: @escaping @Sendable (Int) -> Reply) {
+            self.postStatus = postStatus
+            self.getReply = getReply
+            ReleaseTestProtocol.register(self)
+        }
+
+        var getCount: Int { lock.withLock { gets } }
+        var openStreamCount: Int { lock.withLock { streams.count } }
+        /// The open streams the client has closed.
+        var closedStreamCount: Int { lock.withLock { closed } }
+
+        func makeTransport(streaming: Bool, sseInitializationTimeout: TimeInterval = 10) -> HTTPClientTransport {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [ReleaseTestProtocol.self]
+            configuration.httpAdditionalHeaders = [ReleaseTestProtocol.keyHeader: key]
+            return HTTPClientTransport(
+                endpoint: URL(string: "http://127.0.0.1:9/mcp")!,
+                session: URLSession(configuration: configuration),
+                streaming: streaming,
+                sseInitializationTimeout: sseInitializationTimeout)
+        }
+
+        /// Writes `text` on every open stream.
+        func write(_ text: String) {
+            let open = lock.withLock { Array(streams.values) }
+            for stream in open { stream.write(Data(text.utf8)) }
+        }
+
+        fileprivate func start(_ loading: ReleaseTestProtocol) {
+            guard loading.request.httpMethod == "GET" else {
+                loading.reply(status: postStatus, contentType: "application/json", body: nil)
+                return
+            }
+            let reply = lock.withLock { () -> Reply in
+                gets += 1
+                return getReply(gets)
+            }
+            switch reply {
+            case .status(let status):
+                loading.reply(status: status, contentType: "application/json", body: nil)
+            case .events(let body):
+                loading.reply(status: 200, contentType: "text/event-stream", body: Data(body.utf8))
+            case .open:
+                lock.withLock { streams[ObjectIdentifier(loading)] = loading }
+                loading.reply(status: 200, contentType: "text/event-stream", body: nil, finish: false)
+            case .silent:
+                lock.withLock { streams[ObjectIdentifier(loading)] = loading }
+            }
+        }
+
+        fileprivate func stopped(_ loading: ReleaseTestProtocol) {
+            lock.withLock {
+                if streams.removeValue(forKey: ObjectIdentifier(loading)) != nil { closed += 1 }
+            }
+        }
+    }
+
+    private final class ReleaseTestProtocol: URLProtocol, @unchecked Sendable {
+        static let keyHeader = "X-Release-Test-Key"
+
+        private final class Registry: @unchecked Sendable {
+            let lock = NSLock()
+            var servers: [String: ReleaseTestServer] = [:]
+        }
+        private static let registry = Registry()
+
+        static func register(_ server: ReleaseTestServer) {
+            registry.lock.withLock { registry.servers[server.key] = server }
+        }
+
+        override class func canInit(with request: URLRequest) -> Bool { true }
+        override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+        /// Set by `stopLoading()`: swift-corelibs-foundation traps when a
+        /// protocol calls its client for a task it already cancelled. The lock
+        /// is not held during a callback.
+        private let stateLock = NSLock()
+        private var stopped = false
+        private var server: ReleaseTestServer?
+
+        private var isStopped: Bool { stateLock.withLock { stopped } }
+
+        override func startLoading() {
+            let key = request.value(forHTTPHeaderField: Self.keyHeader) ?? ""
+            guard let server = Self.registry.lock.withLock({ Self.registry.servers[key] }) else {
+                client?.urlProtocol(self, didFailWithError: URLError(.unsupportedURL))
+                return
+            }
+            stateLock.withLock { self.server = server }
+            server.start(self)
+        }
+
+        override func stopLoading() {
+            let server = stateLock.withLock { () -> ReleaseTestServer? in
+                stopped = true
+                return self.server
+            }
+            server?.stopped(self)
+        }
+
+        func reply(status: Int, contentType: String, body: Data?, finish: Bool = true) {
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: status, httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": contentType])!
+            guard !isStopped else { return }
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            if let body { write(body) }
+            guard finish, !isStopped else { return }
+            client?.urlProtocolDidFinishLoading(self)
+        }
+
+        func write(_ data: Data) {
+            guard !isStopped else { return }
+            client?.urlProtocol(self, didLoad: data)
+        }
+    }
+
+    /// Holds a transport weakly, to see when it is released.
+    private final class WeakTransport: @unchecked Sendable {
+        weak var transport: HTTPClientTransport?
+        init(_ transport: HTTPClientTransport?) { self.transport = transport }
+
+        /// Whether the transport is released within `limit`.
+        func isReleased(within limit: Duration = .seconds(5)) async -> Bool {
+            let clock = ContinuousClock()
+            let deadline = clock.now + limit
+            while clock.now < deadline {
+                if transport == nil { return true }
+                try? await Task.sleep(for: .milliseconds(10))
+            }
+            return transport == nil
+        }
+    }
+
+    /// Whether `condition` holds within `limit`.
+    private func eventually(within limit: Duration = .seconds(5), _ condition: () -> Bool) async -> Bool {
+        let clock = ContinuousClock()
+        let deadline = clock.now + limit
+        while clock.now < deadline {
+            if condition() { return true }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return condition()
+    }
+
+    @Suite("HTTP client transport release")
+    struct HTTPClientTransportReleaseTests {
+        @Test("A connected transport dropped without disconnect() is released and ends its message stream")
+        func releasedWithoutStreaming() async throws {
+            let server = ReleaseTestServer { _ in .status(405) }
+            var transport: HTTPClientTransport? = server.makeTransport(streaming: false)
+            try await transport?.connect()
+            let messages = try #require(await transport?.receive())
+            let reference = WeakTransport(transport)
+            transport = nil
+
+            #expect(await reference.isReleased())
+            let ended = await outcome(within: .seconds(5)) {
+                for try await _ in messages {}
+            }
+            #expect(!ended.didTimeOut)
+            #expect(server.getCount == 0)
+        }
+
+        @Test("A transport waiting for a session ID is released, and sends no GET")
+        func releasedWhileWaitingForSessionID() async throws {
+            let server = ReleaseTestServer { _ in .status(405) }
+            var transport: HTTPClientTransport? = server.makeTransport(
+                streaming: true, sseInitializationTimeout: 0.3)
+            try await transport?.connect()
+            let reference = WeakTransport(transport)
+            transport = nil
+
+            #expect(await reference.isReleased())
+            // Past the session ID timeout.
+            try await Task.sleep(for: .milliseconds(600))
+            #expect(server.getCount == 0)
+        }
+
+        @Test("A transport reading an open GET stream is released, closes the stream and sends no further GET")
+        func releasedWithOpenStream() async throws {
+            let server = ReleaseTestServer { _ in .open }
+            var transport: HTTPClientTransport? = server.makeTransport(
+                streaming: true, sseInitializationTimeout: 0.05)
+            try await transport?.connect()
+            let messages = try #require(await transport?.receive())
+            #expect(await eventually { server.openStreamCount == 1 })
+
+            // The stream is read: an event's message arrives.
+            let notification = #"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#
+            server.write("data: \(notification)\n\n")
+            let received = await outcome(within: .seconds(5)) { () -> Data? in
+                var iterator = messages.makeAsyncIterator()
+                return try await iterator.next()
+            }
+            guard case .returned(let message) = received else {
+                Issue.record("No message from the GET stream: \(received)")
+                await transport?.disconnect()
+                return
+            }
+            #expect(message.map { String(decoding: $0, as: UTF8.self) } == notification)
+
+            let reference = WeakTransport(transport)
+            // No further event: the release itself closes the stream.
+            transport = nil
+
+            #expect(await reference.isReleased())
+            #expect(await eventually { server.closedStreamCount == 1 })
+            let gets = server.getCount
+            try await Task.sleep(for: .milliseconds(500))
+            #expect(server.getCount == gets)
+            #expect(gets == 1)
+        }
+
+        @Test("A transport waiting to reconnect its GET stream is released and sends no further GET")
+        func releasedDuringBackoff() async throws {
+            // The first stream sets a short retry interval and ends; later GETs fail.
+            let server = ReleaseTestServer { attempt in
+                attempt == 1 ? .events("retry: 50\n\n") : .status(500)
+            }
+            var transport: HTTPClientTransport? = server.makeTransport(
+                streaming: true, sseInitializationTimeout: 0.05)
+            try await transport?.connect()
+            #expect(await eventually { server.getCount >= 2 })
+
+            let reference = WeakTransport(transport)
+            transport = nil
+
+            #expect(await reference.isReleased())
+            let gets = server.getCount
+            // Longer than the next waits of the backoff (50, 100 and 200 ms).
+            try await Task.sleep(for: .milliseconds(700))
+            #expect(server.getCount == gets)
+        }
+
+        @Test("A transport waiting for the headers of its GET stream is released and stops the GET")
+        func releasedWhileAwaitingHeaders() async throws {
+            let server = ReleaseTestServer { _ in .silent }
+            var transport: HTTPClientTransport? = server.makeTransport(
+                streaming: true, sseInitializationTimeout: 0.05)
+            try await transport?.connect()
+            #expect(await eventually { server.openStreamCount == 1 })
+
+            let reference = WeakTransport(transport)
+            transport = nil
+
+            // Well within the request timeout (60 s), which would otherwise
+            // end the wait.
+            #expect(await reference.isReleased())
+            #expect(await eventually { server.closedStreamCount == 1 })
+            let gets = server.getCount
+            try await Task.sleep(for: .milliseconds(300))
+            #expect(server.getCount == gets)
+            #expect(gets == 1)
+        }
+
+        @Test(
+            "A client whose connect fails disconnects its transport and is released",
+            arguments: [Client.Configuration.default, .handshake])
+        func failedConnectReleasesTransport(configuration: Client.Configuration) async throws {
+            let server = ReleaseTestServer(postStatus: 500) { _ in .open }
+            var transport: HTTPClientTransport? = server.makeTransport(
+                streaming: true, sseInitializationTimeout: 0.05)
+            var client: Client? = Client(name: "test", version: "1.0", configuration: configuration)
+            do {
+                let connecting = try #require(transport)
+                await #expect(throws: (any Swift.Error).self) {
+                    try await client?.connect(transport: connecting)
+                }
+            }
+
+            // The client is kept: it no longer holds the transport.
+            let reference = WeakTransport(transport)
+            transport = nil
+            #expect(await reference.isReleased())
+            #expect(await eventually { server.openStreamCount == 0 })
+
+            weak var released = client
+            client = nil
+            #expect(await eventually { released == nil })
+        }
     }
 #endif  // swift(>=6.1)

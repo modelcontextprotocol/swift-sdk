@@ -171,6 +171,8 @@ await client.disconnect()  // closes listen streams and fails pending requests
 
 `disconnect()` closes every `subscriptions/listen` stream, fails pending requests with `MCPError.internalError("Client disconnected")`, stops the receive loop and disconnects the transport.
 
+A connected client must be disconnected. Its receive loop and inbound queue keep it, and its transport, alive until `disconnect()` or until the transport closes the connection; dropping the last reference to the client does not end the connection. A `connect(transport:)` that throws needs no `disconnect()`: it disconnects the transport and stops the receive loop itself.
+
 ### Connection errors
 
 | Error | Cause |

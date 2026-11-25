@@ -7,6 +7,11 @@ import class Foundation.JSONDecoder
 import class Foundation.JSONEncoder
 
 /// Model Context Protocol client
+///
+/// A connected client must be disconnected: its receive loop and inbound
+/// queue keep it, and its transport, alive until ``disconnect()`` or until
+/// the transport closes the connection. Dropping the last reference to a
+/// connected client does not end the connection.
 public actor Client {
     /// The client configuration
     public struct Configuration: Hashable, Codable, Sendable {
@@ -682,7 +687,9 @@ public actor Client {
     ///   disconnected")` if ``disconnect()`` or another `connect(transport:)`
     ///   runs while the previous transport disconnects or this one connects;
     ///   or any error from connecting the transport or opening the protocol
-    ///   connection.
+    ///   connection. A `connect(transport:)` that throws leaves the client
+    ///   disconnected: it disconnects `transport` and stops the receive loop
+    ///   itself, so the caller need not call ``disconnect()``.
     @discardableResult
     public func connect(transport: any Transport) async throws -> ConnectionInfo {
         // Release the previous connection, so that its transport and message
@@ -705,6 +712,24 @@ public actor Client {
         toolHeaderParameters = [:]
         logLevel = configuration.logLevel
         toolNameWarnings = ToolNameWarnings()
+        do {
+            return try await openConnection(transport, generation: generation)
+        } catch {
+            // Stop what the connection started, as disconnect() does, so that
+            // nothing keeps the client and the transport alive. A disconnect()
+            // or connect(transport:) that ran meanwhile has released it.
+            if connectionGeneration == generation {
+                let loop = task
+                _ = await releaseConnection()
+                _ = await loop?.value
+            }
+            throw error
+        }
+    }
+
+    /// Connects `transport` and opens the protocol connection, for
+    /// ``connect(transport:)``.
+    private func openConnection(_ transport: any Transport, generation: Int) async throws -> ConnectionInfo {
         try await transport.connect()
         guard connectionGeneration == generation else {
             throw MCPError.internalError("Client disconnected")
@@ -810,7 +835,11 @@ public actor Client {
             isStateless: isStateless)
     }
 
-    /// Disconnect the client and cancel all pending requests
+    /// Disconnect the client and cancel all pending requests.
+    ///
+    /// Call this when done with a connected client: until then, or until the
+    /// transport closes the connection, the client's receive loop keeps the
+    /// client and its transport alive.
     public func disconnect() async {
         await logger?.debug("Initiating client disconnect...")
         // A message loop that ends from here on leaves the teardown to this method.
