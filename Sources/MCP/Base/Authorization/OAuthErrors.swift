@@ -120,7 +120,8 @@ public enum OAuthAuthorizationError: LocalizedError {
     /// - Parameter advertisedMethods: The methods listed in the server metadata.
     case pkceS256NotSupported(advertisedMethods: [String])
 
-    /// PKCE S256 challenge generation is unavailable because CryptoKit is not present on this platform.
+    /// PKCE S256 challenge generation is unavailable. Not thrown: SHA-256
+    /// comes from swift-crypto on every platform.
     case pkceS256Unavailable
 
     /// The `issuer` field in the Authorization Server Metadata does not match the URL used to
@@ -130,6 +131,14 @@ public enum OAuthAuthorizationError: LocalizedError {
     ///   - expected: The issuer URL derived from the discovery candidate.
     ///   - actual: The `issuer` field value found in the metadata document.
     case authorizationServerIssuerMismatch(expected: String, actual: String)
+
+    /// The `iss` parameter of the authorization response does not equal the
+    /// issuer of the authorization server (RFC 9207, SEP-2468).
+    case authorizationResponseIssuerMismatch(expected: String, actual: String)
+
+    /// The authorization server advertised `iss` in authorization responses,
+    /// but the response has none (RFC 9207).
+    case authorizationResponseMissingIssuer
 
     public var errorDescription: String? {
         switch self {
@@ -198,6 +207,10 @@ public enum OAuthAuthorizationError: LocalizedError {
         case .authorizationServerIssuerMismatch(let expected, let actual):
             return
                 "Authorization server issuer mismatch. Expected \(expected), got \(actual)"
+        case .authorizationResponseIssuerMismatch(let expected, let actual):
+            return "Authorization response issuer mismatch. Expected \(expected), got \(actual)"
+        case .authorizationResponseMissingIssuer:
+            return "Authorization response is missing the iss parameter the server advertised"
         }
     }
 }

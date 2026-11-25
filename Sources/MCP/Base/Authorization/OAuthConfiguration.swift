@@ -310,6 +310,10 @@ public struct OAuthConfiguration: Sendable {
     }
 
     /// Optional provider for externally acquired access tokens.
+    ///
+    /// The provider runs while the authorizer handles a challenge, and other
+    /// challenges of the transport wait for it: it must not send requests
+    /// through the transport it authorizes.
     public typealias AccessTokenProvider = @Sendable (
         _ context: AccessTokenProviderContext,
         _ session: URLSession
@@ -342,6 +346,31 @@ public struct OAuthConfiguration: Sendable {
     /// Defaults to `"mcp-swift-sdk"`. Override with your application's name.
     public let clientName: String
 
+    /// The OpenID Connect `application_type` sent during dynamic client
+    /// registration (SEP-837).
+    public enum ApplicationType: String, Hashable, Sendable {
+        /// An app on the user's device: loopback or custom-scheme redirects.
+        case native
+        /// A web-hosted client: `https` redirects on a non-loopback host.
+        case web
+    }
+
+    /// The `application_type` sent during dynamic client registration.
+    /// `nil` infers it: `web` for an `https` redirect URI on a non-loopback
+    /// host, otherwise `native`.
+    public let applicationType: ApplicationType?
+
+    /// The `application_type` to register with.
+    var registrationApplicationType: ApplicationType {
+        if let applicationType { return applicationType }
+        guard grantType == .authorizationCode,
+            authorizationRedirectURI.scheme?.lowercased() == OAuthURLScheme.https,
+            let host = authorizationRedirectURI.host?.lowercased(),
+            !OAuthLoopbackHost.isLoopback(host)
+        else { return .native }
+        return .web
+    }
+
     /// Optional provider for externally acquired access tokens.
     public let accessTokenProvider: AccessTokenProvider?
 
@@ -366,6 +395,8 @@ public struct OAuthConfiguration: Sendable {
     ///   - authorizationRedirectURI: Redirect URI for the `authorization_code` flow.
     ///     Defaults to a random loopback URI (`http://127.0.0.1:<port>/callback`).
     ///   - clientName: The `client_name` sent during dynamic client registration. Defaults to `"mcp-swift-sdk"`.
+    ///   - applicationType: The `application_type` sent during dynamic client registration
+    ///     (SEP-837). `nil` infers it from the redirect URI.
     ///   - additionalTokenRequestParameters: Extra form fields appended to every token request.
     ///   - accessTokenProvider: Optional closure invoked after discovery, allowing the host app
     ///     to supply an externally acquired token (e.g., from a system credential store).
@@ -380,6 +411,7 @@ public struct OAuthConfiguration: Sendable {
         endpointOverrides: EndpointOverrides = .none,
         authorizationRedirectURI: URL? = nil,
         clientName: String = "mcp-swift-sdk",
+        applicationType: ApplicationType? = nil,
         additionalTokenRequestParameters: [String: String] = [:],
         accessTokenProvider: AccessTokenProvider? = nil,
         authorizationDelegate: (any OAuthAuthorizationDelegate)? = nil,
@@ -393,6 +425,7 @@ public struct OAuthConfiguration: Sendable {
         self.authorizationRedirectURI =
             authorizationRedirectURI ?? Self.defaultAuthorizationRedirectURI()
         self.clientName = clientName
+        self.applicationType = applicationType
         self.additionalTokenRequestParameters = additionalTokenRequestParameters
         self.accessTokenProvider = accessTokenProvider
         self.authorizationDelegate = authorizationDelegate
@@ -421,6 +454,11 @@ extension OAuthConfiguration.TokenEndpointAuthentication {
 public protocol OAuthAuthorizationDelegate: Sendable {
     /// Presents the authorization URL to the user and returns the redirect URL containing
     /// the authorization code.
+    ///
+    /// The method runs while the authorizer handles a challenge, and other
+    /// challenges of the transport wait for it: it must not send requests
+    /// through the transport it authorizes. When it throws (for example, the
+    /// user cancelled), challenges that waited for it fail with the same error.
     func presentAuthorizationURL(_ url: URL) async throws -> URL
 }
 

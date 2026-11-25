@@ -467,6 +467,7 @@ public actor HTTPClientTransport: Transport {
                         headers: authError.headers,
                         endpoint: endpoint,
                         operationKey: operationKey,
+                        sentAuthorization: request.value(forHTTPHeaderField: HTTPHeaderName.authorization),
                         session: session
                     )
                 } catch {
@@ -918,6 +919,7 @@ public actor HTTPClientTransport: Transport {
                         headers: responseHeaders(from: httpResponse),
                         endpoint: endpoint,
                         operationKey: nil,
+                        sentAuthorization: request.value(forHTTPHeaderField: HTTPHeaderName.authorization),
                         session: session
                     )
                 } catch {

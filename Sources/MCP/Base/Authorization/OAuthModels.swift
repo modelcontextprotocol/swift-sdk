@@ -60,6 +60,9 @@ struct OAuthProtectedResourceMetadata: Decodable, Sendable, Equatable {
     let resource: String?
     let authorizationServers: [URL]
     let scopesSupported: [String]?
+    /// Whether this was synthesized because the server publishes no
+    /// metadata: the authorization server is the server's origin.
+    var isFallback = false
 
     enum CodingKeys: String, CodingKey {
         case resource
@@ -77,6 +80,8 @@ struct OAuthAuthorizationServerMetadata: Decodable, Sendable, Equatable {
     let codeChallengeMethodsSupported: [String]?
     let tokenEndpointAuthMethodsSupported: [String]?
     let clientIDMetadataDocumentSupported: Bool?
+    /// Whether authorization responses carry `iss` (RFC 9207).
+    var authorizationResponseIssParameterSupported: Bool? = nil
 
     enum CodingKeys: String, CodingKey {
         case issuer
@@ -86,6 +91,40 @@ struct OAuthAuthorizationServerMetadata: Decodable, Sendable, Equatable {
         case codeChallengeMethodsSupported = "code_challenge_methods_supported"
         case tokenEndpointAuthMethodsSupported = "token_endpoint_auth_methods_supported"
         case clientIDMetadataDocumentSupported = "client_id_metadata_document_supported"
+        case authorizationResponseIssParameterSupported = "authorization_response_iss_parameter_supported"
+    }
+
+    /// The endpoints a 2025-03-26 server without metadata serves at its root:
+    /// `/authorize`, `/token` and `/register`.
+    static func defaultEndpoints(issuer: URL) -> OAuthAuthorizationServerMetadata {
+        OAuthAuthorizationServerMetadata(
+            issuer: issuer,
+            authorizationEndpoint: issuer.appendingPathComponent("authorize"),
+            tokenEndpoint: issuer.appendingPathComponent("token"),
+            registrationEndpoint: issuer.appendingPathComponent("register"),
+            codeChallengeMethodsSupported: [OAuthCodeChallengeMethod.s256],
+            tokenEndpointAuthMethodsSupported: nil,
+            clientIDMetadataDocumentSupported: nil)
+    }
+}
+
+/// Issuer identifier comparison (RFC 8414 §3.3, RFC 9207 §2.4).
+enum OAuthIssuer {
+    /// Simple string comparison, except that a root issuer with and without
+    /// its trailing slash (`https://as.example` and `https://as.example/`)
+    /// name the same server.
+    static func matches(_ lhs: String, _ rhs: String) -> Bool {
+        if lhs == rhs { return true }
+        let (shorter, longer) = lhs.count < rhs.count ? (lhs, rhs) : (rhs, lhs)
+        // The shorter one must be a bare origin. Its parts are checked rather
+        // than the origin rebuilt from them, so the result does not depend on
+        // how a Foundation version spells an IPv6 host.
+        guard longer == shorter + "/",
+            let components = URLComponents(string: shorter), components.scheme != nil,
+            components.host?.isEmpty == false, components.user == nil, components.password == nil,
+            components.path.isEmpty, components.query == nil, components.fragment == nil
+        else { return false }
+        return true
     }
 }
 

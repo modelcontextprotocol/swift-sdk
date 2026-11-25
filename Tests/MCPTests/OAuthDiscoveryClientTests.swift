@@ -153,7 +153,8 @@ import Testing
             let expected = OAuthProtectedResourceMetadata(
                 resource: nil,
                 authorizationServers: [fallback],
-                scopesSupported: nil)
+                scopesSupported: nil,
+                isFallback: true)
             #expect(metadata == expected)
         }
 
@@ -188,10 +189,9 @@ import Testing
             #expect(metadata == expectedMetadata)
         }
 
-        @Test("Uses metadata issuer as server identity when it differs from candidate URL")
-        func testFetchAuthorizationServerMetadataUsesMetadataIssuer() async throws {
-            let metadataIssuer = "https://other.example.com"
-            let body = try makeASMetadataBody(issuer: metadataIssuer)
+        @Test("Rejects metadata whose issuer differs from the candidate URL (RFC 8414 §3.3)")
+        func testFetchAuthorizationServerMetadataRejectsOtherIssuer() async throws {
+            let body = try makeASMetadataBody(issuer: "https://other.example.com")
             let (session, key) = makeIsolatedSession()
             await IsolatedMockURLProtocol.setHandler(key: key) { _ in
                 let response = HTTPURLResponse(
@@ -200,11 +200,25 @@ import Testing
                 return (response, body)
             }
 
-            let (server, _) = try await makeClient().fetchAuthorizationServerMetadata(
-                candidates: [URL(string: "https://auth.example.com")!],
-                session: session
-            )
-            #expect(server == URL(string: metadataIssuer)!)
+            do {
+                _ = try await makeClient().fetchAuthorizationServerMetadata(
+                    candidates: [URL(string: "https://auth.example.com")!],
+                    session: session
+                )
+                Issue.record("Expected an issuer mismatch")
+            } catch OAuthAuthorizationError.authorizationServerIssuerMismatch(let expected, let actual) {
+                #expect(expected == "https://auth.example.com")
+                #expect(actual == "https://other.example.com")
+            }
+        }
+
+        @Test("A root issuer matches with and without its trailing slash, nothing else is normalized")
+        func testIssuerComparison() {
+            #expect(OAuthIssuer.matches("https://as.example", "https://as.example/"))
+            #expect(OAuthIssuer.matches("https://as.example:8443/", "https://as.example:8443"))
+            #expect(!OAuthIssuer.matches("https://as.example/tenant", "https://as.example/tenant/"))
+            #expect(!OAuthIssuer.matches("https://AS.example", "https://as.example"))
+            #expect(!OAuthIssuer.matches("https://as.example:443", "https://as.example"))
         }
 
         @Test("Skips private IP candidates without making HTTP calls")
@@ -218,21 +232,87 @@ import Testing
             }
         }
 
-        @Test("Throws when all candidates return non-2xx")
-        func testFetchAuthorizationServerMetadataThrowsWhenAllFail() async throws {
+        @Test("Throws discovery failed when every candidate answers 404")
+        func testFetchAuthorizationServerMetadataThrowsWhenAllAbsent() async throws {
             let (session, key) = makeIsolatedSession()
             await IsolatedMockURLProtocol.setHandler(key: key) { request in
-                let response = HTTPURLResponse(
-                    url: request.url!, statusCode: 500, httpVersion: nil, headerFields: nil)!
-                return (response, Data())
+                (HTTPURLResponse(url: request.url!, statusCode: 404, httpVersion: nil, headerFields: nil)!, Data())
             }
+            await #expect {
+                try await makeClient().fetchAuthorizationServerMetadata(
+                    candidates: [URL(string: "https://auth.example.com")!],
+                    session: session
+                )
+            } throws: { error in
+                guard case .authorizationServerMetadataDiscoveryFailed = error as? OAuthAuthorizationError else {
+                    return false
+                }
+                return true
+            }
+        }
 
-            await #expect(throws: OAuthAuthorizationError.self) {
+        @Test("A 5xx is not an absence of metadata", arguments: [500, 503, 429])
+        func testFetchAuthorizationServerMetadataUnavailable(status: Int) async throws {
+            let (session, key) = makeIsolatedSession()
+            await IsolatedMockURLProtocol.setHandler(key: key) { request in
+                (HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!, Data())
+            }
+            await #expect(throws: OAuthMetadataUnavailable.self) {
                 try await makeClient().fetchAuthorizationServerMetadata(
                     candidates: [URL(string: "https://auth.example.com")!],
                     session: session
                 )
             }
+        }
+
+        @Test("Protected resource metadata falls back only when every candidate answers 404 or 410")
+        func testProtectedResourceFallbackNeedsAbsence() async throws {
+            let fallback = URL(string: "https://mcp.example.com")!
+            let candidates = [
+                URL(string: "https://mcp.example.com/.well-known/oauth-protected-resource/mcp")!,
+                URL(string: "https://mcp.example.com/.well-known/oauth-protected-resource")!,
+            ]
+            for (statuses, synthesized) in [([404, 410], true), ([404, 503], false), ([200, 404], false)] {
+                let (session, key) = makeIsolatedSession()
+                await IsolatedMockURLProtocol.setHandler(key: key) { request in
+                    let index = candidates.firstIndex(of: request.url!) ?? 0
+                    return (
+                        HTTPURLResponse(
+                            url: request.url!, statusCode: statuses[index], httpVersion: nil, headerFields: nil)!,
+                        Data("not json".utf8)
+                    )
+                }
+                let result = try? await makeClient().fetchProtectedResourceMetadata(
+                    candidates: candidates, fallbackIssuer: fallback, session: session)
+                #expect((result?.isFallback == true) == synthesized, "statuses \(statuses)")
+            }
+        }
+
+        @Test("A network error is not an absence of metadata")
+        func testProtectedResourceNetworkError() async throws {
+            let (session, key) = makeIsolatedSession()
+            await IsolatedMockURLProtocol.setHandler(key: key) { _ in throw URLError(.notConnectedToInternet) }
+            await #expect(throws: OAuthMetadataUnavailable.self) {
+                try await makeClient().fetchProtectedResourceMetadata(
+                    candidates: [URL(string: "https://mcp.example.com/.well-known/oauth-protected-resource")!],
+                    fallbackIssuer: URL(string: "https://mcp.example.com")!, session: session)
+            }
+        }
+
+        @Test("Metadata of a trusted issuer is accepted with another issuer value")
+        func testTrustedIssuer() async throws {
+            let (session, key) = makeIsolatedSession()
+            let body = try makeASMetadataBody(issuer: "https://AUTH.example.com/realms/x/")
+            await IsolatedMockURLProtocol.setHandler(key: key) { request in
+                (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, body)
+            }
+            let issuer = URL(string: "https://auth.example.com/realms/x")!
+            await #expect(throws: OAuthAuthorizationError.self) {
+                try await makeClient().fetchAuthorizationServerMetadata(candidates: [issuer], session: session)
+            }
+            let (server, _) = try await makeClient().fetchAuthorizationServerMetadata(
+                candidates: [issuer], trustedIssuer: issuer, session: session)
+            #expect(server == issuer)
         }
     }
 
