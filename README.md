@@ -1532,6 +1532,56 @@ guard Server.currentHandlerContext?.clientCapabilities?.sampling != nil else {
 }
 ```
 
+#### Request Headers
+
+At 2026-07-28, HTTP requests also name their method and target in headers,
+so that gateways can route without reading the body (SEP-2243):
+
+| Header | Value |
+| --- | --- |
+| `Mcp-Method` | The JSON-RPC method of every request and notification |
+| `Mcp-Name` | `params.name` of `tools/call` and `prompts/get`; `params.uri` of `resources/read` |
+| `Mcp-Param-<Name>` | A `tools/call` argument whose schema property has `"x-mcp-header": "<Name>"` |
+
+`HTTPClientTransport` and `Client` send these headers on stateless
+connections. Values that are not printable ASCII, or that have leading or
+trailing whitespace, are sent as `=?base64?<Base64>?=`.
+
+`StatelessHTTPServerTransport` rejects a request whose `Mcp-Method` or
+`Mcp-Name` is missing or does not match the body, and `Server` rejects a
+`tools/call` whose `Mcp-Param-*` headers do not match its arguments. Both
+answer HTTP 400 with -32020. To check `Mcp-Param-*` headers, the server reads
+the input schemas from its `tools/list` handler, in one pass through all its
+pages (at most 100), on the first `tools/call` that needs them. It keeps them
+until it sends `ToolListChangedNotification` or the handler is replaced, so
+send that notification when the tool list changes. The check fails closed:
+a call with `Mcp-Param-*` headers is refused when the tool is not listed or
+the schemas cannot be read, and a call to a tool with an invalid annotation
+is always refused.
+
+Annotate a tool argument to mirror it into a header. Only `string`,
+`integer` and `boolean` properties can be mirrored; header names must be
+unique, case-insensitively, and a tool has at most 64 annotations, nested at
+most 32 `properties` deep:
+
+```swift
+Tool(
+    name: "query",
+    description: "Runs a query in a region",
+    inputSchema: [
+        "type": "object",
+        "properties": [
+            "region": ["type": "string", "x-mcp-header": "Region"],  // Mcp-Param-Region
+            "sql": ["type": "string"],
+        ],
+    ])
+```
+
+On stateless connections, tools with invalid annotations are left out of
+`tools/list` on both sides: the server does not list them and the client
+discards them. `MCPRequestHeaders` exposes the value encoding and annotation
+rules.
+
 ### Custom Transport Implementation
 
 You can implement a custom transport by conforming to the `Transport` protocol:

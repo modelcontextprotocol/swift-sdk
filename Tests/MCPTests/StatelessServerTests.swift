@@ -321,11 +321,25 @@ private actor ContextRecorder {
 
 // MARK: - HTTP
 
+/// A POST of `body`. At stateless versions, `Mcp-Method` and `Mcp-Name` are
+/// derived from the body unless `standardHeaders` is `false`; `extraHeaders`
+/// are applied last.
 private func statelessRequest(
-    _ body: String, version: String? = "2026-07-28", accept: String = "application/json, text/event-stream"
+    _ body: String, version: String? = "2026-07-28", accept: String = "application/json, text/event-stream",
+    standardHeaders: Bool = true, extraHeaders: [String: String] = [:]
 ) -> HTTPRequest {
     var headers = ["Content-Type": "application/json", "Accept": accept]
     if let version { headers["MCP-Protocol-Version"] = version }
+    if standardHeaders, let version, Version.profile(for: version).usesStandardHeaders,
+        let message = try? JSONDecoder().decode(Value.self, from: Data(body.utf8)).objectValue,
+        let method = message["method"]?.stringValue
+    {
+        headers[MCPRequestHeaders.method] = method
+        if let name = MCPRequestHeaders.nameValue(method: method, params: message["params"]) {
+            headers[MCPRequestHeaders.name] = MCPRequestHeaders.encode(name)
+        }
+    }
+    headers.merge(extraHeaders) { $1 }
     return HTTPRequest(method: "POST", headers: headers, body: Data(body.utf8), path: "/mcp")
 }
 
@@ -528,5 +542,349 @@ struct StatelessHTTPTests {
             matches: try wireJSON(
                 #"{"id":8,"error":{"code":-32022,"data":{"supported":["2025-11-25","2025-06-18","2025-03-26","2024-11-05"],"requested":"2026-07-28"}}}"#
             ))
+    }
+
+    // MARK: Request headers (SEP-2243)
+
+    private func headerServer() async -> Server {
+        let server = await makeServer()
+        await server.withMethodHandler(ListTools.self) { _ in
+            .init(tools: [
+                Tool(name: "echo", description: nil, inputSchema: ["type": "object"]),
+                Tool(
+                    name: "route", description: nil,
+                    inputSchema: [
+                        "type": "object",
+                        "properties": [
+                            "region": ["type": "string", "x-mcp-header": "Region"],
+                            "count": ["type": "integer", "x-mcp-header": "Count"],
+                            "note": ["type": "string"],
+                        ],
+                    ]),
+                Tool(
+                    name: "broken", description: nil,
+                    inputSchema: ["type": "object", "properties": ["data": ["type": "object", "x-mcp-header": "Data"]]]),
+            ])
+        }
+        await server.withMethodHandler(CallTool.self) { params in
+            .init(content: [.text(text: params.name, annotations: nil, _meta: nil)])
+        }
+        return server
+    }
+
+    @Test("Mcp-Method and Mcp-Name must match the body", arguments: [
+        (true, [:], 200),
+        (false, [:], 400),
+        (true, ["Mcp-Method": "TOOLS/CALL"], 400),
+        (true, ["Mcp-Name": "other"], 400),
+        (true, ["Mcp-Name": "  echo  "], 200),
+        (true, ["Mcp-Name": "=?base64?ZWNobw==?="], 200),
+        (false, ["Mcp-Method": "tools/call"], 400),
+        (false, ["mcp-method": "tools/call", "MCP-NAME": "echo"], 200),
+    ] as [(Bool, [String: String], Int)])
+    func testStandardHeaders(standard: Bool, headers: [String: String], status: Int) async throws {
+        let server = await headerServer()
+        let transport = try await start(server)
+        defer { Task { await server.stop() } }
+
+        let response = await transport.handleRequest(
+            statelessRequest(
+                #"{"jsonrpc":"2.0","id":"s","method":"tools/call","params":\#(statelessParams(#""name":"echo""#))}"#,
+                standardHeaders: standard, extraHeaders: headers))
+        #expect(response.statusCode == status)
+        if status == 400 {
+            expectWire(try bodyJSON(response), matches: try wireJSON(#"{"id":"s","error":{"code":-32020}}"#))
+        }
+    }
+
+    /// Duplicate member names resolve differently across parsers and
+    /// platforms, so whichever member the header names, the request is
+    /// either refused or served as the header says.
+    @Test("Duplicate members are checked as they are dispatched", arguments: [
+        (#""method":"tools/call","params":{"name":"echo","name":"route","#, "tools/call", "echo"),
+        (#""method":"tools/call","params":{"name":"echo","name":"route","#, "tools/call", "route"),
+        (#""method":"tools/call","method":"tools/list","params":{"name":"echo","#, "tools/call", "echo"),
+        (#""method":"tools/list","method":"tools/call","params":{"name":"echo","#, "tools/call", "echo"),
+        (#""method":"tools/call","method":"tools/list","params":{"name":"echo","#, "tools/list", nil),
+        (#""method":"tools/list","method":"tools/call","params":{"name":"echo","#, "tools/list", nil),
+    ] as [(String, String, String?)])
+    func testDuplicateMembers(members: String, method: String, name: String?) async throws {
+        let server = await headerServer()
+        let transport = try await start(server)
+        defer { Task { await server.stop() } }
+
+        var headers = ["Mcp-Method": method]
+        if let name { headers["Mcp-Name"] = name }
+        let response = await transport.handleRequest(
+            statelessRequest(
+                #"{"jsonrpc":"2.0","id":"d",\#(members)\#(statelessMeta)}}"#,
+                standardHeaders: false, extraHeaders: headers))
+        let result = try bodyJSON(response).objectValue?["result"]?.objectValue
+        if response.statusCode == 400 {
+            expectWire(try bodyJSON(response), matches: try wireJSON(#"{"id":"d","error":{"code":-32020}}"#))
+        } else if method == "tools/list" {
+            #expect(response.statusCode == 200)
+            #expect(result?["tools"] != nil)
+        } else {
+            #expect(response.statusCode == 200)
+            #expect(result?["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue == name)
+        }
+    }
+
+    @Test("Messages are forwarded in the form the headers were checked against")
+    func testForwardedAsChecked() async throws {
+        let transport = StatelessHTTPServerTransport(
+            validationPipeline: StandardValidationPipeline(validators: []))
+        try await transport.connect()
+        defer { Task { await transport.disconnect() } }
+        var messages = await transport.receive().makeAsyncIterator()
+
+        let progress = #""params":{"progressToken":"t","progress":0.1,\#(statelessMeta)}}"#
+        let duplicate = #"{"jsonrpc":"2.0","method":"notifications/progress","method":"notifications/message",\#(progress)"#
+        // Foundation keeps one of the two members: the first on Apple
+        // platforms, the last with swift-corelibs-foundation. The header names
+        // that one, so the check passes and the forwarded message must be it.
+        let parsed = try JSONSerialization.jsonObject(with: Data(duplicate.utf8)) as? [String: Any]
+        let kept = try #require(parsed?["method"] as? String)
+        let checked = await transport.handleRequest(
+            statelessRequest(duplicate, standardHeaders: false, extraHeaders: ["Mcp-Method": kept]))
+        try #require(checked.statusCode == 202)
+        let forwarded = String(decoding: try #require(try await messages.next()), as: UTF8.self)
+        #expect(forwarded.components(separatedBy: #""method""#).count == 2)
+        #expect(forwarded.contains(#""method":"\#(kept)""#))
+
+        // Without a header check, a message is forwarded byte for byte.
+        let legacy = #"{"jsonrpc":"2.0","method":"notifications/progress",\#(progress)"#
+        let unchecked = await transport.handleRequest(statelessRequest(legacy, version: nil))
+        #expect(unchecked.statusCode == 202)
+        #expect(try #require(try await messages.next()) == Data(legacy.utf8))
+    }
+
+    @Test("Without a tools/list handler, calls with Mcp-Param headers are refused")
+    func testParameterHeadersWithoutToolList() async throws {
+        let server = Server(name: "stateless", version: "2.0.0", capabilities: .init(tools: .init()))
+        await server.withMethodHandler(CallTool.self) { params in
+            .init(content: [.text(text: params.name, annotations: nil, _meta: nil)])
+        }
+        let transport = try await start(server)
+        defer { Task { await server.stop() } }
+
+        let body =
+            #"{"jsonrpc":"2.0","id":"n","method":"tools/call","params":\#(statelessParams(#""name":"route","arguments":{"region":"us"}"#))}"#
+        let refused = await transport.handleRequest(
+            statelessRequest(body, extraHeaders: ["Mcp-Param-Region": "us"]))
+        #expect(refused.statusCode == 400)
+        expectWire(try bodyJSON(refused), matches: try wireJSON(#"{"id":"n","error":{"code":-32020}}"#))
+        #expect(await transport.handleRequest(statelessRequest(body)).statusCode == 200)
+    }
+
+    @Test("Mcp-Param headers must match x-mcp-header arguments", arguments: [
+        (#"{"region":"us"}"#, ["Mcp-Param-Region": "us"], 200),
+        (#"{"region":"us"}"#, ["mcp-param-region": " us "], 200),
+        (#"{"region":"us"}"#, [:], 400),
+        (#"{}"#, ["Mcp-Param-Region": "us"], 400),
+        (#"{"region":null}"#, [:], 200),
+        (#"{"region":"Hello"}"#, ["Mcp-Param-Region": "=?base64?SGVsbG8=?="], 200),
+        (#"{"region":"Hello"}"#, ["Mcp-Param-Region": "=?base64?SGVsbG8?="], 400),
+        (#"{"region":"=?base64?SGVsbG8="}"#, ["Mcp-Param-Region": "=?base64?SGVsbG8="], 200),
+        (#"{"region":"us","count":3}"#, ["Mcp-Param-Region": "us", "Mcp-Param-Count": "3"], 200),
+        (#"{"region":"us","count":3}"#, ["Mcp-Param-Region": "us", "Mcp-Param-Count": "4"], 400),
+        (#"{"note":"n"}"#, [:], 200),
+    ] as [(String, [String: String], Int)])
+    func testParameterHeaders(arguments: String, headers: [String: String], status: Int) async throws {
+        let server = await headerServer()
+        let transport = try await start(server)
+        defer { Task { await server.stop() } }
+
+        let response = await transport.handleRequest(
+            statelessRequest(
+                #"{"jsonrpc":"2.0","id":"p","method":"tools/call","params":\#(statelessParams(#""name":"route","arguments":\#(arguments)"#))}"#,
+                extraHeaders: headers))
+        #expect(response.statusCode == status)
+        if status == 400 {
+            expectWire(try bodyJSON(response), matches: try wireJSON(#"{"id":"p","error":{"code":-32020}}"#))
+        }
+    }
+
+    @Test("Stateless tools/list omits tools with invalid x-mcp-header annotations")
+    func testInvalidAnnotationsNotListed() async throws {
+        let server = await headerServer()
+        let transport = try await start(server)
+        defer { Task { await server.stop() } }
+
+        func names(_ response: HTTPResponse) throws -> [String] {
+            try bodyJSON(response).objectValue?["result"]?.objectValue?["tools"]?.arrayValue?
+                .compactMap { $0.objectValue?["name"]?.stringValue } ?? []
+        }
+        let stateless = await transport.handleRequest(
+            statelessRequest(#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":\#(statelessParams())}"#))
+        #expect(try names(stateless) == ["echo", "route"])
+
+        let legacy = await transport.handleRequest(
+            statelessRequest(#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#, version: nil))
+        #expect(try names(legacy) == ["echo", "route", "broken"])
+    }
+}
+
+/// Counts `tools/list` handler calls.
+private actor CallCounter {
+    private(set) var count = 0
+    func increment() { count += 1 }
+}
+
+@Suite("Mcp-Param schema lookup")
+struct ParameterHeaderLookupTests {
+    private let routeSchema: Value = [
+        "type": "object",
+        "properties": ["region": ["type": "string", "x-mcp-header": "Region"]],
+    ]
+
+    /// A server whose `tools/list` handler is counted and lists `route` and
+    /// the invalid `broken`, over `pages` pages.
+    private func server(
+        counter: CallCounter, pages: Int = 1, failing: Bool = false
+    ) async -> Server {
+        let server = await makeServer()
+        let route = Tool(name: "route", description: nil, inputSchema: routeSchema)
+        let broken = Tool(
+            name: "broken", description: nil,
+            inputSchema: ["type": "object", "properties": ["data": ["type": "object", "x-mcp-header": "Data"]]])
+        await server.withMethodHandler(ListTools.self) { params in
+            await counter.increment()
+            if failing { throw MCPError.internalError("backend down") }
+            let page = Int(params.cursor ?? "0") ?? 0
+            let next = page + 1 < pages ? String(page + 1) : nil
+            return .init(tools: page == 0 ? [route, broken] : [], nextCursor: next)
+        }
+        await server.withMethodHandler(CallTool.self) { params in
+            .init(content: [.text(text: params.name, annotations: nil, _meta: nil)])
+        }
+        return server
+    }
+
+    private func start(_ server: Server) async throws -> StatelessHTTPServerTransport {
+        let transport = StatelessHTTPServerTransport(
+            validationPipeline: StandardValidationPipeline(validators: [
+                AcceptHeaderValidator(mode: .jsonOnly), ContentTypeValidator(), ProtocolVersionValidator(),
+            ]))
+        try await server.start(transport: transport)
+        return transport
+    }
+
+    private func call(
+        _ transport: StatelessHTTPServerTransport, tool: String, arguments: String = #"{"region":"us"}"#,
+        headers: [String: String] = ["Mcp-Param-Region": "us"]
+    ) async -> HTTPResponse {
+        await transport.handleRequest(
+            statelessRequest(
+                #"{"jsonrpc":"2.0","id":"c","method":"tools/call","params":\#(statelessParams(#""name":"\#(tool)","arguments":\#(arguments)"#))}"#,
+                extraHeaders: headers))
+    }
+
+    @Test("tools/list runs once for many calls, and again after the list changes")
+    func cachesSchemas() async throws {
+        let counter = CallCounter()
+        let server = await server(counter: counter)
+        let transport = try await start(server)
+        defer { Task { await server.stop() } }
+
+        for _ in 0..<5 {
+            #expect(await call(transport, tool: "route").statusCode == 200)
+        }
+        #expect(await counter.count == 1)
+
+        try? await server.notify(ToolListChangedNotification.message())
+        #expect(await call(transport, tool: "route").statusCode == 200)
+        #expect(await counter.count == 2)
+    }
+
+    @Test("Concurrent calls share one pass through tools/list")
+    func sharesOnePass() async throws {
+        let counter = CallCounter()
+        let server = await server(counter: counter, pages: 3)
+        let transport = try await start(server)
+        defer { Task { await server.stop() } }
+
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<10 {
+                group.addTask { _ = await call(transport, tool: "route") }
+            }
+        }
+        #expect(await counter.count == 3)
+    }
+
+    @Test("A call to an unlisted tool does not page tools/list again")
+    func unknownToolDoesNotPage() async throws {
+        let counter = CallCounter()
+        let server = await server(counter: counter, pages: 4)
+        let transport = try await start(server)
+        defer { Task { await server.stop() } }
+
+        for _ in 0..<3 {
+            _ = await call(transport, tool: "ghost", headers: [:])
+        }
+        #expect(await counter.count == 4)
+    }
+
+    @Test("Mcp-Param headers for an unlisted tool are refused; arguments alone pass")
+    func unlistedToolWithHeaders() async throws {
+        let server = await server(counter: CallCounter())
+        let transport = try await start(server)
+        defer { Task { await server.stop() } }
+
+        let refused = await call(transport, tool: "ghost")
+        #expect(refused.statusCode == 400)
+        expectWire(try bodyJSON(refused), matches: try wireJSON(#"{"id":"c","error":{"code":-32020}}"#))
+        #expect(await call(transport, tool: "ghost", headers: [:]).statusCode == 200)
+    }
+
+    @Test("A call to a tool hidden for an invalid annotation is refused")
+    func invalidToolIsRefused() async throws {
+        let server = await server(counter: CallCounter())
+        let transport = try await start(server)
+        defer { Task { await server.stop() } }
+
+        let response = await call(transport, tool: "broken", arguments: #"{"data":{}}"#, headers: [:])
+        #expect(response.statusCode == 400)
+        expectWire(try bodyJSON(response), matches: try wireJSON(#"{"id":"c","error":{"code":-32020}}"#))
+    }
+
+    @Test("When tools/list fails, calls with Mcp-Param headers are refused")
+    func failsClosed() async throws {
+        let server = await server(counter: CallCounter(), failing: true)
+        let transport = try await start(server)
+        defer { Task { await server.stop() } }
+
+        #expect(await call(transport, tool: "route").statusCode == 400)
+        #expect(await call(transport, tool: "route", headers: [:]).statusCode == 200)
+    }
+
+    @Test("A page cap that is reached refuses calls with Mcp-Param headers")
+    func pageCapFailsClosed() async throws {
+        let counter = CallCounter()
+        let server = await server(counter: counter, pages: 1_000)
+        let transport = try await start(server)
+        defer { Task { await server.stop() } }
+
+        #expect(await call(transport, tool: "route").statusCode == 400)
+        #expect(await counter.count == 100)
+    }
+
+    @Test("A refused stateless client does not reach tools/list")
+    func runsAfterTheHook() async throws {
+        let counter = CallCounter()
+        let server = await server(counter: counter)
+        let transport = StatelessHTTPServerTransport(
+            validationPipeline: StandardValidationPipeline(validators: [
+                AcceptHeaderValidator(mode: .jsonOnly), ContentTypeValidator(), ProtocolVersionValidator(),
+            ]))
+        try await server.start(
+            transport: transport, initializeHook: { _, _ in },
+            statelessRequestHook: { _, _ in throw MCPError.invalidRequest("not allowed") })
+        defer { Task { await server.stop() } }
+
+        let response = await call(transport, tool: "route")
+        expectWire(try bodyJSON(response), matches: try wireJSON(#"{"id":"c","error":{"code":-32600}}"#))
+        #expect(await counter.count == 0)
     }
 }

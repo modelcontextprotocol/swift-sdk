@@ -231,7 +231,8 @@ struct OutgoingMessageTests {
                 #"{"jsonrpc":"2.0","id":7,"method":" tools/call ","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}"#
                     .utf8))
         #expect(message.requestID == "7")
-        #expect(message.method == "tools/call")
+        #expect(message.method == " tools/call ")
+        #expect(message.operationKey == "tools/call")
         #expect(message.protocolVersion == "2026-07-28")
         #expect(message.cancelledRequestID == nil)
     }
@@ -245,6 +246,11 @@ struct OutgoingMessageTests {
             Data(#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"r1"}}"#.utf8))
         #expect(cancelled.requestID == nil)
         #expect(cancelled.cancelledRequestID == "r1")
+        let read = OutgoingMessage(
+            Data(#"{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"file:///a","name":"x"}}"#.utf8))
+        #expect(read.nameValue == "file:///a")
+        let call = OutgoingMessage(Data(#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo"}}"#.utf8))
+        #expect(call.nameValue == "echo")
         let batch = OutgoingMessage(Data(#"[{"jsonrpc":"2.0","id":1,"method":"ping"}]"#.utf8))
         #expect(batch.requestID == nil)
     }

@@ -15,6 +15,8 @@ import Logging
 ///   for the request (progress, logging) and the client accepts
 ///   `text/event-stream`, the response is an SSE stream that carries those
 ///   notifications and ends with the response.
+/// - On 2026-07-28 requests, `Mcp-Method` and `Mcp-Name` must match the body
+///   (SEP-2243); a mismatch is answered with 400 and -32020.
 /// - On 2026-07-28 requests, JSON-RPC errors use HTTP status codes:
 ///   404 for -32601; 400 for -32600, -32602 and -32020 to -32022.
 /// - Each request is given a unique internal JSON-RPC id while in flight, so
@@ -231,12 +233,19 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
             return .error(statusCode: 400, .parseError("Empty request body"))
         }
 
-        guard let messageKind = JSONRPCMessageKind(data: body) else {
+        // Parsers resolve duplicate member names differently (JSONSerialization
+        // on Linux keeps the last, JSONDecoder the first). Check and dispatch
+        // one re-serialized form, which has none, so the headers are checked
+        // against the values the server reads.
+        guard let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+            let messageKind = JSONRPCMessageKind(json: json),
+            let normalized = try? JSONSerialization.data(withJSONObject: json, options: [.withoutEscapingSlashes])
+        else {
             return .error(statusCode: 400, .parseError("Invalid JSON-RPC message"))
         }
 
         // One probe for the id and the `_meta` version.
-        let fields = JSONRPCMessageFields.requestFields(in: body)
+        let fields = JSONRPCMessageFields.requestFields(in: normalized)
         var requestID: ID?
         if case .request = messageKind {
             requestID = fields.id
@@ -253,9 +262,13 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
             return errorResponse.withRequestID(requestID)
         }
 
+        if let mismatch = Self.standardHeaderError(request, fields: fields) {
+            return .error(statusCode: 400, mismatch, id: requestID)
+        }
+
         switch messageKind {
         case .notification(let method) where method == CancelledNotification.name:
-            if let cancellation = cancellation(body, request: request) {
+            if let cancellation = cancellation(normalized, request: request) {
                 incomingContinuation.yield(cancellation)
             } else {
                 logger.debug("notifications/cancelled matches no request in flight; ignored")
@@ -263,7 +276,8 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
             return .accepted()
 
         case .notification, .response:
-            incomingContinuation.yield(body)
+            // Forwarded as received unless the headers were checked against it.
+            incomingContinuation.yield(Self.usesStandardHeaders(request) ? normalized : body)
             return .accepted()
 
         case .request:
@@ -274,7 +288,7 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
                 return .error(statusCode: 400, mismatch, id: requestID)
             }
             return await handleJSONRPCRequest(
-                body,
+                normalized,
                 clientID: requestID,
                 isStateless: request.statelessProtocolVersion != nil,
                 request: request
@@ -298,6 +312,41 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
             return .headerMismatch(
                 "\(HTTPHeaderName.protocolVersion) header (\(header)) does not match _meta version \(metaVersion)"
             )
+        }
+        return nil
+    }
+
+    /// Whether the request's protocol revision defines `Mcp-Method` and
+    /// `Mcp-Name` (SEP-2243).
+    private static func usesStandardHeaders(_ request: HTTPRequest) -> Bool {
+        request.statelessProtocolVersion.map { Version.profile(for: $0).usesStandardHeaders } ?? false
+    }
+
+    /// Checks `Mcp-Method` and `Mcp-Name` against the body (SEP-2243).
+    ///
+    /// Applies to protocol revisions that define the headers. Values are
+    /// case-sensitive; surrounding whitespace is ignored.
+    private static func standardHeaderError(
+        _ request: HTTPRequest, fields: JSONRPCMessageFields.RequestFields
+    ) -> MCPError? {
+        guard usesStandardHeaders(request), let method = fields.method else { return nil }
+
+        let methodHeader = request.header(MCPRequestHeaders.method)?
+            .trimmingCharacters(in: .whitespaces)
+        guard let methodHeader else {
+            return .headerMismatch("Missing \(MCPRequestHeaders.method) header")
+        }
+        guard methodHeader == method else {
+            return .headerMismatch(
+                "\(MCPRequestHeaders.method) header \(methodHeader) does not match method \(method)")
+        }
+
+        guard let expected = fields.nameValue else { return nil }
+        guard let raw = request.header(MCPRequestHeaders.name) else {
+            return .headerMismatch("Missing \(MCPRequestHeaders.name) header")
+        }
+        guard MCPRequestHeaders.decode(raw) == expected else {
+            return .headerMismatch("\(MCPRequestHeaders.name) header does not match the request")
         }
         return nil
     }
@@ -477,19 +526,25 @@ enum JSONRPCMessageFields {
     /// hide the others.
     private struct Probe: Decodable {
         let id: ID?
+        let method: String?
+        let name: String?
+        let uri: String?
         let protocolVersion: String?
         let errorCode: Int?
 
         private enum Keys: String, CodingKey {
-            case id, params, error, _meta, code
+            case id, method, params, error, _meta, code, name, uri
             case protocolVersion = "io.modelcontextprotocol/protocolVersion"
         }
 
         init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: Keys.self)
             id = try? container.decodeIfPresent(ID.self, forKey: .id)
-            let meta = try? container.nestedContainer(keyedBy: Keys.self, forKey: .params)
-                .nestedContainer(keyedBy: Keys.self, forKey: ._meta)
+            method = try? container.decodeIfPresent(String.self, forKey: .method)
+            let params = try? container.nestedContainer(keyedBy: Keys.self, forKey: .params)
+            name = try? params?.decodeIfPresent(String.self, forKey: .name)
+            uri = try? params?.decodeIfPresent(String.self, forKey: .uri)
+            let meta = try? params?.nestedContainer(keyedBy: Keys.self, forKey: ._meta)
             // An empty version is malformed, like one that is not a string:
             // read it as absent, so `Server` answers -32602 for both.
             let version = try? meta?.decodeIfPresent(String.self, forKey: .protocolVersion)
@@ -509,12 +564,26 @@ enum JSONRPCMessageFields {
         return id
     }
 
-    /// The `id` and the `params._meta` protocol version of a message, from
-    /// one decode.
-    static func requestFields(in data: Data) -> (id: ID?, metaProtocolVersion: String?) {
+    /// The members of a request the transport reads, from one decode.
+    struct RequestFields {
+        var id: ID?
+        var method: String?
+        /// The `Mcp-Name` value: `params.name` or `params.uri` by method.
+        var nameValue: String?
+        var metaProtocolVersion: String?
+    }
+
+    /// The `id`, method, `Mcp-Name` value and `params._meta` protocol
+    /// version of a message, from one decode.
+    static func requestFields(in data: Data) -> RequestFields {
         let probe = probe(data)
-        let id = probe?.id == .string("") ? nil : probe?.id
-        return (id, probe?.protocolVersion)
+        return RequestFields(
+            id: probe?.id == .string("") ? nil : probe?.id,
+            method: probe?.method,
+            nameValue: probe?.method.flatMap {
+                MCPRequestHeaders.nameValue(method: $0, name: probe?.name, uri: probe?.uri)
+            },
+            metaProtocolVersion: probe?.protocolVersion)
     }
 
     /// The message with its `id` replaced, and its `error.code` if it is an

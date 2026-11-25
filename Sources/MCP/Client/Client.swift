@@ -239,6 +239,8 @@ public actor Client {
     public private(set) var serverInfo: Server.Info?
     /// The server instructions
     private var instructions: String?
+    /// `x-mcp-header` arguments of listed tools, by tool name.
+    private(set) var toolHeaderParameters: [String: [MCPRequestHeaders.Parameter]] = [:]
     /// Whether the connection uses a stateless revision (2026-07-28 and later),
     /// where every request carries its `_meta` envelope.
     public var isStateless: Bool {
@@ -291,6 +293,7 @@ public actor Client {
         serverInfo = nil
         instructions = nil
         self.connection = transport
+        toolHeaderParameters = [:]
         try await self.connection?.connect()
 
         await logger?.debug(
@@ -386,6 +389,7 @@ public actor Client {
         self.task = nil
         self.connection = nil
         self.pendingRequests = [:]  // Use empty dictionary literal
+        self.toolHeaderParameters = [:]
 
         // Part 2: Outside actor - Resume continuations, disconnect transport, await task
 
@@ -499,13 +503,21 @@ public actor Client {
         }
 
         var request = request
+        var headers: [String: String] = [:]
         if isStateless, let version = negotiatedProtocolVersion {
             request._meta = requestMeta(version: version, merging: request._meta)
+            if let call = request.params as? CallTool.Parameters,
+                let parameters = toolHeaderParameters[call.name]
+            {
+                headers = MCPRequestHeaders.parameterHeaders(
+                    parameters, arguments: call.arguments.map(Value.object))
+            }
         }
         let requestData = try encoder.encode(request)
+        let firstToolPage = (request.params as? ListTools.Parameters).map { $0.cursor == nil } ?? false
 
         let requestTask = Task<M.Result, Error> {
-            try await withCheckedThrowingContinuation { continuation in
+            let value: M.Result = try await withCheckedThrowingContinuation { continuation in
                 Task {
                     // Add the pending request before attempting to send
                     self.addPendingRequest(
@@ -516,7 +528,11 @@ public actor Client {
 
                     // Send the request data
                     do {
-                        try await connection.send(requestData)
+                        if !headers.isEmpty {
+                            try await connection.send(requestData, additionalHeaders: headers)
+                        } else {
+                            try await connection.send(requestData)
+                        }
                     } catch {
                         // If send fails, try to remove the pending request.
                         if self.removePendingRequest(id: request.id) != nil {
@@ -525,6 +541,12 @@ public actor Client {
                     }
                 }
             }
+            if let listed = value as? ListTools.Result,
+                let filtered = await self.recordTools(listed, firstPage: firstToolPage)
+            {
+                return filtered as! M.Result
+            }
+            return value
         }
 
         return RequestContext(requestID: request.id, requestTask: requestTask)
@@ -761,6 +783,41 @@ public actor Client {
         try await notify(InitializedNotification.message())
 
         return result
+    }
+
+    /// Records the `x-mcp-header` arguments of each listed tool and drops
+    /// tools with invalid annotations, at revisions that define
+    /// `Mcp-Param-*` headers (SEP-2243). Returns `nil` at other revisions.
+    /// A first page (no cursor) replaces what earlier listings recorded.
+    ///
+    /// The record is replaced in one step before the warnings are logged:
+    /// logging awaits the transport's logger, and a `tools/call` sent
+    /// meanwhile must find every tool of the page.
+    private func recordTools(_ result: ListTools.Result, firstPage: Bool) async -> ListTools.Result? {
+        guard let version = negotiatedProtocolVersion, Version.profile(for: version).usesStandardHeaders
+        else { return nil }
+        var recorded = firstPage ? [:] : toolHeaderParameters
+        var valid: [Tool] = []
+        var rejected: [(tool: String, error: String)] = []
+        for tool in result.tools {
+            do {
+                recorded[tool.name] = try tool.headerParameters()
+                valid.append(tool)
+            } catch {
+                recorded[tool.name] = nil
+                rejected.append((MCPRequestHeaders.sanitized(tool.name), "\(error)"))
+            }
+        }
+        toolHeaderParameters = recorded
+        for (tool, error) in rejected {
+            await logger?.warning(
+                "Ignoring tool with an invalid x-mcp-header annotation",
+                metadata: ["tool": "\(tool)", "error": "\(error)"])
+        }
+        guard valid.count != result.tools.count else { return result }
+        return ListTools.Result(
+            tools: valid, nextCursor: result.nextCursor, _meta: result._meta,
+            ttlMs: result.ttlMs, cacheScope: result.cacheScope)
     }
 
     /// The `_meta` envelope of a stateless request; keys already in `existing` win.
