@@ -22,6 +22,22 @@ import MCP
 
 typealias ScenarioHandler = ([String]) async throws -> Void
 
+/// The protocol mode for the harness leg: discover-first at 2026-07-28 and
+/// later (and outside the harness), the `initialize` handshake otherwise.
+let conformanceProtocolMode: Client.ProtocolMode = {
+    guard let version = ProcessInfo.processInfo.environment["MCP_CONFORMANCE_PROTOCOL_VERSION"],
+        Version.handshake.contains(version)
+    else { return .automatic }
+    return .handshake
+}()
+
+/// A client configured for the harness leg.
+func makeConformanceClient(capabilities: Client.Capabilities = .init()) -> Client {
+    Client(
+        name: "test-client", version: "1.0.0", capabilities: capabilities,
+        configuration: .init(protocolMode: conformanceProtocolMode))
+}
+
 // MARK: - Authorization Scenarios
 
 private func loadConformanceContext() -> [String: String] {
@@ -330,7 +346,7 @@ func runAuthorizationScenario(scenario: String, args: [String]) async throws {
         logger: logger
     )
 
-    let client = Client(name: "test-client", version: "1.0.0")
+    let client = makeConformanceClient()
 
     // Scenarios that expect the connection to fail with a specific error.
     if scenario == "auth/resource-mismatch" {
@@ -392,7 +408,7 @@ func runInitializeScenario(_ args: [String]) async throws {
     )
 
     // Create client
-    let client = Client(name: "test-client", version: "1.0.0")
+    let client = makeConformanceClient()
 
     // Connect
     let initResult = try await client.connect(transport: transport)
@@ -436,7 +452,7 @@ func runToolsCallScenario(_ args: [String]) async throws {
     )
 
     // Create client
-    let client = Client(name: "test-client", version: "1.0.0")
+    let client = makeConformanceClient()
 
     // Connect
     try await client.connect(transport: transport)
@@ -483,7 +499,7 @@ func runJSONSchemaPreservationScenario(_ args: [String]) async throws {
         throw ConformanceError.invalidArguments("Valid server URL is required")
     }
 
-    let client = Client(name: "test-client", version: "1.0.0")
+    let client = makeConformanceClient()
     try await client.connect(transport: HTTPClientTransport(endpoint: serverURL, logger: logger))
 
     let (tools, _) = try await client.listTools()
@@ -492,6 +508,40 @@ func runJSONSchemaPreservationScenario(_ args: [String]) async throws {
     }
     _ = try await client.callTool(name: "json_schema_echo", arguments: ["schema": focal.inputSchema])
 
+    await client.disconnect()
+}
+
+/// Connects with every client capability declared, then lists tools and
+/// calls `add_numbers`. The harness checks each request's `_meta` envelope and
+/// `MCP-Protocol-Version` header (SEP-2575).
+func runRequestMetadataScenario(_ args: [String]) async throws {
+    guard let serverURLString = args.last, let serverURL = URL(string: serverURLString) else {
+        throw ConformanceError.invalidArguments("Valid server URL is required")
+    }
+    let client = makeConformanceClient(
+        capabilities: Client.Capabilities(
+            sampling: .init(), elicitation: .init(form: .init(), url: .init()),
+            roots: .init(listChanged: true)))
+    await client.withSamplingHandler { _ in
+        CreateSamplingMessage.Result(model: "stub", stopReason: .endTurn, role: .assistant, content: .text("stub"))
+    }
+    await client.withElicitationHandler { _ in CreateElicitation.Result(action: .decline) }
+    await client.withRootsHandler { [] }
+
+    try await client.connect(transport: HTTPClientTransport(endpoint: serverURL))
+    _ = try await client.listTools()
+    _ = try await client.callTool(name: "add_numbers", arguments: ["a": 5, "b": 3])
+    await client.disconnect()
+}
+
+/// Lists tools; the scenario fails if the client fetches a network `$ref` (SEP-2106).
+func runJSONSchemaRefNoDerefScenario(_ args: [String]) async throws {
+    guard let serverURLString = args.last, let serverURL = URL(string: serverURLString) else {
+        throw ConformanceError.invalidArguments("Valid server URL is required")
+    }
+    let client = makeConformanceClient()
+    try await client.connect(transport: HTTPClientTransport(endpoint: serverURL))
+    _ = try await client.listTools()
     await client.disconnect()
 }
 
@@ -521,7 +571,7 @@ func runSSEScenario(_ args: [String]) async throws {
     )
 
     // Create client
-    let client = Client(name: "test-client", version: "1.0.0")
+    let client = makeConformanceClient()
 
     // Connect - this will start the SSE stream in the background
     let initResult = try await client.connect(transport: transport)
@@ -577,9 +627,7 @@ func runElicitationSEP1034ClientDefaults(_ args: [String]) async throws {
     )
 
     // Create client with elicitation capabilities
-    let client = Client(
-        name: "test-client",
-        version: "1.0.0",
+    let client = makeConformanceClient(
         capabilities: Client.Capabilities(
             elicitation: Client.Capabilities.Elicitation(form: .init(), url: .init())
         )
@@ -669,7 +717,7 @@ func runDefaultScenario(_ args: [String]) async throws {
     )
 
     // Create client
-    let client = Client(name: "test-client", version: "1.0.0")
+    let client = makeConformanceClient()
 
     // Connect
     let initResult = try await client.connect(transport: transport)
@@ -692,6 +740,8 @@ nonisolated(unsafe) let scenarioHandlers: [String: ScenarioHandler] = [
     "sse-retry": runSSEScenario,
     "elicitation-sep1034-client-defaults": runElicitationSEP1034ClientDefaults,
     "json-schema-2020-12-preservation": runJSONSchemaPreservationScenario,
+    "json-schema-ref-no-deref": runJSONSchemaRefNoDerefScenario,
+    "request-metadata": runRequestMetadataScenario,
 ]
 
 // MARK: - Error Types

@@ -320,7 +320,9 @@ package enum JSONRPCMessageKind {
         return false
     }
 
-    private static func extractID(from json: [String: Any]) -> String? {
+    /// A message's `id`, rendered as a string; `nil` when absent or not a
+    /// string or an integer.
+    package static func extractID(from json: [String: Any]) -> String? {
         if let stringID = json["id"] as? String {
             return stringID
         } else if let intID = json["id"] as? Int {

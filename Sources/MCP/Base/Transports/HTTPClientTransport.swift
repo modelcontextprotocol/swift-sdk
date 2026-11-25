@@ -80,6 +80,8 @@ public actor HTTPClientTransport: Transport {
     private let authorizer: (any HTTPClientAuthorizer)?
 
     private var isConnected = false
+    /// Whether the connection uses a stateless revision.
+    private var isStateless = false
     private let messageStream: AsyncThrowingStream<Data, Swift.Error>
     private let messageContinuation: AsyncThrowingStream<Data, Swift.Error>.Continuation
 
@@ -291,15 +293,28 @@ public actor HTTPClientTransport: Transport {
         self.protocolVersion = version
     }
 
+    /// Switches the transport to a stateless revision (2026-07-28 and later):
+    /// no session ID and no standalone GET stream.
+    public func useStatelessProtocol(_ version: String) {
+        protocolVersion = version
+        isStateless = true
+        sessionID = nil
+        streamingTask?.cancel()
+        streamingTask = nil
+        initialSessionIDSignalled = true
+        initialSessionIDContinuation?.resume()
+        initialSessionIDContinuation = nil
+    }
+
     /// Sends data through an HTTP POST request.
     ///
     /// A request's POST, including the resumption of its response stream,
     /// runs until its response arrives, ``disconnect()`` is called, or the
     /// client sends `notifications/cancelled` for it.
     public func send(_ data: Data) async throws {
-        switch JSONRPCMessageKind(data: data) {
-        case .request(let id, _):
-            let task = Task { try await self.post(data) }
+        let message = OutgoingMessage(data)
+        if let id = message.requestID {
+            let task = Task { try await self.post(message) }
             inFlightPosts[id] = task
             defer { inFlightPosts[id] = nil }
             try await withTaskCancellationHandler {
@@ -307,19 +322,25 @@ public actor HTTPClientTransport: Transport {
             } onCancel: {
                 task.cancel()
             }
-        case .notification:
-            // The client ignores a cancelled request's response: stop reading
-            // and resuming its stream.
-            if let cancelled = JSONRPCMessageKind.cancelledRequestID(in: data) {
-                inFlightPosts[cancelled]?.cancel()
-            }
-            try await post(data)
-        default:
-            try await post(data)
+            return
         }
+        // The client ignores a cancelled request's response: stop reading
+        // and resuming its stream.
+        if let cancelled = message.cancelledRequestID {
+            inFlightPosts[cancelled]?.cancel()
+        }
+        try await post(message)
     }
 
-    private func post(_ data: Data) async throws {
+    /// Aborts the POST that carries request `id`, closing its response stream.
+    ///
+    /// At protocol 2026-07-28 this is how a request is cancelled: the server
+    /// sees the client disconnect.
+    public func cancelRequest(_ id: ID) {
+        inFlightPosts[id.description]?.cancel()
+    }
+
+    private func post(_ message: OutgoingMessage) async throws {
         guard isConnected else {
             throw MCPError.internalError("Transport not connected")
         }
@@ -339,7 +360,9 @@ public actor HTTPClientTransport: Transport {
         }
 
         var attempts = 0
-        let operationKey = jsonRPCOperationKey(from: data)
+        let operationKey = message.method
+        // A stateless request names its version in `_meta`; the header must match.
+        let version = message.protocolVersion ?? protocolVersion
 
         while true {
             var request = URLRequest(url: endpoint)
@@ -349,13 +372,13 @@ public actor HTTPClientTransport: Transport {
                 forHTTPHeaderField: HTTPHeaderName.accept
             )
             request.addValue(ContentType.json, forHTTPHeaderField: HTTPHeaderName.contentType)
-            request.httpBody = data
+            request.httpBody = message.data
 
-            if let protocolVersion = protocolVersion {
-                request.addValue(protocolVersion, forHTTPHeaderField: HTTPHeaderName.protocolVersion)
+            if let version {
+                request.addValue(version, forHTTPHeaderField: HTTPHeaderName.protocolVersion)
             }
 
-            if let sessionID = sessionID {
+            if let sessionID = sessionID, !isStateless {
                 request.addValue(sessionID, forHTTPHeaderField: HTTPHeaderName.sessionID)
             }
 
@@ -368,10 +391,10 @@ public actor HTTPClientTransport: Transport {
             do {
                 #if os(Linux)
                     let (responseData, response) = try await session.data(for: request)
-                    try await processResponse(response: response, data: responseData)
+                    try await processResponse(response: response, data: responseData, request: message)
                 #else
                     let (responseStream, response) = try await session.bytes(for: request)
-                    try await processResponse(response: response, stream: responseStream, request: data)
+                    try await processResponse(response: response, stream: responseStream, request: message)
                 #endif
                 return
             } catch let authError as HTTPAuthenticationChallengeError {
@@ -405,38 +428,8 @@ public actor HTTPClientTransport: Transport {
     }
 
     #if os(Linux)
-        private func processResponse(response: URLResponse, data: Data) async throws {
-            guard let httpResponse = response as? HTTPURLResponse else {
-                throw MCPError.internalError("Invalid HTTP response")
-            }
-
-            let contentType = httpResponse.value(forHTTPHeaderField: HTTPHeaderName.contentType) ?? ""
-
-            if let newSessionID = httpResponse.value(forHTTPHeaderField: HTTPHeaderName.sessionID) {
-                let wasSessionIDNil = (self.sessionID == nil)
-                self.sessionID = newSessionID
-                if wasSessionIDNil {
-                    triggerInitialSessionIDSignal()
-                }
-                logger.debug("Session ID received", metadata: ["sessionID": "\(newSessionID)"])
-            }
-
-            try processHTTPResponse(httpResponse, contentType: contentType)
-            guard case 200..<300 = httpResponse.statusCode else { return }
-
-            if contentType.contains(ContentType.sse) {
-                logger.warning("SSE responses aren't fully supported on Linux")
-                messageContinuation.yield(data)
-            } else if contentType.contains(ContentType.json) {
-                logger.trace("Received JSON response", metadata: ["size": "\(data.count)"])
-                messageContinuation.yield(data)
-            } else {
-                logger.warning("Unexpected content type: \(contentType)")
-            }
-        }
-    #else
         private func processResponse(
-            response: URLResponse, stream: URLSession.AsyncBytes, request requestData: Data
+            response: URLResponse, data: Data, request message: OutgoingMessage
         ) async throws {
             guard let httpResponse = response as? HTTPURLResponse else {
                 throw MCPError.internalError("Invalid HTTP response")
@@ -453,14 +446,60 @@ public actor HTTPClientTransport: Transport {
                 logger.debug("Session ID received", metadata: ["sessionID": "\(newSessionID)"])
             }
 
+            if Self.mayCarryPeerError(httpResponse.statusCode),
+                deliverErrorResponse(data, contentType: contentType, status: httpResponse.statusCode, request: message)
+            {
+                return
+            }
+            try processHTTPResponse(httpResponse, contentType: contentType)
+            guard case 200..<300 = httpResponse.statusCode else { return }
+
+            if contentType.contains(ContentType.sse) {
+                logger.warning("SSE responses aren't fully supported on Linux")
+                messageContinuation.yield(data)
+            } else if contentType.contains(ContentType.json) {
+                logger.trace("Received JSON response", metadata: ["size": "\(data.count)"])
+                messageContinuation.yield(data)
+            } else {
+                logger.warning("Unexpected content type: \(contentType)")
+            }
+        }
+    #else
+        private func processResponse(
+            response: URLResponse, stream: URLSession.AsyncBytes, request message: OutgoingMessage
+        ) async throws {
+            guard let httpResponse = response as? HTTPURLResponse else {
+                throw MCPError.internalError("Invalid HTTP response")
+            }
+
+            let contentType = httpResponse.value(forHTTPHeaderField: HTTPHeaderName.contentType) ?? ""
+
+            if let newSessionID = httpResponse.value(forHTTPHeaderField: HTTPHeaderName.sessionID) {
+                let wasSessionIDNil = (self.sessionID == nil)
+                self.sessionID = newSessionID
+                if wasSessionIDNil {
+                    triggerInitialSessionIDSignal()
+                }
+                logger.debug("Session ID received", metadata: ["sessionID": "\(newSessionID)"])
+            }
+
+            if Self.mayCarryPeerError(httpResponse.statusCode), contentType.contains(ContentType.json) {
+                var body = Data()
+                for try await byte in stream {
+                    body.append(byte)
+                    if body.count > 1 << 20 { break }
+                }
+                if deliverErrorResponse(body, contentType: contentType, status: httpResponse.statusCode, request: message) {
+                    return
+                }
+            }
             try processHTTPResponse(httpResponse, contentType: contentType)
             guard case 200..<300 = httpResponse.statusCode else { return }
 
             if contentType.contains(ContentType.sse) {
                 logger.trace("Received SSE response, processing in streaming task")
                 // The response this stream owes, if the POST carried a request.
-                var awaited: String?
-                if case .request(let id, _) = JSONRPCMessageKind(data: requestData) { awaited = id }
+                let awaited = message.requestID
                 var lastEventID: String?
                 var retry: Int?
                 var responded = false
@@ -474,7 +513,7 @@ public actor HTTPClientTransport: Transport {
                 }
                 if let awaited, !responded, !Task.isCancelled {
                     try await resumeResponseStream(
-                        after: lastEventID, retry: retry, awaiting: awaited, request: requestData)
+                        after: lastEventID, retry: retry, awaiting: awaited, request: message)
                 }
             } else if contentType.contains(ContentType.json) {
                 var buffer = Data()
@@ -495,7 +534,7 @@ public actor HTTPClientTransport: Transport {
             return
 
         case 400:
-            throw MCPError.internalError("Bad request")
+            throw MCPError.internalError(StatusMessage.badRequest)
 
         case 401:
             throw HTTPAuthenticationChallengeError(
@@ -515,14 +554,14 @@ public actor HTTPClientTransport: Transport {
                 sessionID = nil
                 throw MCPError.internalError("Session expired")
             }
-            throw MCPError.internalError("Endpoint not found")
+            throw MCPError.internalError(StatusMessage.notFound)
 
         case 405:
             if streaming {
                 self.streamingTask?.cancel()
-                throw MCPError.internalError("Server does not support streaming")
+                throw MCPError.internalError(StatusMessage.streamingUnsupported)
             }
-            throw MCPError.internalError("Method not allowed")
+            throw MCPError.internalError(StatusMessage.methodNotAllowed)
 
         case 408:
             throw MCPError.internalError("Request timeout")
@@ -559,16 +598,56 @@ public actor HTTPClientTransport: Transport {
         return headers
     }
 
-    private func jsonRPCOperationKey(from data: Data) -> String? {
-        guard
-            let jsonObject = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-            let method = jsonObject["method"] as? String
-        else {
-            return nil
+    /// Delivers the JSON-RPC error a non-2xx reply carries for the POSTed request.
+    ///
+    /// Servers at 2026-07-28 answer protocol errors with HTTP 4xx and a
+    /// JSON-RPC body. Only an `error` whose ID is the request's ID is
+    /// delivered: any other body (a `result`, a placeholder or foreign ID, a
+    /// batch) leaves the request to fail with the status error. Returns
+    /// `true` when the error was delivered. Callers check
+    /// `mayCarryPeerError(_:)` first.
+    private func deliverErrorResponse(
+        _ body: Data, contentType: String, status: Int, request message: OutgoingMessage
+    ) -> Bool {
+        guard contentType.contains(ContentType.json),
+            let requestID = message.requestID,
+            let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+            json["error"] is [String: Any], json["result"] == nil,
+            JSONRPCMessageKind.extractID(from: json) == requestID
+        else { return false }
+        if status == 404, sessionID != nil {
+            logger.warning("Session has expired")
+            sessionID = nil
         }
+        messageContinuation.yield(body)
+        return true
+    }
 
-        let normalized = method.trimmingCharacters(in: .whitespacesAndNewlines)
-        return normalized.isEmpty ? nil : normalized
+    /// Whether a JSON-RPC error on a reply with `status` is the peer's
+    /// answer to the request: a 4xx other than 401 and 403 (authorization),
+    /// 408 and 429. Those, and 5xx, report that the server could not answer
+    /// (a server shutting down answers 503 with `connectionClosed`), so they
+    /// fail the request with the status error even when the body has a
+    /// JSON-RPC error for it.
+    private static func mayCarryPeerError(_ status: Int) -> Bool {
+        (400..<500).contains(status) && ![401, 403, 408, 429].contains(status)
+    }
+
+    /// Whether `error` reports a 400, 404 or 405 reply without a JSON-RPC
+    /// answer for the request: how a server that serves only the handshake
+    /// refuses a request without a session.
+    package static func isSessionlessRefusal(_ error: Swift.Error) -> Bool {
+        guard case .internalError(let detail?) = error as? MCPError else { return false }
+        return [StatusMessage.badRequest, StatusMessage.notFound, StatusMessage.methodNotAllowed,
+            StatusMessage.streamingUnsupported].contains(detail)
+    }
+
+    /// Error details for HTTP status replies.
+    enum StatusMessage {
+        static let badRequest = "Bad request"
+        static let notFound = "Endpoint not found"
+        static let methodNotAllowed = "Method not allowed"
+        static let streamingUnsupported = "Server does not support streaming"
     }
 
     /// Receives data in an async sequence
@@ -696,7 +775,8 @@ public actor HTTPClientTransport: Transport {
                 logger.info("→ Connecting to SSE stream (no last event ID to resume from)")
             }
 
-            let (stream, httpResponse) = try await openEventStream(lastEventID: lastEventID)
+            let (stream, httpResponse) = try await openEventStream(
+                lastEventID: lastEventID, protocolVersion: protocolVersion)
 
             guard httpResponse.statusCode == 200 else {
                 stream.task.cancel()
@@ -729,7 +809,7 @@ public actor HTTPClientTransport: Transport {
         /// given. A 401 or 403 goes to the authorizer, as for a POST, and the
         /// GET is retried while it handles the challenge.
         private func openEventStream(
-            lastEventID: String?
+            lastEventID: String?, protocolVersion: String?
         ) async throws -> (URLSession.AsyncBytes, HTTPURLResponse) {
             if let authorizer {
                 try? await authorizer.prepareAuthorization(for: endpoint, session: session)
@@ -791,10 +871,17 @@ public actor HTTPClientTransport: Transport {
         /// resumability, SEP-1699): a GET with the stream's own last event ID,
         /// repeated while the server closes the stream again. Without an event
         /// ID, or when the server refuses the GET, the request fails with an
-        /// error instead of waiting forever.
+        /// error instead of waiting forever. Revisions without sessions
+        /// (2026-07-28) have no resumability: the request fails at once.
         private func resumeResponseStream(
-            after eventID: String?, retry: Int?, awaiting id: String, request requestData: Data
+            after eventID: String?, retry: Int?, awaiting id: String, request message: OutgoingMessage
         ) async throws {
+            let requestData = message.data
+            let version = message.protocolVersion ?? protocolVersion
+            guard !isStateless, version.map({ Version.profile(for: $0).usesSessions }) ?? true else {
+                deliverStreamLoss(for: requestData, reason: "The server closed the response stream without a response")
+                return
+            }
             var lastEventID = eventID
             var retry = retry
             var attempts = 0
@@ -805,7 +892,8 @@ public actor HTTPClientTransport: Transport {
                 logger.debug(
                     "Resuming a response stream", metadata: ["lastEventID": "\(resumeFrom)", "attempt": "\(attempts)"])
 
-                let (stream, httpResponse) = try await openEventStream(lastEventID: resumeFrom)
+                let (stream, httpResponse) = try await openEventStream(
+                    lastEventID: resumeFrom, protocolVersion: version)
                 guard httpResponse.statusCode == 200 else {
                     stream.task.cancel()
                     logger.warning(
@@ -828,18 +916,18 @@ public actor HTTPClientTransport: Transport {
             // A cancelled read can end the last attempt's stream without an
             // error: a cancelled request or a closed transport is no loss.
             guard isConnected, !Task.isCancelled else { return }
-            deliverStreamLoss(for: requestData, resumable: eventID != nil)
+            deliverStreamLoss(
+                for: requestData,
+                reason: eventID != nil
+                    ? "The response stream could not be resumed"
+                    : "The server closed the response stream without a response or an event ID to resume from")
         }
 
         /// Fails the request of a response stream that cannot be resumed.
-        private func deliverStreamLoss(for requestData: Data, resumable: Bool) {
+        private func deliverStreamLoss(for requestData: Data, reason: String) {
             guard let request = try? JSONSerialization.jsonObject(with: requestData) as? [String: Any],
                 let id = request["id"]
             else { return }
-            let reason =
-                resumable
-                ? "The response stream could not be resumed"
-                : "The server closed the response stream without a response or an event ID to resume from"
             let error: [String: Any] = [
                 "jsonrpc": "2.0", "id": id,
                 "error": ["code": MCPError.internalError(nil).code, "message": reason],
@@ -913,4 +1001,34 @@ public actor HTTPClientTransport: Transport {
             return eventCount > 0
         }
     #endif
+}
+
+/// The parts of an outgoing JSON-RPC message the transport reads, parsed
+/// once per send.
+struct OutgoingMessage: Sendable {
+    let data: Data
+    /// A request's ID, rendered like ``JSONRPCMessageKind`` IDs; `nil` for
+    /// notifications, responses and batches.
+    let requestID: String?
+    /// The trimmed method name; the operation key for authorization.
+    let method: String?
+    /// `params._meta["io.modelcontextprotocol/protocolVersion"]`.
+    let protocolVersion: String?
+    /// The `requestId` of a `notifications/cancelled` message.
+    let cancelledRequestID: String?
+
+    init(_ data: Data) {
+        self.data = data
+        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let method = (json?["method"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let params = json?["params"] as? [String: Any]
+        self.method = method?.isEmpty == false ? method : nil
+        self.requestID = json.flatMap { json in
+            json["method"] is String ? JSONRPCMessageKind.extractID(from: json) : nil
+        }
+        self.protocolVersion = (params?["_meta"] as? [String: Any])?[MetaKey.protocolVersion] as? String
+        self.cancelledRequestID =
+            method == CancelledNotification.name && json?["id"] == nil
+            ? JSONRPCMessageKind.extractID(from: ["id": params?["requestId"] as Any]) : nil
+    }
 }

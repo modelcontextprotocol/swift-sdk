@@ -25,9 +25,69 @@ public actor Client {
         /// servers, though this may lead to undefined behavior.
         public var strict: Bool
 
-        public init(strict: Bool = false) {
+        /// How the client opens a connection.
+        public var protocolMode: ProtocolMode
+
+        /// The lowest log level to request on stateless (2026-07-28) connections,
+        /// sent in each request's `_meta`. `nil` requests no log notifications.
+        public var logLevel: LogLevel?
+
+        /// How long ``ProtocolMode/automatic`` waits for the answer to
+        /// `server/discover` before it falls back to `initialize`. `nil`
+        /// waits indefinitely. Other requests, and `connect` as a whole,
+        /// have no timeout.
+        public var discoveryTimeout: Duration?
+
+        public init(
+            strict: Bool = false,
+            protocolMode: ProtocolMode = .handshake,
+            logLevel: LogLevel? = nil,
+            discoveryTimeout: Duration? = .seconds(10)
+        ) {
             self.strict = strict
+            self.protocolMode = protocolMode
+            self.logLevel = logLevel
+            self.discoveryTimeout = discoveryTimeout
         }
+
+        private enum CodingKeys: String, CodingKey {
+            case strict, protocolMode, logLevel, discoveryTimeout
+        }
+
+        /// Decodes a configuration; keys added after `strict` are optional.
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            strict = try container.decode(Bool.self, forKey: .strict)
+            protocolMode = try container.decodeIfPresent(ProtocolMode.self, forKey: .protocolMode) ?? .handshake
+            logLevel = try container.decodeIfPresent(LogLevel.self, forKey: .logLevel)
+            discoveryTimeout =
+                container.contains(.discoveryTimeout)
+                ? try container.decodeIfPresent(Duration.self, forKey: .discoveryTimeout) : .seconds(10)
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(strict, forKey: .strict)
+            try container.encode(protocolMode, forKey: .protocolMode)
+            try container.encodeIfPresent(logLevel, forKey: .logLevel)
+            try container.encode(discoveryTimeout, forKey: .discoveryTimeout)
+        }
+    }
+
+    /// How the client opens a connection.
+    public enum ProtocolMode: Hashable, Codable, Sendable {
+        /// Use the `initialize` handshake (2025-11-25 and earlier).
+        case handshake
+        /// Send `server/discover` at the newest stateless revision, retry once
+        /// with a version the server lists on -32022, and fall back to
+        /// `initialize` when the server does not serve a stateless revision:
+        /// it answers with a JSON-RPC error, lists only handshake revisions,
+        /// refuses the request with HTTP 400, 404 or 405, or does not answer
+        /// within ``Configuration/discoveryTimeout``. Other transport errors,
+        /// such as authorization failures, 429 or 5xx, are rethrown.
+        case automatic
+        /// Use one stateless revision; fail if the server does not serve it.
+        case stateless(String)
     }
 
     /// Implementation information
@@ -171,12 +231,19 @@ public actor Client {
     /// The client configuration
     public var configuration: Configuration
 
-    /// The server capabilities
-    private var serverCapabilities: Server.Capabilities?
-    /// The server version
-    private var serverVersion: String?
+    /// The server capabilities, known after ``connect(transport:)``.
+    public private(set) var serverCapabilities: Server.Capabilities?
+    /// The negotiated protocol version, known after ``connect(transport:)``.
+    public private(set) var negotiatedProtocolVersion: String?
+    /// The server implementation, known after ``connect(transport:)``.
+    public private(set) var serverInfo: Server.Info?
     /// The server instructions
     private var instructions: String?
+    /// Whether the connection uses a stateless revision (2026-07-28 and later),
+    /// where every request carries its `_meta` envelope.
+    public var isStateless: Bool {
+        negotiatedProtocolVersion.map { Version.profile(for: $0).usesRequestMeta } ?? false
+    }
 
     /// A dictionary of type-erased notification handlers, keyed by method name
     private var notificationHandlers: [String: [NotificationHandlerBox]] = [:]
@@ -217,6 +284,12 @@ public actor Client {
     /// Connect to the server using the given transport
     @discardableResult
     public func connect(transport: any Transport) async throws -> Initialize.Result {
+        // A reconnect negotiates afresh; requests must not carry the
+        // previous connection's stateless `_meta`.
+        serverCapabilities = nil
+        negotiatedProtocolVersion = nil
+        serverInfo = nil
+        instructions = nil
         self.connection = transport
         try await self.connection?.connect()
 
@@ -290,8 +363,15 @@ public actor Client {
             }
         }
 
-        // Automatically initialize after connecting
-        return try await _initialize()
+        // Open the protocol connection
+        switch configuration.protocolMode {
+        case .handshake:
+            return try await _initialize()
+        case .automatic:
+            return try await discoverOrInitialize(Version.stateless[0], fallback: true)
+        case .stateless(let version):
+            return try await discoverOrInitialize(version, fallback: false)
+        }
     }
 
     /// Disconnect the client and cancel all pending requests
@@ -400,10 +480,28 @@ public actor Client {
     /// - Throws: MCPError if the client is not connected
     /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/cancellation
     public func send<M: Method>(_ request: Request<M>) throws -> RequestContext<M.Result> {
+        try send(request, markingSendFailures: false)
+    }
+
+    /// A transport error raised while sending a request, as opposed to the
+    /// peer's answer.
+    private struct SendFailure: Swift.Error {
+        let error: Swift.Error
+    }
+
+    /// Sends a request. With `markingSendFailures`, transport errors are
+    /// wrapped in ``SendFailure``.
+    private func send<M: Method>(
+        _ request: Request<M>, markingSendFailures: Bool
+    ) throws -> RequestContext<M.Result> {
         guard let connection = connection else {
             throw MCPError.internalError("Client connection not initialized")
         }
 
+        var request = request
+        if isStateless, let version = negotiatedProtocolVersion {
+            request._meta = requestMeta(version: version, merging: request._meta)
+        }
         let requestData = try encoder.encode(request)
 
         let requestTask = Task<M.Result, Error> {
@@ -422,7 +520,7 @@ public actor Client {
                     } catch {
                         // If send fails, try to remove the pending request.
                         if self.removePendingRequest(id: request.id) != nil {
-                            continuation.resume(throwing: error)
+                            continuation.resume(throwing: markingSendFailures ? SendFailure(error: error) : error)
                         }
                     }
                 }
@@ -650,7 +748,8 @@ public actor Client {
         let result = try await send(request).value
 
         self.serverCapabilities = result.capabilities
-        self.serverVersion = result.protocolVersion
+        self.negotiatedProtocolVersion = result.protocolVersion
+        self.serverInfo = result.serverInfo
         self.instructions = result.instructions
 
         // For HTTP transport, ensure subsequent MCP-Protocol-Version headers
@@ -664,7 +763,129 @@ public actor Client {
         return result
     }
 
+    /// The `_meta` envelope of a stateless request; keys already in `existing` win.
+    private func requestMeta(version: String, merging existing: Metadata?) -> Metadata {
+        var meta = Metadata()
+        meta.protocolVersion = version
+        meta.clientCapabilities = capabilities
+        meta.clientInfo = clientInfo
+        meta.logLevel = configuration.logLevel
+        if let existing {
+            meta.fields.merge(existing.fields) { _, own in own }
+        }
+        return meta
+    }
+
+    /// Opens a stateless connection with `server/discover` (SEP-2575).
+    ///
+    /// On -32022 the request is retried once with the newest stateless
+    /// version the server lists. With `fallback`, any other protocol error,
+    /// or a server without a stateless revision in common, falls back to
+    /// `initialize`. Transport errors are rethrown.
+    private func discoverOrInitialize(_ preferred: String, fallback: Bool) async throws
+        -> Initialize.Result
+    {
+        var version = preferred
+        var retried = false
+        while true {
+            let request = ServerDiscover.request(
+                .init(), _meta: requestMeta(version: version, merging: nil))
+            // Only discovery runs inside the do: an error from the
+            // `initialize` fallback must not be handled as a discovery error.
+            let result: ServerDiscover.Result
+            do {
+                let context = try send(request, markingSendFailures: true)
+                result = try await discoverResult(
+                    context, timeout: fallback ? configuration.discoveryTimeout : nil)
+            } catch MCPError.unsupportedProtocolVersion(let supported, let requested) {
+                if fallback, !retried, let mutual = supported.first(where: Version.stateless.contains) {
+                    retried = true
+                    version = mutual
+                    continue
+                }
+                if fallback, supported.isEmpty || supported.contains(where: Version.handshake.contains) {
+                    return try await _initialize()
+                }
+                throw MCPError.unsupportedProtocolVersion(supported: supported, requested: requested)
+            } catch let failure as SendFailure {
+                guard fallback, HTTPClientTransport.isSessionlessRefusal(failure.error) else {
+                    throw failure.error
+                }
+                await logger?.info(
+                    "server/discover refused; falling back to initialize",
+                    metadata: ["error": "\(failure.error)"])
+                return try await _initialize()
+            } catch is DiscoverTimeout {
+                await logger?.info("server/discover timed out; falling back to initialize")
+                return try await _initialize()
+            } catch let error as MCPError where fallback {
+                // The peer answered with a JSON-RPC error.
+                await logger?.info(
+                    "server/discover failed; falling back to initialize",
+                    metadata: ["error": "\(error)"])
+                return try await _initialize()
+            }
+            let served =
+                result.supportedVersions.contains(version)
+                ? version
+                : fallback ? result.supportedVersions.first(where: Version.stateless.contains) : nil
+            guard let served else {
+                if fallback { return try await _initialize() }
+                throw MCPError.unsupportedProtocolVersion(
+                    supported: result.supportedVersions, requested: version)
+            }
+            return await adopt(result, version: served)
+        }
+    }
+
+    /// The probe of ``ProtocolMode/automatic`` went unanswered.
+    private struct DiscoverTimeout: Swift.Error {}
+
+    /// Awaits a `server/discover` result. After `timeout`, the request is
+    /// abandoned, its HTTP POST closed, and ``DiscoverTimeout`` thrown.
+    private func discoverResult(
+        _ context: RequestContext<ServerDiscover.Result>, timeout: Duration?
+    ) async throws -> ServerDiscover.Result {
+        guard let timeout else { return try await context.value }
+        let timer = Task {
+            guard (try? await Task.sleep(for: timeout)) != nil,
+                let pending = removePendingRequest(id: context.requestID)
+            else { return }
+            // No notifications/cancelled: the server may not know the request.
+            await (connection as? HTTPClientTransport)?.cancelRequest(context.requestID)
+            pending.resume(throwing: DiscoverTimeout())
+        }
+        defer { timer.cancel() }
+        return try await context.value
+    }
+
+    /// Records a `server/discover` result as the connection state.
+    private func adopt(_ result: ServerDiscover.Result, version: String) async -> Initialize.Result {
+        let info = result.serverInfo ?? Server.Info(name: "", version: "")
+        serverCapabilities = result.capabilities
+        negotiatedProtocolVersion = version
+        serverInfo = info
+        instructions = result.instructions
+        if let httpTransport = connection as? HTTPClientTransport {
+            await httpTransport.useStatelessProtocol(version)
+        }
+        return Initialize.Result(
+            protocolVersion: version,
+            capabilities: result.capabilities,
+            serverInfo: info,
+            instructions: result.instructions
+        )
+    }
+
+    /// Checks that the server is reachable.
+    ///
+    /// On stateless connections, where `ping` does not exist, this sends
+    /// `server/discover` instead.
     public func ping() async throws {
+        if isStateless {
+            _ = try await send(ServerDiscover.request(.init())).value
+            return
+        }
         let request = Ping.request()
         _ = try await send(request).value
     }
@@ -870,7 +1091,12 @@ public actor Client {
     ///
     /// - Throws: MCPError if the client is not connected
     /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/client/roots
+    /// Notifies the server that the client's roots changed.
+    ///
+    /// Does nothing on stateless connections, where servers read roots per
+    /// request instead.
     public func notifyRootsChanged() async throws {
+        if isStateless { return }
         let notification = RootsListChangedNotification.message()
         try await notify(notification)
     }
@@ -886,8 +1112,16 @@ public actor Client {
     /// - Parameter level: The minimum log level to receive
     /// - Throws: MCPError if the client is not connected or if the server doesn't support logging
     /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/server/utilities/logging/
+    /// Sets the lowest log level the server should send.
+    ///
+    /// On stateless connections `logging/setLevel` does not exist: the level
+    /// is sent in the `_meta` of every following request instead.
     public func setLoggingLevel(_ level: LogLevel) async throws {
         try validateServerCapability(\.logging, "Logging")
+        if isStateless {
+            configuration.logLevel = level
+            return
+        }
         let request = SetLoggingLevel.request(.init(level: level))
         _ = try await send(request).value
     }
