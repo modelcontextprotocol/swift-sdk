@@ -119,13 +119,7 @@ public enum OAuthTokenExchange {
         session: URLSession = .shared,
         urlValidator: OAuthURLValidator = OAuthURLValidator()
     ) async throws -> Response {
-        try urlValidator.validateAuthorizationServer(tokenEndpoint, context: "Token exchange endpoint")
-        if let host = URLComponents(url: tokenEndpoint, resolvingAgainstBaseURL: false)?.host?
-            .lowercased(), urlValidator.isPrivateIPHost(host)
-        {
-            throw OAuthAuthorizationError.privateIPAddressBlocked(
-                context: "Token exchange endpoint", url: tokenEndpoint.absoluteString)
-        }
+        try urlValidator.validateAuthorizationServerAndHost(tokenEndpoint, context: "Token exchange endpoint")
 
         var parameters: [String: String] = [
             OAuthParameterName.grantType: OAuthGrantTypeValue.tokenExchange,
@@ -178,9 +172,17 @@ public enum OAuthTokenExchange {
     /// metadata (RFC 8414) or OpenID configuration. The metadata's `issuer`
     /// must match.
     ///
-    /// - Throws: ``OAuthAuthorizationError/authorizationServerMetadataDiscoveryFailed``
-    ///   when no metadata is found, ``OAuthAuthorizationError/tokenEndpointMissing``
-    ///   when it has no token endpoint.
+    /// - Throws: ``OAuthAuthorizationError/insecureAuthorizationServerEndpoint(context:url:)``
+    ///   or ``OAuthAuthorizationError/privateIPAddressBlocked(context:url:)`` when `issuer` is
+    ///   refused, before any request;
+    ///   ``OAuthAuthorizationError/authorizationServerIssuerMismatch(expected:actual:)``
+    ///   when its metadata names another issuer;
+    ///   ``OAuthAuthorizationError/authorizationServerMetadataDiscoveryFailed`` when every
+    ///   metadata URL answers 404 or 410; an error naming the URL and the reason when a
+    ///   metadata request fails otherwise (a network error, another status, or a body that is
+    ///   not metadata); `CancellationError` when cancelled; and
+    ///   ``OAuthAuthorizationError/tokenEndpointMissing`` when the metadata has no token
+    ///   endpoint.
     public static func tokenEndpoint(
         issuer: URL,
         session: URLSession = .shared,

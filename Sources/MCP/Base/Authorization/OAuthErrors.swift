@@ -168,8 +168,8 @@ public enum OAuthAuthorizationError: LocalizedError {
     case assertionAudienceMismatch(expected: [String], actual: [String])
 
     /// The protected resource requires DPoP-bound tokens
-    /// (`dpop_bound_access_tokens_required`) and ``OAuthConfiguration/dpop``
-    /// is not set.
+    /// (`dpop_bound_access_tokens_required`), and ``OAuthConfiguration/dpop``
+    /// is not set or the authorization server issued a Bearer token.
     case dpopRequired
 
     /// The authorization server does not accept ES256 DPoP proofs.
@@ -259,7 +259,8 @@ public enum OAuthAuthorizationError: LocalizedError {
             return
                 "The assertion audience \(actual.joined(separator: ", ")) is none of \(expected.joined(separator: ", "))"
         case .dpopRequired:
-            return "The protected resource requires DPoP-bound tokens; set OAuthConfiguration.dpop"
+            return
+                "The protected resource requires DPoP-bound tokens; set OAuthConfiguration.dpop and use an authorization server that issues them"
         case .dpopAlgorithmUnsupported(let supported):
             return
                 "The authorization server does not accept ES256 DPoP proofs (supported: \(supported.joined(separator: ", ")))"

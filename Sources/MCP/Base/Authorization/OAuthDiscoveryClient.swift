@@ -8,7 +8,7 @@ import Foundation
 protocol OAuthDiscoveryFetching: Sendable {
     var metadataDiscovery: any OAuthMetadataDiscovering { get }
     func fetchProtectedResourceMetadata(candidates: [URL], fallbackIssuer: URL?, session: URLSession) async throws -> OAuthProtectedResourceMetadata
-    func fetchAuthorizationServerMetadata(candidates: [URL], trustedIssuer: URL?, session: URLSession) async throws -> (server: URL, metadata: OAuthAuthorizationServerMetadata)
+    func fetchAuthorizationServerMetadata(candidates: [URL], trustedIssuer: URL?, reportRefused: Bool, session: URLSession) async throws -> (server: URL, metadata: OAuthAuthorizationServerMetadata)
 }
 
 extension OAuthDiscoveryFetching {
@@ -16,6 +16,13 @@ extension OAuthDiscoveryFetching {
         candidates: [URL], session: URLSession
     ) async throws -> (server: URL, metadata: OAuthAuthorizationServerMetadata) {
         try await fetchAuthorizationServerMetadata(candidates: candidates, trustedIssuer: nil, session: session)
+    }
+
+    func fetchAuthorizationServerMetadata(
+        candidates: [URL], trustedIssuer: URL?, session: URLSession
+    ) async throws -> (server: URL, metadata: OAuthAuthorizationServerMetadata) {
+        try await fetchAuthorizationServerMetadata(
+            candidates: candidates, trustedIssuer: trustedIssuer, reportRefused: true, session: session)
     }
 }
 
@@ -148,27 +155,35 @@ struct OAuthDiscoveryClient: Sendable {
     ///   ``OAuthMetadataUnavailable`` when a candidate failed with an error
     ///   and none succeeded;
     ///   ``OAuthAuthorizationError/authorizationServerMetadataDiscoveryFailed``
-    ///   when every candidate answered 404 or 410.
+    ///   when every candidate answered 404 or 410; the error that refused
+    ///   the first candidate, such as
+    ///   ``OAuthAuthorizationError/insecureAuthorizationServerEndpoint(context:url:)``
+    ///   or ``OAuthAuthorizationError/privateIPAddressBlocked(context:url:)``,
+    ///   when every candidate was refused before a request and
+    ///   `reportRefused` is set. Without it, such candidates end in
+    ///   `authorizationServerMetadataDiscoveryFailed`, for a caller that
+    ///   falls back to 2025-03-26 default endpoints.
     func fetchAuthorizationServerMetadata(
         candidates: [URL],
         trustedIssuer: URL?,
+        reportRefused: Bool,
         session: URLSession
     ) async throws -> (server: URL, metadata: OAuthAuthorizationServerMetadata) {
         let decoder = JSONDecoder()
         var mismatch: (expected: String, actual: String)?
         var unavailable: OAuthMetadataUnavailable?
+        var refused: (any Error)?
+        var fetched = false
 
         for candidateServer in candidates {
-            guard (try? urlValidator.validateAuthorizationServer(
-                candidateServer, context: "Authorization server issuer")) != nil
-            else {
+            do {
+                try urlValidator.validateAuthorizationServerAndHost(
+                    candidateServer, context: "Authorization server issuer")
+            } catch {
+                refused = refused ?? error
                 continue
             }
-            if let host = URLComponents(url: candidateServer, resolvingAgainstBaseURL: false)?
-                .host?.lowercased(), urlValidator.isPrivateIPHost(host)
-            {
-                continue
-            }
+            fetched = true
             let trusted = trustedIssuer == candidateServer
 
             for metadataURL in metadataDiscovery.authorizationServerMetadataURLs(
@@ -199,6 +214,9 @@ struct OAuthDiscoveryClient: Sendable {
                 expected: mismatch.expected, actual: mismatch.actual)
         }
         if let unavailable { throw unavailable }
+        // No candidate was even fetched: say why, unless the caller falls back
+        // to 2025-03-26 default endpoints for a synthesized origin.
+        if reportRefused, !fetched, let refused { throw refused }
         throw OAuthAuthorizationError.authorizationServerMetadataDiscoveryFailed
     }
 }

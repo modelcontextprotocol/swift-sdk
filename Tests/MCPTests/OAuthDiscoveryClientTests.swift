@@ -224,12 +224,117 @@ import Testing
         @Test("Skips private IP candidates without making HTTP calls")
         func testFetchAuthorizationServerMetadataSkipsPrivateIP() async throws {
             let (session, _) = makeIsolatedSession()
-            await #expect(throws: OAuthAuthorizationError.self) {
+            await #expect {
                 try await makeClient().fetchAuthorizationServerMetadata(
                     candidates: [URL(string: "https://10.0.0.1")!],
                     session: session
                 )
+            } throws: { error in
+                guard case .privateIPAddressBlocked = error as? OAuthAuthorizationError else { return false }
+                return true
             }
+        }
+
+        // Discovery used to fail with "Failed to discover authorization server
+        // metadata", which hides that the URL was refused.
+        @Test("An insecure issuer is reported as insecure, not as missing metadata")
+        func testFetchAuthorizationServerMetadataReportsInsecureIssuer() async throws {
+            let (session, key) = makeIsolatedSession()
+            await IsolatedMockURLProtocol.setHandler(key: key) { request in
+                Issue.record("no request may be sent to a refused issuer: \(request.url!)")
+                return (HTTPURLResponse(url: request.url!, statusCode: 404, httpVersion: nil, headerFields: nil)!, Data())
+            }
+            await #expect {
+                try await makeClient().fetchAuthorizationServerMetadata(
+                    candidates: [URL(string: "http://localhost.:8091")!],
+                    session: session
+                )
+            } throws: { error in
+                guard case .insecureAuthorizationServerEndpoint(_, let url) = error as? OAuthAuthorizationError
+                else { return false }
+                return url == "http://localhost.:8091"
+            }
+        }
+
+        @Test("A refused candidate next to one without metadata still reports missing metadata")
+        func testFetchAuthorizationServerMetadataRefusedAndAbsent() async throws {
+            let (session, key) = makeIsolatedSession()
+            await IsolatedMockURLProtocol.setHandler(key: key) { request in
+                (HTTPURLResponse(url: request.url!, statusCode: 404, httpVersion: nil, headerFields: nil)!, Data())
+            }
+            await #expect {
+                try await makeClient().fetchAuthorizationServerMetadata(
+                    candidates: [URL(string: "https://10.0.0.1")!, URL(string: "https://auth.example.com")!],
+                    session: session
+                )
+            } throws: { error in
+                guard case .authorizationServerMetadataDiscoveryFailed = error as? OAuthAuthorizationError else {
+                    return false
+                }
+                return true
+            }
+        }
+
+        @Test("Two refused candidates report the first refusal")
+        func testFetchAuthorizationServerMetadataTwoRefusedCandidates() async throws {
+            let (session, key) = makeIsolatedSession()
+            await IsolatedMockURLProtocol.setHandler(key: key) { request in
+                Issue.record("no request may be sent to a refused issuer: \(request.url!)")
+                return (HTTPURLResponse(url: request.url!, statusCode: 404, httpVersion: nil, headerFields: nil)!, Data())
+            }
+            let insecure = URL(string: "http://localhost.:8091")!
+            let privateIP = URL(string: "https://10.0.0.1")!
+            await #expect {
+                try await makeClient().fetchAuthorizationServerMetadata(
+                    candidates: [insecure, privateIP], session: session)
+            } throws: { error in
+                (error as? OAuthAuthorizationError)?.errorDescription
+                    == OAuthAuthorizationError.insecureAuthorizationServerEndpoint(
+                        context: "Authorization server issuer", url: insecure.absoluteString
+                    ).errorDescription
+            }
+            await #expect {
+                try await makeClient().fetchAuthorizationServerMetadata(
+                    candidates: [privateIP, insecure], session: session)
+            } throws: { error in
+                (error as? OAuthAuthorizationError)?.errorDescription
+                    == OAuthAuthorizationError.privateIPAddressBlocked(
+                        context: "Authorization server issuer", url: privateIP.absoluteString
+                    ).errorDescription
+            }
+        }
+
+        @Test("A 2025-03-26 loopback HTTP server without metadata still uses a configured tokenEndpoint")
+        func testFallbackOriginRefusedStillUsesTokenEndpointOverride() async throws {
+            let (session, key) = makeIsolatedSession()
+            let tokenEndpoint = URL(string: "https://auth.example.com/token")!
+            await IsolatedMockURLProtocol.setHandler(key: key) { request in
+                if request.url == tokenEndpoint {
+                    let body = try JSONSerialization.data(
+                        withJSONObject: ["access_token": "override-token", "token_type": "Bearer"])
+                    return (
+                        HTTPURLResponse(
+                            url: tokenEndpoint, statusCode: 200, httpVersion: nil,
+                            headerFields: ["Content-Type": "application/json"])!,
+                        body
+                    )
+                }
+                return (HTTPURLResponse(url: request.url!, statusCode: 404, httpVersion: nil, headerFields: nil)!, Data())
+            }
+            let storage = InMemoryTokenStorage()
+            let authorizer = OAuthAuthorizer(
+                configuration: OAuthConfiguration(
+                    grantType: .clientCredentials,
+                    authentication: .clientSecretPost(clientID: "c", clientSecret: "s"),
+                    endpointOverrides: .init(tokenEndpoint: tokenEndpoint)
+                ),
+                tokenStorage: storage
+            )
+            let mcpEndpoint = URL(string: "http://127.0.0.1:8080/mcp")!
+            let retried = try await authorizer.handleChallenge(
+                statusCode: 401, headers: ["WWW-Authenticate": "Bearer"], endpoint: mcpEndpoint, session: session)
+            #expect(retried)
+            #expect(storage.load()?.value == "override-token")
         }
 
         @Test("Throws discovery failed when every candidate answers 404")

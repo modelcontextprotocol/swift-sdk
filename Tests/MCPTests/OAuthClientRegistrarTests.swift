@@ -65,6 +65,27 @@ import Testing
             #expect(result == nil)
         }
 
+        // Without this, the authorization request carried `client_id=` and
+        // the server answered invalid_client.
+        @Test(
+            "Throws registrationInformationRequired without a client ID or a registration endpoint",
+            arguments: [OAuthConfiguration.GrantType.authorizationCode, .clientCredentials])
+        func testRegisterThrowsWithoutClientIDOrEndpoint(grantType: OAuthConfiguration.GrantType) async throws {
+            let config = OAuthConfiguration(grantType: grantType, authentication: .none(clientID: ""))
+            let (session, _) = makeIsolatedSession()
+            let error = await #expect(throws: OAuthAuthorizationError.self) {
+                try await registrar.register(
+                    configuration: config,
+                    asMetadata: makeASMetadata(registrationEndpoint: nil),
+                    session: session
+                )
+            }
+            guard case .registrationInformationRequired = error else {
+                Issue.record("Expected registrationInformationRequired, got \(String(describing: error))")
+                return
+            }
+        }
+
         @Test("A pre-registered plain client ID is not registered again")
         func testRegisterSkipsPreRegisteredClientID() async throws {
             let (session, key) = makeIsolatedSession()

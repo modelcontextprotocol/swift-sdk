@@ -819,14 +819,8 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
         if let challengeURL = challenge?.resourceMetadataURL {
             try urlValidator.validateHTTPSOrLoopback(
                 challengeURL, context: "Protected resource metadata URL")
-            if let host = URLComponents(url: challengeURL, resolvingAgainstBaseURL: false)?.host?
-                .lowercased(), urlValidator.isPrivateIPHost(host)
-            {
-                throw OAuthAuthorizationError.privateIPAddressBlocked(
-                    context: "Protected resource metadata URL",
-                    url: challengeURL.absoluteString
-                )
-            }
+            try urlValidator.rejectPrivateIP(
+                challengeURL, context: "Protected resource metadata URL")
             candidates.append(challengeURL)
         }
         if let configuredURL = configuration.endpointOverrides.protectedResourceMetadataURL,
@@ -937,15 +931,18 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
         // draft (§9.5) forbids metadata whose issuer differs (RFC 8414 §3.3).
         let trustedIssuer =
             configuration.grantType == .jwtBearer ? nil : configuration.endpointOverrides.authorizationServerURL
+        let usesDefaultEndpointsFallback =
+            metadata.isFallback && configuration.endpointOverrides.authorizationServerURL == nil
+            // The jwt-bearer grant postdates 2025-03-26.
+            && configuration.grantType != .jwtBearer
         let server: URL
         let asMetadata: OAuthAuthorizationServerMetadata
         do {
             (server, asMetadata) = try await discoveryClient.fetchAuthorizationServerMetadata(
-                candidates: candidates, trustedIssuer: trustedIssuer, session: session)
+                candidates: candidates, trustedIssuer: trustedIssuer,
+                reportRefused: !usesDefaultEndpointsFallback, session: session)
         } catch OAuthAuthorizationError.authorizationServerMetadataDiscoveryFailed
-            where metadata.isFallback && configuration.endpointOverrides.authorizationServerURL == nil
-                // The jwt-bearer grant postdates 2025-03-26.
-                && configuration.grantType != .jwtBearer
+            where usesDefaultEndpointsFallback
         {
             // 2025-03-26: a server without metadata serves the endpoints at its root.
             guard let origin = candidates.first else { throw OAuthAuthorizationError.missingAuthorizationServer }
@@ -1047,7 +1044,7 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
             dpop: dpopSigner,
             session: session
         )
-        storeTokenResponse(decoded, requestedScopes: requestedScopes)
+        try storeTokenResponse(decoded, requestedScopes: requestedScopes)
     }
 
     /// The `aud` claim of a JWT (the strings of an array), or `nil` when
@@ -1085,7 +1082,7 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
             dpop: dpopSigner,
             session: session
         )
-        storeTokenResponse(decoded, requestedScopes: requestedScopes)
+        try storeTokenResponse(decoded, requestedScopes: requestedScopes)
     }
 
     private func acquireTokenViaAuthorizationCode(
@@ -1097,16 +1094,8 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
         guard let authorizationEndpoint = asMetadata.authorizationEndpoint else {
             throw OAuthAuthorizationError.tokenEndpointMissing
         }
-        try urlValidator.validateAuthorizationServer(
+        try urlValidator.validateAuthorizationServerAndHost(
             authorizationEndpoint, context: "Authorization endpoint")
-        if let host = URLComponents(url: authorizationEndpoint, resolvingAgainstBaseURL: false)?
-            .host?.lowercased(), urlValidator.isPrivateIPHost(host)
-        {
-            throw OAuthAuthorizationError.privateIPAddressBlocked(
-                context: "Authorization endpoint",
-                url: authorizationEndpoint.absoluteString
-            )
-        }
         try urlValidator.validateRedirectURI(configuration.authorizationRedirectURI)
         try PKCE.checkSupport(in: asMetadata)
 
@@ -1158,7 +1147,7 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
             dpop: dpopSigner,
             session: session
         )
-        storeTokenResponse(decoded, requestedScopes: requestedScopes)
+        try storeTokenResponse(decoded, requestedScopes: requestedScopes)
     }
 
     /// RFC 9449 §5.1, §5.2: the resource may require DPoP, and the
@@ -1185,7 +1174,9 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
     /// Refreshes `token` at the selected server, only if that server issued
     /// it. A token without a recorded server is refreshed only at a
     /// configured server or token endpoint. Returns `false` when the refresh
-    /// is not possible or the server refuses it.
+    /// is not possible, when the server refuses it with a 4xx, or when it
+    /// answers with a `Bearer` token for a resource that requires DPoP-bound
+    /// tokens, which is not stored: the challenge goes on to a full grant.
     private func refreshAccessToken(
         _ token: OAuthAccessToken,
         refreshToken: String,
@@ -1227,7 +1218,9 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
                 dpop: dpopSigner,
                 session: session
             )
-            storeTokenResponse(decoded, requestedScopes: requestedScopes, refreshing: token)
+            guard try storeTokenResponse(decoded, requestedScopes: requestedScopes, refreshing: token) else {
+                return false
+            }
             refreshedTokenValue = decoded.accessToken
             return true
         } catch let error as OAuthAuthorizationError {
@@ -1284,7 +1277,9 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
                 session: session
             )
         } catch {
-            // Registration failed rather than being unavailable: the next flow tries again.
+            // Nothing is remembered when registration failed, or when the
+            // server cannot register this client (`registrationInformationRequired`,
+            // `cimdNotSupported`, `invalidClientIDMetadataURL`): the next flow checks again.
             clientRegistrationAttempted = false
             registrationAttemptIssuer = nil
             throw error
@@ -1300,12 +1295,25 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
 
     // MARK: - State Helpers
 
-    /// Saves a token response. `previous` is the token a refresh replaces.
+    /// Stores a token response. `previous` is the token a refresh replaces.
+    /// A Bearer token for a resource whose metadata requires DPoP-bound tokens
+    /// returns `false` during a refresh (so a full grant can try) and throws
+    /// `dpopRequired` otherwise, as the resource would reject it.
+    @discardableResult
     private func storeTokenResponse(
         _ decoded: OAuthTokenResponse,
         requestedScopes: Set<String>?,
         refreshing previous: OAuthAccessToken? = nil
-    ) {
+    ) throws -> Bool {
+        // A Bearer answer to a DPoP request is a downgrade (RFC 9449 §5): use it as Bearer.
+        let boundKey =
+            decoded.tokenType.caseInsensitiveCompare(OAuthTokenType.dpop) == .orderedSame
+            ? dpopSigner?.thumbprint : nil
+        // RFC 9728 §2: such a resource always requires DPoP-bound tokens.
+        if boundKey == nil, protectedResourceMetadata?.dpopBoundAccessTokensRequired == true {
+            guard previous == nil else { return false }
+            throw OAuthAuthorizationError.dpopRequired
+        }
         let scopeSet: Set<String>
         if let scope = decoded.scope {
             scopeSet = scopeSelector.parseScopeString(scope)
@@ -1318,10 +1326,6 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
         storedTokenLifetime = decoded.expiresIn.map { (decoded.accessToken, TimeInterval($0)) }
         // A stored token is new, even with the value of the one tried.
         proactivelyRenewedToken = nil
-        // A Bearer answer to a DPoP request is a downgrade (RFC 9449 §5): use it as Bearer.
-        let boundKey =
-            decoded.tokenType.caseInsensitiveCompare(OAuthTokenType.dpop) == .orderedSame
-            ? dpopSigner?.thumbprint : nil
         tokenStorage.save(OAuthAccessToken(
             value: decoded.accessToken,
             tokenType: boundKey == nil ? OAuthTokenType.bearer : OAuthTokenType.dpop,
@@ -1333,6 +1337,7 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
             clientID: nonEmptyClientID(),
             keyThumbprint: boundKey
         ))
+        return true
     }
 
     /// Returns the configured `client_id` or `nil` if the authorizer has not yet been assigned one.
@@ -1353,15 +1358,7 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
         guard let tokenEndpoint = asMetadata.tokenEndpoint else {
             throw OAuthAuthorizationError.tokenEndpointMissing
         }
-        try urlValidator.validateAuthorizationServer(tokenEndpoint, context: "Token endpoint")
-        if let host = URLComponents(url: tokenEndpoint, resolvingAgainstBaseURL: false)?.host?
-            .lowercased(), urlValidator.isPrivateIPHost(host)
-        {
-            throw OAuthAuthorizationError.privateIPAddressBlocked(
-                context: "Token endpoint",
-                url: tokenEndpoint.absoluteString
-            )
-        }
+        try urlValidator.validateAuthorizationServerAndHost(tokenEndpoint, context: "Token endpoint")
         return tokenEndpoint
     }
 

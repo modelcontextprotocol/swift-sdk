@@ -192,7 +192,8 @@ the `_meta` envelope of the requested version, then:
    `initialize`.
 6. When no answer arrives within `Client.Configuration.discoveryTimeout`
    (10 seconds by default), `.automatic` sends `initialize`. `.stateless`
-   waits.
+   waits. Time spent authorizing the request does not count: the timeout
+   starts again when authorization ends.
 7. Other transport errors are rethrown: authorization failures, 401 and 403
    after the authorization attempts, 408, 429, 5xx, `transportError`, and
    errors that are not `MCPError`, such as a `URLError`.

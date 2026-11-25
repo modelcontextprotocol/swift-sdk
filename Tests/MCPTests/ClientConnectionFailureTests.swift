@@ -468,7 +468,7 @@ struct OutgoingMessageTests {
         }
     }
 
-    @Suite("Discovery timeout over HTTP")
+    @Suite("Discovery timeout over HTTP", .timeLimit(.minutes(1)))
     struct DiscoveryTimeoutHTTPTests {
         @Test("A timed-out server/discover closes its POST")
         func closesTimedOutDiscover() async throws {
@@ -488,6 +488,248 @@ struct OutgoingMessageTests {
             }
             #expect(await UnansweredDiscoverProtocol.state.discoverStopped)
             await client.disconnect()
+        }
+
+        // A user who takes longer than `discoveryTimeout` to sign in must not
+        // be asked to sign in again, nor be moved to the handshake.
+        @Test("Signing in does not count against the discovery timeout")
+        func signInOutlastsDiscoveryTimeout() async throws {
+            let host = "\(UUID().uuidString).answering.test"
+            let authorizer = SlowSignInAuthorizer(signIn: .seconds(2))
+            let client = Client(
+                name: "probe", version: "1.0",
+                configuration: .init(protocolMode: .automatic, discoveryTimeout: .seconds(1)))
+
+            let result = try await client.connect(
+                transport: ChallengedDiscoverProtocol.transport(host: host, authorizer: authorizer))
+            #expect(result.protocolVersion == Version.v2026_07_28)
+            #expect(authorizer.challenges == 1)
+            #expect(ChallengedDiscoverProtocol.state.methods(of: host) == [ServerDiscover.name])
+            await client.disconnect()
+        }
+
+        @Test("The discovery timeout starts again after signing in")
+        func timeoutAfterSignIn() async throws {
+            let host = "\(UUID().uuidString).silent.test"
+            let authorizer = SlowSignInAuthorizer(signIn: .seconds(2))
+            let client = Client(
+                name: "probe", version: "1.0",
+                configuration: .init(protocolMode: .automatic, discoveryTimeout: .seconds(1)))
+
+            // The server never answers the authorized server/discover.
+            let result = try await client.connect(
+                transport: ChallengedDiscoverProtocol.transport(host: host, authorizer: authorizer))
+            #expect(result.protocolVersion == Version.v2025_11_25)
+            #expect(authorizer.challenges == 1)
+            await client.disconnect()
+        }
+
+        @Test("A sign-in that fails after the deadline fails connect without falling back to initialize")
+        func failedSignInAfterDeadlineThrows() async throws {
+            let host = "\(UUID().uuidString).answering.test"
+            let authorizer = SlowSignInAuthorizer(signIn: .seconds(2), succeeds: false)
+            let client = Client(
+                name: "probe", version: "1.0",
+                configuration: .init(protocolMode: .automatic, discoveryTimeout: .seconds(1)))
+
+            await #expect(throws: (any Swift.Error).self) {
+                try await client.connect(
+                    transport: ChallengedDiscoverProtocol.transport(host: host, authorizer: authorizer))
+            }
+            #expect(authorizer.challenges == 1)
+            #expect(ChallengedDiscoverProtocol.state.methods(of: host).isEmpty)
+            await client.disconnect()
+        }
+
+        // The sign-in ignores cancellation, so only the discovery timer's
+        // cancellation handler can end its wait.
+        @Test("Cancelling connect during sign-in stops waiting promptly")
+        func cancellingConnectDuringSignIn() async throws {
+            let host = "\(UUID().uuidString).answering.test"
+            let authorizer = SlowSignInAuthorizer(untilReleased: true)
+            let transport = ChallengedDiscoverProtocol.transport(host: host, authorizer: authorizer)
+            let client = Client(
+                name: "probe", version: "1.0",
+                configuration: .init(protocolMode: .automatic, discoveryTimeout: .seconds(1)))
+
+            let connecting = Task { try await client.connect(transport: transport) }
+            // The discovery timer passes its deadline and waits for the sign-in.
+            var deadline = ContinuousClock.now + .seconds(10)
+            while await transport.authorizationWaiterCount == 0, ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            #expect(await transport.authorizationWaiterCount == 1)
+            connecting.cancel()
+
+            let finished = await withTaskGroup(of: Bool.self) { group in
+                group.addTask {
+                    _ = try? await connecting.value
+                    return true
+                }
+                group.addTask {
+                    try? await Task.sleep(for: .seconds(5))
+                    return false
+                }
+                let first = await group.next() ?? false
+                group.cancelAll()
+                return first
+            }
+            #expect(finished)
+            deadline = ContinuousClock.now + .seconds(5)
+            while await transport.authorizationWaiterCount > 0, ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            #expect(await transport.authorizationWaiterCount == 0)
+            #expect(authorizer.signInsEnded == 0)
+            authorizer.release()
+            await client.disconnect()
+        }
+    }
+
+    /// Signs in on a 401 after `signIn`, like a user at a browser, then
+    /// authorizes every request when `succeeds` is `true`. With
+    /// `untilReleased`, the sign-in ignores cancellation and lasts until
+    /// ``release()``.
+    private final class SlowSignInAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
+        private struct SignInDenied: LocalizedError {
+            var errorDescription: String? { "User cancelled sign-in" }
+        }
+
+        private let lock = NSLock()
+        private let signIn: Duration
+        private let succeeds: Bool
+        private let untilReleased: Bool
+        private var signedIn = false
+        private var challengeCount = 0
+        private var endedCount = 0
+        private var released = false
+        private var pendingRelease: CheckedContinuation<Void, Never>?
+
+        init(signIn: Duration = .zero, succeeds: Bool = true, untilReleased: Bool = false) {
+            self.signIn = signIn
+            self.succeeds = succeeds
+            self.untilReleased = untilReleased
+        }
+
+        var challenges: Int { lock.withLock { challengeCount } }
+        /// Sign-ins that returned or threw.
+        var signInsEnded: Int { lock.withLock { endedCount } }
+        var maxAuthorizationAttempts: Int { 2 }
+
+        /// Ends a sign-in of `untilReleased`.
+        func release() {
+            let pending = lock.withLock {
+                released = true
+                defer { pendingRelease = nil }
+                return pendingRelease
+            }
+            pending?.resume()
+        }
+
+        func validateEndpointSecurity(for endpoint: URL) throws {}
+
+        func authorizationHeaders(for url: URL, method: String) throws -> [String: String] {
+            lock.withLock { signedIn ? ["Authorization": "Bearer signed-in"] : [:] }
+        }
+
+        func handleChallenge(
+            statusCode: Int, headers: [String: String], endpoint: URL, operationKey: String?,
+            session: URLSession
+        ) async throws -> Bool {
+            lock.withLock { challengeCount += 1 }
+            defer { lock.withLock { endedCount += 1 } }
+            if untilReleased {
+                await withCheckedContinuation { continuation in
+                    let now = lock.withLock {
+                        if !released { pendingRelease = continuation }
+                        return released
+                    }
+                    if now { continuation.resume() }
+                }
+            } else {
+                try await Task.sleep(for: signIn)
+            }
+            guard succeeds else { throw SignInDenied() }
+            lock.withLock { signedIn = true }
+            return true
+        }
+    }
+
+    /// Answers 401 to a request without credentials. With them, hosts ending
+    /// in `.silent.test` never answer `server/discover`; others serve
+    /// 2026-07-28, and all answer `initialize`.
+    private final class ChallengedDiscoverProtocol: URLProtocol, @unchecked Sendable {
+        final class State: @unchecked Sendable {
+            private let lock = NSLock()
+            private var authorized: [String: [String]] = [:]
+            func record(_ method: String, host: String) { lock.withLock { authorized[host, default: []].append(method) } }
+            /// The methods of authorized requests to `host`.
+            func methods(of host: String) -> [String] { lock.withLock { authorized[host] ?? [] } }
+        }
+        static let state = State()
+
+        static func transport(host: String, authorizer: any HTTPClientAuthorizer) -> HTTPClientTransport {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [ChallengedDiscoverProtocol.self]
+            return HTTPClientTransport(
+                endpoint: URL(string: "http://\(host)/mcp")!, configuration: configuration, streaming: false,
+                authorizer: authorizer)
+        }
+
+        override class func canInit(with request: URLRequest) -> Bool { true }
+        override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+        override func startLoading() {
+            let host = request.url?.host ?? ""
+            guard request.value(forHTTPHeaderField: "Authorization") != nil else {
+                return reply(401, headers: ["WWW-Authenticate": "Bearer"])
+            }
+            let message = (try? JSONSerialization.jsonObject(with: body())) as? [String: Any] ?? [:]
+            let method = message["method"] as? String ?? ""
+            let id = message["id"] as? String ?? ""
+            Self.state.record(method, host: host)
+            switch method {
+            case ServerDiscover.name where host.hasSuffix(".silent.test"):
+                return
+            case ServerDiscover.name:
+                reply(
+                    200,
+                    #"{"jsonrpc":"2.0","id":"\#(id)","result":{"supportedVersions":["2026-07-28"],"capabilities":{},"resultType":"complete"}}"#
+                )
+            case Initialize.name:
+                reply(
+                    200,
+                    #"{"jsonrpc":"2.0","id":"\#(id)","result":{"protocolVersion":"2025-11-25","capabilities":{},"serverInfo":{"name":"old","version":"0"}}}"#
+                )
+            default:
+                reply(202)
+            }
+        }
+
+        override func stopLoading() {}
+
+        private func reply(_ status: Int, _ body: String = "", headers: [String: String] = [:]) {
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: status, httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "application/json"].merging(headers) { $1 })!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: Data(body.utf8))
+            client?.urlProtocolDidFinishLoading(self)
+        }
+
+        private func body() -> Data {
+            if let body = request.httpBody { return body }
+            guard let stream = request.httpBodyStream else { return Data() }
+            stream.open()
+            defer { stream.close() }
+            var data = Data()
+            var buffer = [UInt8](repeating: 0, count: 4096)
+            while stream.hasBytesAvailable {
+                let count = stream.read(&buffer, maxLength: buffer.count)
+                guard count > 0 else { break }
+                data.append(buffer, count: count)
+            }
+            return data
         }
     }
 #endif

@@ -101,6 +101,25 @@ public actor HTTPClientTransport: Transport {
     /// ``disconnect()`` and by an outgoing `notifications/cancelled`.
     private var inFlightPosts: [String: Task<Void, Swift.Error>] = [:]
 
+    /// The authorizer calls of requests in flight, by JSON-RPC ID. See
+    /// ``authorizationEnd(of:)``.
+    private var authorizations: [String: Authorization] = [:]
+
+    private struct Authorization {
+        /// Authorizer calls in progress for the request's POST.
+        var active = 0
+        /// When the last one ended.
+        var lastEnded: ContinuousClock.Instant?
+        /// Callers of ``HTTPClientTransport/authorizationEnd(of:)`` waiting for `active` to reach 0.
+        var waiters: [(id: UUID, continuation: CheckedContinuation<Void, Never>)] = []
+
+        mutating func resumeWaiters() {
+            let pending = waiters
+            waiters.removeAll()
+            for waiter in pending { waiter.continuation.resume() }
+        }
+    }
+
     /// Requests passed to ``cancelRequest(_:)`` before their POST started,
     /// oldest first, at most ``maxCancelledBeforeSend``.
     private var cancelledBeforeSend: [String] = []
@@ -338,7 +357,11 @@ public actor HTTPClientTransport: Transport {
             }
             let task = Task { try await self.post(message, additionalHeaders: additionalHeaders) }
             inFlightPosts[id] = task
-            defer { inFlightPosts[id] = nil }
+            defer {
+                inFlightPosts[id] = nil
+                var ended = authorizations.removeValue(forKey: id)
+                ended?.resumeWaiters()
+            }
             try await withTaskCancellationHandler {
                 try await task.value
             } onCancel: {
@@ -387,6 +410,59 @@ public actor HTTPClientTransport: Transport {
         }
     }
 
+    /// When the POST of request `id` last finished waiting on the authorizer,
+    /// or `nil` if it has not. While the POST waits on the authorizer, for
+    /// example for a user who signs in, this waits for it to finish.
+    ///
+    /// ``Client`` does not count that time against
+    /// ``Client/Configuration/discoveryTimeout``.
+    func authorizationEnd(of id: ID) async -> ContinuousClock.Instant? {
+        let key = id.description
+        if authorizations[key]?.active ?? 0 > 0 {
+            let waiter = UUID()
+            await withTaskCancellationHandler {
+                await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                    guard !Task.isCancelled, authorizations[key]?.active ?? 0 > 0 else {
+                        continuation.resume()
+                        return
+                    }
+                    authorizations[key]?.waiters.append((waiter, continuation))
+                }
+            } onCancel: {
+                Task { await self.stopWaitingForAuthorization(waiter, of: key) }
+            }
+        }
+        return authorizations[key]?.lastEnded
+    }
+
+    private func stopWaitingForAuthorization(_ waiter: UUID, of key: String) {
+        guard let index = authorizations[key]?.waiters.firstIndex(where: { $0.id == waiter }) else { return }
+        authorizations[key]?.waiters.remove(at: index).continuation.resume()
+    }
+
+    /// The callers of ``authorizationEnd(of:)`` waiting, for every request.
+    var authorizationWaiterCount: Int {
+        authorizations.values.reduce(0) { $0 + $1.waiters.count }
+    }
+
+    /// Runs an authorizer call for the POST of `message`, recorded for
+    /// ``authorizationEnd(of:)``.
+    private func authorizing<T: Sendable>(_ message: OutgoingMessage, _ body: () async throws -> T) async rethrows -> T {
+        guard let id = message.requestID else { return try await body() }
+        authorizations[id, default: Authorization()].active += 1
+        defer {
+            if var state = authorizations[id] {
+                state.active -= 1
+                state.lastEnded = .now
+                if state.active == 0 {
+                    state.resumeWaiters()
+                }
+                authorizations[id] = state
+            }
+        }
+        return try await body()
+    }
+
     private func post(_ message: OutgoingMessage, additionalHeaders: [String: String]) async throws {
         guard isConnected else {
             throw MCPError.internalError("Transport not connected")
@@ -403,7 +479,9 @@ public actor HTTPClientTransport: Transport {
         }
 
         if let authorizer {
-            try? await authorizer.prepareAuthorization(for: endpoint, session: session)
+            try? await authorizing(message) {
+                try await authorizer.prepareAuthorization(for: endpoint, session: session)
+            }
         }
 
         var attempts = 0
@@ -463,14 +541,16 @@ public actor HTTPClientTransport: Transport {
 
                 let handled: HTTPChallengeResult
                 do {
-                    handled = try await authorizer.handleChallenge(
-                        statusCode: authError.statusCode,
-                        headers: authError.headers,
-                        endpoint: endpoint,
-                        operationKey: operationKey,
-                        sentAuthorization: request.value(forHTTPHeaderField: HTTPHeaderName.authorization),
-                        session: session
-                    )
+                    handled = try await authorizing(message) {
+                        try await authorizer.handleChallenge(
+                            statusCode: authError.statusCode,
+                            headers: authError.headers,
+                            endpoint: endpoint,
+                            operationKey: operationKey,
+                            sentAuthorization: request.value(forHTTPHeaderField: HTTPHeaderName.authorization),
+                            session: session
+                        )
+                    }
                 } catch {
                     throw MCPError.internalError(
                         "Authorization flow failed: \(error.localizedDescription)")
@@ -529,7 +609,9 @@ public actor HTTPClientTransport: Transport {
             } else if contentType.contains(ContentType.json) {
                 logger.trace("Received JSON response", metadata: ["size": "\(data.count)"])
                 messageContinuation.yield(data)
-            } else {
+            } else if httpResponse.statusCode != 202 || message.requestID != nil {
+                // 202 Accepted has no body: how a server accepts a notification or a response.
+                // A request is owed JSON or SSE.
                 logger.warning("Unexpected content type: \(contentType)")
             }
         }
@@ -591,7 +673,9 @@ public actor HTTPClientTransport: Transport {
                 }
                 logger.trace("Received JSON response", metadata: ["size": "\(buffer.count)"])
                 messageContinuation.yield(buffer)
-            } else {
+            } else if httpResponse.statusCode != 202 || message.requestID != nil {
+                // 202 Accepted has no body: how a server accepts a notification or a response.
+                // A request is owed JSON or SSE.
                 logger.warning("Unexpected content type: \(contentType)")
             }
         }

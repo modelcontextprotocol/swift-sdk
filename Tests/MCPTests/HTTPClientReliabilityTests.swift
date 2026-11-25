@@ -349,6 +349,31 @@ struct HTTPClientConnectionLimitTests {
             #expect(auth.prefix(2) == ["Bearer old", "Bearer new"])
         }
 
+        @Test("A 202 without a body is quiet for a notification, not for a request or another content type")
+        func acceptedWithoutBodyIsQuiet() async throws {
+            let handler = CapturingLogHandler()
+            let (transport, key) = makeTransport(logger: Logger(label: "mcp.test.accepted") { _ in handler })
+            await IsolatedMockURLProtocol.setHandler(key: key) { request in
+                let body = request.httpBodyStreamData().map { String(decoding: $0, as: UTF8.self) } ?? ""
+                let accepted = body.contains("initialized") || body.contains("ping")
+                let (status, fields) = accepted ? (202, [:]) : (200, ["Content-Type": "text/plain"])
+                return (
+                    HTTPURLResponse(url: endpoint, statusCode: status, httpVersion: "HTTP/1.1", headerFields: fields)!,
+                    Data()
+                )
+            }
+            try await transport.connect()
+            // Streamable HTTP: a server that accepts a notification answers 202 with no body.
+            try await transport.send(Data(#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#.utf8))
+            #expect(handler.messages.isEmpty)
+            try await transport.send(Data(#"{"jsonrpc":"2.0","method":"notifications/progress","params":{}}"#.utf8))
+            #expect(handler.messages == ["Unexpected content type: text/plain"])
+            // A request is owed JSON or SSE: its 202 leaves it waiting.
+            try await transport.send(Data(#"{"jsonrpc":"2.0","id":"p1","method":"ping"}"#.utf8))
+            #expect(handler.messages == ["Unexpected content type: text/plain", "Unexpected content type: "])
+            await transport.disconnect()
+        }
+
         @Test("A 401 on a POST gives the authorizer the Authorization the POST carried", .timeLimit(.minutes(1)))
         func postChallengePassesSentAuthorization() async throws {
             let authorizer = ChallengeCountingAuthorizer()

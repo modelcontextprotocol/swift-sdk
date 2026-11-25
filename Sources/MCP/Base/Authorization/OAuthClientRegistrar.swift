@@ -33,8 +33,10 @@ struct OAuthClientRegistrar: Sendable {
     /// - Credentials are already configured (not `.none`)
     /// - The client ID is not empty and not a URL: a pre-registered public client
     /// - CIMD is in use and the server supports it
-    /// - No registration endpoint is available and no CIMD mismatch error
+    /// - No registration endpoint is available and the client ID is a non-CIMD URL on a server without CIMD
     ///
+    /// Throws ``OAuthAuthorizationError/registrationInformationRequired`` when
+    /// the client ID is empty and the server has no registration endpoint.
     /// Throws if registration was attempted but failed (4xx, 5xx, or unexpected response).
     func register(
         configuration: OAuthConfiguration,
@@ -71,16 +73,14 @@ struct OAuthClientRegistrar: Sendable {
             if hasClientIDMetadataDocument && !supportsClientIDMetadataDocument {
                 throw OAuthAuthorizationError.cimdNotSupported(clientID: clientID)
             }
+            // No client ID, and no way to get one: do not send an empty client_id.
+            if clientID.isEmpty {
+                throw OAuthAuthorizationError.registrationInformationRequired
+            }
             return nil
         }
-        try urlValidator.validateAuthorizationServer(
+        try urlValidator.validateAuthorizationServerAndHost(
             registrationEndpoint, context: "Client registration endpoint")
-        if let host = URLComponents(url: registrationEndpoint, resolvingAgainstBaseURL: false)?
-            .host?.lowercased(), urlValidator.isPrivateIPHost(host)
-        {
-            throw OAuthAuthorizationError.privateIPAddressBlocked(
-                context: "Client registration endpoint", url: registrationEndpoint.absoluteString)
-        }
 
         var request = URLRequest(url: registrationEndpoint)
         request.httpMethod = "POST"

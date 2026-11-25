@@ -35,8 +35,10 @@ public actor Client {
 
         /// How long ``ProtocolMode/automatic`` waits for the answer to
         /// `server/discover` before it falls back to `initialize`. `nil`
-        /// waits indefinitely. Other requests, and `connect` as a whole,
-        /// have no timeout.
+        /// waits indefinitely. Time ``HTTPClientTransport`` spends
+        /// authorizing the request, such as a user signing in, does not
+        /// count: the timeout starts again when authorization ends. Other
+        /// requests, and `connect` as a whole, have no timeout.
         public var discoveryTimeout: Duration?
 
         /// How the client answers input-required results (SEP-2322).
@@ -1856,15 +1858,26 @@ public actor Client {
     private struct DiscoverTimeout: Swift.Error {}
 
     /// Awaits a `server/discover` result. After `timeout`, the request is
-    /// abandoned, its HTTP POST closed, and ``DiscoverTimeout`` thrown.
+    /// abandoned, its HTTP POST closed, and ``DiscoverTimeout`` thrown. Time
+    /// the transport spends authorizing the request does not count: the
+    /// timeout starts again when authorization ends.
     private func discoverResult(
         _ context: RequestContext<ServerDiscover.Result>, timeout: Duration?
     ) async throws -> ServerDiscover.Result {
         guard let timeout else { return try await context.value }
         let timer = Task {
-            guard (try? await Task.sleep(for: timeout)) != nil,
-                let pending = removePendingRequest(id: context.requestID)
-            else { return }
+            var deadline = ContinuousClock.now + timeout
+            while true {
+                guard (try? await Task.sleep(until: deadline, clock: .continuous)) != nil else { return }
+                // An interactive sign-in can outlast the timeout: cancelling
+                // it would sign in again for `initialize`.
+                guard let http = connection as? HTTPClientTransport,
+                    let ended = await http.authorizationEnd(of: context.requestID),
+                    ended + timeout > .now
+                else { break }
+                deadline = ended + timeout
+            }
+            guard let pending = removePendingRequest(id: context.requestID) else { return }
             // No notifications/cancelled: the server may not know the request.
             await (connection as? HTTPClientTransport)?.cancelRequest(context.requestID)
             pending.resume(throwing: DiscoverTimeout())
