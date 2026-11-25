@@ -264,7 +264,8 @@ public struct OriginValidator: HTTPRequestValidator {
     }
 
     /// Protection for localhost-bound servers.
-    /// Allows requests from `localhost`, `127.0.0.1`, and `[::1]` with the specified port.
+    /// Allows requests from `localhost`, `127.0.0.1`, and `[::1]` on the given port.
+    /// Pass `nil` to allow any port, or none.
     public static func localhost(port: Int? = nil) -> OriginValidator {
         let portPattern = port.map { String($0) } ?? "*"
         return OriginValidator(
