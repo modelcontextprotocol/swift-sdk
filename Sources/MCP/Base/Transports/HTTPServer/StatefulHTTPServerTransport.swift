@@ -59,7 +59,7 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
     private var requestSSEContinuations: [String: AsyncThrowingStream<Data, Swift.Error>.Continuation] = [:]
 
     /// Maps request ID → originating HTTP request, surfaced to handlers via
-    /// ``Server/currentHTTPContext``. Cleared when the response is routed,
+    /// `Server.currentHandlerContext?.httpContext`. Cleared when the response is routed,
     /// the stream is closed, or the session terminates.
     private var httpRequestContexts: [String: HTTPRequest] = [:]
 

@@ -198,8 +198,8 @@ enum MRTR {
     /// The methods whose results may ask for input.
     static let carriers: Set<String> = [CallTool.name, GetPrompt.name, ReadResource.name]
 
-    /// The most rounds a request takes before the SDK gives up (client
-    /// loop and server bridge alike).
+    /// The most handler calls the server bridge makes for one request. The
+    /// client uses `Client.Configuration.multiRoundTrip.maxRounds`.
     static let maxRounds = 10
 
     /// The client's first wait before retrying a result without input requests.

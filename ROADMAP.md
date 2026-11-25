@@ -1,0 +1,99 @@
+# Roadmap
+
+Status of the MCP Swift SDK against the MCP specification, what is deferred, and the remaining
+release step. Design background: [design/design.md](design/design.md). Versioning rules:
+[VERSIONING.md](VERSIONING.md).
+
+## Specification revisions
+
+| Revision | Era | Server | Client | Notes |
+|---|---|---|---|---|
+| 2026-07-28 | stateless | served by default (`Server.Configuration.protocolVersions`) | opt-in: `ProtocolMode.automatic` or `.stateless("2026-07-28")` | in `Version.stateless`; not yet in `Version.supported` |
+| 2025-11-25 | handshake | yes | yes, default | `Version.latest` |
+| 2025-06-18 | handshake | yes | yes | |
+| 2025-03-26 | handshake | yes | yes | |
+| 2024-11-05 | handshake | yes | yes | over stdio and Streamable HTTP; the HTTP+SSE transport of that revision is not implemented |
+
+A server answers both eras on one `Server`. See [docs/protocol.md](docs/protocol.md) for the
+lifecycle and [docs/migration.md](docs/migration.md) for upgrading.
+
+## Implemented in this major version
+
+### 2026-07-28 core
+
+| Feature | SEP | API | Design |
+|---|---|---|---|
+| Per-request `_meta` (protocol version, client capabilities, client info, log level) | SEP-2575 | `MetaKey`, `Metadata` accessors, `Server.HandlerContext` | [stateless.md](design/stateless.md) |
+| `server/discover` | SEP-2575 | `ServerDiscover`, `Client.ProtocolMode` | [stateless.md](design/stateless.md) |
+| `subscriptions/listen` | SEP-2575 | `Client.listen(_:)`, `Client.Subscription`, `Server.closeSubscriptions()` | [subscriptions.md](design/subscriptions.md) |
+| Stateless HTTP serving | SEP-2575 | `StatelessHTTPServerTransport`, `HTTPRequest.statelessProtocolVersion` | [stateless.md](design/stateless.md) |
+| `resultType` on results | SEP-2322 | `ResultType`, result annotation | [stateless.md](design/stateless.md) |
+| Multi round-trip requests | SEP-2322 | `InputRequest`, `InputResponse`, `.inputRequired(_:requestState:_meta:)`, `RequestStateProtection` | [mrtr.md](design/mrtr.md) |
+| Standard and custom request headers | SEP-2243 | `MCPRequestHeaders`, `Tool.headerParameters()` | [request_headers.md](design/request_headers.md) |
+| Cache hints | SEP-2549 | `CacheableResult`, `CacheHint`, `Server.Configuration.cacheHints` | [stateless.md](design/stateless.md) |
+| Resource not found as -32602 with `data.uri` | SEP-2164 | `MCPError.resourceNotFound(uri:message:)` | [design.md](design/design.md#error-model) |
+| `extensions` capability | SEP-2133 | `Client.Capabilities.extensions`, `Server.Capabilities.extensions` | |
+| Error codes -32020, -32021, -32022 | | `MCPError.headerMismatch`, `.missingRequiredClientCapabilities`, `.unsupportedProtocolVersion` | [design.md](design/design.md#error-model) |
+| Protocol profiles | | `Version.profile(for:)`, `ProtocolProfile` | [design.md](design/design.md#the-dual-era-model) |
+
+### Authorization
+
+| Feature | Reference | API |
+|---|---|---|
+| AS metadata issuer must match | RFC 8414 §3.3, SEP-2468 | `OAuthAuthorizationError.authorizationServerIssuerMismatch` |
+| `iss` in the authorization response | RFC 9207, SEP-2468 | `OAuthAuthorizationCodeFlow.ExpectedIssuer` |
+| `application_type` in DCR | SEP-837 | `OAuthConfiguration.applicationType` |
+| Authorization server migration | SEP-2352 | `OAuthAuthorizer` 401 handling |
+| 2025-03-26 default endpoints | 2025-03-26 spec | fallback in `OAuthAuthorizer` |
+
+Details: [design/auth.md](design/auth.md).
+
+### 2025-11-25 reliability
+
+- Notifications and server-to-client requests from a handler travel on the stream of the request
+  that caused them (`Transport.send(_:relatedRequestID:)`).
+
+## Deferred
+
+Not implemented. The conformance harness exercises them only in the default leg, as extension
+scenarios that do not count toward a tier; they are the entries in
+[conformance/baseline.yml](conformance/baseline.yml).
+
+| Item | Reference | Baseline entries |
+|---|---|---|
+| Tasks extension `io.modelcontextprotocol/tasks` | SEP-2663 | 25 (server, `tasks-*`) |
+| DPoP-bound access tokens | SEP-1932 | 8 (client, `auth/dpop`, `auth/dpop-nonce`) |
+| Enterprise-managed authorization | ext-auth | 2 (client) |
+| Workload identity `jwt-bearer` grant | — | 1 (client) |
+
+Other known gaps are listed under "Open questions" in each design note.
+
+## Remaining release step
+
+One change remains before this major version is released:
+
+1. Add `2026-07-28` to `Version.supported`.
+2. Make `Client.ProtocolMode.automatic` the default of `Client.Configuration.protocolMode`.
+3. Update the docs and snippets that state the old defaults.
+4. Verify: every conformance leg, 100% tier score at both revisions, and parity with the Python
+   and Go SDKs.
+
+Until then, a client opts in to 2026-07-28 with `ProtocolMode.automatic`.
+
+## Conformance
+
+Harness: `@modelcontextprotocol/conformance@0.2.0-alpha.11` (pinned in
+`scripts/run-conformance.sh`). Tier scores use the frozen requirement sets of that release.
+
+| Revision | Client | Server |
+|---|---|---|
+| 2025-11-25 | 100% | 100% |
+| 2026-07-28 | 100% | 100% |
+
+| Leg | Baseline entries (server / client) |
+|---|---|
+| `--spec-version 2025-11-25` | 0 / 0 |
+| `--spec-version 2026-07-28` | 0 / 0 |
+| default | 25 / 11, extension scenarios only |
+
+How the legs work: [conformance/README.md](conformance/README.md).

@@ -13,7 +13,7 @@ import Logging
 ///   let server = Server(name: "MyServer", version: "1.0.0")
 ///
 ///   try await client.connect(transport: clientTransport)
-///   try await server.connect(transport: serverTransport)
+///   try await server.start(transport: serverTransport)
 ///   ```
 public actor InMemoryTransport: Transport {
     /// Logger instance for transport-related events

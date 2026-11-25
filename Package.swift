@@ -3,6 +3,49 @@
 
 import PackageDescription
 
+// MARK: - Examples
+//
+// Compiled with the package so that the code in docs/ cannot drift:
+// scripts/weave.swift copies the snippet regions of Examples/Snippets
+// into docs/*.md. None of these targets is a product.
+
+let snippetTargets = ["QuickStart", "Server", "Client", "Protocol", "Guides"]
+
+let examples: [Target] =
+    snippetTargets.map { name in
+        .target(
+            name: "\(name)Snippets",
+            dependencies: ["MCP", .product(name: "Logging", package: "swift-log")],
+            path: "Examples/Snippets/\(name)")
+    } + [
+        .testTarget(
+            name: "SnippetTests",
+            dependencies: ["MCP"] + snippetTargets.map { .target(name: "\($0)Snippets") },
+            path: "Examples/Tests"
+        ),
+        .executableTarget(
+            name: "HelloServer",
+            dependencies: ["MCP"],
+            path: "Examples/hello-server"
+        ),
+        .executableTarget(
+            name: "HelloClient",
+            dependencies: ["MCP", .product(name: "SystemPackage", package: "swift-system")],
+            path: "Examples/hello-client"
+        ),
+        .executableTarget(
+            name: "HTTPServerExample",
+            dependencies: [
+                "MCP",
+                .product(name: "Logging", package: "swift-log"),
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
+            ],
+            path: "Examples/http-server"
+        ),
+    ]
+
 let package = Package(
     name: "mcp-swift-sdk",
     platforms: [
@@ -68,7 +111,7 @@ let package = Package(
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
             ],
-            path: "Sources/MCPConformance/Server"
+            path: "conformance/everything-server"
         ),
         .executableTarget(
             name: "MCPConformanceClient",
@@ -76,7 +119,7 @@ let package = Package(
                 "MCP",
                 .product(name: "Logging", package: "swift-log"),
             ],
-            path: "Sources/MCPConformance/Client"
-        )
-    ]
+            path: "conformance/everything-client"
+        ),
+    ] + examples
 )

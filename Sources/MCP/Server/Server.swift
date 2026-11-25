@@ -579,7 +579,7 @@ public actor Server {
     /// `inputRequired(_:requestState:_meta:)`. At 2026-07-28 it goes to the
     /// client, which retries with the responses. For earlier clients the
     /// server sends the input requests itself and calls the handler again
-    /// with the responses, up to 10 rounds, so one handler serves both.
+    /// with the responses, calling it at most 10 times, so one handler serves both.
     @discardableResult
     public func withMethodHandler<M: Method>(
         _ type: M.Type,
@@ -687,7 +687,7 @@ public actor Server {
 
             guard round < MRTR.maxRounds else {
                 throw MCPError.internalError(
-                    "\(M.name) asked for input more than \(MRTR.maxRounds) times")
+                    "\(M.name) asked for input \(MRTR.maxRounds) times")
             }
             let requests = asking.inputRequests ?? [:]
             if requests.isEmpty {
@@ -1201,8 +1201,9 @@ public actor Server {
     /// Send a log message notification to connected clients.
     ///
     /// Servers that declare the `logging` capability can send structured log messages
-    /// to clients. The client controls which severity levels it wants to receive via
-    /// the `logging/setLevel` request.
+    /// to clients. A stateless (2026-07-28) request receives messages only at or above
+    /// the level in its `_meta`; on handshake connections the server sends every
+    /// message, and a `logging/setLevel` handler, if registered, decides what to keep.
     ///
     /// - Parameters:
     ///   - level: The severity level of the log message

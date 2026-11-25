@@ -58,6 +58,11 @@ jobs:
       - name: Run tests
         run: swift test -v
 
+      - name: Run the hello example over stdio
+        run: |
+          BIN="$(swift build --show-bin-path)"
+          "$BIN/HelloClient" "$BIN/HelloServer"
+
   conformance-fixtures:
     timeout-minutes: 20
     runs-on: macos-latest
@@ -138,8 +143,6 @@ jobs:
     needs: conformance-fixtures
     runs-on: macos-latest
     name: Tier score (${{ matrix.revision }})
-    # Report only until every scored scenario passes.
-    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
@@ -173,6 +176,8 @@ jobs:
         run: swift --version
       - name: Build Documentation
         run: swift package generate-documentation --target MCP --warnings-as-errors
+      - name: Check docs are generated from their sources
+        run: swift scripts/weave.swift --check
 
   static-linux-sdk-build:
     name: Linux Static SDK Build (${{ matrix.swift-version }} - ${{ matrix.os }})
