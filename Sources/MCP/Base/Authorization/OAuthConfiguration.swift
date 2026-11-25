@@ -12,8 +12,8 @@ import Crypto
 /// `OAuthAuthorizer(configuration:)` to `HTTPClientTransport(endpoint:authorizer:)` to
 /// enable automatic Bearer token acquisition.
 ///
-/// Supports both `authorization_code` (interactive, browser-based) and `client_credentials`
-/// (machine-to-machine) grant types via the ``grantType`` property.
+/// Supports the `authorization_code` (interactive, browser-based), `client_credentials`
+/// (machine-to-machine) and RFC 7523 `jwt-bearer` grant types via the ``grantType`` property.
 public struct OAuthConfiguration: Sendable {
     /// The OAuth 2.1 grant type to use for token acquisition.
     public enum GrantType: Sendable {
@@ -22,6 +22,14 @@ public struct OAuthConfiguration: Sendable {
 
         /// OAuth 2.1 client_credentials flow.
         case clientCredentials
+
+        /// RFC 7523 JWT bearer grant (`urn:ietf:params:oauth:grant-type:jwt-bearer`).
+        ///
+        /// The token request presents the JWT that ``OAuthConfiguration/assertionProvider``
+        /// returns: an identity assertion (ID-JAG) for enterprise-managed authorization
+        /// (SEP-990), or a workload identity token (SEP-1933). No client registration
+        /// happens.
+        case jwtBearer
     }
 
     /// How the client authenticates to the OAuth token endpoint.
@@ -77,7 +85,10 @@ public struct OAuthConfiguration: Sendable {
                 bodyParameters[OAuthParameterName.clientID] = clientID
                 bodyParameters[OAuthParameterName.clientSecret] = clientSecret
             case .none(let clientID):
-                bodyParameters[OAuthParameterName.clientID] = clientID
+                // An empty ID asks for registration; it is not sent.
+                if !clientID.isEmpty {
+                    bodyParameters[OAuthParameterName.clientID] = clientID
+                }
             case .privateKeyJWT(let clientID, let assertionFactory):
                 bodyParameters[OAuthParameterName.clientID] = clientID
                 bodyParameters[OAuthParameterName.clientAssertionType] =
@@ -231,9 +242,23 @@ public struct OAuthConfiguration: Sendable {
         public let protectedResourceMetadataURL: URL?
 
         /// Optional override for the authorization server issuer URL.
+        ///
+        /// Its metadata is used whatever `issuer` it names, except with the
+        /// ``GrantType/jwtBearer`` grant: the issuer is the audience of the
+        /// assertion, so it must be this URL (RFC 8414 §3.3), or the grant
+        /// fails with
+        /// ``OAuthAuthorizationError/authorizationServerIssuerMismatch(expected:actual:)``.
         public let authorizationServerURL: URL?
 
         /// Optional override for the token endpoint.
+        ///
+        /// Token requests, and with them the assertion of the
+        /// ``GrantType/jwtBearer`` grant and the client credentials, go only
+        /// here. The authorization server is still discovered from the
+        /// protected resource metadata unless ``authorizationServerURL`` is
+        /// set, and its issuer is the
+        /// ``AssertionContext/audience`` the assertion provider is asked for;
+        /// set ``authorizationServerURL`` too to fix both.
         public let tokenEndpoint: URL?
 
         /// Optional override for the resource indicator used in token requests.
@@ -314,6 +339,37 @@ public struct OAuthConfiguration: Sendable {
         _ session: URLSession
     ) async throws -> String?
 
+    // MARK: - JWT Bearer Assertions
+
+    /// What ``AssertionProvider`` knows when a ``GrantType/jwtBearer`` token
+    /// request is about to be sent.
+    public struct AssertionContext: Sendable {
+        /// The issuer of the authorization server: the audience of the assertion.
+        public let audience: URL
+        /// The canonical RFC 8707 resource URI of the MCP server.
+        public let resource: URL
+        /// The token endpoint the assertion is sent to.
+        public let tokenEndpoint: URL
+        /// The scopes the token request asks for, if any.
+        public let requestedScopes: Set<String>?
+
+        public init(audience: URL, resource: URL, tokenEndpoint: URL, requestedScopes: Set<String>?) {
+            self.audience = audience
+            self.resource = resource
+            self.tokenEndpoint = tokenEndpoint
+            self.requestedScopes = requestedScopes
+        }
+    }
+
+    /// Returns the JWT presented by a ``GrantType/jwtBearer`` token request.
+    ///
+    /// Called for every token request; return a fresh assertion each time.
+    /// An error thrown here fails the authorization attempt.
+    public typealias AssertionProvider = @Sendable (
+        _ context: AssertionContext,
+        _ session: URLSession
+    ) async throws -> String
+
     // MARK: - Properties
 
     /// The grant type used for token acquisition.
@@ -369,13 +425,34 @@ public struct OAuthConfiguration: Sendable {
     /// Optional provider for externally acquired access tokens.
     public let accessTokenProvider: AccessTokenProvider?
 
+    /// The assertion source of the ``GrantType/jwtBearer`` grant. Required for
+    /// that grant, ignored by the others.
+    public let assertionProvider: AssertionProvider?
+
+    /// For the ``GrantType/jwtBearer`` grant, whether the authorization server
+    /// named in the MCP server's metadata may receive the assertion.
+    ///
+    /// Off by default: the assertion goes only to
+    /// ``EndpointOverrides/authorizationServerURL`` or
+    /// ``EndpointOverrides/tokenEndpoint``, and the grant fails with
+    /// ``OAuthAuthorizationError/authorizationServerNotConfigured`` without
+    /// them. When on, the MCP server chooses where the assertion goes; an
+    /// assertion whose `aud` is neither that server's issuer nor its token
+    /// endpoint is not sent, and neither is one that is not a JWT with an
+    /// `aud` claim.
+    public let allowsDiscoveredAuthorizationServer: Bool
+
     /// Optional delegate for browser-based authorization code flows.
     public let authorizationDelegate: (any OAuthAuthorizationDelegate)?
 
     /// How many seconds before token expiry ``OAuthAuthorizer`` proactively refreshes a token
     /// when `prepareAuthorization(for:session:)` is called.
     ///
-    /// Set to `0` to disable proactive refresh. Defaults to 60 seconds.
+    /// Set to `0` to disable proactive refresh. Defaults to 60 seconds. A token
+    /// issued with a shorter lifetime is refreshed halfway between its issue
+    /// and ``OAuthTokenExpirySkew/defaultSeconds`` before its expiry, and one
+    /// that lives no longer than that skew is not refreshed proactively. Each
+    /// token is tried once: when the refresh fails, the next 401 recovers.
     /// Must be greater than ``OAuthTokenExpirySkew/defaultSeconds`` (30 s) to have any effect,
     /// since tokens within the default skew window are already treated as expired.
     public let proactiveRefreshWindowSeconds: TimeInterval
@@ -395,10 +472,13 @@ public struct OAuthConfiguration: Sendable {
     ///   - additionalTokenRequestParameters: Extra form fields appended to every token request.
     ///   - accessTokenProvider: Optional closure invoked after discovery, allowing the host app
     ///     to supply an externally acquired token (e.g., from a system credential store).
+    ///   - assertionProvider: The JWT source of the `.jwtBearer` grant.
     ///   - authorizationDelegate: Optional delegate that presents the authorization URL to the
     ///     user for interactive `authorization_code` flows.
     ///   - proactiveRefreshWindowSeconds: Seconds before expiry at which a token is proactively
     ///     refreshed. Defaults to 60. Set to 0 to disable proactive refresh.
+    ///   - allowsDiscoveredAuthorizationServer: Whether the `.jwtBearer` grant may send its
+    ///     assertion to the authorization server named in the MCP server's metadata.
     public init(
         grantType: GrantType = .clientCredentials,
         authentication: TokenEndpointAuthentication,
@@ -409,9 +489,13 @@ public struct OAuthConfiguration: Sendable {
         applicationType: ApplicationType? = nil,
         additionalTokenRequestParameters: [String: String] = [:],
         accessTokenProvider: AccessTokenProvider? = nil,
+        assertionProvider: AssertionProvider? = nil,
         authorizationDelegate: (any OAuthAuthorizationDelegate)? = nil,
-        proactiveRefreshWindowSeconds: TimeInterval = 60
+        proactiveRefreshWindowSeconds: TimeInterval = 60,
+        allowsDiscoveredAuthorizationServer: Bool = false
     ) {
+        self.assertionProvider = assertionProvider
+        self.allowsDiscoveredAuthorizationServer = allowsDiscoveredAuthorizationServer
         self.grantType = grantType
         self.authentication = authentication
         self.retryPolicy = retryPolicy

@@ -49,13 +49,14 @@ from `handleChallenge` become `MCPError.internalError("Authorization flow failed
 
 | Setting | Default |
 |---|---|
-| `grantType` | `.clientCredentials`; or `.authorizationCode` |
+| `grantType` | `.clientCredentials`; or `.authorizationCode`, `.jwtBearer` |
 | `authentication` | required: `.clientSecretBasic`, `.clientSecretPost`, `.none(clientID:)`, `.privateKeyJWT` |
 | `retryPolicy` | 3 authorization attempts, 2 scope step-ups |
 | `endpointOverrides` | none; PRM URL, AS issuer, token endpoint, resource |
 | `authorizationRedirectURI` | random loopback `http://127.0.0.1:<port>/callback` |
 | `clientName`, `applicationType` | `"mcp-swift-sdk"`, inferred |
 | `accessTokenProvider` | none; supplies an external token after discovery |
+| `assertionProvider` | none; the JWT of the `.jwtBearer` grant |
 | `authorizationDelegate` | none; presents the authorization URL |
 | `proactiveRefreshWindowSeconds` | 60 |
 
@@ -185,6 +186,53 @@ registers again; a server without a registration endpoint is not asked again.
 the authorization code grant with an `https` redirect URI on a non-loopback host, and `native` in
 every other case (the Python SDK's default).
 
+### JWT bearer grant and enterprise-managed authorization
+
+`.jwtBearer` (RFC 7523 §2.1) sends `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer`, the
+`assertion`, `resource` and `scope`, with the configured client authentication. The
+`assertionProvider` gets an `AssertionContext`: the AS issuer (metadata `issuer`, else the selected
+AS) as `audience`, the resource, the token endpoint and the requested scopes. It runs for each
+token request; assertions are not cached. There is no registration for this grant. A failed
+request throws `tokenRequestFailed`; nothing is retried and no other grant is tried (the
+conformance `wif-no-retry` and `wif-grant-fallback` checks).
+
+Enterprise-managed authorization (SEP-990) has two legs:
+
+```mermaid
+sequenceDiagram
+    participant App
+    participant IdP as Identity provider
+    participant AS as MCP authorization server
+    participant RS as MCP server
+    App->>RS: request
+    RS-->>App: 401
+    App->>AS: GET metadata (pinned issuer or from PRM)
+    App->>IdP: token exchange, subject_token = ID token
+    IdP-->>App: ID-JAG (issued_token_type id-jag)
+    App->>AS: jwt-bearer grant, assertion = ID-JAG
+    AS-->>App: access token
+    App->>RS: request with Bearer token
+```
+
+`OAuthConfiguration.enterpriseManaged` builds a `.jwtBearer` configuration whose assertion
+provider asks the application for the ID token and runs `OAuthTokenExchange.exchange` with
+`audience` = AS issuer and `resource` = the MCP server. `authorizationServer` sets
+`endpointOverrides.authorizationServerURL`, so the PRM cannot choose the AS; its metadata must
+name it as `issuer`. `nil` follows the PRM, which the conformance harness needs: it names the AS
+only there.
+
+`OAuthTokenExchange.exchange` (RFC 8693): form POST with `grant_type`
+`urn:ietf:params:oauth:grant-type:token-exchange`, `subject_token`, `subject_token_type`,
+`requested_token_type`, optional `audience`, `resource`, `scope`, and the client authentication.
+`https` (or allowed loopback) and no private IP literal; no redirects. The response must carry
+`issued_token_type` equal to the requested type (`issuedTokenTypeMismatch`); `token_type` is
+not checked (`N_A` for an ID-JAG). `OAuthTokenExchange.tokenEndpoint(issuer:)` reads the token
+endpoint from the issuer's metadata, with the same issuer check as AS discovery.
+
+Comparison: the Python SDK implements leg 2 (`IdentityAssertionOAuthProvider`, configured issuer,
+no PRM) and leaves leg 1 to the application; the Go SDK has both legs (`EnterpriseHandler`,
+`oauthex.ExchangeToken`) and an OIDC login helper. Neither has the workload identity grant.
+
 ### PKCE and the authorization code grant
 
 - The AS metadata must list `S256` in `code_challenge_methods_supported`; a missing list or one
@@ -247,5 +295,6 @@ DNS rebinding is not covered. The redirect URI is validated before the flow star
 
 - A missing `authorization_endpoint` throws `tokenEndpointMissing`.
 - `TokenStorage` holds one token, so one authorizer serves one resource.
-- Deferred extensions, not scored for conformance tiers: DPoP (SEP-1932), enterprise-managed
-  authorization, workload identity `jwt-bearer` ([ROADMAP.md](../ROADMAP.md)).
+- Deferred, not scored for conformance tiers: DPoP (SEP-1932) ([ROADMAP.md](../ROADMAP.md)).
+- No OpenID Connect sign-in helper produces the ID token for `enterpriseManaged` (the Go SDK has
+  `PerformOIDCLogin`).

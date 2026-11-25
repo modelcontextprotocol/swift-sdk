@@ -174,6 +174,8 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
     private var _refreshedTokenValue: String?
     private var _completedChallenges = 0
     private var _lastChallengeError: (any Error)?
+    private var _storedTokenLifetime: (value: String, seconds: TimeInterval)?
+    private var _proactivelyRenewedToken: String?
 
     private var configuration: OAuthConfiguration {
         get { stateLock.withLock { _configuration } }
@@ -235,6 +237,17 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
             _completedChallenges += 1
             _lastChallengeError = error
         }
+    }
+    /// The `expires_in` of the token this authorizer stored last.
+    private var storedTokenLifetime: (value: String, seconds: TimeInterval)? {
+        get { stateLock.withLock { _storedTokenLifetime } }
+        set { stateLock.withLock { _storedTokenLifetime = newValue } }
+    }
+    /// The access token `prepareAuthorization` last tried to replace. It is
+    /// tried once: a failed renewal is left to the 401 path.
+    private var proactivelyRenewedToken: String? {
+        get { stateLock.withLock { _proactivelyRenewedToken } }
+        set { stateLock.withLock { _proactivelyRenewedToken = newValue } }
     }
 
     private let tokenStorage: TokenStorage
@@ -591,16 +604,27 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
 
     public func prepareAuthorization(for endpoint: URL, session: URLSession) async throws {
         guard configuration.proactiveRefreshWindowSeconds > 0 else { return }
-        guard let token = tokenStorage.load(),
-            token.isExpired(skewSeconds: configuration.proactiveRefreshWindowSeconds)
-        else { return }
+        guard let token = tokenStorage.load(), isDueForRenewal(token) else { return }
         try await gate.run {
             // Read again: a refresh may have run while this one waited.
-            guard let token = tokenStorage.load(),
-                token.isExpired(skewSeconds: configuration.proactiveRefreshWindowSeconds)
+            guard let token = tokenStorage.load(), isDueForRenewal(token) else { return }
+            guard let asMeta = authorizationServerMetadata,
+                configuration.endpointOverrides.tokenEndpoint != nil || asMeta.tokenEndpoint != nil
             else { return }
-            guard let refreshToken = token.refreshToken else { return }
-            guard let asMeta = authorizationServerMetadata, asMeta.tokenEndpoint != nil else { return }
+            guard let refreshToken = token.refreshToken else {
+                // Grants without user interaction get a new token before
+                // this one expires; a failure leaves the 401 path to recover.
+                guard configuration.grantType == .jwtBearer || configuration.grantType == .clientCredentials,
+                    let metadata = protectedResourceMetadata
+                else { return }
+                proactivelyRenewedToken = token.value
+                try? await acquireToken(
+                    endpoint: endpoint, metadata: metadata,
+                    requestedScopes: token.scopes.isEmpty ? nil : token.scopes, session: session)
+                // A cancelled attempt is not a try: the next request makes it.
+                if Task.isCancelled { proactivelyRenewedToken = nil }
+                return
+            }
 
             let resource: URL
             do {
@@ -610,6 +634,7 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
             }
 
             let requestedScopes = token.scopes.isEmpty ? nil : token.scopes
+            proactivelyRenewedToken = token.value
             _ = try? await refreshAccessToken(
                 token,
                 refreshToken: refreshToken,
@@ -618,7 +643,26 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
                 asMetadata: asMeta,
                 session: session
             )
+            if Task.isCancelled { proactivelyRenewedToken = nil }
         }
+    }
+
+    /// Whether `prepareAuthorization` replaces `token`: it expires within
+    /// `proactiveRefreshWindowSeconds`, and it was not tried already. For a
+    /// token this authorizer stored with a lifetime shorter than the window,
+    /// the window shrinks to half the time the token is sent (until
+    /// ``OAuthTokenExpirySkew/defaultSeconds`` before it expires), so it is
+    /// not replaced on every request; a token that is never sent is left to
+    /// the 401 path.
+    private func isDueForRenewal(_ token: OAuthAccessToken) -> Bool {
+        guard token.value != proactivelyRenewedToken else { return false }
+        var window = configuration.proactiveRefreshWindowSeconds
+        if let stored = storedTokenLifetime, stored.value == token.value, stored.seconds < window {
+            let skew = OAuthTokenExpirySkew.defaultSeconds
+            guard stored.seconds > skew else { return false }
+            window = (stored.seconds + skew) / 2
+        }
+        return token.isExpired(skewSeconds: window)
     }
 
     // MARK: - Discovery
@@ -744,20 +788,33 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
         } else if let selected = selectedAuthorizationServer {
             candidates = [selected]
         } else {
+            // A jwt-bearer assertion goes to a server the MCP server names
+            // only after the opt-in: fail before any request to one.
+            if configuration.grantType == .jwtBearer, configuration.endpointOverrides.tokenEndpoint == nil,
+                !configuration.allowsDiscoveredAuthorizationServer
+            {
+                throw OAuthAuthorizationError.authorizationServerNotConfigured
+            }
             guard !metadata.authorizationServers.isEmpty else {
                 throw OAuthAuthorizationError.missingAuthorizationServer
             }
             candidates = metadata.authorizationServers
         }
 
+        // The issuer of a jwt-bearer server is checked even when configured:
+        // it is the audience of the assertion (RFC 7523 §3), and the ID-JAG
+        // draft (§9.5) forbids metadata whose issuer differs (RFC 8414 §3.3).
+        let trustedIssuer =
+            configuration.grantType == .jwtBearer ? nil : configuration.endpointOverrides.authorizationServerURL
         let server: URL
         let asMetadata: OAuthAuthorizationServerMetadata
         do {
             (server, asMetadata) = try await discoveryClient.fetchAuthorizationServerMetadata(
-                candidates: candidates, trustedIssuer: configuration.endpointOverrides.authorizationServerURL,
-                session: session)
+                candidates: candidates, trustedIssuer: trustedIssuer, session: session)
         } catch OAuthAuthorizationError.authorizationServerMetadataDiscoveryFailed
             where metadata.isFallback && configuration.endpointOverrides.authorizationServerURL == nil
+                // The jwt-bearer grant postdates 2025-03-26.
+                && configuration.grantType != .jwtBearer
         {
             // 2025-03-26: a server without metadata serves the endpoints at its root.
             guard let origin = candidates.first else { throw OAuthAuthorizationError.missingAuthorizationServer }
@@ -799,7 +856,80 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
                 asMetadata: asMetadata,
                 session: session
             )
+        case .jwtBearer:
+            try await acquireTokenViaJWTBearer(
+                resource: resource,
+                requestedScopes: requestedScopes,
+                asMetadata: asMetadata,
+                session: session
+            )
         }
+    }
+
+    /// RFC 7523 §2.1: presents the provider's JWT. A failed request throws:
+    /// the grant is not retried and no other grant is tried.
+    private func acquireTokenViaJWTBearer(
+        resource: URL,
+        requestedScopes: Set<String>?,
+        asMetadata: OAuthAuthorizationServerMetadata,
+        session: URLSession
+    ) async throws {
+        guard let assertionProvider = configuration.assertionProvider else {
+            throw OAuthAuthorizationError.assertionProviderMissing
+        }
+        let overrides = configuration.endpointOverrides
+        let pinned = overrides.authorizationServerURL != nil || overrides.tokenEndpoint != nil
+        guard pinned || configuration.allowsDiscoveredAuthorizationServer else {
+            throw OAuthAuthorizationError.authorizationServerNotConfigured
+        }
+        let tokenEndpoint = try resolveTokenEndpoint(asMetadata: asMetadata)
+        guard let audience = asMetadata.issuer ?? selectedAuthorizationServer else {
+            throw OAuthAuthorizationError.missingAuthorizationServer
+        }
+        let assertion = try await assertionProvider(
+            OAuthConfiguration.AssertionContext(
+                audience: audience, resource: resource, tokenEndpoint: tokenEndpoint,
+                requestedScopes: requestedScopes),
+            session)
+        // A server the MCP server chose gets only an assertion meant for it,
+        // which it can tell only from a readable `aud`.
+        if !pinned {
+            let claimed = Self.audiences(of: assertion) ?? []
+            let expected = [audience.absoluteString, tokenEndpoint.absoluteString]
+            guard claimed.contains(where: { claim in expected.contains { OAuthIssuer.matches(claim, $0) } }) else {
+                throw OAuthAuthorizationError.assertionAudienceMismatch(expected: expected, actual: claimed)
+            }
+        }
+
+        var bodyParameters: [String: String] = configuration.additionalTokenRequestParameters
+        bodyParameters[OAuthParameterName.grantType] = OAuthGrantTypeValue.jwtBearer
+        bodyParameters[OAuthParameterName.assertion] = assertion
+        bodyParameters[OAuthParameterName.resource] = resource.absoluteString
+        if let scope = requestedScopes.flatMap(scopeSelector.serialize) {
+            bodyParameters[OAuthParameterName.scope] = scope
+        }
+        let decoded = try await tokenEndpointClient.request(
+            parameters: &bodyParameters,
+            endpoint: tokenEndpoint,
+            authentication: configuration.authentication,
+            session: session
+        )
+        storeTokenResponse(decoded, requestedScopes: requestedScopes)
+    }
+
+    /// The `aud` claim of a JWT (the strings of an array), or `nil` when
+    /// `token` is not a JWT with one. A padded payload is read too.
+    static func audiences(of token: String) -> [String]? {
+        let parts = token.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 3 else { return nil }
+        var encoded = String(parts[1])
+        while encoded.hasSuffix("=") { encoded.removeLast() }
+        guard let payload = Data(base64URLEncoded: encoded),
+            let claims = try? JSONSerialization.jsonObject(with: payload) as? [String: Any]
+        else { return nil }
+        if let single = claims["aud"] as? String { return [single] }
+        let strings = (claims["aud"] as? [Any])?.compactMap { $0 as? String } ?? []
+        return strings.isEmpty ? nil : strings
     }
 
     private func acquireTokenViaClientCredentials(
@@ -982,6 +1112,8 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
 
         guard !clientRegistrationAttempted else { return }
         guard case .none = configuration.authentication else { return }
+        // The assertion identifies the client: nothing to register.
+        guard configuration.grantType != .jwtBearer else { return }
 
         clientRegistrationAttempted = true
         registrationAttemptIssuer = selectedAuthorizationServer
@@ -1021,6 +1153,9 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
             scopeSet = requestedScopes ?? []
         }
         let expiresAt = decoded.expiresIn.map { Date().addingTimeInterval(TimeInterval($0)) }
+        storedTokenLifetime = decoded.expiresIn.map { (decoded.accessToken, TimeInterval($0)) }
+        // A stored token is new, even with the value of the one tried.
+        proactivelyRenewedToken = nil
         tokenStorage.save(OAuthAccessToken(
             value: decoded.accessToken,
             tokenType: OAuthTokenType.bearer,
@@ -1135,6 +1270,7 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
         requestedScopes: Set<String>?,
         authorizationServer: URL?
     ) {
+        proactivelyRenewedToken = nil
         tokenStorage.save(OAuthAccessToken(
             value: token,
             tokenType: OAuthTokenType.bearer,
@@ -1154,6 +1290,12 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
         requestedScopes: Set<String>?,
         session: URLSession
     ) async throws -> OAuthConfiguration.AccessTokenProviderContext {
+        // A grant that cannot run fails before the authorization server is asked.
+        if configuration.grantType == .jwtBearer, configuration.assertionProvider == nil,
+            configuration.accessTokenProvider == nil
+        {
+            throw OAuthAuthorizationError.assertionProviderMissing
+        }
         let asMetadata = try await resolveAuthorizationServerMetadata(
             metadata: metadata, session: session)
         let resource = try canonicalResource(for: endpoint)

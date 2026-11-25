@@ -2363,11 +2363,12 @@ import Testing
                 let scenario = await MockURLProtocol.requestHandlerStorage
                     .configureOAuthProactiveTokenRefreshWithinWindow()
 
+                let storage = InMemoryTokenStorage()
                 let transport = HTTPClientTransport(
                     endpoint: scenario.testEndpoint,
                     configuration: MockResponses.ephemeralConfiguration(),
                     streaming: false,
-                    authorizer: OAuthAuthorizer(configuration: scenario.oauthConfiguration),
+                    authorizer: OAuthAuthorizer(configuration: scenario.oauthConfiguration, tokenStorage: storage),
                     logger: nil
                 )
 
@@ -2379,6 +2380,14 @@ import Testing
                 try await transport.send(scenario.messageData)
                 let receivedFirst = try await iterator.next()
                 #expect(receivedFirst == scenario.expectedResponseData)
+
+                // 200 s later the 300 s token is within its renewal window.
+                let token = try #require(storage.load())
+                storage.save(
+                    OAuthAccessToken(
+                        value: token.value, tokenType: token.tokenType, expiresAt: Date().addingTimeInterval(100),
+                        scopes: token.scopes, authorizationServer: token.authorizationServer,
+                        refreshToken: token.refreshToken, clientID: token.clientID))
 
                 try await transport.send(scenario.secondMessageData!)
                 let receivedSecond = try await iterator.next()

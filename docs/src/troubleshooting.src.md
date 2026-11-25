@@ -260,13 +260,18 @@ authorizer, a 401 is `Authentication required` and a 403 is
 
 | Description starts with | Case | Cause |
 |---|---|---|
-| `Authorization server issuer mismatch` | `authorizationServerIssuerMismatch` | The metadata's `issuer` differs from the issuer its URL was built from (RFC 8414 §3.3), for example by case or a trailing slash on a path. Only a trailing slash on a root issuer is tolerated. To trust such a server, set it in `endpointOverrides.authorizationServerURL`. |
+| `Authorization server issuer mismatch` | `authorizationServerIssuerMismatch` | The metadata's `issuer` differs from the issuer its URL was built from (RFC 8414 §3.3), for example by case or a trailing slash on a path. Only a trailing slash on a root issuer is tolerated. To trust such a server, set it in `endpointOverrides.authorizationServerURL`; with `.jwtBearer`, a configured server must name itself too, since its issuer is the audience of the assertion. |
 | `Authorization metadata at <url> is unavailable: ...` | — | Discovery got a network error, a timeout or a status other than 404 and 410. Nothing is cached; the next request tries again. |
 | `Authorization response issuer mismatch` | `authorizationResponseIssuerMismatch` | The redirect's `iss` differs from the metadata's `issuer`. The comparison is exact. |
 | `Authorization response is missing the iss parameter` | `authorizationResponseMissingIssuer` | The server advertises `authorization_response_iss_parameter_supported`, and the redirect has no `iss`. |
 | `Authorization server metadata must include code_challenge_methods_supported` | `pkceCodeChallengeMethodsMissing` | The metadata does not advertise PKCE. |
 | `Authorization server metadata must support PKCE S256` | `pkceS256NotSupported` | The metadata lists PKCE methods without `S256`. |
 | `No authorization server was found` | `missingAuthorizationServer` | The protected resource metadata names no authorization server. |
+| `The jwt-bearer grant requires an assertion provider` | `assertionProviderMissing` | `grantType` is `.jwtBearer` and `assertionProvider` is `nil`. |
+| `The jwt-bearer grant needs endpointOverrides.authorizationServerURL or tokenEndpoint` | `authorizationServerNotConfigured` | `.jwtBearer` without a configured authorization server or token endpoint, or `enterpriseManaged` with `authorizationServer: nil`, and `allowsDiscoveredAuthorizationServer` is off. Configure the server, or set the option to let the MCP server's metadata choose it. |
+| `The assertion audience` | `assertionAudienceMismatch` | With `allowsDiscoveredAuthorizationServer`, the assertion's `aud` is neither the discovered issuer nor its token endpoint, or the assertion is not a JWT with an `aud` claim. It is not sent. Return an assertion for `context.audience`. |
+| `Token exchange issued` | `issuedTokenTypeMismatch` | The identity provider returned another token type than requested, for example an access token instead of an ID-JAG. |
+| `Token request failed with status 400 (oauth_error: invalid_grant)` | `tokenRequestFailed` | With `.jwtBearer`: the assertion is expired, has the wrong audience, or is not trusted. The request is not retried. |
 | `Authorization response state mismatch` | `authorizationResponseStateMismatch` | The redirect does not belong to this authorization request. |
 
 Issuer mismatches are configuration errors on the server side: the issuer in

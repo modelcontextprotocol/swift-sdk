@@ -138,8 +138,7 @@ func textContent(_ string: String) -> Tool.Content {
 |---|---|
 | The `io.modelcontextprotocol/tasks` extension (`tasks-*` conformance scenarios) | Deferred. Not scored for any tier; listed in `conformance/baseline.yml`. |
 | DPoP-bound tokens (SEP-1932; `auth/dpop`, `auth/dpop-nonce`) | Deferred. |
-| Enterprise-managed authorization (`auth/enterprise-managed-authorization`) | Deferred. |
-| Workload identity with the JWT bearer grant (`auth/wif-jwt-bearer`) | Deferred. `OAuthConfiguration.GrantType` has `authorizationCode` and `clientCredentials` only. |
+| An OpenID Connect sign-in helper for enterprise-managed authorization | Not planned. `enterpriseManaged` takes the user's ID token from the application. |
 
 The capability structs carry `extensions`, so an application can declare and
 read extension settings, but the SDK implements none of these extensions.

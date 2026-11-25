@@ -425,7 +425,7 @@ Pass an `HTTPClientAuthorizer` to `HTTPClientTransport(endpoint:authorizer:)`. T
 What happens on a request:
 
 1. Before the first request, `validateEndpointSecurity` requires the MCP endpoint to be `https`, or `http` on a loopback host.
-2. Before every request, the authorizer refreshes a token that expires within `proactiveRefreshWindowSeconds` (60 s) and adds `Authorization: Bearer <token>`.
+2. Before every request, the authorizer refreshes a token that expires within `proactiveRefreshWindowSeconds` (60 s) and adds `Authorization: Bearer <token>`. A token issued for less than the window is refreshed halfway through the time it is sent (until 30 s before it expires), so it is not refreshed on every request. Each token is tried once; when that fails, the next 401 recovers.
 3. On 401 or 403 the transport calls `handleChallenge`. The authorizer parses `WWW-Authenticate`, discovers metadata and gets a token, and the transport retries. It sends one request at most `RetryPolicy.maxAuthorizationAttempts` (3) times. A 403 with `error="insufficient_scope"` requests the union of the current and the challenged scopes, up to `maxScopeUpgradeAttempts` (2) times per resource, method and scope set.
 
 Discovery follows the MCP authorization spec: protected resource metadata (RFC 9728) from the challenge's `resource_metadata` or the well-known URLs, then authorization server metadata (RFC 8414, then OpenID Connect discovery). Tokens are bound to the resource with the RFC 8707 `resource` parameter. `EndpointOverrides` skips parts of discovery.
@@ -436,6 +436,7 @@ Discovery follows the MCP authorization spec: protected resource metadata (RFC 9
 |---|---|---|
 | `.clientCredentials` (default) | Services without a user | Needs a confidential `authentication`. |
 | `.authorizationCode` | Apps with a user | PKCE with S256 is required; the flow fails with `pkceS256NotSupported` when the server advertises other methods only. The `authorizationDelegate` shows the URL and returns the redirect. |
+| `.jwtBearer` | Enterprise-managed authorization, workload identity | RFC 7523: presents the JWT that `assertionProvider` returns. No client registration. See [Enterprise-managed authorization](#enterprise-managed-authorization) and [Workload identity](#workload-identity). |
 
 `TokenEndpointAuthentication`: `.clientSecretBasic`, `.clientSecretPost`, `.none(clientID:)` for public clients, and `.privateKeyJWT(clientID:assertionFactory:)`. `OAuthConfiguration.makePrivateKeyJWTAssertion` builds ES256 assertions.
 
@@ -460,11 +461,41 @@ Tokens are kept in a `TokenStorage`. The default `InMemoryTokenStorage` loses th
 
 Use one `OAuthAuthorizer` per transport. Requests of a transport run concurrently: the authorizer handles one challenge or proactive refresh at a time, and a request whose 401, or 403 for the same scopes, arrives while another is handled retries with the token that one obtained, so concurrent challenges cause one refresh or sign-in. The authorizer compares a challenge with the token the challenged request carried, so a late 401 for a token another request already replaced retries with the new one instead of starting over. When the challenge being handled fails and leaves no usable token other than the one the waiting requests carried (the user cancelled the authorization, the grant was refused), the requests that waited for it fail with its error instead of each starting the flow again; a later request starts a new flow. A request cancelled while it waits stops waiting.
 
+#### Enterprise-managed authorization
+
+In an enterprise that manages access to MCP servers (SEP-990), the user signs in once at the company's identity provider, and the client turns that sign-in into MCP access tokens without a browser round trip per server:
+
+1. The application gets the user's ID token from its sign-in at the identity provider.
+2. The client exchanges it at the identity provider for an identity assertion (ID-JAG) with an RFC 8693 token exchange: `subject_token_type` `urn:ietf:params:oauth:token-type:id_token`, `requested_token_type` `urn:ietf:params:oauth:token-type:id-jag`, the MCP authorization server's issuer as `audience`, the MCP server as `resource`, and the requested scopes.
+3. The client presents the ID-JAG to the MCP authorization server with the jwt-bearer grant and its own credentials there.
+
+`OAuthConfiguration.enterpriseManaged(authentication:authorizationServer:identityProvider:idToken:retryPolicy:additionalTokenRequestParameters:allowsDiscoveredAuthorizationServer:)` configures all three:
+
+%include Examples/Snippets/Protocol/Authorization.swift auth-enterprise
+
+- `authorizationServer` pins the MCP authorization server, which receives the ID-JAG and the client credentials. Its metadata must name it as `issuer`, which becomes the ID-JAG's audience; otherwise the grant fails with `authorizationServerIssuerMismatch` before the token exchange. `nil` uses the server named in the protected resource metadata, so the MCP server decides where they go; it needs `allowsDiscoveredAuthorizationServer: true`, and fails with `authorizationServerNotConfigured` otherwise.
+- `identityProvider.endpoint` is the identity provider's token endpoint, or its issuer (`.issuer`), from whose metadata (`/.well-known/oauth-authorization-server`, then `/.well-known/openid-configuration`) the token endpoint is read once; a failed exchange reads it again next time, a cancelled one does not.
+- `idToken` runs before each token exchange. The SDK does not sign the user in: use the identity provider's SDK, or the authorization code flow with the `openid` scope.
+- Every 401 runs both steps again, unless the authorization server issued a refresh token. Without a refresh token, the authorizer also runs them before the token expires (`proactiveRefreshWindowSeconds`). ID-JAGs are not cached. Concurrent 401s run them once.
+- The exchange requires `issued_token_type` to be the ID-JAG type (`issuedTokenTypeMismatch` otherwise) and accepts the `token_type` `N_A`. Exchange and grant requests follow no redirects.
+
+`OAuthTokenExchange.exchange(_:tokenEndpoint:authentication:session:urlValidator:)` performs one RFC 8693 exchange for other uses, and `OAuthTokenExchange.tokenEndpoint(issuer:session:urlValidator:)` discovers a token endpoint. `OAuthTokenExchange.TokenType` has the token type URIs.
+
+#### Workload identity
+
+A workload with a platform identity, such as a Kubernetes service account or a cloud workload identity, authenticates with a JWT its platform issued (SEP-1933). Use `.jwtBearer` with a public client and return the JWT from `assertionProvider`:
+
+%include Examples/Snippets/Protocol/Authorization.swift auth-workload-identity
+
+`AssertionContext` carries the `audience` (the authorization server's issuer), the `resource`, the `tokenEndpoint` and the `requestedScopes`. The provider runs for every token request, and before the token expires; return a JWT that is still valid.
+
+The `.jwtBearer` grant sends its assertion only to a configured server: `endpointOverrides.authorizationServerURL` or `tokenEndpoint`. Otherwise it fails with `authorizationServerNotConfigured`, because the MCP server's metadata would choose where a credential goes that a hostile server could replay at the real authorization server. `allowsDiscoveredAuthorizationServer: true` lets the metadata choose; then an assertion whose `aud` is neither the discovered issuer nor its token endpoint, or that is not a JWT with an `aud` claim, fails with `assertionAudienceMismatch` before it is sent, so do not return a token with a fixed audience for an unexpected `context.audience`. `tokenEndpoint` alone fixes where the assertion goes but not `context.audience`: the authorization server, and its issuer, still come from the protected resource metadata. Set `authorizationServerURL` to fix both; its metadata must then name it as `issuer` (RFC 8414 §3.3), or the grant fails with `authorizationServerIssuerMismatch`. The 2025-03-26 fallback to endpoints at the server origin is never used for this grant. A rejected grant (`invalid_grant`, `invalid_scope`, `unauthorized_client`) fails the request with `tokenRequestFailed` and is not retried with another grant.
+
 `accessTokenProvider` lets the app supply a token it got elsewhere. The SDK calls it after discovery with an `AccessTokenProviderContext` (resource, endpoints, scopes); return `nil` to run the configured grant. The provider and the `authorizationDelegate` run while the authorizer handles a challenge, and the transport's other challenges wait for them: they must not send requests through the transport they authorize.
 
 Issuer checks and authorization server changes:
 
-- Authorization server metadata is accepted only when its `issuer` equals the issuer the metadata URL was built from (RFC 8414 §3.3). The comparison is case-sensitive; a root issuer may differ by a trailing slash. A mismatch fails with `authorizationServerIssuerMismatch`. An issuer set in `endpointOverrides.authorizationServerURL` is trusted: its metadata is used whatever `issuer` it names.
+- Authorization server metadata is accepted only when its `issuer` equals the issuer the metadata URL was built from (RFC 8414 §3.3). The comparison is case-sensitive; a root issuer may differ by a trailing slash. A mismatch fails with `authorizationServerIssuerMismatch`. An issuer set in `endpointOverrides.authorizationServerURL` is trusted: its metadata is used whatever `issuer` it names, except with `.jwtBearer`, whose assertion is addressed to that issuer.
 - The `iss` parameter of the authorization response must equal the metadata issuer exactly (RFC 9207). An `iss` given more than once or without a value is rejected too. A missing `iss` is rejected when the server advertises `authorization_response_iss_parameter_supported`. Errors: `authorizationResponseIssuerMismatch`, `authorizationResponseMissingIssuer`.
 - When a stored token is rejected, the authorizer refreshes it at the server that issued it. It reads the protected resource metadata again when the refresh fails, when the refreshed token is rejected too, or when the challenge names another metadata URL; a refreshed token is then refreshed again when the resource still names the same server. If the selected authorization server is no longer listed, it drops the stored token, selects a new server (SEP-2352) and drops credentials it registered at the old one; pre-registered credentials are kept. When `endpointOverrides.authorizationServerURL` configures the server, the resource cannot move away from it, and the token is kept. A read that fails falls back to the metadata read before; with none, the request fails and the token is kept. A network error or an unexpected status while reading the authorization server metadata also fails the request and keeps the token.
 - A refresh token is sent only to the server that issued it. A token without a recorded server is refreshed only at a configured `authorizationServerURL` or `tokenEndpoint`.

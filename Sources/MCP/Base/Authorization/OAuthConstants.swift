@@ -6,6 +6,10 @@ enum OAuthGrantTypeValue {
     static let clientCredentials = "client_credentials"
     static let authorizationCode = "authorization_code"
     static let refreshToken = "refresh_token"
+    /// RFC 7523 §2.1.
+    static let jwtBearer = "urn:ietf:params:oauth:grant-type:jwt-bearer"
+    /// RFC 8693.
+    static let tokenExchange = "urn:ietf:params:oauth:grant-type:token-exchange"
 }
 
 // MARK: - OAuth Parameter Names
@@ -27,6 +31,11 @@ enum OAuthParameterName {
     static let refreshToken = "refresh_token"
     static let state = "state"
     static let issuer = "iss"
+    static let assertion = "assertion"
+    static let subjectToken = "subject_token"
+    static let subjectTokenType = "subject_token_type"
+    static let requestedTokenType = "requested_token_type"
+    static let audience = "audience"
 }
 
 // MARK: - OAuth Well-Known Paths

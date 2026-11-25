@@ -17,7 +17,8 @@ Most code compiles unchanged; the breaking changes are in `MCPError`,
 | `MCPError` decoding | -32000 and -32001 decode as `serverError`; -32602 with `data.uri` as `resourceNotFound` | Match the new cases |
 | `HTTPResponse` | `.data` and `.error` have new associated values | Update patterns |
 | `Client.Capabilities.experimental` | `[String: String]?` became `[String: Value]?` | Pass `Value`s |
-| `OAuthAuthorizationError` | Two new cases | Update exhaustive `switch` statements |
+| `OAuthAuthorizationError` | Six new cases | Update exhaustive `switch` statements |
+| `OAuthConfiguration.GrantType` | New case `.jwtBearer` | Update exhaustive `switch` statements |
 | `Server` | Serves 2026-07-28 requests by default | Nothing, or opt out |
 | `Client` | Connects at 2026-07-28 by default, with a fallback to `initialize` | Nothing, or opt out |
 | `Version.supported` | Lists 2026-07-28 | Read `Version.handshake` for the `initialize` revisions |
@@ -171,9 +172,16 @@ compile; variables of type `[String: String]` do not.
 
 ### `OAuthAuthorizationError`
 
-Two cases are new: `authorizationResponseIssuerMismatch(expected:actual:)` and
-`authorizationResponseMissingIssuer`. Add them, or a `default`, to exhaustive
-`switch` statements. See [Authorization](#authorization).
+Six cases are new: `authorizationResponseIssuerMismatch(expected:actual:)`,
+`authorizationResponseMissingIssuer`, `assertionProviderMissing`,
+`issuedTokenTypeMismatch(expected:actual:)`, `authorizationServerNotConfigured`
+and `assertionAudienceMismatch(expected:actual:)`. Add them, or a `default`, to
+exhaustive `switch` statements. See [Authorization](#authorization).
+
+### `OAuthConfiguration.GrantType`
+
+`GrantType` has a new case, `.jwtBearer`. A `switch` over `grantType` needs it,
+or a `default`.
 
 ## Behavior changes
 
@@ -411,4 +419,6 @@ It seals `requestState` with AES-GCM, computes PKCE challenges and signs
 | Capability extensions | `extensions` on both capability structs | [server.md](server.md#capabilities-and-extensions) |
 | Log level order | `LogLevel: Comparable` | [server.md](server.md#logging) |
 | OAuth | `OAuthConfiguration.ApplicationType`, `OAuthAuthorizationCodeFlow.ExpectedIssuer` | [protocol.md](protocol.md#authorization) |
+| Enterprise-managed authorization, workload identity | `OAuthConfiguration.enterpriseManaged(...)`, `GrantType.jwtBearer`, `assertionProvider`, `OAuthTokenExchange` | [protocol.md](protocol.md#enterprise-managed-authorization) |
+| Replay store size | `StatefulHTTPServerTransport(eventStoreCapacity:)` | [protocol.md](protocol.md#transports) |
 

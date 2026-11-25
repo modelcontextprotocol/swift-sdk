@@ -66,21 +66,6 @@ private func loadConformanceContext() -> [String: String] {
     return parsed
 }
 
-private func percentEncodeFormValue(_ value: String) -> String {
-    let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
-    return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
-}
-
-private func formURLEncodedBody(_ parameters: [String: String]) -> Data {
-    let encoded = parameters
-        .sorted { $0.key < $1.key }
-        .map { key, value in
-            "\(percentEncodeFormValue(key))=\(percentEncodeFormValue(value))"
-        }
-        .joined(separator: "&")
-    return Data(encoded.utf8)
-}
-
 private func clientAssertionAudience(from tokenEndpoint: URL) -> String {
     guard var components = URLComponents(url: tokenEndpoint, resolvingAgainstBaseURL: false) else {
         return tokenEndpoint.absoluteString
@@ -190,14 +175,31 @@ private func makeOAuthConfiguration(
                     ?? "https://conformance-test.local/client-metadata.json")
         )
 
-    case "auth/cross-app-access-complete-flow":
+    case "auth/enterprise-managed-authorization":
+        // SEP-990: ID token -> ID-JAG at the IdP -> access token at the AS.
+        // The harness names the AS only in the protected resource metadata.
+        let idToken = context["idp_id_token"] ?? ""
+        var identityProvider = OAuthConfiguration.EnterpriseIdentityProvider(
+            endpoint: .tokenEndpoint(
+                URL(string: context["idp_token_endpoint"] ?? "") ?? URL(string: "http://localhost/token")!),
+            authentication: .none(clientID: context["idp_client_id"] ?? ""))
+        identityProvider.allowsLoopbackHTTP = true
+        configuration = .enterpriseManaged(
+            authentication: .clientSecretBasic(clientID: clientID, clientSecret: clientSecret),
+            authorizationServer: nil,
+            identityProvider: identityProvider,
+            idToken: { _ in idToken },
+            allowsDiscoveredAuthorizationServer: true)
+
+    case "auth/wif-jwt-bearer":
+        // SEP-1933: the workload's JWT is the assertion; the client is public.
+        let workloadJWT = context["valid_jwt"] ?? ""
+        // The harness names the AS only in the protected resource metadata.
         configuration = .init(
-            authentication: .clientSecretBasic(
-                clientID: clientID,
-                clientSecret: clientSecret
-            ),
-            accessTokenProvider: makeCrossAppAccessTokenProvider(context: context)
-        )
+            grantType: .jwtBearer,
+            authentication: .none(clientID: ""),
+            assertionProvider: { _, _ in workloadJWT },
+            allowsDiscoveredAuthorizationServer: true)
 
     // An empty client ID registers dynamically; a supplied one is pre-registered.
     case let s where s.hasPrefix("auth/client-credentials"):
@@ -215,111 +217,6 @@ private func makeOAuthConfiguration(
     // Conformance harness currently uses loopback http AS endpoints.
     configuration.allowLoopbackHTTPAuthorizationServerEndpoints = true
     return configuration
-}
-
-private struct ConformanceTokenResponse: Decodable {
-    let accessToken: String
-
-    enum CodingKeys: String, CodingKey {
-        case accessToken = "access_token"
-    }
-}
-
-private func requestOAuthToken(
-    url: URL,
-    parameters: [String: String],
-    authorizationHeader: String?,
-    session: URLSession
-) async throws -> String {
-    var request = URLRequest(url: url)
-    request.httpMethod = "POST"
-    request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-    request.setValue("application/json", forHTTPHeaderField: "Accept")
-    if let authorizationHeader {
-        request.setValue(authorizationHeader, forHTTPHeaderField: "Authorization")
-    }
-    request.httpBody = formURLEncodedBody(parameters)
-
-    let (data, response) = try await session.data(for: request)
-    guard let httpResponse = response as? HTTPURLResponse else {
-        throw ConformanceError.invalidArguments("Token endpoint returned an invalid response")
-    }
-    guard (200..<300).contains(httpResponse.statusCode) else {
-        let body = String(data: data, encoding: .utf8) ?? "<non-utf8 body>"
-        throw ConformanceError.invalidArguments(
-            "Token endpoint error (\(httpResponse.statusCode)): \(body)"
-        )
-    }
-
-    let token = try JSONDecoder().decode(ConformanceTokenResponse.self, from: data)
-    guard !token.accessToken.isEmpty else {
-        throw ConformanceError.invalidArguments("Token endpoint returned an empty access token")
-    }
-    return token.accessToken
-}
-
-private func makeCrossAppAccessTokenProvider(
-    context: [String: String]
-) -> OAuthConfiguration.AccessTokenProvider {
-    return { discovery, session in
-        guard let clientID = context["client_id"],
-            let clientSecret = context["client_secret"],
-            let idpClientID = context["idp_client_id"],
-            let idpIDToken = context["idp_id_token"],
-            let idpTokenEndpointValue = context["idp_token_endpoint"],
-            let idpTokenEndpoint = URL(string: idpTokenEndpointValue)
-        else {
-            throw ConformanceError.invalidArguments(
-                "Cross-app scenario requires client_id, client_secret, idp_client_id, idp_id_token, and idp_token_endpoint"
-            )
-        }
-
-        guard let authorizationServer = discovery.authorizationServer else {
-            throw ConformanceError.invalidArguments(
-                "SDK did not provide authorization server discovery context"
-            )
-        }
-        guard let tokenEndpoint = discovery.tokenEndpoint else {
-            throw ConformanceError.invalidArguments(
-                "SDK did not provide token endpoint discovery context"
-            )
-        }
-        let resource = discovery.resource.absoluteString
-
-        let idJag = try await requestOAuthToken(
-            url: idpTokenEndpoint,
-            parameters: [
-                "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
-                "subject_token": idpIDToken,
-                "subject_token_type": "urn:ietf:params:oauth:token-type:id_token",
-                "requested_token_type": "urn:ietf:params:oauth:token-type:id-jag",
-                "audience": authorizationServer.absoluteString,
-                "resource": resource,
-                "client_id": idpClientID,
-            ],
-            authorizationHeader: nil,
-            session: session
-        )
-
-        var accessTokenParameters: [String: String] = [
-            "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
-            "assertion": idJag,
-            "resource": resource,
-        ]
-        if let requestedScopes = discovery.requestedScopes, !requestedScopes.isEmpty {
-            accessTokenParameters["scope"] = requestedScopes.sorted().joined(separator: " ")
-        }
-
-        let basicCredentials = Data("\(clientID):\(clientSecret)".utf8).base64EncodedString()
-        let accessToken = try await requestOAuthToken(
-            url: tokenEndpoint,
-            parameters: accessTokenParameters,
-            authorizationHeader: "Basic \(basicCredentials)",
-            session: session
-        )
-
-        return accessToken
-    }
 }
 
 func runAuthorizationScenario(scenario: String, args: [String]) async throws {

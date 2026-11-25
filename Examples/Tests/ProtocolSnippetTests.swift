@@ -182,4 +182,14 @@ struct ProtocolSnippetTests {
             httpMethod: "GET", sessionID: nil, isInitializationRequest: false)
         #expect(pipeline.validate(get, context: getContext)?.statusCode == 200)
     }
+
+    @Test func enterpriseAndWorkloadConfigurations() {
+        let enterprise = enterpriseConfiguration { "id-token" }
+        #expect(enterprise.grantType == .jwtBearer)
+        #expect(enterprise.assertionProvider != nil)
+        #expect(enterprise.endpointOverrides.authorizationServerURL == URL(string: "https://auth.example.com")!)
+        let workload = workloadConfiguration { "workload-jwt" }
+        #expect(workload.grantType == .jwtBearer)
+        #expect(workload.authentication == .none(clientID: ""))
+    }
 }
