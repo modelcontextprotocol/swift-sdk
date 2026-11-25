@@ -1596,7 +1596,7 @@ struct ServerHandlerContextTests {
                 path: ctx?.httpContext?.path,
                 id: ctx?.id
             )
-            return CallTool.Result(content: [.text(text: "ok", annotations: nil, _meta: nil)])
+            return CallTool.Result(content: [.text(text: "ok")])
         }
 
         try await server.start(transport: transport)
@@ -1640,7 +1640,7 @@ struct ServerHandlerContextTests {
         )
         await server.withMethodHandler(CallTool.self) { [weak server] _ in
             try await server?.log(level: .info, data: "from-handler")
-            return CallTool.Result(content: [.text(text: "ok", annotations: nil, _meta: nil)])
+            return CallTool.Result(content: [.text(text: "ok")])
         }
         try await server.start(transport: transport)
 

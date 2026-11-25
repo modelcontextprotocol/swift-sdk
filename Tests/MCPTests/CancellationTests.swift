@@ -152,7 +152,7 @@ struct CancellationTests {
         }
 
         await server.withMethodHandler(CallTool.self) { params in
-            return .init(content: [.text(text: "Result for \(params.name)", annotations: nil, _meta: nil)], isError: false)
+            return .init(content: [.text(text: "Result for \(params.name)")], isError: false)
         }
 
         // Start server and connect client
@@ -161,14 +161,14 @@ struct CancellationTests {
         try await Task.sleep(for: .milliseconds(50))
 
         // Use the callTool overload that returns RequestContext (non-async version)
-        let context: RequestContext<CallTool.Result> = try await client.callTool(name: "testTool", arguments: ["test": "value"])
+        let context = try await client.startToolCall(name: "testTool", arguments: ["test": "value"])
 
         // Verify we got a context
         #expect(context.requestID != ID(stringLiteral: ""))
 
         // Get the result
         let result = try await context.value
-        #expect(result.content == [.text(text: "Result for testTool", annotations: nil, _meta: nil)])
+        #expect(result.content == [.text(text: "Result for testTool")])
         #expect(result.isError == false)
 
         await client.disconnect()
@@ -193,7 +193,7 @@ struct CancellationTests {
 
         await server.withMethodHandler(CallTool.self) { params in
             try await Task.sleep(for: .seconds(5))
-            return .init(content: [.text(text: "Should not reach here", annotations: nil, _meta: nil)], isError: false)
+            return .init(content: [.text(text: "Should not reach here")], isError: false)
         }
 
         // Start server and connect client
@@ -202,7 +202,7 @@ struct CancellationTests {
         try await Task.sleep(for: .milliseconds(50))
 
         // Use the callTool overload that returns RequestContext (non-async version)
-        let context: RequestContext<CallTool.Result> = try await client.callTool(name: "slowTool", arguments: [:])
+        let context = try await client.startToolCall(name: "slowTool", arguments: [:])
 
         // Cancel after a short delay
         try await Task.sleep(for: .milliseconds(50))

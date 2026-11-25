@@ -195,7 +195,7 @@ func registerUserAwareTool(on server: Server) async {
             throw MCPError.invalidRequest("Unauthenticated")
         }
         // Use claims.subject to scope data access. Never forward the token itself.
-        return .init(content: [.text(text: "Hello, \(claims.subject)", annotations: nil, _meta: nil)])
+        return .init(content: [.text(text: "Hello, \(claims.subject)")])
     }
     // endsnippet
 }

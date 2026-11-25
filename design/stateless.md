@@ -61,8 +61,9 @@ Client side (`Client.discoverOrInitialize`):
    answer within `Configuration.discoveryTimeout`: fall back to `initialize`. The client tells
    transport errors from the server's answer by wrapping send failures (`SendFailure`); other
    transport errors propagate.
-5. `adopt` records capabilities, version, `serverInfo` (from `_meta`) and instructions, calls
-   `HTTPClientTransport.useStatelessProtocol(_:)`, and returns a synthesized `Initialize.Result`.
+5. `adopt` records capabilities, version, `serverInfo` (from `_meta`, `nil` when absent) and
+   instructions, and calls `HTTPClientTransport.useStatelessProtocol(_:)`; `connect(transport:)`
+   returns that state as a `Client.ConnectionInfo`.
 
 On a stateless connection `ping()` sends `server/discover`, `setLoggingLevel(_:)` changes the
 level stamped into `_meta`, and `notifyRootsChanged()` does nothing.

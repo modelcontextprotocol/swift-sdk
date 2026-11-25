@@ -66,7 +66,7 @@ struct ServerSnippetTests {
         let client = try await connect(server, mode: mode)
         defer { Task { await client.disconnect(); await server.stop() } }
 
-        let (tools, _) = try await client.listTools()
+        let tools = try await client.listTools().tools
         #expect(tools.map(\.name) == ["get_weather", "get_forecast", "run_query"])
 
         let ok = try await client.callTool(name: "get_weather", arguments: ["city": "Paris"])
@@ -131,11 +131,11 @@ struct ServerSnippetTests {
 
         #expect(try await client.listResources().resources.count == 2)
         #expect(try await client.listResourceTemplates().templates.first?.uriTemplate == "file:///project/{path}")
-        let readme = try await client.readResource(uri: "file:///project/README.md")
+        let readme = try await client.readResource(uri: "file:///project/README.md").contents
         #expect(readme.first?.text == "# Project\n")
-        let logo = try await client.readResource(uri: "file:///project/logo.png")
+        let logo = try await client.readResource(uri: "file:///project/logo.png").contents
         #expect(logo.first?.blob == Data([0x89, 0x50, 0x4E, 0x47]).base64EncodedString())
-        let file = try await client.readResource(uri: "file:///project/notes.txt")
+        let file = try await client.readResource(uri: "file:///project/notes.txt").contents
         #expect(file.first?.text == "Contents of notes.txt")
         do {
             _ = try await client.readResource(uri: "other://x")
@@ -271,7 +271,7 @@ struct ServerSnippetTests {
         await watchRoots(on: server) { await changes.add(true) }
         await server.withMethodHandler(CallTool.self) { _ in
             let confirmed = try await confirmDirectly(on: server)
-            return .init(content: [.text(text: "\(confirmed)", annotations: nil, _meta: nil)])
+            return .init(content: [.text(text: "\(confirmed)")])
         }
         let client = try await connect(
             server, mode: mode, capabilities: .init(elicitation: .init(), roots: .init(listChanged: true))
@@ -326,14 +326,7 @@ struct ServerSnippetTests {
 
     @Test("Logging honors the level of each era", arguments: eras)
     func logging(mode: Client.ProtocolMode) async throws {
-        let server = makeServer()
-        let threshold = LogThreshold()
-        await registerLogging(on: server, threshold: threshold)
-        await server.withMethodHandler(CallTool.self) { _ in
-            try await log(.info, "starting", server: server, threshold: threshold)
-            try await log(.error, "failed", server: server, threshold: threshold)
-            return .init(content: [])
-        }
+        let server = await makeLoggingServer()
         let inbox = Inbox<LogLevel>()
         let client = try await connect(server, mode: mode) { client in
             await client.onNotification(LogMessageNotification.self) { await inbox.add($0.params.level) }
@@ -348,7 +341,7 @@ struct ServerSnippetTests {
     func handlerContext(mode: Client.ProtocolMode) async throws {
         let server = makeServer()
         await server.withMethodHandler(CallTool.self) { _ in
-            .init(content: [.text(text: describeCaller(), annotations: nil, _meta: nil)])
+            .init(content: [.text(text: describeCaller())])
         }
         let client = try await connect(server, mode: mode)
         defer { Task { await client.disconnect(); await server.stop() } }

@@ -92,3 +92,49 @@ func describeGrant(_ grantType: OAuthConfiguration.GrantType) -> String {
     }
 }
 // endsnippet
+
+// snippet: migration-client-results
+/// The convenience methods return the request's result.
+func callAndList(_ client: Client) async throws -> (text: [String], nextCursor: String?) {
+    let result = try await client.callTool(name: "echo", arguments: ["text": "hi"])
+    let text = result.content.compactMap { block -> String? in
+        if case .text(let text, _, _) = block { return text }
+        return nil
+    }
+    let page = try await client.listTools()
+    return (text, page.nextCursor)
+}
+// endsnippet
+
+// snippet: migration-connection-info
+/// `connect` returns a `Client.ConnectionInfo`; `serverInfo` is optional.
+func describeServer(_ client: Client, transport: any Transport) async throws -> String {
+    let connection = try await client.connect(transport: transport)
+    let name = connection.serverInfo?.name ?? "unnamed server"
+    return "\(name) at \(connection.protocolVersion)"
+}
+// endsnippet
+
+// snippet: migration-content
+/// `annotations` and `_meta` default to `nil`.
+let greeting: [Tool.Content] = [
+    .text(text: "Hello"),
+    .image(data: "iVBORw0KGgo=", mimeType: "image/png"),
+]
+// endsnippet
+
+// snippet: migration-http-errors
+/// HTTP and OAuth failures are typed errors inside `transportError`.
+func describeFailure(_ error: any Error) -> String {
+    switch error {
+    case MCPError.transportError(let status as HTTPStatusError) where status.isSessionExpired:
+        return "The session expired; connect again"
+    case MCPError.transportError(let status as HTTPStatusError):
+        return "HTTP \(status.statusCode), retry after \(status.value(forHeader: "Retry-After") ?? "?")"
+    case MCPError.transportError(let oauth as OAuthAuthorizationError):
+        return "Authorization failed: \(oauth.code)"
+    default:
+        return error.localizedDescription
+    }
+}
+// endsnippet

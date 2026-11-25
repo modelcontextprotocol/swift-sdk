@@ -26,26 +26,19 @@ func registerCompletions(on server: Server) async {
 // endsnippet
 
 // snippet: logging-level
-/// The level a handshake client chose with logging/setLevel.
-actor LogThreshold {
-    private(set) var level: LogLevel = .info
-    func set(_ level: LogLevel) { self.level = level }
-}
-
-func registerLogging(on server: Server, threshold: LogThreshold) async {
-    // 2025-11-25 and earlier. The SDK neither stores nor applies this level.
-    await server.withMethodHandler(SetLoggingLevel.self) { params in
-        await threshold.set(params.level)
-        return Empty()
+/// A server that logs. With the `logging` capability, `log` applies the
+/// level the client chose, in either era.
+func makeLoggingServer() async -> Server {
+    let server = Server(
+        name: "deployer", version: "1.0.0",
+        capabilities: .init(logging: .init(), tools: .init()))
+    // The server keeps its handlers: a strong capture would keep it alive.
+    await server.withMethodHandler(CallTool.self) { [weak server] _ in
+        guard let server else { return .init(content: [.text(text: "Server stopped")], isError: true) }
+        try await server.log(level: .info, logger: "deploy", data: ["message": "starting"])
+        try await server.log(level: .error, logger: "deploy", data: ["message": "failed"])
+        return .init(content: [])
     }
-}
-
-/// Sends a log message at the level each era asks for.
-func log(_ level: LogLevel, _ message: String, server: Server, threshold: LogThreshold) async throws {
-    // A stateless request carries its own level, and server.log applies it.
-    if Server.currentHandlerContext?.isStateless != true {
-        guard level >= (await threshold.level) else { return }
-    }
-    try await server.log(level: level, logger: "deploy", data: ["message": .string(message)])
+    return server
 }
 // endsnippet

@@ -467,7 +467,7 @@ struct StatelessHTTPTests {
                 try await server?.notify(
                     ProgressNotification.message(.init(progressToken: token, progress: 1, total: 2)))
             }
-            return .init(content: [.text(text: "done", annotations: nil, _meta: nil)])
+            return .init(content: [.text(text: "done")])
         }
         let transport = try await start(server)
         defer { Task { await server.stop() } }
@@ -559,7 +559,7 @@ struct StatelessHTTPTests {
         let server = await makeServer()
         await server.withMethodHandler(CallTool.self) { params in
             if params.arguments?["slow"] == true { try await Task.sleep(for: .milliseconds(100)) }
-            return .init(content: [.text(text: params.arguments?["tag"]?.stringValue ?? "", annotations: nil, _meta: nil)])
+            return .init(content: [.text(text: params.arguments?["tag"]?.stringValue ?? "")])
         }
         let transport = try await start(server)
         defer { Task { await server.stop() } }
@@ -630,7 +630,7 @@ struct StatelessHTTPTests {
             ])
         }
         await server.withMethodHandler(CallTool.self) { params in
-            .init(content: [.text(text: params.name, annotations: nil, _meta: nil)])
+            .init(content: [.text(text: params.name)])
         }
         return server
     }
@@ -921,7 +921,7 @@ struct ParameterHeaderLookupTests {
             return .init(tools: page == 0 ? [route, broken] : [], nextCursor: next)
         }
         await server.withMethodHandler(CallTool.self) { params in
-            .init(content: [.text(text: params.name, annotations: nil, _meta: nil)])
+            .init(content: [.text(text: params.name)])
         }
         return server
     }

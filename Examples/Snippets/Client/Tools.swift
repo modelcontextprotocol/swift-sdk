@@ -22,11 +22,11 @@ func listAllTools(_ client: Client) async throws -> [Tool] {
 /// Calls a tool and collects its text content.
 func callEchoTool(_ client: Client) async throws -> String {
     // snippet: call-tool
-    let (content, isError) = try await client.callTool(
+    let result = try await client.callTool(
         name: "echo", arguments: ["text": "hello"])
 
     var text = ""
-    for item in content {
+    for item in result.content {
         switch item {
         case .text(let string, _, _):
             text += string
@@ -41,7 +41,7 @@ func callEchoTool(_ client: Client) async throws -> String {
             print("unknown content: \(type)")
         }
     }
-    if isError == true {
+    if result.isError == true {
         // The tool ran and failed; `content` describes the failure to the model.
         print("tool error: \(text)")
     }
@@ -58,9 +58,7 @@ struct Weather: Codable, Equatable {
 /// Reads `structuredContent`, which the `callTool` tuple does not return.
 func callStructuredTool(_ client: Client) async throws -> Weather? {
     // snippet: call-structured
-    let result = try await client.send(
-        CallTool.request(.init(name: "weather", arguments: ["city": "Paris"]))
-    ).value
+    let result = try await client.callTool(name: "weather", arguments: ["city": "Paris"])
 
     var weather: Weather?
     if let structured = result.structuredContent {
@@ -77,7 +75,7 @@ func describeHeaderParameters(_ client: Client) async throws -> [String: [String
     // At 2026-07-28 the client records these on every tools/list and sends them
     // as Mcp-Param-* headers on tools/call over HTTP.
     var mirrored: [String: [String]] = [:]
-    let (tools, _) = try await client.listTools()
+    let tools = try await client.listTools().tools
     for tool in tools {
         let parameters = try tool.headerParameters()
         mirrored[tool.name] = parameters.map { "\($0.fieldName) <- \($0.path.joined(separator: "."))" }
@@ -92,17 +90,17 @@ func describeHeaderParameters(_ client: Client) async throws -> [String: [String
 /// Lists prompts and renders one.
 func renderGreeting(_ client: Client) async throws -> [String] {
     // snippet: prompts
-    let (prompts, _) = try await client.listPrompts()
+    let prompts = try await client.listPrompts().prompts
     for prompt in prompts {
         let required = prompt.arguments?.filter { $0.required == true }.map(\.name) ?? []
         print("\(prompt.name), required arguments: \(required)")
     }
 
-    let (description, messages) = try await client.getPrompt(
+    let prompt = try await client.getPrompt(
         name: "greeting", arguments: ["name": "Ada"])
-    print(description ?? "")
+    print(prompt.description ?? "")
     var lines: [String] = []
-    for message in messages {
+    for message in prompt.messages {
         if case .text(let text) = message.content {
             lines.append("\(message.role.rawValue): \(text)")
         }
@@ -114,11 +112,11 @@ func renderGreeting(_ client: Client) async throws -> [String] {
 /// Lists resources and templates and reads one resource.
 func readNotes(_ client: Client) async throws -> String? {
     // snippet: resources
-    let (resources, _) = try await client.listResources()
-    let (templates, _) = try await client.listResourceTemplates()
+    let resources = try await client.listResources().resources
+    let templates = try await client.listResourceTemplates().templates
     print(resources.map(\.uri), templates.map(\.uriTemplate))
 
-    let contents = try await client.readResource(uri: "file:///notes.txt")
+    let contents = try await client.readResource(uri: "file:///notes.txt").contents
     for content in contents {
         if let text = content.text {
             print("\(content.uri): \(text)")

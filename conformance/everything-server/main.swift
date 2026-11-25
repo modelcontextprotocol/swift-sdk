@@ -132,44 +132,44 @@ func createConformanceServer(state: ServerState, transport: any Transport) async
         if let result = try callInputRequiredTool(params) { return result }
         switch params.name {
         case "test_simple_text":
-            return .init(content: [.text(text: "This is a simple text response for testing.", annotations: nil, _meta: nil)], isError: false)
+            return .init(content: [.text(text: "This is a simple text response for testing.")], isError: false)
         case "test_trigger_tool_change":
             await state.listDynamicTool()
             try await server?.notify(ToolListChangedNotification.message())
-            return .init(content: [.text(text: "Tool list changed", annotations: nil, _meta: nil)], isError: false)
+            return .init(content: [.text(text: "Tool list changed")], isError: false)
         case "test_trigger_prompt_change":
             await state.listDynamicPrompt()
             try await server?.notify(PromptListChangedNotification.message())
-            return .init(content: [.text(text: "Prompt list changed", annotations: nil, _meta: nil)], isError: false)
+            return .init(content: [.text(text: "Prompt list changed")], isError: false)
         case "test_dynamic_tool":
-            return .init(content: [.text(text: "Dynamic tool", annotations: nil, _meta: nil)], isError: false)
+            return .init(content: [.text(text: "Dynamic tool")], isError: false)
         case "test_x_mcp_header":
             let region = params.arguments?["region"]?.stringValue ?? ""
-            return .init(content: [.text(text: "Region: \(region)", annotations: nil, _meta: nil)], isError: false)
+            return .init(content: [.text(text: "Region: \(region)")], isError: false)
         case "test_image_content":
-            return .init(content: [.image(data: testImageBase64, mimeType: "image/png", annotations: nil, _meta: nil)], isError: false)
+            return .init(content: [.image(data: testImageBase64, mimeType: "image/png")], isError: false)
         case "test_audio_content":
-            return .init(content: [.audio(data: testAudioBase64, mimeType: "audio/wav", annotations: nil, _meta: nil)], isError: false)
+            return .init(content: [.audio(data: testAudioBase64, mimeType: "audio/wav")], isError: false)
         case "test_embedded_resource":
             return .init(content: [.resource(resource: .text("This is an embedded resource content.", uri: "test://embedded-resource", mimeType: "text/plain"))], isError: false)
         case "test_multiple_content_types":
             return .init(content: [
-                .text(text: "Multiple content types test:", annotations: nil, _meta: nil),
-                .image(data: testImageBase64, mimeType: "image/png", annotations: nil, _meta: nil),
+                .text(text: "Multiple content types test:"),
+                .image(data: testImageBase64, mimeType: "image/png"),
                 .resource(resource: .text("{\"test\":\"data\",\"value\":123}", uri: "test://mixed-content-resource", mimeType: "application/json"))], isError: false)
         case "test_error_handling":
-            return .init(content: [.text(text: "An error occurred during tool execution", annotations: nil, _meta: nil)], isError: true)
+            return .init(content: [.text(text: "An error occurred during tool execution")], isError: true)
         case "test_logging":
-            return .init(content: [.text(text: "Logging test completed", annotations: nil, _meta: nil)], isError: false)
+            return .init(content: [.text(text: "Logging test completed")], isError: false)
         case "test_progress":
             let duration = params.arguments?["duration_ms"]?.intValue ?? 1000
             try? await Task.sleep(for: .milliseconds(duration))
-            return .init(content: [.text(text: "Progress test completed", annotations: nil, _meta: nil)], isError: false)
+            return .init(content: [.text(text: "Progress test completed")], isError: false)
         case "add_numbers":
             guard let a = params.arguments?["a"]?.intValue, let b = params.arguments?["b"]?.intValue else {
-                return .init(content: [.text(text: "Invalid arguments: expected numbers a and b", annotations: nil, _meta: nil)], isError: true)
+                return .init(content: [.text(text: "Invalid arguments: expected numbers a and b")], isError: true)
             }
-            return .init(content: [.text(text: "\(a + b)", annotations: nil, _meta: nil)], isError: false)
+            return .init(content: [.text(text: "\(a + b)")], isError: false)
         case "test_tool_with_progress":
             if let token = params._meta?.progressToken {
                 let notification1 = ProgressNotification.message(
@@ -190,16 +190,16 @@ func createConformanceServer(state: ServerState, transport: any Transport) async
                 try await server?.notify(notification3)
             }
 
-            return .init(content: [.text(text: "This is a simple text response for testing.", annotations: nil, _meta: nil)], isError: false)
+            return .init(content: [.text(text: "This is a simple text response for testing.")], isError: false)
         case "json_schema_2020_12_tool":
-            return .init(content: [.text(text: "This is a simple text response for testing.", annotations: nil, _meta: nil)], isError: false)
+            return .init(content: [.text(text: "This is a simple text response for testing.")], isError: false)
         case "test_tool_with_logging":
             try await server?.log(level: .info, data: "Tool execution started")
             try await Task.sleep(for: .milliseconds(50))
             try await server?.log(level: .info, data: "Tool processing data")
             try await Task.sleep(for: .milliseconds(50))
             try await server?.log(level: .info, data: "Tool execution completed")
-            return .init(content: [.text(text: "Logging test completed", annotations: nil, _meta: nil)], isError: false)
+            return .init(content: [.text(text: "Logging test completed")], isError: false)
         case "test_missing_capability":
             // SEP-2575: a request must not rely on undeclared client capabilities.
             guard Server.currentHandlerContext?.clientCapabilities?.sampling != nil else {
@@ -207,14 +207,14 @@ func createConformanceServer(state: ServerState, transport: any Transport) async
                     Client.Capabilities(sampling: .init()),
                     message: "sampling capability required but not declared by client")
             }
-            return .init(content: [.text(text: "Client declared the sampling capability; tool executed.", annotations: nil, _meta: nil)], isError: false)
+            return .init(content: [.text(text: "Client declared the sampling capability; tool executed.")], isError: false)
         case "test_logging_tool":
             // Logged only when the request set _meta io.modelcontextprotocol/logLevel.
             try await server?.log(level: .info, data: "test_logging_tool executed")
-            return .init(content: [.text(text: "Log attempted; the server gates on the request log level.", annotations: nil, _meta: nil)], isError: false)
+            return .init(content: [.text(text: "Log attempted; the server gates on the request log level.")], isError: false)
         case "test_streaming_elicitation":
             // The response stream carries no independent requests at 2026-07-28.
-            return .init(content: [.text(text: "stream observed: result frames only, no top-level requests", annotations: nil, _meta: nil)], isError: false)
+            return .init(content: [.text(text: "stream observed: result frames only, no top-level requests")], isError: false)
         case "test_reconnection":
             // SEP-1699: Close the SSE stream mid-call to trigger client reconnection.
             // The client should reconnect via GET with Last-Event-ID and receive the
@@ -226,11 +226,11 @@ func createConformanceServer(state: ServerState, transport: any Transport) async
             }
             // Wait briefly for the client to reconnect before sending the response.
             try await Task.sleep(for: .milliseconds(100))
-            return .init(content: [.text(text: "Reconnection test completed successfully. If you received this, the client properly reconnected after stream closure.", annotations: nil, _meta: nil)], isError: false)
+            return .init(content: [.text(text: "Reconnection test completed successfully. If you received this, the client properly reconnected after stream closure.")], isError: false)
         case "test_sampling":
             // Test LLM sampling - request sampling/createMessage from client
             guard let prompt = params.arguments?["prompt"]?.stringValue else {
-                return .init(content: [.text(text: "Missing required argument: prompt", annotations: nil, _meta: nil)], isError: true)
+                return .init(content: [.text(text: "Missing required argument: prompt")], isError: true)
             }
 
             let samplingResult = try await server?.requestSampling(
@@ -247,11 +247,11 @@ func createConformanceServer(state: ServerState, transport: any Transport) async
                 }
                 .joined(separator: "\n") ?? "No response"
 
-            return .init(content: [.text(text: responseText, annotations: nil, _meta: nil)], isError: false)
+            return .init(content: [.text(text: responseText)], isError: false)
         case "test_elicitation":
             // Test elicitation - request user input for username and email
             guard let message = params.arguments?["message"]?.stringValue else {
-                return .init(content: [.text(text: "Missing required argument: message", annotations: nil, _meta: nil)], isError: true)
+                return .init(content: [.text(text: "Missing required argument: message")], isError: true)
             }
 
             let elicitationResult = try await server?.requestElicitation(
@@ -266,7 +266,7 @@ func createConformanceServer(state: ServerState, transport: any Transport) async
             )
 
             return .init(
-                content: [.text(text: "Elicitation completed: action=\(elicitationResult?.action.rawValue ?? "unknown"), content=\(elicitationResult?.content ?? [:])", annotations: nil, _meta: nil)],
+                content: [.text(text: "Elicitation completed: action=\(elicitationResult?.action.rawValue ?? "unknown"), content=\(elicitationResult?.content ?? [:])")],
                 isError: false
             )
         case "test_elicitation_sep1034_defaults":
@@ -301,7 +301,7 @@ func createConformanceServer(state: ServerState, transport: any Transport) async
             )
 
             return .init(
-                content: [.text(text: "Elicitation completed: action=\(elicitationResult?.action.rawValue ?? "unknown"), content=\(elicitationResult?.content ?? [:])", annotations: nil, _meta: nil)],
+                content: [.text(text: "Elicitation completed: action=\(elicitationResult?.action.rawValue ?? "unknown"), content=\(elicitationResult?.content ?? [:])")],
                 isError: false
             )
         case "test_elicitation_sep1330_enums":
@@ -354,7 +354,7 @@ func createConformanceServer(state: ServerState, transport: any Transport) async
             )
 
             return .init(
-                content: [.text(text: "Elicitation completed: action=\(elicitationResult?.action.rawValue ?? "unknown"), content=\(elicitationResult?.content ?? [:])", annotations: nil, _meta: nil)],
+                content: [.text(text: "Elicitation completed: action=\(elicitationResult?.action.rawValue ?? "unknown"), content=\(elicitationResult?.content ?? [:])")],
                 isError: false
             )
         case "test_client_elicitation_defaults":
@@ -395,19 +395,19 @@ func createConformanceServer(state: ServerState, transport: any Transport) async
                   let score = content["score"]?.doubleValue,
                   let status = content["status"]?.stringValue,
                   let verified = content["verified"]?.boolValue else {
-                return .init(content: [.text(text: "Client did not provide all required fields with defaults", annotations: nil, _meta: nil)], isError: true)
+                return .init(content: [.text(text: "Client did not provide all required fields with defaults")], isError: true)
             }
 
             guard name == "John Doe", age == 30, score == 95.5, status == "active", verified == true else {
-                return .init(content: [.text(text: "Client defaults do not match expected values", annotations: nil, _meta: nil)], isError: true)
+                return .init(content: [.text(text: "Client defaults do not match expected values")], isError: true)
             }
 
             return .init(
-                content: [.text(text: "Client correctly applied all default values", annotations: nil, _meta: nil)],
+                content: [.text(text: "Client correctly applied all default values")],
                 isError: false
             )
         default:
-            return .init(content: [.text(text: "Unknown tool: \(params.name)", annotations: nil, _meta: nil)], isError: true)
+            return .init(content: [.text(text: "Unknown tool: \(params.name)")], isError: true)
         }
     }
 

@@ -374,13 +374,13 @@ The eras choose the level differently:
 | | 2025-11-25 and earlier | 2026-07-28 |
 | --- | --- | --- |
 | How the client sets the level | `logging/setLevel` request, once | `_meta["io.modelcontextprotocol/logLevel"]` on each request |
-| Who stores it | Your `SetLoggingLevel` handler. Without one, the client gets -32601. | The SDK, per request |
-| Who filters | You: `log` sends every message | `log` called from the handler drops messages below the level, and all messages when the request set none |
-| `logging/setLevel` | Served by your handler | -32601 |
+| Who stores it | The SDK, per connection, when the server declares `logging` | The SDK, per request |
+| Who filters | `log` drops messages below the level; before the client sets one, it sends every message | `log` called from the handler drops messages below the level, and all messages when the request set none |
+| `logging/setLevel` | Served by the SDK, or by your `SetLoggingLevel` handler; without the `logging` capability, -32601 | -32601 |
 
 %include Examples/Snippets/Server/Utilities.swift logging-level
 
-Outside a handler there is no request, so `log` does not filter. The messages are `notifications/message` notifications; called from a handler, they go on the stream of the request being handled.
+Outside a handler there is no request: `log` applies the connection's `logging/setLevel` level, if any. The messages are `notifications/message` notifications; called from a handler, they go on the stream of the request being handled.
 
 ## Handler context
 
@@ -460,7 +460,7 @@ The server answers with the requested version if it is a handshake revision in `
 
 ### Built-in handlers and registration
 
-`start` registers method handlers for `initialize`, `ping`, `server/discover` and `subscriptions/listen`, and adds a notification handler for `notifications/cancelled`. It replaces your handlers for these four methods if you registered them before `start`; a registration after `start` replaces the built-in one. Replace a built-in handler only on purpose, as in [protocol_versions.md](protocol_versions.md#stateless-only).
+`start` registers method handlers for `initialize`, `ping`, `server/discover`, `subscriptions/listen` and, with the `logging` capability, `logging/setLevel`, and adds a notification handler for `notifications/cancelled`. A handler of yours for one of these methods is kept, whether you registered it before or after `start`. Replace a built-in handler only on purpose, as in [protocol_versions.md](protocol_versions.md#stateless-only); a `SetLoggingLevel` handler of yours means `log` no longer knows the level.
 
 - `withMethodHandler(_:handler:)` keeps one handler per method. A second registration for the same method replaces the first.
 - `onNotification(_:handler:)` adds a handler; several handlers for one notification all run. Errors they throw are logged.

@@ -25,7 +25,7 @@ struct ServerTests {
         try await transport.queue(
             request: Initialize.request(
                 .init(
-                    protocolVersion: Version.latest,
+                    protocolVersion: Version.latestHandshake,
                     capabilities: .init(),
                     clientInfo: .init(name: "TestClient", version: "1.0")
                 )
@@ -83,7 +83,7 @@ struct ServerTests {
         try await transport.queue(
             request: Initialize.request(
                 .init(
-                    protocolVersion: Version.latest,
+                    protocolVersion: Version.latestHandshake,
                     capabilities: .init(),
                     clientInfo: .init(name: "TestClient", version: "1.0")
                 )
@@ -132,7 +132,7 @@ struct ServerTests {
         try await transport.queue(
             request: Initialize.request(
                 .init(
-                    protocolVersion: Version.latest,
+                    protocolVersion: Version.latestHandshake,
                     capabilities: .init(),
                     clientInfo: .init(name: "TestClient", version: "1.0")
                 )
@@ -172,7 +172,7 @@ struct ServerTests {
         try await transport.queue(
             request: Initialize.request(
                 .init(
-                    protocolVersion: Version.latest,
+                    protocolVersion: Version.latestHandshake,
                     capabilities: .init(),
                     clientInfo: .init(name: "BlockedClient", version: "1.0")
                 )
@@ -269,7 +269,7 @@ struct ServerTests {
         // Initialize the server first
         let initRequest = Initialize.request(
             .init(
-                protocolVersion: Version.latest,
+                protocolVersion: Version.latestHandshake,
                 capabilities: .init(),
                 clientInfo: .init(name: "TestClient", version: "1.0")
             )
@@ -313,5 +313,53 @@ struct ServerTests {
         await server.stop()
         await clientTransport.disconnect()
         await serverTransport.disconnect()
+    }
+}
+
+@Suite("Server default handlers")
+struct ServerDefaultHandlerTests {
+    @Test("start keeps a handler registered before it")
+    func startKeepsHandlers() async throws {
+        let server = Server(name: "s", version: "1", capabilities: .init(tools: .init()))
+        let pinged = AsyncStream<Void>.makeStream()
+        await server.withMethodHandler(Ping.self) { _ in
+            pinged.continuation.yield()
+            return Empty()
+        }
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+        try await server.start(transport: serverTransport)
+        let client = Client(name: "c", version: "1", configuration: .handshake)
+        try await client.connect(transport: clientTransport)
+        try await client.ping()
+        // The handler ran before the response: without it, next() returns nil.
+        pinged.continuation.finish()
+        var iterator = pinged.stream.makeAsyncIterator()
+        #expect(await iterator.next() != nil)
+        await client.disconnect()
+        await server.stop()
+    }
+
+    @Test("logging/setLevel filters log messages on a handshake connection")
+    func setLevelFilters() async throws {
+        let server = Server(name: "s", version: "1", capabilities: .init(logging: .init(), tools: .init()))
+        await server.withMethodHandler(CallTool.self) { _ in
+            try await server.log(level: .debug, data: "hidden")
+            try await server.log(level: .warning, data: "shown")
+            return .init(content: [])
+        }
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+        try await server.start(transport: serverTransport)
+        let client = Client(name: "c", version: "1", configuration: .handshake)
+        let received = AsyncStream<String>.makeStream()
+        await client.onNotification(LogMessageNotification.self) { message in
+            received.continuation.yield(message.params.data.stringValue ?? "")
+        }
+        try await client.connect(transport: clientTransport)
+        try await client.setLoggingLevel(.info)
+        _ = try await client.callTool(name: "log")
+        var iterator = received.stream.makeAsyncIterator()
+        #expect(await iterator.next() == "shown")
+        await client.disconnect()
+        await server.stop()
     }
 }

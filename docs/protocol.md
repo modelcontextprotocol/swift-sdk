@@ -19,11 +19,11 @@ Current defaults:
 
 - `Client.Configuration.protocolMode` defaults to `.automatic`: `server/discover` at 2026-07-28, with a fallback to `initialize`.
 - `Server.Configuration.protocolVersions` defaults to `Version.stateless + Version.handshake`, so a server serves both eras.
-- `Version.supported` lists both eras. `Version.latest`, the version `initialize` requests, is 2025-11-25.
+- `Version.supported` lists both eras. `Version.latestHandshake`, the version `initialize` requests, is 2025-11-25.
 
 ### The initialize handshake
 
-With `.handshake`, or after an `.automatic` fallback, the client sends `initialize` with `Version.latest`, then `notifications/initialized`. The server negotiates: it answers with the requested version when it serves it, and otherwise with its newest handshake revision.
+With `.handshake`, or after an `.automatic` fallback, the client sends `initialize` with `Version.latestHandshake`, then `notifications/initialized`. The server negotiates: it answers with the requested version when it serves it, and otherwise with its newest handshake revision.
 
 ```swift
 let client = Client(
@@ -61,7 +61,7 @@ At 2026-07-28 there is no handshake. A client may send `server/discover` to lear
 | Mode | Behavior |
 |---|---|
 | `.automatic` (default) | `server/discover` at `Version.stateless[0]`. On -32022 it retries once with the first version in `data.supported` that is in `Version.stateless`. Falls back to `initialize` (see below). |
-| `.handshake` | `initialize` with `Version.latest`. |
+| `.handshake` | `initialize` with `Version.latestHandshake`. |
 | `.stateless(v)` | `server/discover` at `v`. No retry and no fallback: when the server does not serve `v`, the -32022 error is thrown. |
 
 `.automatic` falls back to `initialize` when:
@@ -86,7 +86,7 @@ print(await client.isStateless)  // true
 print(await client.serverInfo?.name ?? "")  // example
 ```
 
-`connect` returns an `Initialize.Result` in both eras. After discovery it is built from the `server/discover` result, so code that reads `result.capabilities` works unchanged. `client.isStateless` is `true` when the negotiated version uses per-request `_meta`.
+`connect` returns a `Client.ConnectionInfo` in both eras: `protocolVersion`, `capabilities`, `serverInfo`, `instructions` and `isStateless`. After discovery it is built from the `server/discover` result, so code that reads `result.capabilities` works unchanged; `serverInfo` is `nil` when the server sends no `io.modelcontextprotocol/serverInfo`. `client.isStateless` is `true` when the negotiated version uses per-request `_meta`.
 
 To end a connection, disconnect the client and stop the server. `disconnect()` first closes the client's open listen streams, fails pending requests with -32603 "Client disconnected", and disconnects the transport. `stop()` closes the server's listen streams and fails its pending requests to the client.
 
@@ -155,7 +155,7 @@ await server.withMethodHandler(CallTool.self) { params in
     let version = context?.protocolVersion ?? "unknown"
     let caller = context?.clientInfo?.name ?? "anonymous"
     let stateless = context?.isStateless ?? false
-    return .init(content: [.text(text: "\(caller) at \(version), stateless: \(stateless)", annotations: nil, _meta: nil)])
+    return .init(content: [.text(text: "\(caller) at \(version), stateless: \(stateless)")])
 }
 ```
 
@@ -282,22 +282,21 @@ What the transport sends depends on the era of each message:
 
 The client switches the transport when the connection opens: `Client` calls `updateNegotiatedProtocolVersion(_:)` after `initialize` and `useStatelessProtocol(_:)` after `server/discover`.
 
-On handshake connections with `streaming: true`, the transport waits up to `sseInitializationTimeout` (10 s) for a session ID, then opens the GET stream for server-initiated messages. When the stream ends it reconnects after the server's SSE `retry:` interval (3000 ms by default) and sends `Last-Event-ID` with the last event ID it saw. A 405 on GET stops the stream. A line, or the data of one event, over 16 MiB ends the stream, and the next GET opens a fresh stream without `Last-Event-ID`, since a replay would repeat the event; that event is lost.
+On handshake connections with `streaming: true`, the transport waits up to `sseInitializationTimeout` (10 s) for a session ID, then opens the GET stream for server-initiated messages. When the stream ends it reconnects after the server's SSE `retry:` interval (3000 ms by default) and sends `Last-Event-ID` with the last event ID it saw. A 405 on GET stops the stream, and so does a 404 on a GET that carried the session ID: the stream is not reopened, and the session ID is kept. The next request carries it, receives the server's 404, drops the session and reports `isSessionExpired`. A line, or the data of one event, over 16 MiB ends the stream, and the next GET opens a fresh stream without `Last-Event-ID`, since a replay would repeat the event; that event is lost.
 
 When a POST's SSE stream ends before the response to its request, a handshake connection resumes that stream: after the stream's `retry:` interval the transport sends a GET with `Last-Event-ID` set to the stream's own last event ID, and reads the replay until the response arrives. It repeats this while the server closes the stream again, up to 10 times in a row without a new message: a resumed stream that delivers a message, such as a progress notification, under an event ID the transport has not seen starts the count again. A message under an event ID it has seen, which a server that ignores `Last-Event-ID` replays, does not. A resumption GET that fails to connect is retried within the same count. When the stream had no event ID, the server refuses the GET (the Go SDK's server keeps no events and answers 400), or the attempts run out, the request fails with -32603 ("The server closed the response stream without a response or an event ID to resume from", or "The response stream could not be resumed") instead of waiting. At 2026-07-28 there is no resumption: the request fails at once ("The server closed the response stream without a response").
 
 `HTTPClientTransport.defaultConfiguration` is `URLSessionConfiguration.default` with `httpMaximumConnectionsPerHost` raised to 64. Over HTTP/1.1 each request in flight holds a connection until its response ends, and the GET stream holds one more. A server-to-client request (sampling, elicitation, roots) arrives on one of those streams, and the client's reply needs a connection of its own, so with the system's limit (6 per host on Apple platforms) five concurrent calls that each wait for a reply deadlock. A custom configuration needs a limit above the number of concurrent requests plus one.
 
-HTTP errors map as follows. At 2026-07-28 a server answers protocol errors with a 4xx status and a JSON-RPC error body; the transport delivers that body, so the caller sees the `MCPError` (-32601, -32602, -32020, -32021, -32022), not an HTTP error. Only an `error` whose ID is the request's ID is delivered. A `result`, an error with another ID (such as a placeholder), a batch, or the reply to a notification gives the status error below. A 404 drops the session ID in both cases.
+HTTP errors map as follows. At 2026-07-28 a server answers protocol errors with a 4xx status and a JSON-RPC error body; the transport delivers that body, so the caller sees the `MCPError` (-32601, -32602, -32020, -32021, -32022), not an HTTP error. Only an `error` whose ID is the request's ID is delivered. A `result`, an error with another ID (such as a placeholder), a batch, or the reply to a notification gives the status error below. A 404 to a POST that carried the session ID ends the session in both cases.
 
-| Status | Without a JSON-RPC error for the request |
+Without a JSON-RPC error for the request, the transport throws `MCPError.transportError(_:)` with an `HTTPStatusError`: its `statusCode`, the response `headers` (`value(forHeader:)` reads one, such as `Retry-After`), and `isSessionExpired`. Its `debugDescription`, which `MCPError`'s includes, names the headers without their values, so a logged error carries no cookie or challenge.
+
+| Status | Also |
 |---|---|
-| 400 | `MCPError.internalError("Bad request")` |
-| 401, 403 | handled by the authorizer if one is set; else `internalError("Authentication required")` / `("Access forbidden")` |
-| 404 | with a session: the session is dropped and `internalError("Session expired")`; else `("Endpoint not found")` |
-| 405 | `internalError("Server does not support streaming")` when `streaming` is `true`, which also stops the GET stream; else `("Method not allowed")` |
-| 408, 429 | `internalError("Request timeout")`, `("Too many requests")` |
-| 5xx | `internalError("Server error: <status>")` |
+| 401, 403 | Handled by the authorizer, if one is set; the error when it is not, or when retries run out |
+| 404 | To a POST that carried the session ID: `isSessionExpired` is `true` (for each such POST in flight), the session ID is dropped and the GET stream stops. To the GET stream: the stream stops, and the session ID is kept for the next request |
+| 405 | On the GET stream, the stream stops; a 405 to a POST does not stop it |
 
 To add headers to every request (an API key, a user agent), pass `requestModifier`. For OAuth, pass an `authorizer` (see [Authorization](#authorization)).
 
@@ -551,7 +550,7 @@ await server.withMethodHandler(CallTool.self) { params in
     let userAgent = await Task.detached {
         context?.httpContext?.header("User-Agent") ?? "unknown"
     }.value
-    return .init(content: [.text(text: userAgent, annotations: nil, _meta: nil)])
+    return .init(content: [.text(text: userAgent)])
 }
 ```
 
@@ -768,7 +767,7 @@ Issuer checks and authorization server changes:
 - A refresh token is sent only to the server that issued it. A token without a recorded server is refreshed only at a configured `authorizationServerURL` or `tokenEndpoint`.
 - For 2025-03-26 servers that publish no metadata at all, the authorizer falls back to `/authorize`, `/token` and `/register` at the server origin, with S256. It does so only on first discovery, and only when every metadata URL answers 404 or 410; a network error, a cancelled request or another status fails the request instead.
 
-Errors reach the caller as `MCPError.internalError("Authorization flow failed: …")` wrapping an `OAuthAuthorizationError`, or as `internalError("Authentication required")` (401) and `("Access forbidden")` (403) when retries run out.
+Errors reach the caller as `MCPError.transportError(_:)` with the `OAuthAuthorizationError` (or the error a custom authorizer threw; a `CancellationError` is thrown as is), or with an `HTTPStatusError` of 401 or 403 when retries run out.
 
 #### Enterprise-managed authorization
 
@@ -934,7 +933,7 @@ await server.withMethodHandler(CallTool.self) { params in
         throw MCPError.invalidRequest("Unauthenticated")
     }
     // Use claims.subject to scope data access. Never forward the token itself.
-    return .init(content: [.text(text: "Hello, \(claims.subject)", annotations: nil, _meta: nil)])
+    return .init(content: [.text(text: "Hello, \(claims.subject)")])
 }
 ```
 
@@ -1003,7 +1002,7 @@ On the client, `cancelRequest(_:reason:)` fails the pending request with `Cancel
 
 On the server, `notifications/cancelled` cancels the handler's task. Over `StatelessHTTPServerTransport`, the transport does the same when the client closes an SSE reply: it injects `notifications/cancelled` for the request's internal id. A `notifications/cancelled` POSTed to that transport is honored when its `Authorization` header matches the request's ([Stateless HTTP server](#stateless-http-server)); the request's HTTP response then ends with 202 Accepted, or with the end of its SSE stream, and carries no JSON-RPC response. A handler stops when it reaches a cancellation point (`Task.sleep`, `Task.checkCancellation()`, a cancellable `await`). If it throws `CancellationError`, the server sends nothing; any other error is sent as a response.
 
-To cancel, keep the request id. The convenience methods return results, so use the `callTool` overload that returns a `RequestContext`, or `send(_:)`:
+To cancel, keep the request id: `startToolCall(name:arguments:meta:)` and `send(_:)` return a `RequestContext` that has it.
 
 ```swift
 await server.withMethodHandler(CallTool.self) { params in
@@ -1019,7 +1018,7 @@ await server.withMethodHandler(CallTool.self) { params in
 ```
 
 ```swift
-let call: RequestContext<CallTool.Result> = try await client.callTool(name: "slow")
+let call = try await client.startToolCall(name: "slow")
 ```
 
 ```swift
@@ -1074,7 +1073,7 @@ await client.onNotification(ProgressNotification.self) { message in
     let params = message.params
     report.yield("\(params.message ?? "") \(Int(params.progress))/\(Int(params.total ?? 0))")
 }
-let (_, _) = try await client.callTool(
+_ = try await client.callTool(
     name: "build", meta: Metadata(progressToken: .unique()))
 ```
 

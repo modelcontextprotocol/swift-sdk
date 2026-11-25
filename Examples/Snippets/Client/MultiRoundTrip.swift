@@ -21,7 +21,7 @@ func deployWithConfirmation(transport: any Transport, mode: Client.ProtocolMode)
     try await client.connect(transport: transport)
 
     // One call, however many rounds the server needs.
-    let (content, _) = try await client.callTool(name: "deploy", arguments: ["env": "prod"])
+    let content = try await client.callTool(name: "deploy", arguments: ["env": "prod"]).content
     // endsnippet
     return (client, content)
 }

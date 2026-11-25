@@ -26,7 +26,7 @@ private func makeStatelessServer(
 
 private func connectClient(
     _ server: Server, mode: Client.ProtocolMode, logLevel: LogLevel? = nil
-) async throws -> (Client, Initialize.Result) {
+) async throws -> (Client, Client.ConnectionInfo) {
     let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
     try await server.start(transport: serverTransport)
     let client = Client(
@@ -45,7 +45,7 @@ struct ClientStatelessTests {
         defer { Task { await client.disconnect(); await server.stop() } }
 
         #expect(result.protocolVersion == Version.v2026_07_28)
-        #expect(result.serverInfo.name == "discoverable")
+        #expect(result.serverInfo?.name == "discoverable")
         #expect(result.instructions == "Hello")
         #expect(await client.isStateless)
         #expect(await client.negotiatedProtocolVersion == Version.v2026_07_28)
@@ -53,7 +53,7 @@ struct ClientStatelessTests {
         #expect(await client.serverCapabilities?.tools != nil)
 
         // Every request carries the _meta envelope.
-        let (tools, _) = try await client.listTools()
+        let tools = try await client.listTools().tools
         #expect(tools.first?.name == "true|probe|warning")
     }
 
@@ -65,7 +65,7 @@ struct ClientStatelessTests {
 
         #expect(result.protocolVersion == Version.v2025_11_25)
         #expect(await !client.isStateless)
-        let (tools, _) = try await client.listTools()
+        let tools = try await client.listTools().tools
         #expect(tools.first?.name == "false|probe|-")
     }
 
@@ -86,7 +86,7 @@ struct ClientStatelessTests {
         #expect(result.protocolVersion == Version.v2025_11_25)
         #expect(await !client.isStateless)
         // Requests no longer carry the stateless _meta envelope.
-        let (tools, _) = try await client.listTools()
+        let tools = try await client.listTools().tools
         #expect(tools.first?.name == "false|probe|-")
     }
 
@@ -124,8 +124,44 @@ struct ClientStatelessTests {
         defer { Task { await client.disconnect(); await server.stop() } }
 
         try await client.setLoggingLevel(.error)
-        let (tools, _) = try await client.listTools()
+        let tools = try await client.listTools().tools
         #expect(tools.first?.name == "true|probe|error")
+    }
+
+    @Test("Changing configuration.logLevel after init stamps the new level")
+    func testConfigurationLogLevelChange() async throws {
+        let server = await makeStatelessServer()
+        let (client, _) = try await connectClient(server, mode: .automatic, logLevel: .warning)
+        defer { Task { await client.disconnect(); await server.stop() } }
+
+        func setLevel(_ level: LogLevel?, on client: isolated Client) { client.configuration.logLevel = level }
+        await setLevel(.debug, on: client)
+        #expect(try await client.listTools().tools.first?.name == "true|probe|debug")
+
+        // A configuration change to another value replaces the level of
+        // setLoggingLevel; assigning the value it already has does not.
+        try await client.setLoggingLevel(.error)
+        #expect(try await client.listTools().tools.first?.name == "true|probe|error")
+        await setLevel(.debug, on: client)
+        #expect(try await client.listTools().tools.first?.name == "true|probe|error")
+        await setLevel(nil, on: client)
+        #expect(try await client.listTools().tools.first?.name == "true|probe|-")
+    }
+
+    @Test("A reconnect starts from configuration.logLevel")
+    func testReconnectResetsLogLevel() async throws {
+        let first = await makeStatelessServer()
+        let second = await makeStatelessServer()
+        let (client, _) = try await connectClient(first, mode: .automatic, logLevel: .warning)
+        defer { Task { await client.disconnect(); await first.stop(); await second.stop() } }
+        try await client.setLoggingLevel(.error)
+        #expect(try await client.listTools().tools.first?.name == "true|probe|error")
+
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+        try await second.start(transport: serverTransport)
+        try await client.connect(transport: clientTransport)
+        #expect(await client.logLevel == .warning)
+        #expect(try await client.listTools().tools.first?.name == "true|probe|warning")
     }
 }
 
@@ -336,8 +372,26 @@ struct ClientDiscoveryNegotiationTests {
         try await reply(transport, to: second, discoverResult)
 
         let result = try await connecting.value
-        #expect(result.serverInfo.name == "mock")
+        #expect(result.serverInfo?.name == "mock")
         #expect(await client.isStateless)
+        await client.disconnect()
+    }
+
+    @Test("A server without serverInfo connects with nil serverInfo")
+    func testDiscoverWithoutServerInfo() async throws {
+        let transport = MockTransport()
+        let client = Client(name: "probe", version: "1.0", configuration: .init(protocolMode: .automatic))
+        let connecting = Task { try await client.connect(transport: transport) }
+        let first = try await sent(transport, count: 1)
+        try await reply(
+            transport, to: first,
+            #""result":{"supportedVersions":["2026-07-28"],"capabilities":{},"instructions":"Be brief","resultType":"complete"}"#)
+        let connection = try await connecting.value
+        #expect(connection.serverInfo == nil)
+        #expect(await client.serverInfo == nil)
+        #expect(connection.isStateless)
+        #expect(connection.protocolVersion == "2026-07-28")
+        #expect(connection.instructions == "Be brief")
         await client.disconnect()
     }
 
@@ -357,7 +411,7 @@ struct ClientDiscoveryNegotiationTests {
             #""result":{"protocolVersion":"2025-11-25","capabilities":{},"serverInfo":{"name":"old","version":"0"}}"#)
 
         let result = try await connecting.value
-        #expect(result.serverInfo.name == "old")
+        #expect(result.serverInfo?.name == "old")
         #expect(await !client.isStateless)
         await client.disconnect()
     }

@@ -8,7 +8,7 @@ Status of the MCP Swift SDK against the MCP specification and what is deferred. 
 | Revision | Era | Server | Client | Notes |
 |---|---|---|---|---|
 | 2026-07-28 | stateless | served by default (`Server.Configuration.protocolVersions`) | default: `ProtocolMode.automatic`, or pinned with `.stateless("2026-07-28")` | `Version.stateless[0]` |
-| 2025-11-25 | handshake | yes | yes; the `.automatic` fallback and `.handshake` | `Version.latest` |
+| 2025-11-25 | handshake | yes | yes; the `.automatic` fallback and `.handshake` | `Version.latestHandshake` |
 | 2025-06-18 | handshake | yes | yes | |
 | 2025-03-26 | handshake | yes | yes | |
 | 2024-11-05 | handshake | yes | yes | over stdio and Streamable HTTP; the HTTP+SSE transport of that revision is not implemented |

@@ -67,12 +67,13 @@ struct AutomaticConnectionFailureTests {
     @Test("A transport error on server/discover is rethrown without initialize")
     func rethrowsTransportErrors() async throws {
         let transport = ScriptedTransport()
-        await transport.fail("server/discover", with: MCPError.internalError("Too many requests"))
+        await transport.fail("server/discover", with: MCPError.transportError(HTTPStatusError(statusCode: 429)))
         let client = client()
         await #expect {
             _ = try await client.connect(transport: transport)
         } throws: { error in
-            (error as? MCPError) == .internalError("Too many requests")
+            guard case .transportError(let underlying) = error as? MCPError else { return false }
+            return (underlying as? HTTPStatusError)?.statusCode == 429
         }
         #expect(await transport.methods == ["server/discover"])
         await client.disconnect()
@@ -81,7 +82,7 @@ struct AutomaticConnectionFailureTests {
     @Test("An authorization failure on server/discover is rethrown")
     func rethrowsAuthorizationFailures() async throws {
         let transport = ScriptedTransport()
-        await transport.fail("server/discover", with: MCPError.internalError("Authentication required"))
+        await transport.fail("server/discover", with: MCPError.transportError(HTTPStatusError(statusCode: 401)))
         let client = client()
         await #expect(throws: MCPError.self) { _ = try await client.connect(transport: transport) }
         #expect(await transport.methods == ["server/discover"])
@@ -90,16 +91,16 @@ struct AutomaticConnectionFailureTests {
 
     @Test(
         "An HTTP 400, 404 or 405 refusal falls back to initialize",
-        arguments: ["Bad request", "Endpoint not found", "Method not allowed"])
-    func fallsBackOnRefusal(detail: String) async throws {
+        arguments: [400, 404, 405])
+    func fallsBackOnRefusal(status: Int) async throws {
         let transport = ScriptedTransport()
-        await transport.fail("server/discover", with: MCPError.internalError(detail))
+        await transport.fail("server/discover", with: MCPError.transportError(HTTPStatusError(statusCode: status)))
         let client = client()
         let connecting = Task { try await client.connect(transport: transport) }
         let initialize = try await transport.message(2)
         #expect(initialize["method"] == "initialize")
         try await transport.reply(to: initialize, initializeResult)
-        #expect(try await connecting.value.serverInfo.name == "old")
+        #expect(try await connecting.value.serverInfo?.name == "old")
         await client.disconnect()
     }
 
@@ -112,7 +113,7 @@ struct AutomaticConnectionFailureTests {
         let initialize = try await transport.message(2)
         #expect(initialize["method"] == "initialize")
         try await transport.reply(to: initialize, initializeResult)
-        #expect(try await connecting.value.serverInfo.name == "old")
+        #expect(try await connecting.value.serverInfo?.name == "old")
         #expect(await !client.isStateless)
         await client.disconnect()
     }
@@ -291,7 +292,8 @@ struct OutgoingMessageTests {
             await #expect {
                 try await transport.send(request)
             } throws: { error in
-                (error as? MCPError) == .internalError("Bad request")
+                guard case .transportError(let underlying) = error as? MCPError else { return false }
+                return (underlying as? HTTPStatusError)?.statusCode == 400
             }
             await transport.disconnect()
         }
@@ -319,11 +321,8 @@ struct OutgoingMessageTests {
 
         @Test(
             "An error for the request on a 408, 429 or 5xx fails with the status",
-            arguments: [
-                (408, "Request timeout"), (429, "Too many requests"),
-                (500, "Server error: 500"), (503, "Server error: 503"),
-            ])
-        func unavailableStatusFails(status: Int, detail: String) async throws {
+            arguments: [408, 429, 500, 503])
+        func unavailableStatusFails(status: Int) async throws {
             let transport = await makeTransport { _ in
                 reply(status, #"{"jsonrpc":"2.0","id":"r1","error":{"code":-32000,"message":"Connection closed"}}"#)
             }
@@ -331,7 +330,8 @@ struct OutgoingMessageTests {
             await #expect {
                 try await transport.send(request)
             } throws: { error in
-                (error as? MCPError) == .internalError(detail)
+                guard case .transportError(let underlying) = error as? MCPError else { return false }
+                return (underlying as? HTTPStatusError)?.statusCode == status
             }
             await transport.disconnect()
         }
@@ -355,7 +355,8 @@ struct OutgoingMessageTests {
             await #expect {
                 try await client.connect(transport: transport)
             } throws: { error in
-                (error as? MCPError) == .internalError("Server error: 503")
+                guard case .transportError(let underlying) = error as? MCPError else { return false }
+                return (underlying as? HTTPStatusError)?.statusCode == 503
             }
             #expect(await methods.sent == [ServerDiscover.name])
             await client.disconnect()

@@ -276,7 +276,7 @@ func runAuthorizationScenario(scenario: String, args: [String]) async throws {
     _ = try await client.connect(transport: transport)
 
     // Exercise both initialization and regular request paths.
-    let (tools, _) = try await client.listTools()
+    let tools = try await client.listTools().tools
     logger.debug("Auth scenario listed tools", metadata: ["count": "\(tools.count)"])
 
     // Trigger an additional request for scenarios that involve runtime scope behavior.
@@ -318,12 +318,12 @@ func runInitializeScenario(_ args: [String]) async throws {
     // Connect
     let initResult = try await client.connect(transport: transport)
     logger.debug("Successfully connected to MCP server", metadata: [
-        "serverName": "\(initResult.serverInfo.name)",
-        "serverVersion": "\(initResult.serverInfo.version)"
+        "serverName": "\(initResult.serverInfo?.name ?? "-")",
+        "serverVersion": "\(initResult.serverInfo?.version ?? "-")"
     ])
 
     // List tools
-    let (tools, _) = try await client.listTools()
+    let tools = try await client.listTools().tools
     logger.debug("Successfully listed tools", metadata: [
         "toolCount": "\(tools.count)"
     ])
@@ -364,7 +364,7 @@ func runToolsCallScenario(_ args: [String]) async throws {
     logger.debug("Successfully connected to MCP server")
 
     // List tools
-    let (tools, _) = try await client.listTools()
+    let tools = try await client.listTools().tools
     logger.debug("Successfully listed tools", metadata: [
         "toolCount": "\(tools.count)"
     ])
@@ -407,7 +407,7 @@ func runJSONSchemaPreservationScenario(_ args: [String]) async throws {
     let client = makeConformanceClient()
     try await client.connect(transport: HTTPClientTransport(endpoint: serverURL, logger: logger))
 
-    let (tools, _) = try await client.listTools()
+    let tools = try await client.listTools().tools
     guard let focal = tools.first(where: { $0.name == "json_schema_2020_12_tool" }) else {
         throw ConformanceError.invalidArguments("json_schema_2020_12_tool not listed")
     }
@@ -590,8 +590,8 @@ func runSSEScenario(_ args: [String]) async throws {
     // Connect - this will start the SSE stream in the background
     let initResult = try await client.connect(transport: transport)
     logger.debug("Successfully connected to MCP server", metadata: [
-        "serverName": "\(initResult.serverInfo.name)",
-        "serverVersion": "\(initResult.serverInfo.version)"
+        "serverName": "\(initResult.serverInfo?.name ?? "-")",
+        "serverVersion": "\(initResult.serverInfo?.version ?? "-")"
     ])
 
     // Give the GET SSE stream time to establish
@@ -683,7 +683,7 @@ func runElicitationSEP1034ClientDefaults(_ args: [String]) async throws {
     logger.debug("Successfully connected to MCP server")
 
     // List tools
-    let (tools, _) = try await client.listTools()
+    let tools = try await client.listTools().tools
     logger.debug("Successfully listed tools", metadata: [
         "toolCount": "\(tools.count)"
     ])
@@ -738,8 +738,8 @@ func runDefaultScenario(_ args: [String]) async throws {
     // Connect
     let initResult = try await client.connect(transport: transport)
     logger.debug("Successfully connected to MCP server", metadata: [
-        "serverName": "\(initResult.serverInfo.name)",
-        "serverVersion": "\(initResult.serverInfo.version)"
+        "serverName": "\(initResult.serverInfo?.name ?? "-")",
+        "serverVersion": "\(initResult.serverInfo?.version ?? "-")"
     ])
 
     // Disconnect

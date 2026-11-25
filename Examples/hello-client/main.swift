@@ -39,11 +39,11 @@ let transport = StdioTransport(
 let client = Client(name: "hello-client", version: "1.0.0")
 try await client.connect(transport: transport)
 
-let (tools, _) = try await client.listTools()
+let tools = try await client.listTools().tools
 print("Tools:", tools.map(\.name).joined(separator: ", "))
 
-let (content, isError) = try await client.callTool(name: "greet", arguments: ["name": "Swift"])
-for case .text(let text, _, _) in content {
+let result = try await client.callTool(name: "greet", arguments: ["name": "Swift"])
+for case .text(let text, _, _) in result.content {
     print(text)
 }
 // endsnippet
@@ -52,5 +52,5 @@ for case .text(let text, _, _) in content {
 await client.disconnect()
 try toServer.fileHandleForWriting.close()  // EOF on the server's stdin: it exits.
 process.waitUntilExit()
-exit(isError == true ? 1 : 0)
+exit(result.isError == true ? 1 : 0)
 // endsnippet

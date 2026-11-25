@@ -44,7 +44,7 @@ private let demoTools: [Tool] = [
 ]
 
 private func text(_ string: String) -> Tool.Content {
-    .text(text: string, annotations: nil, _meta: nil)
+    .text(text: string)
 }
 
 private func texts(_ content: [Tool.Content]) -> [String] {
@@ -212,7 +212,7 @@ struct ClientSnippetTests {
         let server = await makeDemoServer()
         let (client, result) = try await connectWithDefaults(transport: try await start(server))
         #expect(result.protocolVersion == Version.v2026_07_28)
-        #expect(result.serverInfo.name == "demo")
+        #expect(result.serverInfo?.name == "demo")
         #expect(await client.isStateless)
         try await pingAndDisconnect(client)
         await server.stop()
@@ -325,7 +325,7 @@ struct ClientSnippetTests {
         let server = await makeDemoServer()
         let workspace = Workspace()
         let client = try await connectWithRoots(transport: try await start(server), workspace: workspace)
-        let (content, _) = try await client.callTool(name: "where")
+        let content = try await client.callTool(name: "where").content
         #expect(texts(content) == ["file:///Users/me/project", "file:///Users/me/scratch"])
         await client.disconnect()
         await server.stop()
@@ -335,7 +335,7 @@ struct ClientSnippetTests {
     func sampling() async throws {
         let server = await makeDemoServer()
         let client = try await connectWithSampling(transport: try await start(server))
-        let (content, _) = try await client.callTool(name: "summarize")
+        let content = try await client.callTool(name: "summarize").content
         #expect(texts(content) == ["Summary of 14 characters"])
         await client.disconnect()
         await server.stop()
@@ -345,9 +345,9 @@ struct ClientSnippetTests {
     func elicitation() async throws {
         let server = await makeDemoServer()
         let client = try await connectWithElicitation(transport: try await start(server))
-        let (deployed, _) = try await client.callTool(name: "deploy")
+        let deployed = try await client.callTool(name: "deploy").content
         #expect(texts(deployed) == ["deployed"])
-        let (opened, _) = try await client.callTool(name: "open-docs")
+        let opened = try await client.callTool(name: "open-docs").content
         #expect(texts(opened) == ["accept"])
         #expect(try await callAfterURLElicitation(client).map(\.url) == ["https://example.com/connect"])
         await client.disconnect()
@@ -383,7 +383,7 @@ struct ClientSnippetTests {
             configuration: .init(protocolMode: .automatic, multiRoundTrip: .init(isEnabled: false)))
         try await client.connect(transport: try await start(server))
         await #expect(throws: MCPError.self) {
-            let (_, _) = try await client.callTool(name: "deploy")
+            _ = try await client.callTool(name: "deploy")
         }
         await client.disconnect()
         await server.stop()
@@ -451,7 +451,8 @@ struct ClientSnippetTests {
     func loggingStateless() async throws {
         let (server, client) = try await connected(.automatic)
         try await receiveLogs(client, into: LogInbox())
-        #expect(await client.configuration.logLevel == .info)
+        #expect(await client.logLevel == .info)
+        #expect(await client.configuration.logLevel == nil)
         await client.disconnect()
         await server.stop()
     }

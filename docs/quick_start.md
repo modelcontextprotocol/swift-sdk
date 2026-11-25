@@ -67,7 +67,7 @@ await server.withMethodHandler(CallTool.self) { params in
         throw MCPError.invalidParams("Unknown tool: \(params.name)")
     }
     let name = params.arguments?["name"]?.stringValue ?? "world"
-    return CallTool.Result(content: [.text(text: "Hello, \(name)!", annotations: nil, _meta: nil)])
+    return CallTool.Result(content: [.text(text: "Hello, \(name)!")])
 }
 
 try await server.start(transport: StdioTransport())
@@ -127,11 +127,11 @@ let transport = StdioTransport(
 let client = Client(name: "hello-client", version: "1.0.0")
 try await client.connect(transport: transport)
 
-let (tools, _) = try await client.listTools()
+let tools = try await client.listTools().tools
 print("Tools:", tools.map(\.name).joined(separator: ", "))
 
-let (content, isError) = try await client.callTool(name: "greet", arguments: ["name": "Swift"])
-for case .text(let text, _, _) in content {
+let result = try await client.callTool(name: "greet", arguments: ["name": "Swift"])
+for case .text(let text, _, _) in result.content {
     print(text)
 }
 ```
@@ -140,8 +140,8 @@ for case .text(let text, _, _) in content {
   configuration it sends `server/discover` and connects at 2026-07-28. A
   server that does not serve 2026-07-28 gets `initialize` and
   `notifications/initialized` instead.
-- `listTools()` and `callTool(name:arguments:meta:)` return tuples. See
-  [client.md](client.md) for the full results.
+- `listTools()` and `callTool(name:arguments:meta:)` return the request's
+  result: `ListTools.Result` and `CallTool.Result`. See [client.md](client.md).
 - `FileDescriptor` comes from `System` on Apple platforms and from
   `SystemPackage` (swift-system) elsewhere.
 
@@ -152,7 +152,7 @@ exits:
 await client.disconnect()
 try toServer.fileHandleForWriting.close()  // EOF on the server's stdin: it exits.
 process.waitUntilExit()
-exit(isError == true ? 1 : 0)
+exit(result.isError == true ? 1 : 0)
 ```
 
 ## Running the examples
@@ -185,7 +185,7 @@ func greetInProcess() async throws -> String {
 
     let client = Client(name: "hello-client", version: "1.0.0")
     try await client.connect(transport: clientTransport)
-    let (content, _) = try await client.callTool(name: "greet", arguments: ["name": "Swift"])
+    let content = try await client.callTool(name: "greet", arguments: ["name": "Swift"]).content
 
     await client.disconnect()
     await server.stop()

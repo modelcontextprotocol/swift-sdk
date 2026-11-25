@@ -64,27 +64,27 @@ private func makeServer(configuration: Server.Configuration = .default) async ->
         switch params.name {
         case "log":
             try await server.log(level: .info, data: "hello")
-            return .init(content: [.text(text: "logged", annotations: nil, _meta: nil)])
+            return .init(content: [.text(text: "logged")])
         case "progress":
             if let token = params._meta?.progressToken {
                 try await server.notify(ProgressNotification.message(.init(progressToken: token, progress: 1)))
             }
-            return .init(content: [.text(text: "done", annotations: nil, _meta: nil)])
+            return .init(content: [.text(text: "done")])
         case "sample":
             let result = try await server.requestSampling(
                 messages: [.user(.text("Hi"))], maxTokens: 10)
             if case .text(let text)? = result.content.asArray.first {
-                return .init(content: [.text(text: text, annotations: nil, _meta: nil)])
+                return .init(content: [.text(text: text)])
             }
             return .init(content: [])
         case "confirm":
             guard params.inputResponses?["ok"]?.elicitation?.action == .accept else {
                 return .inputRequired(["ok": .elicitation(message: "Proceed?")])
             }
-            return .init(content: [.text(text: "confirmed", annotations: nil, _meta: nil)])
+            return .init(content: [.text(text: "confirmed")])
         default:
             let stateless = Server.currentHandlerContext?.isStateless == true
-            return .init(content: [.text(text: stateless ? "stateless" : "handshake", annotations: nil, _meta: nil)])
+            return .init(content: [.text(text: stateless ? "stateless" : "handshake")])
         }
     }
     return server
@@ -141,8 +141,8 @@ struct RequestLifecycleTests {
             await listed.set()
         }
         try await client.connect(transport: clientEnd)
-        let (content, _) = try await client.callTool(name: "log")
-        #expect(content == [.text(text: "logged", annotations: nil, _meta: nil)])
+        let content = try await client.callTool(name: "log").content
+        #expect(content == [.text(text: "logged")])
         #expect(await eventually { await listed.isSet })
         await client.disconnect()
         await server.stop()
@@ -156,12 +156,12 @@ struct RequestLifecycleTests {
         let client = Client(
             name: "c", version: "1", capabilities: .init(sampling: .init()), configuration: .handshake)
         await client.withSamplingHandler { _ in
-            let (tools, _) = try await client.listTools()
+            let tools = try await client.listTools().tools
             return .init(model: "m", role: .assistant, content: .text("\(tools.count) tools"))
         }
         try await client.connect(transport: clientEnd)
-        let (content, _) = try await client.callTool(name: "sample")
-        #expect(content == [.text(text: "1 tools", annotations: nil, _meta: nil)])
+        let content = try await client.callTool(name: "sample").content
+        #expect(content == [.text(text: "1 tools")])
         await client.disconnect()
         await server.stop()
     }
@@ -247,7 +247,7 @@ struct RequestLifecycleTests {
         try await client.connect(transport: clientEnd)
         // The handler for this log notification waits for a later call.
         _ = try await client.callTool(name: "log")
-        let other = try await client.callTool(name: "era", meta: nil) as RequestContext<CallTool.Result>
+        let other = try await client.startToolCall(name: "era", meta: nil)
         gate.continuation.yield(other)
         #expect(await eventually { await finished.isSet })
         await client.disconnect()
@@ -288,7 +288,7 @@ struct RequestLifecycleTests {
         _ = try await connecting.value
         _ = try await incoming.next()  // notifications/initialized
 
-        let context: RequestContext<CallTool.Result> = try await client.callTool(name: "slow")
+        let context = try await client.startToolCall(name: "slow")
         let call = try JSONDecoder().decode(Value.self, from: try #require(await incoming.next()))
         let waiter = Task { try await context.value }
         // The request is shared: another task that awaits it fails too.
@@ -665,7 +665,7 @@ struct ServerReplyTests {
         let client = Client(name: "c", version: "1", configuration: .init(protocolMode: .automatic))
         try await client.connect(transport: clientEnd)
         #expect(await client.isStateless)
-        let context: RequestContext<CallTool.Result> = try await client.callTool(name: "slow")
+        let context = try await client.startToolCall(name: "slow")
         #expect(await eventually { await started.isSet })
         try await client.cancelRequest(context.requestID)
         #expect(await eventually { await cancelled.isSet })

@@ -71,8 +71,8 @@ Then connect, list the tools and call `greet`:
   configuration it sends `server/discover` and connects at 2026-07-28. A
   server that does not serve 2026-07-28 gets `initialize` and
   `notifications/initialized` instead.
-- `listTools()` and `callTool(name:arguments:meta:)` return tuples. See
-  [client.md](client.md) for the full results.
+- `listTools()` and `callTool(name:arguments:meta:)` return the request's
+  result: `ListTools.Result` and `CallTool.Result`. See [client.md](client.md).
 - `FileDescriptor` comes from `System` on Apple platforms and from
   `SystemPackage` (swift-system) elsewhere.
 

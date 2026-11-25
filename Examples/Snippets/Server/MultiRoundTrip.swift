@@ -14,12 +14,12 @@ func registerDeployTool(on server: Server) async {
         // Round 2: the client sent the answer under the key of the request.
         if let answer = params.inputResponses?["confirm"]?.elicitation {
             guard answer.action == .accept, answer.content?["confirm"]?.boolValue == true else {
-                return CallTool.Result(content: [.text(text: "Cancelled", annotations: nil, _meta: nil)])
+                return CallTool.Result(content: [.text(text: "Cancelled")])
             }
             // requestState is the plaintext this handler returned in round 1.
             let build = params.requestState ?? "unknown"
             return CallTool.Result(content: [
-                .text(text: "Deployed \(build) to \(environment)", annotations: nil, _meta: nil)
+                .text(text: "Deployed \(build) to \(environment)")
             ])
         }
 
@@ -47,7 +47,7 @@ func summarizeWorkspace(_ params: CallTool.Parameters) -> CallTool.Result {
         ])
     }
     let text = "\(roots.count) roots. Model: \(summary.model)"
-    return CallTool.Result(content: [.text(text: text, annotations: nil, _meta: nil)])
+    return CallTool.Result(content: [.text(text: text)])
 }
 // endsnippet
 
@@ -57,7 +57,7 @@ func confirmation(_ message: String) -> CallTool.Result {
     guard Server.currentHandlerContext?.clientCapabilities?.elicitation != nil else {
         // Returning the input request anyway fails with -32021 at 2026-07-28.
         return CallTool.Result(
-            content: [.text(text: "This tool needs a client with elicitation", annotations: nil, _meta: nil)],
+            content: [.text(text: "This tool needs a client with elicitation")],
             isError: true)
     }
     return .inputRequired(["confirm": .elicitation(message: message)])

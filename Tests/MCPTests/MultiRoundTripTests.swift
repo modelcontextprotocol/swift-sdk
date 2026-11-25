@@ -24,10 +24,10 @@ private func makeRoundTripServer(
                 return .inputRequired(
                     ["confirm": .elicitation(message: "Proceed?")], requestState: "pending:\(params.name)")
             }
-            return .init(content: [.text(text: "\(answer.action.rawValue) \(params.requestState ?? "-")", annotations: nil, _meta: nil)])
+            return .init(content: [.text(text: "\(answer.action.rawValue) \(params.requestState ?? "-")")])
         case "rounds":
             if params.requestState == "two", let root = responses["roots"]?.roots?.first {
-                return .init(content: [.text(text: "root \(root.uri)", annotations: nil, _meta: nil)])
+                return .init(content: [.text(text: "root \(root.uri)")])
             }
             if params.requestState == "one", responses["model"]?.sampling != nil {
                 return .inputRequired(["roots": .listRoots], requestState: "two")
@@ -35,7 +35,7 @@ private func makeRoundTripServer(
             return .inputRequired(
                 ["model": .sampling(.init(messages: [.user(.text("Hi"))], maxTokens: 10))], requestState: "one")
         case "both":
-            var result = CallTool.Result(content: [.text(text: "done", annotations: nil, _meta: nil)])
+            var result = CallTool.Result(content: [.text(text: "done")])
             result.inputRequests = ["confirm": .elicitation(message: "Proceed?")]
             return result
         case "forever":
@@ -313,9 +313,9 @@ struct MultiRoundTripTests {
         defer { Task { await client.disconnect(); await server.stop() } }
         #expect(await client.isStateless)
 
-        let (content, _) = try await client.callTool(name: "confirm")
+        let content = try await client.callTool(name: "confirm").content
         // The handler sees the plaintext state it wrote.
-        #expect(content == [.text(text: "accept pending:confirm", annotations: nil, _meta: nil)])
+        #expect(content == [.text(text: "accept pending:confirm")])
         #expect(await calls.value == 2)
         #expect(await elicitations.value == 1)
 
@@ -325,7 +325,7 @@ struct MultiRoundTripTests {
 
         let prompt = try await client.getPrompt(name: "p")
         #expect(prompt.messages == [.user(.text(text: "About swift"))])
-        let contents = try await client.readResource(uri: "test://doc")
+        let contents = try await client.readResource(uri: "test://doc").contents
         #expect(contents == [.text("secret", uri: "test://doc")])
     }
 
@@ -410,7 +410,7 @@ struct MultiRoundTripTests {
             let client = try await connect(server, mode: mode, capabilities: .init(elicitation: elicitation)) {
                 await answerEverything($0)
             }
-            let (content, _) = try await client.callTool(name: "confirm")
+            let content = try await client.callTool(name: "confirm").content
             #expect(content == [.text(text: "accept pending:confirm", annotations: nil, _meta: nil)], "\(elicitation)")
             await client.disconnect()
             await server.stop()
@@ -464,7 +464,7 @@ struct MultiRoundTripTests {
         ) {
             await $0.withElicitationHandler { _ in .init(action: .decline) }
         }
-        let (content, _) = try await client.callTool(name: "speak")
+        let content = try await client.callTool(name: "speak").content
         #expect(content == [.text(text: "answered", annotations: nil, _meta: nil)])
         await client.disconnect()
         await server.stop()
@@ -491,7 +491,7 @@ struct MultiRoundTripTests {
                 return response
             }
         }
-        let (content, _) = try await client.callTool(name: "approve")
+        let content = try await client.callTool(name: "approve").content
         #expect(content == [.text(text: "kept", annotations: nil, _meta: nil)])
         #expect(await received.values == [.init(taskId: "t1", src: "data:,hi")])
         await client.disconnect()
@@ -517,7 +517,7 @@ struct MultiRoundTripTests {
                 return .init(model: "test", role: .assistant, content: .text("data:,hi"))
             }
         }
-        let (content, _) = try await client.callTool(name: "sample")
+        let content = try await client.callTool(name: "sample").content
         #expect(content == [.text(text: "data:,hi", annotations: nil, _meta: nil)])
         #expect(await prompts.values == [.text("data:,hello")])
         await client.disconnect()
@@ -585,8 +585,8 @@ struct MultiRoundTripTests {
         defer { Task { await client.disconnect(); await server.stop() } }
         #expect(await !client.isStateless)
 
-        let (content, _) = try await client.callTool(name: "confirm")
-        #expect(content == [.text(text: "accept pending:confirm", annotations: nil, _meta: nil)])
+        let content = try await client.callTool(name: "confirm").content
+        #expect(content == [.text(text: "accept pending:confirm")])
         #expect(await calls.value == 2)
         #expect(await elicitations.value == 1)
 
@@ -755,14 +755,14 @@ struct MultiRoundTripTests {
         await server.withMethodHandler(CallTool.self) { _ in
             await calls.increment()
             if await calls.value < 3 { return .inputRequired(requestState: "working") }
-            return .init(content: [.text(text: "done", annotations: nil, _meta: nil)])
+            return .init(content: [.text(text: "done")])
         }
         let client = try await connect(server, mode: .handshake)
         defer { Task { await client.disconnect(); await server.stop() } }
 
         let start = ContinuousClock.now
-        let (content, _) = try await client.callTool(name: "job")
-        #expect(content == [.text(text: "done", annotations: nil, _meta: nil)])
+        let content = try await client.callTool(name: "job").content
+        #expect(content == [.text(text: "done")])
         #expect(ContinuousClock.now - start >= .milliseconds(150))
         #expect(await calls.value == 3)
     }

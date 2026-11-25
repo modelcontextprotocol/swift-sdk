@@ -15,7 +15,7 @@ func makeGreetServer() async -> Server {
     }
     await server.withMethodHandler(CallTool.self) { params in
         let name = params.arguments?["name"]?.stringValue ?? "world"
-        return CallTool.Result(content: [.text(text: "Hello, \(name)!", annotations: nil, _meta: nil)])
+        return CallTool.Result(content: [.text(text: "Hello, \(name)!")])
     }
     return server
 }
@@ -29,7 +29,7 @@ func greetInProcess() async throws -> String {
 
     let client = Client(name: "hello-client", version: "1.0.0")
     try await client.connect(transport: clientTransport)
-    let (content, _) = try await client.callTool(name: "greet", arguments: ["name": "Swift"])
+    let content = try await client.callTool(name: "greet", arguments: ["name": "Swift"]).content
 
     await client.disconnect()
     await server.stop()

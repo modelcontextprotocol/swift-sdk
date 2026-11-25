@@ -71,7 +71,7 @@ reaches the peer as -32603 with the error's description.
 | -32022 Unsupported protocol version | [-32022](#-32022-unsupported-protocol-version) |
 | HTTP 400, 404, 405 and other statuses | [HTTP status codes](#http-status-codes) |
 | A feature that works in one era only | [Era mix-ups](#era-mix-ups) |
-| `Authorization flow failed` | [OAuth failures](#oauth-failures) |
+| `transportError` with an `OAuthAuthorizationError` | [OAuth failures](#oauth-failures) |
 | A request that never completes | [Timeouts](#timeouts) |
 
 ### -32601 Method not found
@@ -208,13 +208,16 @@ both: use it only for a server that authenticates every request and that no
 browser can reach.
 
 `HTTPClientTransport` delivers the JSON-RPC error of a non-2xx response as
-the request's error when the error's ID is the request's ID. Otherwise it throws `MCPError.internalError`
-with `Bad request` (400), `Session expired` or `Endpoint not found` (404),
-`Server does not support streaming` or `Method not allowed` (405),
-`Request timeout` (408), `Too many requests` (429), or `Server error: <status>`
-(5xx). A 404 with a session drops the session ID. The client does not
-initialize a new session on its own; after `Session expired`, connect a new
-client. The Go and Python clients behave the same way.
+the request's error when the error's ID is the request's ID. Otherwise it throws
+`MCPError.transportError(_:)` with an `HTTPStatusError`, whose description is
+`Bad request` (400), `Session expired` or `Endpoint not found` (404),
+`Method not allowed` (405), `Request timeout` (408), `Too many requests` (429),
+or `Server error: <status>` (5xx). A 404 to a POST that carried the session
+ID sets `isSessionExpired`, drops the session ID and stops the GET stream. A 404
+on the GET stream stops the stream and keeps the session ID: the next request
+carries it, receives the server's 404 and reports `isSessionExpired`. The
+client does not initialize a new session on its own; after an expired session,
+connect a new client. The Go and Python clients behave the same way.
 
 A POST response stream that ends before its response, and that the transport
 cannot resume, fails its request with -32603: `The server closed the response
@@ -235,7 +238,7 @@ Each era has features the other lacks; see
 |---|---|---|
 | `requestSampling`, `requestElicitation` or `listRoots` fails with -32600 | The handler serves a stateless request. | Return an input-required result, which works in both eras (below). |
 | A raw `logging/setLevel` fails with -32601 at 2026-07-28 | The method was removed. | Call `Client.setLoggingLevel(_:)`, or set `Configuration.logLevel`. Servers read `currentHandlerContext?.logLevel`. |
-| `logging/setLevel` fails with -32601 in the handshake era | `Server` has no built-in handler. | Register a `SetLoggingLevel` handler. |
+| `logging/setLevel` fails with -32601 in the handshake era | The server does not declare the `logging` capability. | Declare it; the server then answers `logging/setLevel`. |
 | No log notifications at 2026-07-28 | The request's `_meta` has no log level, or the message is below it. | Set `Client.Configuration.logLevel`. |
 | No list-changed notifications at 2026-07-28 | They are sent only on listen streams. | Register the list-changed handler on the client, declare `listChanged` on the server, and send with `server.notify(_:)`. |
 | A `.handshake` client cannot connect to a stateless-only server | The server refuses `initialize`. | Connect with `.automatic`. |
@@ -255,12 +258,11 @@ handler, the call fails with -32601 at 2026-07-28 and with -32603 for
 ### OAuth failures
 
 `HTTPClientTransport` reports OAuth failures as
-`MCPError.internalError("Authorization flow failed: <description>")`, where
-the description is that of an `OAuthAuthorizationError`. Without an
-authorizer, a 401 is `Authentication required` and a 403 is
-`Access forbidden`.
+`MCPError.transportError(_:)` with the `OAuthAuthorizationError`; match its
+`code`. Without an authorizer, a 401 or 403 is an `HTTPStatusError` (described
+as `Authentication required` and `Access forbidden`).
 
-| Description starts with | Case | Cause |
+| Description starts with | Code | Cause |
 |---|---|---|
 | `Authorization server issuer mismatch` | `authorizationServerIssuerMismatch` | The metadata's `issuer` differs from the issuer its URL was built from (RFC 8414 §3.3), for example by case or a trailing slash on a path. Only a trailing slash on a root issuer is tolerated. To trust such a server, set it in `endpointOverrides.authorizationServerURL`; with `.jwtBearer`, a configured server must name itself too, since its issuer is the audience of the assertion. |
 | `Authorization metadata at <url> is unavailable: ...` | — | Discovery got a network error, a timeout or a status other than 404 and 410. Nothing is cached; the next request tries again. |

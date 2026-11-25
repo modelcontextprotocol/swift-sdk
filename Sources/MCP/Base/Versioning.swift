@@ -25,8 +25,13 @@ public enum Version {
     public static let supported: Set<String> = Set(handshake + stateless)
 
     /// The newest handshake revision: the version `initialize` requests and
-    /// the default `MCP-Protocol-Version` of session-based HTTP.
-    public static let latest: String = v2025_11_25
+    /// the default `MCP-Protocol-Version` of session-based HTTP. The newest
+    /// revision the SDK implements is `stateless[0]`.
+    public static let latestHandshake: String = v2025_11_25
+
+    /// The newest handshake revision.
+    @available(*, deprecated, renamed: "latestHandshake", message: "The newest revision is Version.stateless[0]")
+    public static var latest: String { latestHandshake }
 
     /// Negotiates the protocol version of an `initialize` request.
     ///
@@ -37,14 +42,14 @@ public enum Version {
         if supported.contains(clientRequestedVersion), handshake.contains(clientRequestedVersion) {
             return clientRequestedVersion
         }
-        return handshake.first { supported.contains($0) } ?? latest
+        return handshake.first { supported.contains($0) } ?? latestHandshake
     }
 
     /// Returns the feature profile of a protocol version.
     ///
     /// Versions are compared as `YYYY-MM-DD` strings, so an unknown future
     /// version gets the profile of the newest known revision before it. A
-    /// string that is not a `YYYY-MM-DD` date gets the profile of ``latest``.
+    /// string that is not a `YYYY-MM-DD` date gets the profile of ``latestHandshake``.
     public static func profile(for version: String) -> ProtocolProfile {
         ProtocolProfile(version: version)
     }
@@ -103,7 +108,7 @@ public struct ProtocolProfile: Hashable, Sendable {
 
     init(version: String) {
         // Only dates are ordered; anything else would sort above every revision.
-        let comparable = Version.isDateVersion(version) ? version : Version.latest
+        let comparable = Version.isDateVersion(version) ? version : Version.latestHandshake
         let stateless = comparable >= Version.v2026_07_28
         self.version = version
         self.usesInitializeHandshake = !stateless

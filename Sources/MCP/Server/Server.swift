@@ -255,6 +255,12 @@ public actor Server {
 
     /// Request handlers
     private var methodHandlers: [String: RequestHandlerBox] = [:]
+    /// The methods whose handler is the SDK's default, which `start` may
+    /// replace; a handler registered with `withMethodHandler` is never replaced.
+    private var defaultHandlerMethods: Set<String> = []
+    /// The level of the last `logging/setLevel` on this connection; `nil`
+    /// before one, when every message is sent.
+    private var clientLogLevel: LogLevel?
     /// Notification handlers
     private var notificationHandlers: [String: [NotificationHandlerBox]] = [:]
     /// Pending request tasks (for cancellation support)
@@ -365,9 +371,22 @@ public actor Server {
     }
 
     /// Start the server
+    ///
+    /// `start` adds the SDK's handlers for `initialize`, `ping`,
+    /// `logging/setLevel` (with the `logging` capability),
+    /// `subscriptions/listen` and `server/discover`, except where a handler
+    /// registered with ``withMethodHandler(_:handler:)`` exists: that one is
+    /// kept. An application `Initialize` handler therefore replaces the SDK's
+    /// handshake: `initializeHook` and version negotiation do not run, and the
+    /// server neither records the client's info and capabilities nor counts
+    /// as initialized: list-changed and resource-updated notifications are
+    /// not sent on the connection, and with
+    /// ``Configuration/strict-swift.property`` later requests are refused.
+    ///
     /// - Parameters:
     ///   - transport: The transport to use for the server
-    ///   - initializeHook: An optional hook that runs when the client sends an initialize request
+    ///   - initializeHook: An optional hook that runs when the client sends an
+    ///     initialize request, in the SDK's `Initialize` handler
     ///   - statelessRequestHook: An optional hook that runs before every
     ///     stateless request (2026-07-28 and later), which never sends
     ///     `initialize`, and behind ``StatelessHTTPServerTransport`` before
@@ -491,6 +510,7 @@ public actor Server {
 
         task?.cancel()
         task = nil
+        clientLogLevel = nil
 
         // Clear pending requests with errors
         let pendingRequestsToCancel = self.pendingRequests
@@ -548,7 +568,16 @@ public actor Server {
         /// The feature profile of ``protocolVersion``.
         public var profile: ProtocolProfile? { protocolVersion.map(Version.profile(for:)) }
 
-        package init(
+        /// Creates a context, for example to test a handler that reads
+        /// ``Server/currentHandlerContext`` without a connection:
+        ///
+        /// ```swift
+        /// let context = Server.HandlerContext(id: 1, httpContext: nil, isStateless: true)
+        /// let result = try await Server.$currentHandlerContext.withValue(context) {
+        ///     try await handler(params)
+        /// }
+        /// ```
+        public init(
             id: ID,
             httpContext: HTTPRequest?,
             protocolVersion: String? = nil,
@@ -591,6 +620,12 @@ public actor Server {
     /// client, which retries with the responses. For earlier clients the
     /// server sends the input requests itself and calls the handler again
     /// with the responses, calling it at most 10 times, so one handler serves both.
+    ///
+    /// A handler for a method the SDK answers itself (`initialize`, `ping`,
+    /// `logging/setLevel`, `subscriptions/listen`, `server/discover`)
+    /// replaces the SDK's, whether registered before or after
+    /// ``start(transport:initializeHook:statelessRequestHook:)``. For
+    /// `Initialize`, the `initializeHook` passed to `start` then does not run.
     @discardableResult
     public func withMethodHandler<M: Method>(
         _ type: M.Type,
@@ -605,7 +640,17 @@ public actor Server {
             return Response(id: request.id, result: result)
         }
         if M.name == ListTools.name { invalidateToolHeaders() }
+        defaultHandlerMethods.remove(M.name)
         return self
+    }
+
+    /// Registers a default handler unless the application registered one.
+    private func registerDefault<M: Method>(
+        _ type: M.Type, handler: @escaping @Sendable (M.Parameters) async throws -> M.Result
+    ) {
+        guard methodHandlers[M.name] == nil || defaultHandlerMethods.contains(M.name) else { return }
+        withMethodHandler(type, handler: handler)
+        defaultHandlerMethods.insert(M.name)
     }
 
     // MARK: - Multi round-trip requests (SEP-2322)
@@ -1238,8 +1283,9 @@ public actor Server {
     ///
     /// Servers that declare the `logging` capability can send structured log messages
     /// to clients. A stateless (2026-07-28) request receives messages only at or above
-    /// the level in its `_meta`; on handshake connections the server sends every
-    /// message, and a `logging/setLevel` handler, if registered, decides what to keep.
+    /// the level in its `_meta`. On handshake connections the built-in
+    /// `logging/setLevel` handler records the client's level, and messages below it
+    /// are not sent; before the client sets a level, every message is sent.
     ///
     /// - Parameters:
     ///   - level: The severity level of the log message
@@ -1256,6 +1302,8 @@ public actor Server {
         // the level it set in `_meta`, and none when it set no level.
         if let context = Server.currentHandlerContext, context.isStateless {
             guard let minimum = context.logLevel, level >= minimum else { return }
+        } else if let minimum = clientLogLevel, level < minimum {
+            return
         }
         let notification = LogMessageNotification.message(
             .init(level: level, logger: logger, data: data)
@@ -1852,7 +1900,7 @@ public actor Server {
         initializeHook: (@Sendable (Client.Info, Client.Capabilities) async throws -> Void)?
     ) {
         // Initialize
-        withMethodHandler(Initialize.self) { params in
+        registerDefault(Initialize.self) { params in
             // Behind a sessionless transport every client sends its own
             // `initialize`; the server keeps no per-client state.
             let sessionless = await self.isSessionless
@@ -1895,21 +1943,36 @@ public actor Server {
         }
 
         // Ping
-        withMethodHandler(Ping.self) { _ in return Empty() }
+        registerDefault(Ping.self) { _ in return Empty() }
+
+        // Log level (handshake connections; 2026-07-28 sets it per request)
+        if capabilities.logging != nil {
+            registerDefault(SetLoggingLevel.self) { params in
+                await self.setClientLogLevel(params.level)
+                return Empty()
+            }
+        }
 
         // Notification streams (2026-07-28 and later)
-        withMethodHandler(SubscriptionsListen.self) { params in
+        registerDefault(SubscriptionsListen.self) { params in
             try await self.serveListen(params)
         }
 
         // Discovery (2026-07-28 and later)
-        withMethodHandler(ServerDiscover.self) { _ in
+        registerDefault(ServerDiscover.self) { _ in
             ServerDiscover.Result(
                 supportedVersions: await self.configuration.protocolVersions,
                 capabilities: await self.capabilities,
                 instructions: self.instructions
             )
         }
+    }
+
+    /// Records the level of `logging/setLevel`. Behind a sessionless
+    /// transport there is no connection to record it for.
+    private func setClientLogLevel(_ level: LogLevel) {
+        guard !isSessionless else { return }
+        clientLogLevel = level
     }
 
     private func setInitialState(

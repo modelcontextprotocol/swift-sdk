@@ -31,6 +31,11 @@ public actor Client {
 
         /// The lowest log level to request on stateless (2026-07-28) connections,
         /// sent in each request's `_meta`. `nil` requests no log notifications.
+        /// Changing it to another value on ``Client/configuration`` sets
+        /// ``Client/logLevel`` for the following requests, as
+        /// ``Client/setLoggingLevel(_:)`` does. ``Client/setLoggingLevel(_:)``
+        /// does not change it, so assigning the value it already has does
+        /// nothing: a level set with ``Client/setLoggingLevel(_:)`` stays.
         public var logLevel: LogLevel?
 
         /// How long ``ProtocolMode/automatic`` waits for the answer to
@@ -293,14 +298,26 @@ public actor Client {
     /// The client capabilities
     public var capabilities: Client.Capabilities
     /// The client configuration
-    public var configuration: Configuration
+    public var configuration: Configuration {
+        didSet {
+            if configuration.logLevel != oldValue.logLevel { logLevel = configuration.logLevel }
+        }
+    }
 
     /// The server capabilities, known after ``connect(transport:)``.
     public private(set) var serverCapabilities: Server.Capabilities?
     /// The negotiated protocol version, known after ``connect(transport:)``.
     public private(set) var negotiatedProtocolVersion: String?
-    /// The server implementation, known after ``connect(transport:)``.
+    /// The server implementation, known after ``connect(transport:)``. `nil`
+    /// on a 2026-07-28 connection to a server that does not send
+    /// `io.modelcontextprotocol/serverInfo`.
     public private(set) var serverInfo: Server.Info?
+    /// The lowest log level the server should send, carried in the `_meta` of
+    /// every 2026-07-28 request: ``Configuration/logLevel``, until
+    /// ``setLoggingLevel(_:)`` or a change of `configuration.logLevel`
+    /// changes it. ``connect(transport:)`` starts from
+    /// `configuration.logLevel` again.
+    public private(set) var logLevel: LogLevel?
     /// The server instructions
     private var instructions: String?
     /// The background `subscriptions/listen` stream (2026-07-28): the list
@@ -433,9 +450,42 @@ public actor Client {
             description: description, websiteUrl: websiteUrl, icons: icons)
         self.capabilities = capabilities
         self.configuration = configuration
+        self.logLevel = configuration.logLevel
     }
 
-    /// Connect to the server using the given transport
+    /// What ``connect(transport:)`` learned about the server.
+    public struct ConnectionInfo: Hashable, Sendable {
+        /// The negotiated protocol version.
+        public let protocolVersion: String
+        /// The server's capabilities.
+        public let capabilities: Server.Capabilities
+        /// The server's implementation: from `initialize`, or from the
+        /// `io.modelcontextprotocol/serverInfo` of `server/discover`. `nil` when
+        /// a 2026-07-28 server does not send it.
+        public let serverInfo: Server.Info?
+        /// The server's instructions, if any.
+        public let instructions: String?
+        /// Whether the connection is at 2026-07-28, without a handshake.
+        public let isStateless: Bool
+
+        public init(
+            protocolVersion: String,
+            capabilities: Server.Capabilities,
+            serverInfo: Server.Info?,
+            instructions: String? = nil,
+            isStateless: Bool
+        ) {
+            self.protocolVersion = protocolVersion
+            self.capabilities = capabilities
+            self.serverInfo = serverInfo
+            self.instructions = instructions
+            self.isStateless = isStateless
+        }
+    }
+
+    /// Connects to the server with `transport` and opens the protocol
+    /// connection: `server/discover` or `initialize`, depending on
+    /// ``Configuration/protocolMode``.
     ///
     /// If the client is already connected, it first disconnects the previous
     /// transport, and that connection's pending requests fail as they do with
@@ -449,6 +499,7 @@ public actor Client {
     /// ``MCPError``. Call `connect(transport:)` again with a new transport to
     /// reconnect.
     ///
+    /// - Returns: What the client learned about the server.
     /// - Throws: The error the pending requests fail with when the connection
     ///   closes before the server answered; `MCPError.internalError("Client
     ///   disconnected")` if ``disconnect()`` or another `connect(transport:)`
@@ -456,7 +507,7 @@ public actor Client {
     ///   or any error from connecting the transport or opening the protocol
     ///   connection.
     @discardableResult
-    public func connect(transport: any Transport) async throws -> Initialize.Result {
+    public func connect(transport: any Transport) async throws -> ConnectionInfo {
         // Release the previous connection, so that its transport and message
         // loop stop and its requests don't wait for a response.
         if connection != nil {
@@ -475,6 +526,7 @@ public actor Client {
         instructions = nil
         self.connection = transport
         toolHeaderParameters = [:]
+        logLevel = configuration.logLevel
         try await transport.connect()
         guard connectionGeneration == generation else {
             throw MCPError.internalError("Client disconnected")
@@ -563,18 +615,21 @@ public actor Client {
         }
 
         // Open the protocol connection
-        let result: Initialize.Result
         switch configuration.protocolMode {
         case .handshake:
-            result = try await _initialize()
+            try await _initialize()
         case .automatic:
-            result = try await discoverOrInitialize(
-                Version.stateless[0], fallback: true, generation: generation)
+            try await discoverOrInitialize(Version.stateless[0], fallback: true, generation: generation)
         case .stateless(let version):
-            result = try await discoverOrInitialize(version, fallback: false, generation: generation)
+            try await discoverOrInitialize(version, fallback: false, generation: generation)
         }
         refreshNotificationStream()
-        return result
+        return ConnectionInfo(
+            protocolVersion: negotiatedProtocolVersion ?? "",
+            capabilities: serverCapabilities ?? .init(),
+            serverInfo: serverInfo,
+            instructions: instructions,
+            isStateless: isStateless)
     }
 
     /// Disconnect the client and cancel all pending requests
@@ -1675,26 +1730,11 @@ public actor Client {
 
     // MARK: - Lifecycle
 
-    /// Initialize the connection with the server.
-    ///
-    /// - Important: This method is deprecated. Initialization now happens automatically
-    ///   when calling `connect(transport:)`. You should use that method instead.
-    ///
-    /// - Returns: The server's initialization response containing capabilities and server info
-    @available(
-        *, deprecated,
-        message:
-            "Initialization now happens automatically during connect. Use connect(transport:) instead."
-    )
-    public func initialize() async throws -> Initialize.Result {
-        return try await _initialize()
-    }
-
-    /// Internal initialization implementation
-    private func _initialize() async throws -> Initialize.Result {
+    /// Sends `initialize` and `notifications/initialized`.
+    private func _initialize() async throws {
         let request = Initialize.request(
             .init(
-                protocolVersion: Version.latest,
+                protocolVersion: Version.latestHandshake,
                 capabilities: capabilities,
                 clientInfo: clientInfo
             ))
@@ -1713,8 +1753,6 @@ public actor Client {
         }
 
         try await notify(InitializedNotification.message())
-
-        return result
     }
 
     /// Records the `x-mcp-header` arguments of each listed tool and drops
@@ -1758,7 +1796,7 @@ public actor Client {
         meta.protocolVersion = version
         meta.clientCapabilities = capabilities
         meta.clientInfo = clientInfo
-        meta.logLevel = configuration.logLevel
+        meta.logLevel = logLevel
         if let existing {
             meta.fields.merge(existing.fields) { _, own in own }
         }
@@ -1776,17 +1814,15 @@ public actor Client {
     /// - Parameter generation: The connection generation of the
     ///   `connect(transport:)` call. Once another connect or a disconnect
     ///   replaced it, this throws instead of acting on the new connection.
-    private func discoverOrInitialize(_ preferred: String, fallback: Bool, generation: Int) async throws
-        -> Initialize.Result
-    {
+    private func discoverOrInitialize(_ preferred: String, fallback: Bool, generation: Int) async throws {
         func ensureCurrent() throws {
             guard connectionGeneration == generation else {
                 throw MCPError.internalError("Client disconnected")
             }
         }
-        func initialize() async throws -> Initialize.Result {
+        func initialize() async throws {
             try ensureCurrent()
-            return try await _initialize()
+            try await _initialize()
         }
         var version = preferred
         var retried = false
@@ -1879,21 +1915,14 @@ public actor Client {
     }
 
     /// Records a `server/discover` result as the connection state.
-    private func adopt(_ result: ServerDiscover.Result, version: String) async -> Initialize.Result {
-        let info = result.serverInfo ?? Server.Info(name: "", version: "")
+    private func adopt(_ result: ServerDiscover.Result, version: String) async {
         serverCapabilities = result.capabilities
         negotiatedProtocolVersion = version
-        serverInfo = info
+        serverInfo = result.serverInfo
         instructions = result.instructions
         if let httpTransport = connection as? HTTPClientTransport {
             await httpTransport.useStatelessProtocol(version)
         }
-        return Initialize.Result(
-            protocolVersion: version,
-            capabilities: result.capabilities,
-            serverInfo: info,
-            instructions: result.instructions
-        )
     }
 
     /// Checks that the server is reachable.
@@ -1911,50 +1940,42 @@ public actor Client {
 
     // MARK: - Prompts
 
+    /// Gets a prompt from the server (`prompts/get`).
+    ///
+    /// When the server asks for input, the client answers with its handlers
+    /// (``Configuration/multiRoundTrip``) and returns the final result.
     public func getPrompt(name: String, arguments: [String: String]? = nil) async throws
-        -> (description: String?, messages: [Prompt.Message])
+        -> GetPrompt.Result
     {
         try validateServerCapability(\.prompts, "Prompts")
         let request = GetPrompt.request(.init(name: name, arguments: arguments))
-        let result = try Self.complete(try await send(request).value, GetPrompt.name)
-        return (description: result.description, messages: result.messages)
+        return try Self.complete(try await send(request).value, GetPrompt.name)
     }
 
-    public func listPrompts(cursor: String? = nil) async throws
-        -> (prompts: [Prompt], nextCursor: String?)
-    {
+    /// Lists one page of the server's prompts (`prompts/list`). Pass the
+    /// result's `nextCursor` to get the next page.
+    public func listPrompts(cursor: String? = nil) async throws -> ListPrompts.Result {
         try validateServerCapability(\.prompts, "Prompts")
-        let request: Request<ListPrompts>
-        if let cursor = cursor {
-            request = ListPrompts.request(.init(cursor: cursor))
-        } else {
-            request = ListPrompts.request(.init())
-        }
-        let result = try await send(request).value
-        return (prompts: result.prompts, nextCursor: result.nextCursor)
+        return try await send(ListPrompts.request(cursor.map { .init(cursor: $0) } ?? .init())).value
     }
 
     // MARK: - Resources
 
-    public func readResource(uri: String) async throws -> [Resource.Content] {
+    /// Reads a resource (`resources/read`).
+    ///
+    /// When the server asks for input, the client answers with its handlers
+    /// (``Configuration/multiRoundTrip``) and returns the final result.
+    public func readResource(uri: String) async throws -> ReadResource.Result {
         try validateServerCapability(\.resources, "Resources")
         let request = ReadResource.request(.init(uri: uri))
-        let result = try Self.complete(try await send(request).value, ReadResource.name)
-        return result.contents
+        return try Self.complete(try await send(request).value, ReadResource.name)
     }
 
-    public func listResources(cursor: String? = nil) async throws -> (
-        resources: [Resource], nextCursor: String?
-    ) {
+    /// Lists one page of the server's resources (`resources/list`). Pass the
+    /// result's `nextCursor` to get the next page.
+    public func listResources(cursor: String? = nil) async throws -> ListResources.Result {
         try validateServerCapability(\.resources, "Resources")
-        let request: Request<ListResources>
-        if let cursor = cursor {
-            request = ListResources.request(.init(cursor: cursor))
-        } else {
-            request = ListResources.request(.init())
-        }
-        let result = try await send(request).value
-        return (resources: result.resources, nextCursor: result.nextCursor)
+        return try await send(ListResources.request(cursor.map { .init(cursor: $0) } ?? .init())).value
     }
 
     /// Asks for `notifications/resources/updated` when the resource at `uri` changes.
@@ -2054,37 +2075,29 @@ public actor Client {
         Set(notificationStream?.notifications.resourceSubscriptions ?? []).intersection(subscribedResources)
     }
 
-    public func listResourceTemplates(cursor: String? = nil) async throws -> (
-        templates: [Resource.Template], nextCursor: String?
-    ) {
+    /// Lists one page of the server's resource templates
+    /// (`resources/templates/list`). Pass the result's `nextCursor` to get the
+    /// next page.
+    public func listResourceTemplates(cursor: String? = nil) async throws -> ListResourceTemplates.Result {
         try validateServerCapability(\.resources, "Resources")
-        let request: Request<ListResourceTemplates>
-        if let cursor = cursor {
-            request = ListResourceTemplates.request(.init(cursor: cursor))
-        } else {
-            request = ListResourceTemplates.request(.init())
-        }
-        let result = try await send(request).value
-        return (templates: result.templates, nextCursor: result.nextCursor)
+        return try await send(ListResourceTemplates.request(cursor.map { .init(cursor: $0) } ?? .init())).value
     }
 
     // MARK: - Tools
 
-    public func listTools(cursor: String? = nil) async throws -> (
-        tools: [Tool], nextCursor: String?
-    ) {
+    /// Lists one page of the server's tools (`tools/list`). Pass the result's
+    /// `nextCursor` to get the next page.
+    public func listTools(cursor: String? = nil) async throws -> ListTools.Result {
         try validateServerCapability(\.tools, "Tools")
-        let request: Request<ListTools>
-        if let cursor = cursor {
-            request = ListTools.request(.init(cursor: cursor))
-        } else {
-            request = ListTools.request(.init())
-        }
-        let result = try await send(request).value
-        return (tools: result.tools, nextCursor: result.nextCursor)
+        return try await send(ListTools.request(cursor.map { .init(cursor: $0) } ?? .init())).value
     }
 
-    /// Call a tool on the server.
+    /// Calls a tool on the server (`tools/call`).
+    ///
+    /// When the server asks for input, the client answers with its handlers
+    /// (``Configuration/multiRoundTrip``) and returns the final result. To
+    /// cancel the call or read its request ID, use
+    /// ``startToolCall(name:arguments:meta:)``.
     ///
     /// - Parameters:
     ///   - name: The name of the tool to call.
@@ -2092,18 +2105,32 @@ public actor Client {
     ///   - meta: Optional request metadata including progress token. If `progressToken` is specified,
     ///           the caller is requesting out-of-band progress notifications for this request.
     ///           Use `onNotification(ProgressNotification.self)` to receive progress updates.
-    /// - Returns: A tuple containing the tool's content response and an optional error flag.
-    /// - Note: For advanced use cases requiring cancellation support, use `send()` directly to get a `RequestContext`.
+    /// - Returns: The result: `content`, `structuredContent`, `isError` and `_meta`. `isError`
+    ///   means the tool ran and failed; a protocol failure is thrown.
     /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/server/tools/#calling-tools
     public func callTool(
         name: String,
         arguments: [String: Value]? = nil,
         meta: Metadata? = nil
-    ) async throws -> (content: [Tool.Content], isError: Bool?) {
+    ) async throws -> CallTool.Result {
         try validateServerCapability(\.tools, "Tools")
         let request = CallTool.request(.init(name: name, arguments: arguments, meta: meta))
-        let result = try Self.complete(try await send(request).value, CallTool.name)
-        return (content: result.content, isError: result.isError)
+        return try Self.complete(try await send(request).value, CallTool.name)
+    }
+
+    /// Starts a tool call and returns at once, with the call's ``RequestContext``.
+    ///
+    /// Await `value` for the result, or pass `requestID` to
+    /// ``cancelRequest(_:reason:)``; cancelling the task that awaits `value`
+    /// cancels the call too. Unlike ``callTool(name:arguments:meta:)``, an
+    /// input-required result is returned as is when multi round-trip is off.
+    public func startToolCall(
+        name: String,
+        arguments: [String: Value]? = nil,
+        meta: Metadata? = nil
+    ) throws -> RequestContext<CallTool.Result> {
+        try validateServerCapability(\.tools, "Tools")
+        return try send(CallTool.request(.init(name: name, arguments: arguments, meta: meta)))
     }
 
     /// Rejects an input-required result, returned when multi round-trip is disabled.
@@ -2111,27 +2138,6 @@ public actor Client {
         guard result.isInputRequired else { return result }
         throw MCPError.invalidRequest(
             "\(method) requires input; enable Configuration.multiRoundTrip or use send(_:)")
-    }
-
-    /// Call a tool on the server.
-    ///
-    /// - Parameters:
-    ///   - name: The name of the tool to call.
-    ///   - arguments: Arguments to use for the tool call.
-    ///   - meta: Optional request metadata including progress token. If `progressToken` is specified,
-    ///           the caller is requesting out-of-band progress notifications for this request.
-    ///           Use `onNotification(ProgressNotification.self)` to receive progress updates.
-    /// - Returns: A tuple containing the tool's content response and an optional error flag.
-    /// - Note: For advanced use cases requiring cancellation support, use `send()` directly to get a `RequestContext`.
-    /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/server/tools/#calling-tools
-    public func callTool(
-        name: String,
-        arguments: [String: Value]? = nil,
-        meta: Metadata? = nil
-    ) throws -> RequestContext<CallTool.Result> {
-        try validateServerCapability(\.tools, "Tools")
-        let request = CallTool.request(.init(name: name, arguments: arguments, meta: meta))
-        return try send(request)
     }
 
     // MARK: - Sampling
@@ -2220,19 +2226,18 @@ public actor Client {
     ///
     /// On handshake connections this sends `logging/setLevel`. On stateless
     /// connections that method does not exist: the level is sent in the
-    /// `_meta` of every following request instead.
+    /// `_meta` of every following request instead. Either way it becomes
+    /// ``logLevel``; ``configuration`` does not change.
     ///
     /// - Parameter level: The minimum log level to receive
     /// - Throws: MCPError if the client is not connected or if the server doesn't support logging
     /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/server/utilities/logging/
     public func setLoggingLevel(_ level: LogLevel) async throws {
         try validateServerCapability(\.logging, "Logging")
-        if isStateless {
-            configuration.logLevel = level
-            return
+        if !isStateless {
+            _ = try await send(SetLoggingLevel.request(.init(level: level))).value
         }
-        let request = SetLoggingLevel.request(.init(level: level))
-        _ = try await send(request).value
+        logLevel = level
     }
 
     // MARK: - Completions

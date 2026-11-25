@@ -366,10 +366,11 @@ import Testing
                 try await transport.send(messageData)
                 Issue.record("Expected send to throw an error for 404")
             } catch let error as MCPError {
-                guard case .internalError(let message) = error else {
-                    Issue.record("Expected MCPError.internalError, got \(error)")
+                guard case .transportError(let underlying) = error else {
+                    Issue.record("Expected MCPError.transportError, got \(error)")
                     throw error
                 }
+                let message: String? = underlying.localizedDescription
                 #expect(message?.contains("Endpoint not found") ?? false)
             } catch {
                 Issue.record("Expected MCPError, got \(error)")
@@ -404,10 +405,11 @@ import Testing
                 try await transport.send(messageData)
                 Issue.record("Expected send to throw an error for 500")
             } catch let error as MCPError {
-                guard case .internalError(let message) = error else {
-                    Issue.record("Expected MCPError.internalError, got \(error)")
+                guard case .transportError(let underlying) = error else {
+                    Issue.record("Expected MCPError.transportError, got \(error)")
                     throw error
                 }
+                let message: String? = underlying.localizedDescription
                 #expect(message?.contains("Server error: 500") ?? false)
             } catch {
                 Issue.record("Expected MCPError, got \(error)")
@@ -441,10 +443,11 @@ import Testing
                 try await transport.send(messageData)
                 Issue.record("Expected send to throw an error for 400")
             } catch let error as MCPError {
-                guard case .internalError(let message) = error else {
-                    Issue.record("Expected MCPError.internalError, got \(error)")
+                guard case .transportError(let underlying) = error else {
+                    Issue.record("Expected MCPError.transportError, got \(error)")
                     throw error
                 }
+                let message: String? = underlying.localizedDescription
                 #expect(message?.contains("Bad request") ?? false)
             } catch {
                 Issue.record("Expected MCPError, got \(error)")
@@ -483,10 +486,13 @@ import Testing
                 try await transport.send(messageData)
                 Issue.record("Expected send to throw an error for 401 without OAuth")
             } catch let error as MCPError {
-                guard case .internalError(let message) = error else {
-                    Issue.record("Expected MCPError.internalError, got \(error)")
+                guard case .transportError(let underlying) = error else {
+                    Issue.record("Expected MCPError.transportError, got \(error)")
                     throw error
                 }
+                let message: String? = underlying.localizedDescription
+                #expect((underlying as? HTTPStatusError)?.statusCode == 401)
+                #expect((underlying as? HTTPStatusError)?.value(forHeader: "www-authenticate") == #"Bearer scope="files:read""#)
                 #expect(message?.contains("Authentication required") ?? false)
             } catch {
                 Issue.record("Expected MCPError, got \(error)")
@@ -526,10 +532,11 @@ import Testing
                 try await transport.send(messageData)
                 Issue.record("Expected send to throw an error for 403 without OAuth")
             } catch let error as MCPError {
-                guard case .internalError(let message) = error else {
-                    Issue.record("Expected MCPError.internalError, got \(error)")
+                guard case .transportError(let underlying) = error else {
+                    Issue.record("Expected MCPError.transportError, got \(error)")
                     throw error
                 }
+                let message: String? = underlying.localizedDescription
                 #expect(message?.contains("Access forbidden") ?? false)
             } catch {
                 Issue.record("Expected MCPError, got \(error)")
@@ -936,10 +943,11 @@ import Testing
                 try await transport.send(operationAData)
                 Issue.record("Expected operation A to fail after scope-upgrade retry limit")
             } catch let error as MCPError {
-                guard case .internalError(let message) = error else {
-                    Issue.record("Expected MCPError.internalError, got \(error)")
+                guard case .transportError(let underlying) = error else {
+                    Issue.record("Expected MCPError.transportError, got \(error)")
                     throw error
                 }
+                let message: String? = underlying.localizedDescription
                 #expect(message?.contains("Access forbidden") ?? false)
             } catch {
                 Issue.record("Expected MCPError, got \(error)")
@@ -1007,10 +1015,12 @@ import Testing
                 try await transport.send(secondMessageData)
                 Issue.record("Expected send to throw session expired error")
             } catch let error as MCPError {
-                guard case .internalError(let message) = error else {
-                    Issue.record("Expected MCPError.internalError, got \(error)")
+                guard case .transportError(let underlying) = error else {
+                    Issue.record("Expected MCPError.transportError, got \(error)")
                     throw error
                 }
+                let message: String? = underlying.localizedDescription
+                #expect((underlying as? HTTPStatusError)?.isSessionExpired == true)
                 #expect(message?.contains("Session expired") ?? false)
                 #expect(await transport.sessionID == nil)
             } catch {
@@ -1218,7 +1228,7 @@ import Testing
 
                     let requestID = json["id"] as! String
                     let result = Initialize.Result(
-                        protocolVersion: Version.latest,
+                        protocolVersion: Version.latestHandshake,
                         capabilities: .init(tools: .init()),
                         serverInfo: .init(name: "Mock Server", version: "0.0.1"),
                         instructions: nil
@@ -1245,7 +1255,7 @@ import Testing
                     #expect(toolName == "calculator")
 
                     let requestID = json["id"] as! String
-                    let result = CallTool.Result(content: [.text(text: "42", annotations: nil, _meta: nil)])
+                    let result = CallTool.Result(content: [.text(text: "42")])
                     let response = CallTool.response(id: .string(requestID), result: result)
                     let responseData = try JSONEncoder().encode(response)
 
@@ -1271,7 +1281,7 @@ import Testing
 
             // Step 1: Initialize client
             let initResult = try await client.connect(transport: transport)
-            #expect(initResult.protocolVersion == Version.latest)
+            #expect(initResult.protocolVersion == Version.latestHandshake)
             #expect(initResult.capabilities.tools != nil)
 
             // Step 2: Call a tool
@@ -1452,10 +1462,11 @@ import Testing
                 try await transport.send(scenario.messageData)
                 Issue.record("Expected send to throw an error")
             } catch let error as MCPError {
-                guard case .internalError(let detail) = error else {
-                    Issue.record("Expected MCPError.internalError, got \(error)")
+                guard case .transportError(let underlying) = error else {
+                    Issue.record("Expected MCPError.transportError, got \(error)")
                     throw error
                 }
+                let detail: String? = underlying.localizedDescription
                 #expect(detail?.contains(scenario.expectedErrorSubstring!) == true)
                 for unexpected in scenario.unexpectedErrorSubstrings {
                     #expect(detail?.contains(unexpected) == false)
@@ -1490,10 +1501,11 @@ import Testing
                 try await transport.send(scenario.messageData)
                 Issue.record("Expected send to throw an error")
             } catch let error as MCPError {
-                guard case .internalError(let detail) = error else {
-                    Issue.record("Expected MCPError.internalError, got \(error)")
+                guard case .transportError(let underlying) = error else {
+                    Issue.record("Expected MCPError.transportError, got \(error)")
                     throw error
                 }
+                let detail: String? = underlying.localizedDescription
                 #expect(detail?.contains(scenario.expectedErrorSubstring!) == true)
                 for unexpected in scenario.unexpectedErrorSubstrings {
                     #expect(detail?.contains(unexpected) == false)
@@ -1528,10 +1540,11 @@ import Testing
                 try await transport.send(scenario.messageData)
                 Issue.record("Expected send to throw an error")
             } catch let error as MCPError {
-                guard case .internalError(let detail) = error else {
-                    Issue.record("Expected MCPError.internalError, got \(error)")
+                guard case .transportError(let underlying) = error else {
+                    Issue.record("Expected MCPError.transportError, got \(error)")
                     throw error
                 }
+                let detail: String? = underlying.localizedDescription
                 #expect(detail?.contains(scenario.expectedErrorSubstring!) == true)
                 for unexpected in scenario.unexpectedErrorSubstrings {
                     #expect(detail?.contains(unexpected) == false)
@@ -1566,10 +1579,11 @@ import Testing
                 try await transport.send(scenario.messageData)
                 Issue.record("Expected send to throw an error")
             } catch let error as MCPError {
-                guard case .internalError(let detail) = error else {
-                    Issue.record("Expected MCPError.internalError, got \(error)")
+                guard case .transportError(let underlying) = error else {
+                    Issue.record("Expected MCPError.transportError, got \(error)")
                     throw error
                 }
+                let detail: String? = underlying.localizedDescription
                 #expect(detail?.contains(scenario.expectedErrorSubstring!) == true)
                 for unexpected in scenario.unexpectedErrorSubstrings {
                     #expect(detail?.contains(unexpected) == false)
@@ -1678,10 +1692,12 @@ import Testing
                 try await transport.send(scenario.messageData)
                 Issue.record("Expected send to throw an error")
             } catch let error as MCPError {
-                guard case .internalError(let detail) = error else {
-                    Issue.record("Expected MCPError.internalError, got \(error)")
+                guard case .transportError(let underlying) = error else {
+                    Issue.record("Expected MCPError.transportError, got \(error)")
                     throw error
                 }
+                let detail: String? = underlying.localizedDescription
+                #expect(underlying as? OAuthAuthorizationError == .tokenResponseInvalid)
                 #expect(detail?.contains(scenario.expectedErrorSubstring!) == true)
                 for unexpected in scenario.unexpectedErrorSubstrings {
                     #expect(detail?.contains(unexpected) == false)
@@ -1713,10 +1729,11 @@ import Testing
                 try await transport.send(scenario.messageData)
                 Issue.record("Expected send to throw an error")
             } catch let error as MCPError {
-                guard case .internalError(let detail) = error else {
-                    Issue.record("Expected MCPError.internalError, got \(error)")
+                guard case .transportError(let underlying) = error else {
+                    Issue.record("Expected MCPError.transportError, got \(error)")
                     throw error
                 }
+                let detail: String? = underlying.localizedDescription
                 #expect(detail?.contains(scenario.expectedErrorSubstring!) == true)
                 for unexpected in scenario.unexpectedErrorSubstrings {
                     #expect(detail?.contains(unexpected) == false)
@@ -1748,10 +1765,11 @@ import Testing
                 try await transport.send(scenario.messageData)
                 Issue.record("Expected send to throw an error")
             } catch let error as MCPError {
-                guard case .internalError(let detail) = error else {
-                    Issue.record("Expected MCPError.internalError, got \(error)")
+                guard case .transportError(let underlying) = error else {
+                    Issue.record("Expected MCPError.transportError, got \(error)")
                     throw error
                 }
+                let detail: String? = underlying.localizedDescription
                 #expect(detail?.contains(scenario.expectedErrorSubstring!) == true)
                 for unexpected in scenario.unexpectedErrorSubstrings {
                     #expect(detail?.contains(unexpected) == false)
@@ -1897,10 +1915,11 @@ import Testing
                 try await transport.send(scenario.messageData)
                 Issue.record("Expected send to fail when PRM discovery fails")
             } catch let error as MCPError {
-                guard case .internalError(let detail) = error else {
-                    Issue.record("Expected MCPError.internalError, got \(error)")
+                guard case .transportError(let underlying) = error else {
+                    Issue.record("Expected MCPError.transportError, got \(error)")
                     throw error
                 }
+                let detail: String? = underlying.localizedDescription
                 #expect(detail?.contains(scenario.expectedErrorSubstring!) == true)
             } catch {
                 Issue.record("Expected MCPError, got \(error)")
@@ -2102,10 +2121,11 @@ import Testing
                 try await transport.send(scenario.messageData)
                 Issue.record("Expected send to throw an error")
             } catch let error as MCPError {
-                guard case .internalError(let detail) = error else {
-                    Issue.record("Expected MCPError.internalError, got \(error)")
+                guard case .transportError(let underlying) = error else {
+                    Issue.record("Expected MCPError.transportError, got \(error)")
                     throw error
                 }
+                let detail: String? = underlying.localizedDescription
                 #expect(detail?.contains(scenario.expectedErrorSubstring!) == true)
                 for unexpected in scenario.unexpectedErrorSubstrings {
                     #expect(detail?.contains(unexpected) == false)
@@ -2138,10 +2158,11 @@ import Testing
                 try await transport.send(scenario.messageData)
                 Issue.record("Expected send to throw an error")
             } catch let error as MCPError {
-                guard case .internalError(let detail) = error else {
-                    Issue.record("Expected MCPError.internalError, got \(error)")
+                guard case .transportError(let underlying) = error else {
+                    Issue.record("Expected MCPError.transportError, got \(error)")
                     throw error
                 }
+                let detail: String? = underlying.localizedDescription
                 #expect(detail?.contains(scenario.expectedErrorSubstring!) == true)
                 for unexpected in scenario.unexpectedErrorSubstrings {
                     #expect(detail?.contains(unexpected) == false)
@@ -2174,10 +2195,11 @@ import Testing
                 try await transport.send(scenario.messageData)
                 Issue.record("Expected send to throw an error")
             } catch let error as MCPError {
-                guard case .internalError(let detail) = error else {
-                    Issue.record("Expected MCPError.internalError, got \(error)")
+                guard case .transportError(let underlying) = error else {
+                    Issue.record("Expected MCPError.transportError, got \(error)")
                     throw error
                 }
+                let detail: String? = underlying.localizedDescription
                 #expect(detail?.contains(scenario.expectedErrorSubstring!) == true)
                 for unexpected in scenario.unexpectedErrorSubstrings {
                     #expect(detail?.contains(unexpected) == false)
@@ -2210,10 +2232,11 @@ import Testing
                 try await transport.send(scenario.messageData)
                 Issue.record("Expected send to throw an error")
             } catch let error as MCPError {
-                guard case .internalError(let detail) = error else {
-                    Issue.record("Expected MCPError.internalError, got \(error)")
+                guard case .transportError(let underlying) = error else {
+                    Issue.record("Expected MCPError.transportError, got \(error)")
                     throw error
                 }
+                let detail: String? = underlying.localizedDescription
                 #expect(detail?.contains(scenario.expectedErrorSubstring!) == true)
                 for unexpected in scenario.unexpectedErrorSubstrings {
                     #expect(detail?.contains(unexpected) == false)

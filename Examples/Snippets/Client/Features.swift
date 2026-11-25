@@ -116,7 +116,7 @@ func callAfterURLElicitation(_ client: Client) async throws -> [URLElicitationIn
         print("completed: \(message.params.elicitationId)")
     }
     do {
-        let (content, _) = try await client.callTool(name: "connect-calendar")
+        let content = try await client.callTool(name: "connect-calendar").content
         print(content)
     } catch MCPError.urlElicitationRequired(let message, let elicitations) {
         print(message)

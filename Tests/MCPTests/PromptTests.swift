@@ -498,7 +498,8 @@ struct PromptIntegrationTests {
         try await server.start(transport: serverTransport)
         try await client.connect(transport: clientTransport)
 
-        let (prompts, nextCursor) = try await client.listPrompts()
+        let result = try await client.listPrompts()
+        let (prompts, nextCursor) = (result.prompts, result.nextCursor)
 
         #expect(prompts.isEmpty)
         #expect(nextCursor == nil)
@@ -552,7 +553,8 @@ struct PromptIntegrationTests {
         try await server.start(transport: serverTransport)
         try await client.connect(transport: clientTransport)
 
-        let (prompts, nextCursor) = try await client.listPrompts()
+        let result = try await client.listPrompts()
+        let (prompts, nextCursor) = (result.prompts, result.nextCursor)
 
         #expect(prompts == expectedPrompts)
         #expect(nextCursor == "page2")
@@ -596,10 +598,11 @@ struct PromptIntegrationTests {
         try await server.start(transport: serverTransport)
         try await client.connect(transport: clientTransport)
 
-        let (description, messages) = try await client.getPrompt(
+        let result = try await client.getPrompt(
             name: "interview",
             arguments: ["position": "Software Engineer"]
         )
+        let (description, messages) = (result.description, result.messages)
 
         #expect(description == "Interview preparation prompt")
         #expect(messages == expectedMessages)
@@ -644,7 +647,8 @@ struct PromptIntegrationTests {
         try await server.start(transport: serverTransport)
         try await client.connect(transport: clientTransport)
 
-        let (description, messages) = try await client.getPrompt(name: "design_review")
+        let result = try await client.getPrompt(name: "design_review")
+        let (description, messages) = (result.description, result.messages)
 
         #expect(description == "Design review prompt with multimedia")
         #expect(messages == expectedMessages)
@@ -692,7 +696,8 @@ struct PromptIntegrationTests {
         try await server.start(transport: serverTransport)
         try await client.connect(transport: clientTransport)
 
-        let (description, messages) = try await client.getPrompt(name: "code_review")
+        let result = try await client.getPrompt(name: "code_review")
+        let (description, messages) = (result.description, result.messages)
 
         #expect(description == "Code review prompt")
         #expect(messages == expectedMessages)
@@ -743,14 +748,16 @@ struct PromptIntegrationTests {
         try await client.connect(transport: clientTransport)
 
         // First page
-        let (page1Prompts, page1Cursor) = try await client.listPrompts()
+        let page1 = try await client.listPrompts()
+        let (page1Prompts, page1Cursor) = (page1.prompts, page1.nextCursor)
         #expect(page1Prompts.count == 2)
         #expect(page1Prompts[0].name == "prompt1")
         #expect(page1Prompts[1].name == "prompt2")
         #expect(page1Cursor == "page2")
 
         // Second page
-        let (page2Prompts, page2Cursor) = try await client.listPrompts(cursor: "page2")
+        let page2 = try await client.listPrompts(cursor: "page2")
+        let (page2Prompts, page2Cursor) = (page2.prompts, page2.nextCursor)
         #expect(page2Prompts.count == 2)
         #expect(page2Prompts[0].name == "prompt3")
         #expect(page2Prompts[1].name == "prompt4")
@@ -818,7 +825,7 @@ struct PromptIntegrationTests {
         try await client.connect(transport: clientTransport)
 
         // Should succeed because server declares prompts capability
-        let (prompts, _) = try await client.listPrompts()
+        let prompts = try await client.listPrompts().prompts
 
         #expect(prompts.count == 1)
         #expect(prompts[0].name == "test")
@@ -888,7 +895,7 @@ struct PromptIntegrationTests {
         try await client.connect(transport: clientTransport)
 
         // Should succeed because client is in non-strict mode
-        let (prompts, _) = try await client.listPrompts()
+        let prompts = try await client.listPrompts().prompts
 
         #expect(prompts.count == 1)
         #expect(prompts[0].name == "non_strict_test")

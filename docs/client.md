@@ -20,14 +20,14 @@ This guide covers the `Client` actor: connecting at either protocol era, calling
 
 ## Connecting
 
-`Client(name:version:title:description:websiteUrl:icons:capabilities:configuration:)` describes the client. `connect(transport:)` connects the transport, starts the receive loop, opens the protocol connection and returns an `Initialize.Result`. The result is discardable. With the default configuration the client sends `server/discover` and connects at 2026-07-28 when the server serves it, and otherwise falls back to `initialize`.
+`Client(name:version:title:description:websiteUrl:icons:capabilities:configuration:)` describes the client. `connect(transport:)` connects the transport, starts the receive loop, opens the protocol connection and returns a `Client.ConnectionInfo` (see [Connection state](#connection-state)). The result is discardable. With the default configuration the client sends `server/discover` and connects at 2026-07-28 when the server serves it, and otherwise falls back to `initialize`.
 
 ```swift
 let client = Client(name: "my-client", version: "1.0.0")
 let result = try await client.connect(transport: transport)
-print("Connected to \(result.serverInfo.name) at \(result.protocolVersion)")
+print("Connected to \(result.serverInfo?.name ?? "a server") at \(result.protocolVersion)")
 if result.capabilities.tools != nil {
-    let (tools, _) = try await client.listTools()
+    let tools = try await client.listTools().tools
     print("Tools: \(tools.map(\.name))")
 }
 ```
@@ -49,7 +49,7 @@ if result.capabilities.tools != nil {
 | Mode | First request | Result |
 |---|---|---|
 | `.automatic` (default) | `server/discover` at `Version.stateless[0]` (2026-07-28) | 2026-07-28 when the server serves it; otherwise falls back to `initialize`. |
-| `.handshake` | `initialize` with `Version.latest` (2025-11-25), then `notifications/initialized` | The version the server returns. |
+| `.handshake` | `initialize` with `Version.latestHandshake` (2025-11-25), then `notifications/initialized` | The version the server returns. |
 | `.stateless(version)` | `server/discover` at `version` | `version`, or an error. Never retries with another version and never falls back. |
 
 `.automatic` falls back to `initialize` when:
@@ -101,10 +101,10 @@ After `connect`, these actor properties describe the server:
 |---|---|---|
 | `negotiatedProtocolVersion` | From the `initialize` result | The version `server/discover` accepted |
 | `serverCapabilities` | From the `initialize` result | From the `server/discover` result |
-| `serverInfo` | From the `initialize` result | From `_meta["io.modelcontextprotocol/serverInfo"]` of the discover result; empty name and version when absent |
+| `serverInfo` | From the `initialize` result | From `_meta["io.modelcontextprotocol/serverInfo"]` of the discover result; `nil` when absent |
 | `isStateless` | `false` | `true` |
 
-`connect` returns the same information as an `Initialize.Result`; at 2026-07-28 it is built from the discover result.
+`connect` returns the same information as a `Client.ConnectionInfo`.
 
 ### What changes at 2026-07-28
 
@@ -177,7 +177,7 @@ await client.disconnect()  // closes listen streams and fails pending requests
 
 ## Calling tools
 
-`listTools(cursor:)` returns one page of tools and a cursor for the next page.
+`listTools(cursor:)` returns one page of tools, a `ListTools.Result`: its `tools`, and the `nextCursor` for the next page.
 
 ```swift
 var tools: [Tool] = []
@@ -189,19 +189,14 @@ repeat {
 } while cursor != nil
 ```
 
-`callTool(name:arguments:meta:)` has two overloads:
-
-| Return type | Use |
-|---|---|
-| `async throws -> (content: [Tool.Content], isError: Bool?)` | The common case. |
-| `throws -> RequestContext<CallTool.Result>` | Cancellation, or the full result. Annotate the type to select it. See [Cancellation and progress](#cancellation-and-progress). |
+`callTool(name:arguments:meta:)` returns the `CallTool.Result`: `content`, `structuredContent`, `isError` and `_meta`. `startToolCall(name:arguments:meta:)` returns at once with a `RequestContext`, for cancellation; see [Cancellation and progress](#cancellation-and-progress).
 
 ```swift
-let (content, isError) = try await client.callTool(
+let result = try await client.callTool(
     name: "echo", arguments: ["text": "hello"])
 
 var text = ""
-for item in content {
+for item in result.content {
     switch item {
     case .text(let string, _, _):
         text += string
@@ -216,7 +211,7 @@ for item in content {
         print("unknown content: \(type)")
     }
 }
-if isError == true {
+if result.isError == true {
     // The tool ran and failed; `content` describes the failure to the model.
     print("tool error: \(text)")
 }
@@ -226,12 +221,10 @@ if isError == true {
 
 ### Structured content
 
-The tuple overload drops `structuredContent` and `_meta`. Send the request yourself to read them:
+A tool with an `outputSchema` returns `structuredContent` as well:
 
 ```swift
-let result = try await client.send(
-    CallTool.request(.init(name: "weather", arguments: ["city": "Paris"]))
-).value
+let result = try await client.callTool(name: "weather", arguments: ["city": "Paris"])
 
 var weather: Weather?
 if let structured = result.structuredContent {
@@ -239,8 +232,6 @@ if let structured = result.structuredContent {
     weather = try JSONDecoder().decode(Weather.self, from: data)
 }
 ```
-
-`send(_:)` returns a `RequestContext`; `value` waits for the result. The automatic multi round-trip loop applies to `send` as well.
 
 ### Header parameters
 
@@ -256,7 +247,7 @@ At 2026-07-28 over Streamable HTTP, a tool can ask for some arguments to be mirr
 // At 2026-07-28 the client records these on every tools/list and sends them
 // as Mcp-Param-* headers on tools/call over HTTP.
 var mirrored: [String: [String]] = [:]
-let (tools, _) = try await client.listTools()
+let tools = try await client.listTools().tools
 for tool in tools {
     let parameters = try tool.headerParameters()
     mirrored[tool.name] = parameters.map { "\($0.fieldName) <- \($0.path.joined(separator: "."))" }
@@ -276,17 +267,17 @@ Errors:
 Prompts: `listPrompts(cursor:)` and `getPrompt(name:arguments:)`. Prompt arguments are strings.
 
 ```swift
-let (prompts, _) = try await client.listPrompts()
+let prompts = try await client.listPrompts().prompts
 for prompt in prompts {
     let required = prompt.arguments?.filter { $0.required == true }.map(\.name) ?? []
     print("\(prompt.name), required arguments: \(required)")
 }
 
-let (description, messages) = try await client.getPrompt(
+let prompt = try await client.getPrompt(
     name: "greeting", arguments: ["name": "Ada"])
-print(description ?? "")
+print(prompt.description ?? "")
 var lines: [String] = []
-for message in messages {
+for message in prompt.messages {
     if case .text(let text) = message.content {
         lines.append("\(message.role.rawValue): \(text)")
     }
@@ -296,11 +287,11 @@ for message in messages {
 Resources: `listResources(cursor:)`, `listResourceTemplates(cursor:)` and `readResource(uri:)`. A `Resource.Content` holds `text` or a Base64 `blob`.
 
 ```swift
-let (resources, _) = try await client.listResources()
-let (templates, _) = try await client.listResourceTemplates()
+let resources = try await client.listResources().resources
+let templates = try await client.listResourceTemplates().templates
 print(resources.map(\.uri), templates.map(\.uriTemplate))
 
-let contents = try await client.readResource(uri: "file:///notes.txt")
+let contents = try await client.readResource(uri: "file:///notes.txt").contents
 for content in contents {
     if let text = content.text {
         print("\(content.uri): \(text)")
@@ -321,7 +312,7 @@ print(completion.values, completion.hasMore ?? false)
 Differences between eras:
 
 - `getPrompt` and `readResource`, like `callTool`, may receive input-required results at 2026-07-28. The loop answers them (see [Multi round-trip requests](#multi-round-trip-requests)).
-- At 2026-07-28, list results and `resources/read` may carry cache hints, `ttlMs` and `cacheScope` (SEP-2549). The tuple methods drop them; read them from `send(ListTools.request(.init()))` and the other `send` results.
+- At 2026-07-28, list results and `resources/read` may carry cache hints, `ttlMs` and `cacheScope` (SEP-2549), on the results these methods return.
 
 Errors:
 
@@ -442,7 +433,7 @@ await client.onNotification(ElicitationCompleteNotification.self) { message in
     print("completed: \(message.params.elicitationId)")
 }
 do {
-    let (content, _) = try await client.callTool(name: "connect-calendar")
+    let content = try await client.callTool(name: "connect-calendar").content
     print(content)
 } catch MCPError.urlElicitationRequired(let message, let elicitations) {
     print(message)
@@ -489,7 +480,7 @@ await client.withElicitationHandler { _ in
 try await client.connect(transport: transport)
 
 // One call, however many rounds the server needs.
-let (content, _) = try await client.callTool(name: "deploy", arguments: ["env": "prod"])
+let content = try await client.callTool(name: "deploy", arguments: ["env": "prod"]).content
 ```
 
 `Client.Configuration.MultiRoundTrip`:
@@ -614,7 +605,7 @@ await subscription.cancel()
 
 ```swift
 await client.onNotification(ResourceUpdatedNotification.self) { message in
-    guard let contents = try? await client.readResource(uri: message.params.uri) else { return }
+    guard let contents = try? await client.readResource(uri: message.params.uri).contents else { return }
     print("\(message.params.uri) now has \(contents.count) parts")
 }
 // resources/subscribe at 2025-11-25; a listen stream per URI at 2026-07-28.
@@ -648,20 +639,20 @@ try await client.setLoggingLevel(.info)
 
 | | 2025-11-25 | 2026-07-28 |
 |---|---|---|
-| `setLoggingLevel(_:)` | Sends `logging/setLevel` | Sets `configuration.logLevel`; later requests carry it in `_meta` |
+| `setLoggingLevel(_:)` | Sends `logging/setLevel` | Sets `Client.logLevel`; later requests carry it in `_meta` |
 | Default | The server decides | `Configuration.logLevel` is `nil`: an SDK server sends no log notifications |
 
-At 2026-07-28 log notifications belong to the request that caused them. Set `logLevel` in the configuration to receive them from the first request on. `setLoggingLevel` requires the `logging` capability in strict mode.
+At 2026-07-28 log notifications belong to the request that caused them. Set `logLevel` in the configuration to receive them from the first request on; `Client.logLevel` starts with it. `setLoggingLevel` requires the `logging` capability in strict mode.
 
 ## Cancellation and progress
 
 ### Cancellation
 
-`send(_:)` and the `RequestContext` overload of `callTool` return a `RequestContext` with the `requestID` and the result (`value`). `cancelRequest(_:reason:)` cancels the request:
+`send(_:)` and `startToolCall(name:arguments:meta:)` return a `RequestContext` with the `requestID` and the result (`value`). `cancelRequest(_:reason:)` cancels the request:
 
 ```swift
 var cancelled = false
-let context: RequestContext<CallTool.Result> = try await client.callTool(
+let context = try await client.startToolCall(
     name: "slow", arguments: ["seconds": 30])
 
 // Give up after `timeout`, for example. A Stop button works the same way.
@@ -697,9 +688,9 @@ await client.onNotification(ProgressNotification.self) { message in
     guard params.progressToken == token else { return }
     await updates.add(params.progress, of: params.total)
 }
-let (content, _) = try await client.callTool(
+let content = try await client.callTool(
     name: "index", arguments: ["path": "/src"],
-    meta: Metadata(progressToken: token))
+    meta: Metadata(progressToken: token)).content
 ```
 
 `ProgressToken` is a string or an integer; `ProgressToken.unique()` makes a UUID string. Each notification carries `progress`, an optional `total` and an optional `message`. The handler receives the notifications of every request, so compare the token. Progress works the same at both eras; at 2026-07-28 over HTTP the notifications arrive on the request's response stream.

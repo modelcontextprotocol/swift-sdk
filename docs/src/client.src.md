@@ -18,7 +18,7 @@ This guide covers the `Client` actor: connecting at either protocol era, calling
 
 ## Connecting
 
-`Client(name:version:title:description:websiteUrl:icons:capabilities:configuration:)` describes the client. `connect(transport:)` connects the transport, starts the receive loop, opens the protocol connection and returns an `Initialize.Result`. The result is discardable. With the default configuration the client sends `server/discover` and connects at 2026-07-28 when the server serves it, and otherwise falls back to `initialize`.
+`Client(name:version:title:description:websiteUrl:icons:capabilities:configuration:)` describes the client. `connect(transport:)` connects the transport, starts the receive loop, opens the protocol connection and returns a `Client.ConnectionInfo` (see [Connection state](#connection-state)). The result is discardable. With the default configuration the client sends `server/discover` and connects at 2026-07-28 when the server serves it, and otherwise falls back to `initialize`.
 
 %include Examples/Snippets/Client/Client.swift connect
 
@@ -39,7 +39,7 @@ This guide covers the `Client` actor: connecting at either protocol era, calling
 | Mode | First request | Result |
 |---|---|---|
 | `.automatic` (default) | `server/discover` at `Version.stateless[0]` (2026-07-28) | 2026-07-28 when the server serves it; otherwise falls back to `initialize`. |
-| `.handshake` | `initialize` with `Version.latest` (2025-11-25), then `notifications/initialized` | The version the server returns. |
+| `.handshake` | `initialize` with `Version.latestHandshake` (2025-11-25), then `notifications/initialized` | The version the server returns. |
 | `.stateless(version)` | `server/discover` at `version` | `version`, or an error. Never retries with another version and never falls back. |
 
 `.automatic` falls back to `initialize` when:
@@ -68,10 +68,10 @@ After `connect`, these actor properties describe the server:
 |---|---|---|
 | `negotiatedProtocolVersion` | From the `initialize` result | The version `server/discover` accepted |
 | `serverCapabilities` | From the `initialize` result | From the `server/discover` result |
-| `serverInfo` | From the `initialize` result | From `_meta["io.modelcontextprotocol/serverInfo"]` of the discover result; empty name and version when absent |
+| `serverInfo` | From the `initialize` result | From `_meta["io.modelcontextprotocol/serverInfo"]` of the discover result; `nil` when absent |
 | `isStateless` | `false` | `true` |
 
-`connect` returns the same information as an `Initialize.Result`; at 2026-07-28 it is built from the discover result.
+`connect` returns the same information as a `Client.ConnectionInfo`.
 
 ### What changes at 2026-07-28
 
@@ -115,16 +115,11 @@ With `strict: true`, `listTools`, `callTool`, `listPrompts`, `getPrompt`, `listR
 
 ## Calling tools
 
-`listTools(cursor:)` returns one page of tools and a cursor for the next page.
+`listTools(cursor:)` returns one page of tools, a `ListTools.Result`: its `tools`, and the `nextCursor` for the next page.
 
 %include Examples/Snippets/Client/Tools.swift list-tools
 
-`callTool(name:arguments:meta:)` has two overloads:
-
-| Return type | Use |
-|---|---|
-| `async throws -> (content: [Tool.Content], isError: Bool?)` | The common case. |
-| `throws -> RequestContext<CallTool.Result>` | Cancellation, or the full result. Annotate the type to select it. See [Cancellation and progress](#cancellation-and-progress). |
+`callTool(name:arguments:meta:)` returns the `CallTool.Result`: `content`, `structuredContent`, `isError` and `_meta`. `startToolCall(name:arguments:meta:)` returns at once with a `RequestContext`, for cancellation; see [Cancellation and progress](#cancellation-and-progress).
 
 %include Examples/Snippets/Client/Tools.swift call-tool
 
@@ -132,11 +127,9 @@ With `strict: true`, `listTools`, `callTool`, `listPrompts`, `getPrompt`, `listR
 
 ### Structured content
 
-The tuple overload drops `structuredContent` and `_meta`. Send the request yourself to read them:
+A tool with an `outputSchema` returns `structuredContent` as well:
 
 %include Examples/Snippets/Client/Tools.swift call-structured
-
-`send(_:)` returns a `RequestContext`; `value` waits for the result. The automatic multi round-trip loop applies to `send` as well.
 
 ### Header parameters
 
@@ -174,7 +167,7 @@ Completions: `complete(promptName:argumentName:argumentValue:context:)` and `com
 Differences between eras:
 
 - `getPrompt` and `readResource`, like `callTool`, may receive input-required results at 2026-07-28. The loop answers them (see [Multi round-trip requests](#multi-round-trip-requests)).
-- At 2026-07-28, list results and `resources/read` may carry cache hints, `ttlMs` and `cacheScope` (SEP-2549). The tuple methods drop them; read them from `send(ListTools.request(.init()))` and the other `send` results.
+- At 2026-07-28, list results and `resources/read` may carry cache hints, `ttlMs` and `cacheScope` (SEP-2549), on the results these methods return.
 
 Errors:
 
@@ -344,16 +337,16 @@ Servers with the `logging` capability send `notifications/message`. Register a h
 
 | | 2025-11-25 | 2026-07-28 |
 |---|---|---|
-| `setLoggingLevel(_:)` | Sends `logging/setLevel` | Sets `configuration.logLevel`; later requests carry it in `_meta` |
+| `setLoggingLevel(_:)` | Sends `logging/setLevel` | Sets `Client.logLevel`; later requests carry it in `_meta` |
 | Default | The server decides | `Configuration.logLevel` is `nil`: an SDK server sends no log notifications |
 
-At 2026-07-28 log notifications belong to the request that caused them. Set `logLevel` in the configuration to receive them from the first request on. `setLoggingLevel` requires the `logging` capability in strict mode.
+At 2026-07-28 log notifications belong to the request that caused them. Set `logLevel` in the configuration to receive them from the first request on; `Client.logLevel` starts with it. `setLoggingLevel` requires the `logging` capability in strict mode.
 
 ## Cancellation and progress
 
 ### Cancellation
 
-`send(_:)` and the `RequestContext` overload of `callTool` return a `RequestContext` with the `requestID` and the result (`value`). `cancelRequest(_:reason:)` cancels the request:
+`send(_:)` and `startToolCall(name:arguments:meta:)` return a `RequestContext` with the `requestID` and the result (`value`). `cancelRequest(_:reason:)` cancels the request:
 
 %include Examples/Snippets/Client/Notifications.swift cancel
 

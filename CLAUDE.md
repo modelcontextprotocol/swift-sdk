@@ -89,7 +89,7 @@ against `InMemoryTransport` or `Helpers/MockTransport.swift` rather than real so
 
 - `Version.handshake` (newest first) are the revisions served through `initialize`;
   `Version.stateless` (`2026-07-28`) are served per request with `_meta`.
-- `Version.supported` (both lists) and `Version.latest` (2025-11-25, what `initialize`
+- `Version.supported` (both lists) and `Version.latestHandshake` (2025-11-25, what `initialize`
   requests) are explicit. `latest` is not `max()`. `Version.negotiate` only ever returns a
   handshake revision. `StatefulHTTPServerTransport` validates against `Version.handshake`.
 - `Version.profile(for:)` returns a `ProtocolProfile` (`usesInitializeHandshake`,

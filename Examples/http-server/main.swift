@@ -50,7 +50,7 @@ func makeServer() async -> Server {
         guard params.name == echo.name, let text = params.arguments?["text"]?.stringValue else {
             throw MCPError.invalidParams("echo needs a string argument \"text\"")
         }
-        return .init(content: [.text(text: text, annotations: nil, _meta: nil)])
+        return .init(content: [.text(text: text)])
     }
     return server
 }

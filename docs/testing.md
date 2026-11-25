@@ -41,9 +41,9 @@ func calculatorAdds() async throws {
     let server = await makeCalculatorServer()
     let client = try await connectInMemory(to: server)
 
-    let (content, isError) = try await client.callTool(name: "add", arguments: ["a": 2, "b": 3])
-    #expect(isError == nil)
-    #expect(content == [.text(text: "5", annotations: nil, _meta: nil)])
+    let result = try await client.callTool(name: "add", arguments: ["a": 2, "b": 3])
+    #expect(result.isError == nil)
+    #expect(result.content == [.text(text: "5")])
 
     await client.disconnect()
     await server.stop()
@@ -73,11 +73,11 @@ can be registered and also called directly:
     }
     guard let a = params.arguments?["a"]?.intValue, let b = params.arguments?["b"]?.intValue else {
         return CallTool.Result(
-            content: [.text(text: "a and b must be integers", annotations: nil, _meta: nil)],
+            content: [.text(text: "a and b must be integers")],
             isError: true)
     }
     return CallTool.Result(
-        content: [.text(text: "\(a + b)", annotations: nil, _meta: nil)],
+        content: [.text(text: "\(a + b)")],
         structuredContent: ["sum": .int(a + b)])
 }
 
@@ -103,9 +103,33 @@ func addHandler() async throws {
 }
 ```
 
-`Server.currentHandlerContext` is `nil` in a direct call, and
-`Server.HandlerContext` has no public initializer. Test handlers that read the
-context, or that return input-required results, through a connection.
+`Server.currentHandlerContext` is `nil` in a direct call. A handler that reads
+it gets one from `Server.HandlerContext(id:httpContext:...)` and
+`$currentHandlerContext.withValue`:
+
+```swift
+/// A handler that reads the request's context.
+@Sendable func whoAmI(_ params: CallTool.Parameters) async throws -> CallTool.Result {
+    let client = Server.currentHandlerContext?.clientInfo?.name ?? "unknown"
+    return CallTool.Result(content: [.text(text: client)])
+}
+```
+
+```swift
+@Test("A handler that reads its context")
+func contextHandler() async throws {
+    let context = Server.HandlerContext(
+        id: 1, httpContext: nil, protocolVersion: Version.v2026_07_28,
+        clientInfo: .init(name: "tester", version: "1"), isStateless: true)
+    let result = try await Server.$currentHandlerContext.withValue(context) {
+        try await whoAmI(.init(name: "whoami"))
+    }
+    #expect(result.content == [.text(text: "tester")])
+}
+```
+
+Test handlers that return input-required results through a connection: the
+server runs the rounds.
 
 ## Testing both eras
 
@@ -122,8 +146,8 @@ func calculatorEras(mode: Client.ProtocolMode) async throws {
     let client = try await connectInMemory(to: server, mode: mode)
     #expect(await client.isStateless == (mode == .automatic))
 
-    let (content, _) = try await client.callTool(name: "add", arguments: ["a": 1, "b": 1])
-    #expect(content == [.text(text: "2", annotations: nil, _meta: nil)])
+    let content = try await client.callTool(name: "add", arguments: ["a": 1, "b": 1]).content
+    #expect(content == [.text(text: "2")])
 
     await client.disconnect()
     await server.stop()
