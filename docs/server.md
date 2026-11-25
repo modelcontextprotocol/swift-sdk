@@ -989,27 +989,57 @@ Handshake clients accept requests from the server. `Server` has methods for them
 | `listRoots()` | `roots/list` | `roots` |
 
 ```swift
-/// Asks the client directly. 2025-11-25 and earlier only: at 2026-07-28
-/// these calls throw -32600; return input requests instead.
-func confirmDirectly(on server: Server) async throws -> Bool {
-    let roots = try await server.listRoots()
-    let answer = try await server.requestElicitation(
-        message: "Clean \(roots.count) workspace roots?",
-        requestedSchema: .init(properties: ["confirm": ["type": "boolean"]], required: ["confirm"]))
-    return answer.action == .accept && answer.content?["confirm"]?.boolValue == true
+/// Asks the client while it handles `clean`, so the requests belong to that
+/// `tools/call` (SEP-2260). 2025-11-25 and earlier only: at 2026-07-28 these
+/// calls throw -32600; return input requests instead.
+func registerCleanTool(on server: Server, roots: RootsCache) async {
+    await server.withMethodHandler(CallTool.self) { [weak server] _ in
+        guard let server else { throw MCPError.internalError("Server is gone") }
+        let current = try await roots.roots(of: server)
+        let answer = try await server.requestElicitation(
+            message: "Clean \(current.count) workspace roots?",
+            requestedSchema: .init(properties: ["confirm": ["type": "boolean"]], required: ["confirm"]))
+        let confirmed = answer.action == .accept && answer.content?["confirm"]?.boolValue == true
+        return CallTool.Result(content: [.text(text: "\(confirmed)")])
+    }
 }
 
-func watchRoots(on server: Server, changed: @escaping @Sendable () async -> Void) async {
+/// The client's roots, fetched in the first handler that needs them and
+/// again after the client says they changed.
+actor RootsCache {
+    private var cached: [Root]?
+    /// Changed by `invalidate()`: roots fetched before it are not kept.
+    private var generation = 0
+
+    /// Marks the roots stale: the next handler fetches them.
+    func invalidate() {
+        cached = nil
+        generation += 1
+    }
+
+    /// The roots. Call it from a handler.
+    func roots(of server: Server) async throws -> [Root] {
+        if let cached { return cached }
+        let started = generation
+        let roots = try await server.listRoots()
+        if generation == started { cached = roots }
+        return roots
+    }
+}
+
+func watchRoots(on server: Server, cache: RootsCache) async {
     await server.onNotification(RootsListChangedNotification.self) { _ in
-        await changed()
+        await cache.invalidate()
     }
 }
 ```
 
-- Call them from a handler, so that over HTTP the request goes on the stream of the request being handled.
+- Send them from the handler of the request that needs them, as the snippet does. The request then belongs to that client request, as SEP-2260 requires, and over HTTP it goes on that request's stream. A request sent after the handler returned, or from code that handles no request, is sent anyway, because 2025-11-25 allows it; the SDK logs one warning for each method (`sampling/createMessage`, `elicitation/create`). `roots/list` is not checked.
+- Fetch roots in the handler that needs them. When the client sends `notifications/roots/list_changed`, mark them stale, and fetch them again in the next handler, as `RootsCache` does.
 - In strict mode they fail with -32601 when the client did not declare the capability. Otherwise the request is sent, and a client without a handler answers with an error.
 - `requestSampling` with `tools` or `toolChoice` fails with -32601 when the client did not declare `sampling.tools`, also when the server is not strict: the specification forbids the request. It fails with -32602 when the messages break the rules in [Sampling with tools](#sampling-with-tools). It checks both before it sends the request.
-- At 2026-07-28 they throw -32600 "... cannot be sent at protocol version 2026-07-28". Use [multi round-trip requests](#multi-round-trip-requests), which serve both eras.
+- At 2026-07-28 they throw -32600 "... cannot be sent at protocol version 2026-07-28". Use [multi round-trip requests](#multi-round-trip-requests), which serve both eras. Outside a handler, for example in a detached task or a task body, the connection decides: a request throws once the connection has served a stateless request, or when the server serves no handshake revision.
+- Behind a `StatelessHTTPServerTransport` a request outside a handler throws -32600 "... cannot be sent outside a client request": the transport has no stream for it.
 - `notifications/roots/list_changed` exists only in the handshake era. Stateless clients send their roots per request.
 
 ## Cacheable results

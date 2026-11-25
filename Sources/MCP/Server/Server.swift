@@ -328,6 +328,9 @@ public actor Server {
     /// Requests received whose handler task is not registered yet, and
     /// whether `notifications/cancelled` arrived for them meanwhile.
     private var startingRequests: [ID: Bool] = [:]
+    /// The methods of requests sent while no client request was handled,
+    /// each logged once per connection (SEP-2260).
+    private var unassociatedRequestMethods: Set<String> = []
 
     /// Runs and keeps tasks; set by ``withTasks(_:)``.
     private var taskManager: TaskManager?
@@ -596,6 +599,7 @@ public actor Server {
         notifiedTasks = [:]
         task?.cancel()
         task = nil
+        unassociatedRequestMethods = []
         clientLogLevel = nil
 
         // Their responses can no longer be sent. The requests of this
@@ -1677,19 +1681,24 @@ public actor Server {
             throw MCPError.internalError("Server connection not initialized")
         }
 
-        if let context = Server.currentHandlerContext, context.profile?.allowsServerRequests == false {
-            throw MCPError.invalidRequest(
-                "\(M.name) cannot be sent at protocol version \(context.protocolVersion ?? "")")
+        if let refusal = serverRequestRefusal(M.name) {
+            throw MCPError.invalidRequest(refusal)
         }
 
         let requestData = try encoder.encode(request)
         let relatedRequestID = Server.currentHandlerContext?.id
         let generation = connectionGeneration
+        let warning = unassociatedRequestWarning(M.name)
 
         unsentRequests.insert(request.id)
         let requestTask = Task<M.Result, Error> {
             try await withCheckedThrowingContinuation { continuation in
                 Task {
+                    if let warning {
+                        await self.logger?.warning("\(warning)", metadata: ["method": "\(M.name)"])
+                    }
+                    // No suspension from here to the registration, so a
+                    // withdraw either finds the id unsent or registered.
                     guard generation == self.connectionGeneration else {
                         // `stop()` ended the connection before the request was
                         // registered, and no longer resumes it.
@@ -1725,6 +1734,53 @@ public actor Server {
         return requestTask
     }
 
+    /// Why a request to the client cannot be sent now, or `nil` when it can.
+    ///
+    /// In a handler, the request's revision decides. Outside one, for example
+    /// in a background or detached task or in a task body, the connection
+    /// decides: a negotiated handshake revision allows the request; a
+    /// connection that served a stateless request, or a server that serves no
+    /// handshake revision, is at 2026-07-28, which has no server-to-client
+    /// requests (SEP-2260); and a sessionless transport has no stream outside a
+    /// request, so the request would wait for an answer that never comes.
+    private func serverRequestRefusal(_ method: String) -> String? {
+        if let context = Server.currentHandlerContext {
+            guard context.profile?.allowsServerRequests == false else { return nil }
+            return "\(method) cannot be sent at protocol version \(context.protocolVersion ?? "")"
+        }
+        if let protocolVersion {
+            guard !Version.profile(for: protocolVersion).allowsServerRequests else { return nil }
+            return "\(method) cannot be sent at protocol version \(protocolVersion)"
+        }
+        if servedStatelessRequest || handshakeVersions.isEmpty {
+            let version =
+                configuration.protocolVersions.first { !Version.profile(for: $0).allowsServerRequests }
+                ?? Version.stateless[0]
+            return "\(method) cannot be sent at protocol version \(version)"
+        }
+        if isSessionless {
+            return "\(method) cannot be sent outside a client request: the transport has no stream for it"
+        }
+        return nil
+    }
+
+    /// The warning to log when `method` is sent while the server handles no
+    /// client request, the first time only; otherwise `nil`.
+    ///
+    /// SEP-2260 requires `sampling/createMessage` and `elicitation/create` to
+    /// belong to a client request. 2025-11-25 and earlier do not require it, so
+    /// the request is sent anyway. `ping` and `roots/list` are not checked: at
+    /// 2025-11-25 a server can ask for roots after
+    /// `notifications/roots/list_changed`.
+    private func unassociatedRequestWarning(_ method: String) -> String? {
+        guard method == CreateSamplingMessage.name || method == CreateElicitation.name else { return nil }
+        if let id = Server.currentHandlerContext?.id, pendingRequestTasks[id] != nil { return nil }
+        guard unassociatedRequestMethods.insert(method).inserted else { return nil }
+        return "\(method) was sent while the server handled no client request. SEP-2260 requires "
+            + "this request to belong to a client request: send it from the handler of the request "
+            + "that needs it. At 2026-07-28, return an input request instead. This warning is "
+            + "logged once for each method."
+    }
 
     private func addPendingResponse<T: Sendable & Decodable>(
         id: ID,
@@ -1753,6 +1809,11 @@ public actor Server {
     /// 3. Client samples from an LLM
     /// 4. Client reviews the completion
     /// 5. Client returns the result to the server
+    ///
+    /// Call it from the handler of the request that needs the answer: the
+    /// request then belongs to that client request (SEP-2260). Sent while the
+    /// server handles no client request, it is sent anyway, and the server logs
+    /// one warning for each method.
     ///
     /// With `tools`, the model can ask for tool calls: the result then has
     /// ``Sampling/StopReason/toolUse`` and one tool use block for each call.
@@ -1843,6 +1904,11 @@ public actor Server {
     /// 3. User provides input or declines
     /// 4. Client returns the result to the server
     ///
+    /// Call it from the handler of the request that needs the answer: the
+    /// request then belongs to that client request (SEP-2260). Sent while the
+    /// server handles no client request, it is sent anyway, and the server logs
+    /// one warning for each method.
+    ///
     /// - Parameters:
     ///   - message: The message to display to the user
     ///   - mode: The elicitation mode (form or url)
@@ -1882,6 +1948,11 @@ public actor Server {
     ///
     /// URL-based elicitation directs the user to an external URL for authentication
     /// or data collection. This is useful for OAuth flows or other web-based input.
+    ///
+    /// Call it from the handler of the request that needs the answer: the
+    /// request then belongs to that client request (SEP-2260). Sent while the
+    /// server handles no client request, it is sent anyway, and the server logs
+    /// one warning for each method.
     ///
     /// - Parameters:
     ///   - message: The message to display to the user

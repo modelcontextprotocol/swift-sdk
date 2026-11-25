@@ -104,19 +104,47 @@ func currentWeather(in city: String) -> String {
 }
 
 // snippet: server-requests
-/// Asks the client directly. 2025-11-25 and earlier only: at 2026-07-28
-/// these calls throw -32600; return input requests instead.
-func confirmDirectly(on server: Server) async throws -> Bool {
-    let roots = try await server.listRoots()
-    let answer = try await server.requestElicitation(
-        message: "Clean \(roots.count) workspace roots?",
-        requestedSchema: .init(properties: ["confirm": ["type": "boolean"]], required: ["confirm"]))
-    return answer.action == .accept && answer.content?["confirm"]?.boolValue == true
+/// Asks the client while it handles `clean`, so the requests belong to that
+/// `tools/call` (SEP-2260). 2025-11-25 and earlier only: at 2026-07-28 these
+/// calls throw -32600; return input requests instead.
+func registerCleanTool(on server: Server, roots: RootsCache) async {
+    await server.withMethodHandler(CallTool.self) { [weak server] _ in
+        guard let server else { throw MCPError.internalError("Server is gone") }
+        let current = try await roots.roots(of: server)
+        let answer = try await server.requestElicitation(
+            message: "Clean \(current.count) workspace roots?",
+            requestedSchema: .init(properties: ["confirm": ["type": "boolean"]], required: ["confirm"]))
+        let confirmed = answer.action == .accept && answer.content?["confirm"]?.boolValue == true
+        return CallTool.Result(content: [.text(text: "\(confirmed)")])
+    }
 }
 
-func watchRoots(on server: Server, changed: @escaping @Sendable () async -> Void) async {
+/// The client's roots, fetched in the first handler that needs them and
+/// again after the client says they changed.
+actor RootsCache {
+    private var cached: [Root]?
+    /// Changed by `invalidate()`: roots fetched before it are not kept.
+    private var generation = 0
+
+    /// Marks the roots stale: the next handler fetches them.
+    func invalidate() {
+        cached = nil
+        generation += 1
+    }
+
+    /// The roots. Call it from a handler.
+    func roots(of server: Server) async throws -> [Root] {
+        if let cached { return cached }
+        let started = generation
+        let roots = try await server.listRoots()
+        if generation == started { cached = roots }
+        return roots
+    }
+}
+
+func watchRoots(on server: Server, cache: RootsCache) async {
     await server.onNotification(RootsListChangedNotification.self) { _ in
-        await changed()
+        await cache.invalidate()
     }
 }
 // endsnippet

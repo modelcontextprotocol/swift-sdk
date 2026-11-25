@@ -1100,10 +1100,11 @@ private struct HandshakeTaskServer {
     init(
         manager: TaskManager = TaskManager(
             configuration: .init(pollInterval: .milliseconds(10), sendsStatusNotifications: false)),
-        version: String = Version.v2025_11_25, capabilities: Value = ["elicitation": [:]]
+        version: String = Version.v2025_11_25, capabilities: Value = ["elicitation": [:]],
+        logger: Logger? = nil
     ) async throws {
         let server = await makeTaskServer(manager: manager, cancelled: cancelled)
-        wire = WireExchange(server: server)
+        wire = WireExchange(server: server, logger: logger)
         try await wire.start()
         let reply = try await wire.send(
             handshakeMessage(
@@ -1289,7 +1290,8 @@ struct HandshakeTaskServerTests {
 
     @Test("Input is sent on the tasks/result stream with related-task")
     func input() async throws {
-        let server = try await HandshakeTaskServer()
+        let log = CapturingLogHandler()
+        let server = try await HandshakeTaskServer(logger: Logger(label: "test") { _ in log })
         defer { Task { await server.stop() } }
         let id = try #require(try await server.create("ask")["taskId"])
         #expect(try await server.wait(id, for: "input_required")["status"] == "input_required")
@@ -1308,6 +1310,8 @@ struct HandshakeTaskServerTests {
         let final = try #require(replies.first { $0.objectValue?["id"] == .int(resultID) }?.objectValue?["result"])
         #expect(final.objectValue?["content"] == [["type": "text", "text": "Ada"]])
         #expect(final.objectValue?["_meta"]?.objectValue?[MetaKey.relatedTask] == ["taskId": id])
+        // The input belongs to tasks/result (SEP-2260).
+        #expect(!log.messages.contains { $0.contains("SEP-2260") })
     }
 
     @Test("Cancelling a task withdraws the input requests tasks/result sent, and tasks/result ends")
