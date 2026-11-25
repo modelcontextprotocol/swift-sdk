@@ -10,7 +10,8 @@ exposes a single library product, `MCP`, implementing both client and server sid
 against the [2025-11-25](https://modelcontextprotocol.io/specification/2025-11-25) and 2026-07-28 MCP
 specifications. See `README.md`
 for full API usage examples (client/server setup, transports, tools/resources/prompts, sampling,
-elicitation, OAuth authorization).
+elicitation, OAuth authorization). `ROADMAP.md` "SEP coverage" gives the status of every SEP; a
+change that implements a SEP updates its row.
 
 ## Common Commands
 

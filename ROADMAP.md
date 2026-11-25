@@ -82,11 +82,79 @@ Details: [design/auth.md](design/auth.md).
 
 ## Planned
 
-Nothing is planned beyond 1.0.0 today. The conformance harness exercises extensions only in the
-default leg, as scenarios that do not count toward a tier; their failing checks would be entries
-in [conformance/baseline.yml](conformance/baseline.yml).
+The SEPs marked Planned in [SEP coverage](#sep-coverage), and the gaps of SEP-1577 (sampling
+with tools) and SEP-2260 (server requests outside a client request at 2025-11-25).
+
+The conformance harness exercises extensions only in the default leg, as scenarios that do not
+count toward a tier; their failing checks would be entries in
+[conformance/baseline.yml](conformance/baseline.yml).
 
 Other known gaps are listed under "Open questions" in each design note.
+
+## SEP coverage
+
+One row for each SEP in the [official SEP index](https://modelcontextprotocol.io/seps) (44 SEPs,
+read on 2026-10-28), and for the SEPs that the specification changelogs cite but the index does
+not list (835, 837, 1932, 1933, 2352). Status values:
+
+- Implemented: the SDK does what the SEP asks of an SDK.
+- Partial: the SDK does part of it; the column after the status gives the gap.
+- Planned: not done yet; the column after the status gives the gap.
+- Not applicable: the SEP asks nothing of an SDK.
+
+A change that implements a SEP updates its row.
+
+| SEP | Title | Track | Status | Where, or why |
+|---|---|---|---|---|
+| 414 | OpenTelemetry trace context in `_meta` | Standards | Not applicable | A naming convention for `_meta` keys (`traceparent`, `tracestate`, `baggage`). The SDK passes `_meta` keys through unchanged. |
+| 835 | Incremental scope consent through `WWW-Authenticate` | Not in the index | Implemented | `OAuthAuthorizer`: scope from the challenge, then `scopes_supported`; step-up on `403 insufficient_scope`. [auth.md](design/auth.md) |
+| 837 | `application_type` in dynamic client registration | Not in the index | Implemented | `OAuthConfiguration.applicationType` |
+| 932 | Governance | Process | Not applicable | Project governance; no protocol surface. |
+| 973 | Icons and other metadata for implementations, resources, tools and prompts | Standards | Implemented | `Icon`; `icons` on `Tool`, `Resource`, `Resource.Template`, `Prompt`, `Client.Info` and `Server.Info`; `websiteUrl` on `Client.Info` and `Server.Info` |
+| 985 | Protected resource metadata aligned with RFC 9728 | Standards | Implemented | `OAuthDiscovery` (the `WWW-Authenticate` URL, then the well-known URLs); `ProtectedResourceMetadataValidator` |
+| 986 | Tool name format | Standards | Planned | Tool names are not checked. |
+| 990 | Enterprise IdP policy controls | Standards | Implemented | `OAuthConfiguration.enterpriseManaged(...)`, `OAuthTokenExchange` |
+| 991 | Client ID metadata documents | Standards | Implemented | An https `clientID` URL, used when the authorization server sets `client_id_metadata_document_supported`; otherwise dynamic registration |
+| 994 | Shared communication practices | Process | Not applicable | Community process. |
+| 1024 | Client security for local server installation | Standards | Not applicable | Applies to host applications that install local servers. The SDK installs nothing. |
+| 1034 | Default values for primitive types in elicitation schemas | Standards | Implemented | The requested schema is `Value` (`Elicitation.RequestSchema.properties`); conformance `elicitation-sep1034-*` |
+| 1036 | URL mode elicitation | Standards | Implemented | `CreateElicitation.Parameters.url`, `Elicitation.Mode.url`, `ElicitationCompleteNotification` (2025-11-25) |
+| 1046 | OAuth client credentials flow | Standards | Implemented | `OAuthConfiguration.GrantType.clientCredentials` |
+| 1302 | Working groups and interest groups | Standards | Not applicable | Governance. |
+| 1303 | Input validation errors as tool execution errors | Standards | Not applicable | Guidance for tool handlers, given in the server guide ([Errors and isError](docs/server.md#errors-and-iserror)). The SDK does not validate tool arguments. |
+| 1319 | Request payloads decoupled from method definitions | Standards | Not applicable | A schema refactor. The SDK already models each method's `Parameters` as its own type (`Method`). |
+| 1330 | Elicitation enum schemas | Standards | Implemented | The requested schema is `Value`; conformance `elicitation-sep1330-*` |
+| 1577 | Sampling with tools | Standards | Partial | The wire types have `tools`, `toolChoice`, `toolUse` and `toolResult`. `Server.requestSampling` cannot send tools, and the `sampling.tools` capability and the message rules are not checked. |
+| 1613 | JSON Schema 2020-12 as the default dialect | Standards | Partial | Schemas are `Value`. The SDK does not validate them. |
+| 1686 | Tasks (2025-11-25) | Standards | Implemented | [Tasks](#tasks) |
+| 1699 | SSE polling through server-side disconnect | Standards | Implemented | `HTTPClientTransport` resumes a closed stream with a GET and its last event ID; `StatefulHTTPServerTransport` sends priming events (`retryInterval`) |
+| 1730 | SDK tiering | Standards | Not applicable | Asks something of the SDK project, which the tooling meets: `scripts/run-conformance.sh --requirements <revision>` scores the tier sets, and CI gates on them. |
+| 1850 | PR-based SEP workflow | Process | Not applicable | Process. |
+| 1865 | MCP Apps | Extensions | Planned | Not implemented. |
+| 1932 | DPoP | Not in the index | Implemented | [Authorization](#authorization) |
+| 1933 | Workload identity federation | Not in the index | Implemented | [Authorization](#authorization) |
+| 2085 | Governance succession and amendment | Process | Not applicable | Governance. |
+| 2106 | `inputSchema` and `outputSchema` as JSON Schema 2020-12 | Standards | Partial | Schemas are `Value`, so any keyword is kept, and the client never fetches a network `$ref`. The SDK does not resolve `$ref` or bound composition keywords, because it does not validate. |
+| 2127 | Server Cards | Extensions | Planned | Not implemented. |
+| 2133 | Extensions | Standards | Implemented | `extensions` on both capability structs |
+| 2148 | Contributor ladder | Process | Not applicable | Governance. |
+| 2149 | Group charter template | Process | Not applicable | Governance. |
+| 2164 | Resource not found error code | Standards | Implemented | `MCPError.resourceNotFound(uri:message:)` |
+| 2207 | OIDC refresh token guidance | Standards | Partial | Dynamic registration declares the `refresh_token` grant (a SHOULD). The client does not add `offline_access` (a MAY). |
+| 2243 | HTTP header standardization | Standards | Implemented | [2026-07-28 core](#2026-07-28-core) |
+| 2260 | Server requests belong to a client request | Standards | Partial | Met at 2026-07-28, which has no server-to-client requests. At 2025-11-25 a server can send a request outside a handler. |
+| 2322 | Multi round-trip requests | Standards | Implemented | [2026-07-28 core](#2026-07-28-core) |
+| 2352 | Client credentials bound to their authorization server | Not in the index | Implemented | [Authorization](#authorization) |
+| 2468 | `iss` in authorization responses | Standards | Implemented | [Authorization](#authorization) |
+| 2484 | Conformance tests for Final SEPs | Process | Not applicable | Asks something of SEP authors. The SDK runs those tests: every leg runs `--suite all`. |
+| 2549 | TTL for list results | Standards | Implemented | [2026-07-28 core](#2026-07-28-core) |
+| 2567 | Sessionless MCP | Standards | Implemented | `StatelessHTTPServerTransport` has no session. Lists that do not vary per client are the server's duty. |
+| 2575 | Stateless MCP | Standards | Implemented | [2026-07-28 core](#2026-07-28-core) |
+| 2577 | Deprecate roots, sampling and logging | Standards | Planned | The features work on every revision that has them; the API does not mark them deprecated yet. |
+| 2596 | Feature lifecycle and deprecation policy | Process | Planned | The policy needs no code. The deprecations it makes (the `includeContext` values `thisServer` and `allServers`, HTTP+SSE) are not marked yet. |
+| 2640 | Skills | Extensions | Implemented | [Skills](#skills) |
+| 2663 | Tasks extension | Extensions | Implemented | [Tasks](#tasks) |
+| 3398 | Release cycle updates (Accepted) | Process | Not applicable | Process. |
 
 ## Conformance
 
