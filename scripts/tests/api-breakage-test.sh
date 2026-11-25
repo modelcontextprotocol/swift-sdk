@@ -59,12 +59,14 @@ check "no release tag X.Y.Z (X >= 1): skipped" skipped "$(baseline)"
 # main: 0.12.1 - 1.0.0 - m1 - m2
 #   release-1.0 from 1.0.0: 1.0.1
 #   release-1.1 from m1:    1.1.0 - 1.1.1 (not on main)
+#   release-1.2 from m2:    1.2.0-rc.1, a release candidate
 commit "1.0.0"
 g tag 1.0.0
 g branch release-1.0
 commit "m1"
 g branch release-1.1
 commit "m2"
+g branch release-1.2
 g switch --quiet release-1.0
 commit "1.0.1"
 g tag 1.0.1
@@ -73,9 +75,12 @@ commit "1.1.0"
 g tag 1.1.0
 commit "1.1.1"
 g tag 1.1.1
+g switch --quiet release-1.2
+commit "1.2.0-rc.1"
+g tag 1.2.0-rc.1
 
 g switch --quiet main
-check "main: the newest release on any branch" 1.1.1 "$(baseline)"
+check "main: the newest release on any branch, not a release candidate" 1.1.1 "$(baseline)"
 check "a pull request into main" 1.1.1 "$(baseline GITHUB_BASE_REF=main GITHUB_REF_NAME=7/merge)"
 check "an explicit baseline wins" 1.0.0 "$(baseline --arg 1.0.0)"
 check "an explicit none skips" skipped "$(baseline --arg none)"
@@ -84,6 +89,8 @@ g switch --quiet release-1.0
 check "release-1.0: its newest patch" 1.0.1 "$(baseline)"
 check "a push to release-1.0" 1.0.1 "$(baseline GITHUB_BASE_REF= GITHUB_REF_NAME=release-1.0)"
 check "release-1.1: its newest patch" 1.1.1 "$(g switch --quiet release-1.1 && baseline)"
+check "release-1.2 before 1.2.0: the newest 1.1 release, not its ancestor 1.0.0" 1.1.1 \
+  "$(g switch --quiet release-1.2 && baseline)"
 
 g switch --quiet --create fix release-1.0
 commit "fix"
@@ -95,5 +102,12 @@ check "API_BREAKAGE_BRANCH overrides the pull request's base" 1.0.1 \
 
 g switch --quiet --detach 1.0.1
 check "a detached HEAD: like main" 1.1.1 "$(baseline)"
+
+# A new major version: main compares with it, release-1.1 keeps 1.1.1.
+g switch --quiet main
+commit "2.0.0"
+g tag 2.0.0
+check "main after 2.0.0" 2.0.0 "$(baseline)"
+check "release-1.1 after 2.0.0" 1.1.1 "$(g switch --quiet release-1.1 && baseline)"
 
 exit "$FAILED"
