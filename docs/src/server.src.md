@@ -462,6 +462,35 @@ A Server Card is a public JSON document that describes a server before a client 
 - A card is public: put no credentials, internal hosts or user data in it, and serve it over https.
 - To publish a changed card, create a new validator.
 
+## MCP Apps
+
+MCP Apps (SEP-1865) lets a tool show its results in an interactive HTML view, which the host renders in a sandboxed frame. A view is a resource with a `ui://` URI and the MIME type `text/html;profile=mcp-app`; a tool refers to it in `_meta.ui`. The SDK follows the `io.modelcontextprotocol/ui` extension at `ext-apps` `v2.0.4` (`7af9a75d`). `withAppResources(_:)` serves the views:
+
+%include Examples/Snippets/Server/Apps.swift apps-server
+
+The server then:
+
+- declares `extensions["io.modelcontextprotocol/ui"]` and the `resources` capability;
+- answers `resources/read` of a view before your `resources/read` handler, with the HTML as `text` (or base64 `blob` for `.blob`) and `_meta.ui` on the content item. Other URIs, also other `ui://` URIs, go to your handler, so you can serve views that change;
+- adds the views to `resources/list` with `_meta.ui` on the entry, so a host can review the metadata before it reads a view. The first page is your handler's first page and the views' first page, as for [skills](#skills). At 2026-07-28 a merged page has the shortest `ttlMs` of its pages and is `.private` when any of them is; a page without hints, such as the views', counts with the [cache hint](#cacheable-results) of `resources/list`. Pass `listInResources: false` to leave them out; hosts then find them through the tools.
+
+`UIResource(uri:name:title:description:html:meta:)` throws `UIResource.ValidationError` for a URI that does not start with `ui://` in lowercase. A later view with the URI of an earlier one replaces it. Call `withAppResources` again to replace the views, then send a `ResourceListChangedNotification`, and declare `resources: .init(listChanged: true)` when you create the server: `withAppResources` declares `resources` without it, and listen streams carry the notification only when it is declared.
+
+`UIResourceMeta` is the view's configuration:
+
+| Field | What the host does with it |
+|---|---|
+| `csp` | Allows the declared origins: `connectDomains` (network requests), `resourceDomains` (scripts, styles, images, fonts, media), `frameDomains` (nested frames), `baseUriDomains`. Without `csp`, the host uses a policy that allows no external origin |
+| `permissions` | Can grant the camera, the microphone, the location and clipboard writes. A view must not assume them |
+| `domain` | A dedicated origin for the view, in a format that the host defines |
+| `prefersBorder` | Shows a border and background, or not. Without it, the host decides |
+
+`Tool.ui` is the tool's `ToolUIMeta`: `resourceUri`, and `visibility`. Without `visibility`, the agent and the view can both call the tool. `[.app]` hides the tool from the agent, for tools that only the view calls; `[.model]` keeps the view from calling it. The setter keeps the other keys of `_meta`.
+
+A tool result must make sense without the view: give it `content` with text, for hosts without views, and put the data that the view reads in `structuredContent`. `Server.currentHandlerContext?.clientUISettings` is the extension settings that the client declared, if any. A server can give tools their `ui` only for clients that render views, but at 2026-07-28 a `tools/list` result that differs by client should have the `.private` [cache scope](#cacheable-results). It is simpler to list the same tools for every client.
+
+The SDK does not implement the View-Host bridge (`ui/initialize` and the other `ui/*` messages between a view and its host).
+
 ## Requests to the client
 
 `requestSampling` and `listRoots` are deprecated by the specification (SEP-2577); elicitation is not. See [Deprecated by the specification](rough_edges.md#deprecated-by-the-specification).

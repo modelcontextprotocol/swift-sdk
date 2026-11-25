@@ -276,18 +276,31 @@ CORS preflight); the stateless transport passes its 304, the stateful one runs v
 other methods. `scripts/server-card-examples.mjs` regenerates
 `Tests/MCPTests/Generated/ServerCardExamples.swift`. `Examples/http-server` serves a card.
 
+## MCP Apps (SEP-1865)
+
+`io.modelcontextprotocol/ui` (`design/apps.md`), pinned to `modelcontextprotocol/ext-apps` at
+`v2.0.4` (`7af9a75d`, draft text). `Base/AppTypes.swift`: `ExtensionID.ui`,
+`UIExtensionSettings`, `UIResourceMeta` (`CSP.policy()`, `restrictiveDefault`, `Permissions`),
+`ToolUIMeta`; accessors `Tool.ui` (reads the flat `ui/resourceUri`, never writes it),
+`Resource.ui`, `Resource.Content.ui`, `Client.Capabilities.ui`. `Server/Apps.swift`:
+`UIResource`, `withAppResources`, `HandlerContext.clientUISettings`. Views and skills share
+`Server/BuiltInResources.swift` (ordered sources before the app's handler, one
+`mcp-resources:` listing cursor). `Client/ClientApps.swift`: `readAppResource(uri:listing:)`
+(content `_meta.ui` over the listing's). No View-Host bridge (ROADMAP "Planned").
+
 ## Interop
 
 `scripts/run-interop.sh [--update-results | --check]` runs the Swift, Go and Python SDKs' clients and
-servers against each other (profiles basic, advanced, connect, session, tasks), in both eras, over
+servers against each other (profiles basic, advanced, connect, session, tasks, apps), in both eras, over
 HTTP and stdio, and writes `.build/interop/report.md` (`--update-results` copies it to
 `interop/RESULTS.md`; `--check` fails when the result rows differ from it, via
 `interop/report.py --expect`). The other SDKs are pinned releases: `interop/go-client/go.mod`,
 `interop/python-client/requirements.in` (hashed lock `requirements.txt`, example servers
 checked against `examples.sha256`) and `interop/ts-client/package.json` (`npm ci` from
 `package-lock.json`); no local checkouts. The TypeScript SDK (2025-11-25 only) runs the tasks
-profile: `ts-client/client.mjs` and a task server, `ts-client/server.mjs`, on its SEP-1686
-runtime. The drivers in `interop/{swift-client,go-client,python-client,ts-client}` take the same
+and apps profiles: `ts-client/client.mjs` and a server, `ts-client/server.mjs`, on its SEP-1686
+runtime and the `ext-apps` 1.7.5 server helpers; the Swift fixture is
+`conformance/everything-server/Apps.swift`. The drivers in `interop/{swift-client,go-client,python-client,ts-client}` take the same
 flags and checks; keep them in step. Findings: `interop/README.md`.
 
 ## CI

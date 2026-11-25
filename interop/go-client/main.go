@@ -9,7 +9,7 @@
 // Profiles: everything, advanced (concurrency, cancellation, notifications,
 // subscriptions, transport edges), connect (-expect-era
 // handshake|stateless|unsupported), session (-pause-file; the runner restarts
-// the server), tool.
+// the server), tasks, apps (MCP Apps, SEP-1865), tool.
 package main
 
 import (
@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -33,7 +34,7 @@ import (
 var (
 	urlFlag     = flag.String("url", "", "streamable HTTP endpoint")
 	eraFlag     = flag.String("era", "auto", "handshake, stateless or auto")
-	profileFlag = flag.String("profile", "everything", "everything, advanced, connect, session, tasks or tool")
+	profileFlag = flag.String("profile", "everything", "everything, advanced, connect, session, tasks, apps or tool")
 	toolFlag    = flag.String("tool", "", "tool profile: tool name")
 	argsFlag    = flag.String("args", "{}", "tool profile: JSON arguments")
 	expectFlag  = flag.String("expect", "", "tool profile: expected text")
@@ -173,6 +174,118 @@ func (b *battery) runTasks() {
 			return "", err
 		}
 		return "", fmt.Errorf("returned %s", texts(res.Content))
+	})
+}
+
+// The apps fixture (conformance/everything-server/Apps.swift,
+// interop/ts-client/server.mjs).
+const (
+	appsViewURI   = "ui://interop/weather.html"
+	appsMimeType  = "text/html;profile=mcp-app"
+	appsExtension = "io.modelcontextprotocol/ui"
+)
+
+var appsViewUI = map[string]any{
+	"csp":           map[string]any{"connectDomains": []any{"https://api.example.com"}},
+	"prefersBorder": true,
+}
+
+// uiMeta is the _meta.ui object of meta, as plain JSON values.
+func uiMeta(meta mcp.Meta) map[string]any {
+	data, err := json.Marshal(meta["ui"])
+	if err != nil {
+		return nil
+	}
+	var ui map[string]any
+	if json.Unmarshal(data, &ui) != nil {
+		return nil
+	}
+	return ui
+}
+
+// runApps declares the extension (newClient) and reads the fixture as a host
+// does, from the raw _meta.
+func (b *battery) runApps() {
+	b.check("apps-tools", "", func(ctx context.Context) (string, error) {
+		res, err := b.cs.ListTools(ctx, nil)
+		if err != nil {
+			return "", err
+		}
+		var show, refresh *mcp.Tool
+		for _, tool := range res.Tools {
+			switch tool.Name {
+			case "show_weather":
+				show = tool
+			case "refresh_weather":
+				refresh = tool
+			}
+		}
+		if show == nil || refresh == nil {
+			return "", errors.New("no show_weather and refresh_weather")
+		}
+		showUI, refreshUI := uiMeta(show.Meta), uiMeta(refresh.Meta)
+		if showUI["resourceUri"] != appsViewURI || showUI["visibility"] != nil {
+			return "", fmt.Errorf("show_weather _meta.ui %v", showUI)
+		}
+		if refreshUI["resourceUri"] != appsViewURI || !reflect.DeepEqual(refreshUI["visibility"], []any{"app"}) {
+			return "", fmt.Errorf("refresh_weather _meta.ui %v", refreshUI)
+		}
+		detail := "show_weather -> " + appsViewURI + ", refresh_weather app-only"
+		if show.Meta["ui/resourceUri"] != nil {
+			detail += ", flat key too"
+		}
+		return detail, nil
+	})
+	b.check("apps-list", "", func(ctx context.Context) (string, error) {
+		res, err := b.cs.ListResources(ctx, nil)
+		if err != nil {
+			return "", err
+		}
+		for _, resource := range res.Resources {
+			if resource.URI != appsViewURI {
+				continue
+			}
+			if resource.MIMEType != appsMimeType {
+				return "", fmt.Errorf("mimeType %q", resource.MIMEType)
+			}
+			if ui := uiMeta(resource.Meta); !reflect.DeepEqual(ui, appsViewUI) {
+				return "", fmt.Errorf("listing _meta.ui %v", ui)
+			}
+			return resource.URI + " with _meta.ui", nil
+		}
+		return "", errors.New(appsViewURI + " is not listed")
+	})
+	b.check("apps-read", "", func(ctx context.Context) (string, error) {
+		res, err := b.cs.ReadResource(ctx, &mcp.ReadResourceParams{URI: appsViewURI})
+		if err != nil {
+			return "", err
+		}
+		for _, content := range res.Contents {
+			if content.URI != appsViewURI {
+				continue
+			}
+			if content.MIMEType != appsMimeType {
+				return "", fmt.Errorf("mimeType %q", content.MIMEType)
+			}
+			if !strings.Contains(content.Text, "interop weather view") {
+				return "", fmt.Errorf("text %q", content.Text)
+			}
+			if ui := uiMeta(content.Meta); !reflect.DeepEqual(ui, appsViewUI) {
+				return "", fmt.Errorf("content _meta.ui %v", ui)
+			}
+			return fmt.Sprintf("%d bytes with _meta.ui", len(content.Text)), nil
+		}
+		return "", errors.New("no content for " + appsViewURI)
+	})
+	b.check("apps-call", "", func(ctx context.Context) (string, error) {
+		res, err := b.call(ctx, "show_weather", map[string]any{"city": "Oslo"})
+		if err != nil {
+			return "", err
+		}
+		if got := texts(res.Content); got != "Weather in Oslo: sunny (view declared)" {
+			return "", fmt.Errorf("unexpected result: %s", got)
+		}
+		return texts(res.Content), nil
 	})
 }
 
@@ -873,7 +986,14 @@ func answer(schema any) map[string]any {
 }
 
 func newClient() *mcp.Client {
+	var capabilities *mcp.ClientCapabilities
+	if *profileFlag == "apps" {
+		// The SDK's default roots, and the extension.
+		capabilities = &mcp.ClientCapabilities{RootsV2: &mcp.RootCapabilities{ListChanged: true}}
+		capabilities.AddExtension(appsExtension, map[string]any{"mimeTypes": []any{appsMimeType}})
+	}
 	client := mcp.NewClient(&mcp.Implementation{Name: "go-interop-client", Version: "1.0.0"}, &mcp.ClientOptions{
+		Capabilities: capabilities,
 		CreateMessageHandler: func(context.Context, *mcp.CreateMessageRequest) (*mcp.CreateMessageResult, error) {
 			counts.sampling.Add(1)
 			return &mcp.CreateMessageResult{
@@ -1000,6 +1120,9 @@ func main() {
 		return
 	case "tasks":
 		b.runTasks()
+		return
+	case "apps":
+		b.runApps()
 		return
 	case "connect":
 		b.check("tools-list", "", func(ctx context.Context) (string, error) {

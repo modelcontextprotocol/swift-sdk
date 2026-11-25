@@ -341,10 +341,10 @@ public actor Server {
     /// Runs and keeps tasks; set by ``withTasks(_:)``.
     private var taskManager: TaskManager?
 
-    /// The skills served; set by ``withSkills(_:listInResources:)``.
-    private var skillCatalog: (any SkillCatalog)?
-    /// Whether `resources/list` starts with the skills' `SKILL.md` resources.
-    private var listsSkillsInResources = true
+    /// The resources the server answers before the application's handlers;
+    /// set by ``withAppResources(_:listInResources:)`` and
+    /// ``withSkills(_:listInResources:)``.
+    private var builtInResourceSources: [BuiltInResourceSource] = []
     /// This server's observer of `taskManager`'s changes.
     private var taskObserver: Int?
     private var observingTasks = false
@@ -1114,12 +1114,14 @@ public actor Server {
     // MARK: - Skills (SEP-2640)
 
     func installSkills(_ catalog: some SkillCatalog, listInResources: Bool) {
-        skillCatalog = catalog
-        listsSkillsInResources = listInResources
+        installResourceSource(
+            .init(
+                key: .skills, lists: listInResources,
+                read: { uri in try await catalog.readResource(uri: uri) },
+                list: { cursor in try await catalog.listResources(cursor: cursor) }))
         var extensions = capabilities.extensions ?? [:]
         extensions[ExtensionID.skills] = SkillsSettings(directoryRead: catalog.supportsDirectoryRead ? true : nil).value
         capabilities.extensions = extensions
-        if capabilities.resources == nil { capabilities.resources = .init() }
         registerDefault(ListSkills.self) { params in
             try await catalog.listSkills(cursor: params.cursor)
         }
@@ -1137,76 +1139,30 @@ public actor Server {
                 return result
             }
         }
-        // Skill files are read before these; they answer for the rest.
+    }
+
+    // MARK: - MCP Apps (SEP-1865)
+
+    func installAppResources(_ catalog: AppResourceCatalog, listInResources: Bool) {
+        installResourceSource(
+            .init(
+                key: .apps, lists: listInResources, read: { uri in catalog.read(uri: uri) },
+                list: { cursor in try catalog.list(cursor: cursor) }))
+        var extensions = capabilities.extensions ?? [:]
+        extensions[ExtensionID.ui] = [:]
+        capabilities.extensions = extensions
+    }
+
+    /// Adds `source`, or replaces the source with its key, and declares the
+    /// `resources` capability.
+    private func installResourceSource(_ source: BuiltInResourceSource) {
+        builtInResourceSources = builtInResourceSources.installing(source)
+        if capabilities.resources == nil { capabilities.resources = .init() }
+        // Built-in resources are read before these; they answer for the rest.
         registerDefault(ReadResource.self) { params in
             throw MCPError.resourceNotFound(uri: params.uri)
         }
         registerDefault(ListResources.self) { _ in ListResources.Result(resources: []) }
-    }
-
-    /// The response to a `resources/read` of a skill file, or to a
-    /// `resources/list` that includes the skills; `nil` for the
-    /// application's handler.
-    ///
-    /// The first `resources/list` page is the application's first page and
-    /// the skills' first `SKILL.md` page, so a client that reads one page
-    /// sees both; later pages continue the application's listing, then the
-    /// skills'. The cursor carries both positions.
-    private static func skillResources(
-        _ request: Request<AnyMethod>, catalog: any SkillCatalog, listsSkills: Bool,
-        applicationList: RequestHandlerBox?
-    ) async throws -> Response<AnyMethod>? {
-        let params = request.params.objectValue ?? [:]
-        if request.method == ReadResource.name {
-            guard let uri = params["uri"]?.stringValue, let result = try await catalog.readResource(uri: uri) else {
-                return nil
-            }
-            return Response(id: request.id, result: try Value.preservingStrings(result))
-        }
-        guard request.method == ListResources.name, listsSkills else { return nil }
-
-        var position = SkillListingCursor.start(listsApplication: applicationList != nil)
-        if let value = params["cursor"], value != .null {
-            guard let cursor = value.stringValue, var decoded = SkillListingCursor(cursor) else {
-                throw MCPError.invalidParams("Invalid cursor")
-            }
-            // A position that this server cannot advance would give a next
-            // cursor on every page.
-            if applicationList == nil { decoded.application = .done }
-            position = decoded
-        }
-        var resources: [Value] = []
-        var meta: Value?
-        var hints: [String: Value] = [:]
-        var next = position
-        if let application = applicationList, case .page(let cursor) = position.application {
-            var forwarded = params
-            forwarded["cursor"] = cursor.map(Value.string)
-            let response = try await application(
-                Request<AnyMethod>(
-                    id: request.id, method: request.method, params: .object(forwarded), _meta: request._meta))
-            guard case .success(let value) = response.result, let object = value.objectValue else { return response }
-            resources += object["resources"]?.arrayValue ?? []
-            meta = object["_meta"]
-            for key in [ResultKeys.ttlMs, ResultKeys.cacheScope] { hints[key] = object[key] }
-            next.application = object["nextCursor"]?.stringValue.map { .page($0) } ?? .done
-        }
-        // The skills join the first page, and follow the application's last.
-        if case .page(let cursor) = position.skills, cursor == nil || position.application == .done {
-            let page = try await catalog.listResources(cursor: cursor)
-            let encoded = try Value.preservingStrings(page)
-            resources += encoded.objectValue?["resources"]?.arrayValue ?? []
-            if meta == nil { meta = encoded.objectValue?["_meta"] }
-            for key in [ResultKeys.ttlMs, ResultKeys.cacheScope] where hints[key] == nil {
-                hints[key] = encoded.objectValue?[key]
-            }
-            next.skills = page.nextCursor.map { .page($0) } ?? .done
-        }
-        var result: [String: Value] = ["resources": .array(resources)]
-        if let cursor = next.encoded { result["nextCursor"] = .string(cursor) }
-        if let meta { result["_meta"] = meta }
-        result.merge(hints) { current, _ in current }
-        return Response(id: request.id, result: .object(result))
     }
 
     // MARK: - Multi round-trip requests (SEP-2322)
@@ -2324,9 +2280,8 @@ public actor Server {
             }
         }
         let taskManager = request.method == CallTool.name ? taskManager : nil
-        let skills =
-            request.method == ReadResource.name || request.method == ListResources.name ? skillCatalog : nil
-        let listsSkills = listsSkillsInResources
+        let resourceSources =
+            request.method == ReadResource.name || request.method == ListResources.name ? builtInResourceSources : []
         let applicationList =
             defaultHandlerMethods.contains(ListResources.name) ? nil : methodHandlers[ListResources.name]
         let handlerContext = dispatchContext
@@ -2336,16 +2291,16 @@ public actor Server {
             handlerContext.isStateless && request.method == CallTool.name
                 && handlerContext.profile?.usesStandardHeaders == true
             ? httpContext : nil
+        let cacheHint = configuration.cacheHints[request.method] ?? configuration.defaultCacheHint
         let annotate: @Sendable (Response<AnyMethod>) -> Response<AnyMethod> = {
-            [serverInfo, configuration] response in
+            [serverInfo] response in
             guard handlerContext.isStateless, case .success(let value) = response.result else {
                 return response
             }
-            let hint = configuration.cacheHints[request.method] ?? configuration.defaultCacheHint
             return Response(
                 id: response.id,
                 result: StatelessRequests.annotate(
-                    value, method: request.method, serverInfo: serverInfo, cacheHint: hint))
+                    value, method: request.method, serverInfo: serverInfo, cacheHint: cacheHint))
         }
 
         // Sessionless handshake requests, other than `initialize`, pass the
@@ -2400,9 +2355,10 @@ public actor Server {
 
                     // Handle request and get response
                     var response = try await Server.$currentHandlerContext.withValue(context) {
-                        if let skills,
-                            let served = try await Self.skillResources(
-                                request, catalog: skills, listsSkills: listsSkills, applicationList: applicationList)
+                        if !resourceSources.isEmpty,
+                            let served = try await Self.builtInResources(
+                                request, sources: resourceSources, applicationList: applicationList,
+                                cacheHint: cacheHint)
                         {
                             return served
                         }

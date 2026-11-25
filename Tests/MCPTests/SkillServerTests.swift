@@ -387,7 +387,8 @@ struct SkillServerTests {
         }
         // A position in an application listing that this server does not
         // have is done: the skills continue, and the listing ends.
-        let foreign = try #require(SkillListingCursor(application: .page("x"), skills: .page("1")).encoded)
+        let foreign = try #require(
+            ResourceListingCursor(application: .page("x"), sources: [.skills: .page("1")]).encoded)
         let rest = try await result(wire, ListResources.name, ["cursor": .string(foreign)])
         #expect(rest.objectValue?["resources"]?.arrayValue?.count == 1)
         #expect(rest.objectValue?["nextCursor"] == nil)
@@ -414,7 +415,7 @@ struct SkillServerTests {
         let second = try await result(wire, ListResources.name, ["cursor": .string(cursor)])
         #expect(uris(second) == ["app://2"])
         #expect(second.objectValue?["nextCursor"] == nil)
-        for invalid in ["1", "a", "mcp-skills:", "mcp-skills:e30="] {
+        for invalid in ["1", "a", "mcp-resources:", "mcp-resources:e30="] {
             #expect(try await errorCode(wire, ListResources.name, ["cursor": .string(invalid)]) == -32602, "\(invalid)")
         }
 

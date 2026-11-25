@@ -448,60 +448,6 @@ public actor InMemorySkillCatalog: SkillCatalog {
     }
 }
 
-// MARK: - Merged resources/list
-
-/// Where a `resources/list` that includes skills stands in the
-/// application's listing and in the skills': a page still to read, by its
-/// cursor (`nil` for the first), or done.
-struct SkillListingCursor: Equatable {
-    enum Position: Equatable {
-        case page(String?)
-        case done
-    }
-
-    var application: Position
-    var skills: Position
-
-    static func start(listsApplication: Bool) -> Self {
-        .init(application: listsApplication ? .page(nil) : .done, skills: .page(nil))
-    }
-
-    private static let prefix = "mcp-skills:"
-
-    /// The cursor of this position, or `nil` when both listings are done.
-    var encoded: String? {
-        guard application != .done || skills != .done else { return nil }
-        var object: [String: Value] = [:]
-        if case .page(let cursor) = application { object["a"] = cursor.map(Value.string) ?? .null }
-        if case .page(let cursor) = skills { object["s"] = cursor.map(Value.string) ?? .null }
-        guard let data = try? JSONEncoder().encode(Value.object(object)) else { return nil }
-        return Self.prefix + data.base64EncodedString()
-    }
-
-    /// The position a cursor of ``encoded`` names; `nil` for any other string.
-    init?(_ cursor: String) {
-        guard cursor.hasPrefix(Self.prefix), let data = Data(base64Encoded: String(cursor.dropFirst(Self.prefix.count))),
-            let value = try? JSONDecoder().decode([String: Value.Preserved].self, from: data)
-        else { return nil }
-        func position(_ key: String) -> Position? {
-            switch value[key]?.value {
-            case nil: return .done
-            case .null?: return .page(nil)
-            case .string(let cursor)?: return .page(cursor)
-            default: return nil
-            }
-        }
-        guard let application = position("a"), let skills = position("s"), application != .done || skills != .done
-        else { return nil }
-        self.init(application: application, skills: skills)
-    }
-
-    init(application: Position, skills: Position) {
-        self.application = application
-        self.skills = skills
-    }
-}
-
 // MARK: - Server
 
 extension Server {

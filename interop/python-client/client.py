@@ -9,7 +9,8 @@ one JSON object per line: a "meta" line, then one line per check.
 Profiles: everything, advanced (concurrency, cancellation, notifications,
 subscriptions, transport edges), connect (--expect-era
 handshake|stateless|unsupported), session (--pause-file; the runner restarts
-the server), tasks (task tools of the Swift everything-server), tool.
+the server), tasks (task tools of the Swift everything-server), apps (MCP
+Apps, SEP-1865), tool.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from typing import Any, Awaitable, Callable
 import anyio
 
 from mcp import Client, StdioServerParameters, types
+from mcp.client.extension import advertise
 from mcp.shared.exceptions import MCPError
 
 counts: Counter[str] = Counter()
@@ -169,10 +171,19 @@ async def pause(path: str) -> None:
     raise CheckFailed("the runner did not resume")
 
 
-def make_client(target: Any, mode: str) -> Client:
+# The apps fixture (conformance/everything-server/Apps.swift,
+# interop/ts-client/server.mjs).
+APPS_EXTENSION = "io.modelcontextprotocol/ui"
+APPS_MIME_TYPE = "text/html;profile=mcp-app"
+APPS_VIEW_URI = "ui://interop/weather.html"
+APPS_VIEW_UI = {"csp": {"connectDomains": ["https://api.example.com"]}, "prefersBorder": True}
+
+
+def make_client(target: Any, mode: str, apps: bool = False) -> Client:
     return Client(
         target,
         mode=mode,
+        extensions=[advertise(APPS_EXTENSION, {"mimeTypes": [APPS_MIME_TYPE]})] if apps else None,
         sampling_callback=on_sampling,
         elicitation_callback=on_elicitation,
         list_roots_callback=on_roots,
@@ -669,6 +680,61 @@ async def run_tasks(battery: Battery) -> None:
     await battery.check("task-required-refused", refused)
 
 
+def ui_meta(meta: dict[str, Any] | None) -> Any:
+    return (meta or {}).get("ui")
+
+
+async def run_apps(battery: Battery) -> None:
+    """Declares the extension (make_client) and reads the fixture as a host does, from the raw _meta."""
+    c = battery.client
+
+    async def tools() -> str:
+        listed = {t.name: t for t in (await c.list_tools()).tools}
+        show, refresh = listed.get("show_weather"), listed.get("refresh_weather")
+        require(show is not None and refresh is not None, "no show_weather and refresh_weather")
+        show_ui, refresh_ui = ui_meta(show.meta) or {}, ui_meta(refresh.meta) or {}
+        require(show_ui.get("resourceUri") == APPS_VIEW_URI and "visibility" not in show_ui,
+                f"show_weather _meta.ui {show_ui}")
+        require(refresh_ui.get("resourceUri") == APPS_VIEW_URI and refresh_ui.get("visibility") == ["app"],
+                f"refresh_weather _meta.ui {refresh_ui}")
+        flat = ", flat key too" if "ui/resourceUri" in (show.meta or {}) else ""
+        return f"show_weather -> {APPS_VIEW_URI}, refresh_weather app-only{flat}"
+
+    await battery.check("apps-tools", tools)
+
+    async def listing() -> str:
+        for resource in (await c.list_resources()).resources:
+            if str(resource.uri) != APPS_VIEW_URI:
+                continue
+            require(resource.mime_type == APPS_MIME_TYPE, f"mimeType {resource.mime_type}")
+            require(ui_meta(resource.meta) == APPS_VIEW_UI, f"listing _meta.ui {ui_meta(resource.meta)}")
+            return f"{resource.uri} with _meta.ui"
+        raise CheckFailed(f"{APPS_VIEW_URI} is not listed")
+
+    await battery.check("apps-list", listing)
+
+    async def read() -> str:
+        result = await c.read_resource(APPS_VIEW_URI)
+        for content in result.contents:
+            if str(content.uri) != APPS_VIEW_URI:
+                continue
+            text = getattr(content, "text", None) or ""
+            require(content.mime_type == APPS_MIME_TYPE, f"mimeType {content.mime_type}")
+            require("interop weather view" in text, f"text {text!r}")
+            require(ui_meta(content.meta) == APPS_VIEW_UI, f"content _meta.ui {ui_meta(content.meta)}")
+            return f"{len(text)} bytes with _meta.ui"
+        raise CheckFailed(f"no content for {APPS_VIEW_URI}")
+
+    await battery.check("apps-read", read)
+
+    async def call() -> str:
+        r = await battery.call("show_weather", {"city": "Oslo"})
+        require(texts(r.content) == "Weather in Oslo: sunny (view declared)", f"unexpected result: {texts(r.content)}")
+        return texts(r.content)
+
+    await battery.check("apps-call", call)
+
+
 async def run_session(battery: Battery, options: argparse.Namespace, target: Any, mode: str) -> None:
     async def before() -> str:
         return texts((await battery.call("test_simple_text")).content)
@@ -707,7 +773,7 @@ async def main() -> int:
     parser.add_argument("--url")
     parser.add_argument("--era", default="auto", choices=["auto", "handshake", "stateless"])
     parser.add_argument("--profile", default="everything",
-                        choices=["everything", "advanced", "connect", "session", "tasks", "tool"])
+                        choices=["everything", "advanced", "connect", "session", "tasks", "apps", "tool"])
     parser.add_argument("--expect-era", default="", choices=["", "handshake", "stateless", "unsupported"])
     parser.add_argument("--watched-updates", action="store_true")
     parser.add_argument("--pause-file", default="")
@@ -727,7 +793,7 @@ async def main() -> int:
         return 2
 
     mode = {"handshake": "legacy", "stateless": "2026-07-28"}.get(options.era, "auto")
-    client = make_client(target, mode)
+    client = make_client(target, mode, apps=options.profile == "apps")
     connected = False
     finished = False  # the profile's checks ran to the end
     try:
@@ -780,6 +846,8 @@ async def main() -> int:
                 await run_session(battery, options, target, mode)
             elif options.profile == "tasks":
                 await run_tasks(battery)
+            elif options.profile == "apps":
+                await run_apps(battery)
             elif options.profile == "tool":
                 await battery.run_tool(options.tool, json.loads(options.args), options.expect)
             else:

@@ -16,6 +16,7 @@ Feature notes go deeper on single topics:
 | [tasks.md](tasks.md) | Tasks at 2025-11-25 (SEP-1686) and the 2026-07-28 tasks extension (SEP-2663) |
 | [skills.md](skills.md) | The skills extension (SEP-2640): frontmatter, catalogs, serving and verified loading |
 | [server_cards.md](server_cards.md) | Server Cards (SEP-2127): the document, serving, fetching and checks |
+| [apps.md](apps.md) | MCP Apps (SEP-1865): views, tool and resource metadata, the Content Security Policy |
 | [auth.md](auth.md) | OAuth client architecture |
 | [linux.md](linux.md) | Linux status and what differs there by design |
 | [threat_model.md](threat_model.md) | Trust boundaries, defenses and their limits |

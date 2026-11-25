@@ -70,6 +70,17 @@ other SDK implements the extension.
 The format is the one of `modelcontextprotocol/ext-server-card` at `526201bb`; the tests use its
 examples. The SDK does not read AI Catalogs: the application passes the card URL.
 
+### MCP Apps
+
+| Feature | SEP | API | Design |
+|---|---|---|---|
+| Views: `ui://` resources served before the application's handler and merged into `resources/list` | SEP-1865 | `Server.withAppResources(_:listInResources:)`, `UIResource` | [apps.md](design/apps.md) |
+| Tool and resource metadata, with the deprecated flat key read | SEP-1865 | `Tool.ui`, `ToolUIMeta`, `Resource.ui`, `Resource.Content.ui`, `UIResourceMeta`, `isVisibleToModel`, `isCallableFromApp` | [apps.md](design/apps.md) |
+| The extension settings | SEP-1865 | `Client.Capabilities.ui`, `UIExtensionSettings`, `HandlerContext.clientUISettings` | [apps.md](design/apps.md) |
+| Reading a view with its effective metadata, and its Content Security Policy | SEP-1865 | `Client.readAppResource(uri:listing:)`, `AppResourceContents`, `UIResourceMeta.CSP.policy()`, `restrictiveDefault` | [apps.md](design/apps.md) |
+
+The wire is the one of `io.modelcontextprotocol/ui` at `ext-apps` `v2.0.4` (`7af9a75d`).
+
 ### Authorization
 
 | Feature | Reference | API |
@@ -93,7 +104,12 @@ Details: [design/auth.md](design/auth.md).
 
 ## Planned
 
-The SEPs marked Planned in [SEP coverage](#sep-coverage).
+The SEPs marked Planned in [SEP coverage](#sep-coverage), and:
+
+- The MCP Apps View-Host bridge (SEP-1865): `ui/initialize` and the host context,
+  `ui/notifications/*`, the view's `tools/call` with visibility enforced, sampling through the
+  host, size and display modes, and app-provided tools. It needs a `WKWebView` transport (Apple
+  platforms only) and, for web hosts, the sandbox proxy ([design/apps.md](design/apps.md)).
 
 The conformance harness exercises extensions only in the default leg, as scenarios that do not
 count toward a tier; their failing checks would be entries in
@@ -140,7 +156,7 @@ A change that implements a SEP updates its row.
 | 1699 | SSE polling through server-side disconnect | Standards | Implemented | `HTTPClientTransport` resumes a closed stream with a GET and its last event ID; `StatefulHTTPServerTransport` sends priming events (`retryInterval`) |
 | 1730 | SDK tiering | Standards | Not applicable | Asks something of the SDK project, which the tooling meets: `scripts/run-conformance.sh --requirements <revision>` scores the tier sets, and CI gates on them. |
 | 1850 | PR-based SEP workflow | Process | Not applicable | Process. |
-| 1865 | MCP Apps | Extensions | Planned | Not implemented. |
+| 1865 | MCP Apps | Extensions | Partial | [MCP Apps](#mcp-apps): the wire between server and host; the View-Host bridge is Planned |
 | 1932 | DPoP | Not in the index | Implemented | [Authorization](#authorization) |
 | 1933 | Workload identity federation | Not in the index | Implemented | [Authorization](#authorization) |
 | 2085 | Governance succession and amendment | Process | Not applicable | Governance. |

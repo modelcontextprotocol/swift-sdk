@@ -1,9 +1,10 @@
 {
   "name": "mcp-interop-ts",
   "private": true,
-  "description": "Interop driver and task server on the TypeScript SDK (2025-11-25 tasks, SEP-1686)",
+  "description": "Interop driver and servers on the TypeScript SDK (2025-11-25 tasks, SEP-1686; MCP Apps, SEP-1865)",
   "type": "module",
   "dependencies": {
+    "@modelcontextprotocol/ext-apps": "1.7.5",
     "@modelcontextprotocol/sdk": "1.32.2",
     "zod": "4.1.12"
   }
