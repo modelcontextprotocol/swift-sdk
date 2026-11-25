@@ -220,6 +220,44 @@ struct ServerSnippetTests {
         #expect(text(try await client.callTool(name: "summarize").content) == "1 roots. Model: test-model")
     }
 
+    @Test("Multi round-trip: sampling with tools", arguments: eras)
+    func multiRoundTripSamplingTools(mode: Client.ProtocolMode) async throws {
+        for maxRounds in [4, 1] {
+            let server = Server(name: "travel", version: "1.0", capabilities: .init(tools: .init()))
+            await server.withMethodHandler(CallTool.self) { try adviseTravel($0, maxRounds: maxRounds) }
+            let choices = Inbox<String>()
+            let client = try await connect(
+                server, mode: mode, capabilities: .init(sampling: .init(tools: .init()))
+            ) { client in
+                await client.withSamplingHandler { params in
+                    await choices.add(params.toolChoice?.mode?.rawValue ?? "-")
+                    // Call the tool first; answer once the result is there.
+                    if case .toolResult(let result)? = params.messages.last?.content.asArray.first,
+                        case .text(let weather)? = result.content.first
+                    {
+                        return .init(model: "m", stopReason: .endTurn, role: .assistant, content: .text("Go to \(weather)"))
+                    }
+                    if params.toolChoice?.mode == CreateSamplingMessage.ToolChoice.Mode.none {
+                        return .init(model: "m", stopReason: .endTurn, role: .assistant, content: .text("Either"))
+                    }
+                    return .init(
+                        model: "m", stopReason: .toolUse, role: .assistant,
+                        content: .single(.toolUse(.init(id: "1", name: "get_weather", input: ["city": "Paris"]))))
+                }
+            }
+            let answer = text(try await client.callTool(name: "advise").content)
+            if maxRounds == 1 {
+                #expect(answer == "Either")
+                #expect(await choices.items == ["none"])
+            } else {
+                #expect(answer == "Go to Paris: 18°C, partly cloudy")
+                #expect(await choices.items == ["-", "-"])
+            }
+            await client.disconnect()
+            await server.stop()
+        }
+    }
+
     @Test("Multi round-trip: capability checks")
     func multiRoundTripCapabilities() async throws {
         let server = Server(name: "deployer", version: "1.0", capabilities: .init(tools: .init()))

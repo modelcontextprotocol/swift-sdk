@@ -65,6 +65,9 @@ Behavior that can break working code ([docs/migration.md](docs/migration.md#beha
 - Authorization: issuer checks (RFC 8414, RFC 9207), `application_type`, authorization server
   migration, the JWT bearer grant, enterprise-managed authorization with token exchange, workload
   identity, DPoP.
+- Sampling with tools (SEP-1577): `Server.requestSampling` takes `tools` and `toolChoice`. Server
+  and client check the `sampling.tools` and `sampling.context` capabilities and the rules for
+  tool uses and tool results.
 - A built-in `logging/setLevel` handler that filters `Server.log`.
 - `statelessRequestHook` on `Server.start`, `HTTPClientTransport.cancelRequest(_:)`,
   `BearerTokenValidationResult.tokenInfo`, and the `HTTPClientAuthorizer` requirement
@@ -125,3 +128,5 @@ Behavior that can break working code ([docs/migration.md](docs/migration.md#beha
 ### Deprecations
 
 - `Version.latest`: use `Version.latestHandshake`.
+- `CreateSamplingMessage.ToolChoice.init(mode:)` with an optional mode: pass a `Mode`. With an
+  optional parameter, `.none` is `nil`, which is `auto`.

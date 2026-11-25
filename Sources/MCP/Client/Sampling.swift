@@ -513,13 +513,27 @@ public enum CreateSamplingMessage: Method {
         }
 
         /// The tool choice mode. If omitted, defaults to `.auto`.
+        ///
+        /// The initializers and decoding store `.auto` for an omitted mode,
+        /// so this is never `nil`.
         public let mode: Mode?
 
         /// Creates a tool choice.
         ///
         /// A mode of `.auto` is omitted from the wire, where it is the default.
-        public init(mode: Mode? = .auto) {
+        public init(mode: Mode = .auto) {
             self.mode = mode
+        }
+
+        /// Creates a tool choice with an optional mode. `nil` is the default
+        /// mode, `auto`.
+        ///
+        /// With an optional parameter, `.none` is `nil` and not ``Mode/none``,
+        /// so this initializer is deprecated.
+        @_disfavoredOverload
+        @available(*, deprecated, message: "Pass a Mode; nil is .auto")
+        public init(mode: Mode?) {
+            self.mode = mode ?? .auto
         }
 
         private enum CodingKeys: String, CodingKey {
@@ -593,6 +607,10 @@ public enum CreateSamplingMessage: Method {
     }
 
     /// The result of `sampling/createMessage`.
+    ///
+    /// When the request has tools, `content` can hold several blocks, such as
+    /// one ``Sampling/Message/Content/ContentBlock/toolUse(_:)`` for each tool
+    /// the model calls, with ``Sampling/StopReason/toolUse``.
     public struct Result: Hashable, Codable, Sendable {
         /// Name of the model used
         public let model: String
@@ -642,5 +660,90 @@ public enum CreateSamplingMessage: Method {
             content = try container.decode(Sampling.Message.Content.self, forKey: .content)
             _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
         }
+    }
+}
+
+// MARK: - Tools in sampling (SEP-1577)
+
+extension CreateSamplingMessage.Parameters {
+    /// Whether the request uses tools: it has `tools` or `toolChoice`. Such a
+    /// request needs the client's `sampling.tools` capability.
+    var usesTools: Bool { tools != nil || toolChoice != nil }
+
+    /// Whether the request asks for context from MCP servers: an
+    /// `includeContext` other than `none`. Such a request needs the client's
+    /// `sampling.context` capability.
+    var usesContext: Bool {
+        guard let includeContext else { return false }
+        return includeContext != Sampling.ContextInclusion.none
+    }
+
+    /// The first violation of the message rules for tools, or `nil`.
+    ///
+    /// The rules of the specification:
+    /// - Tool uses are in assistant messages, tool results in user messages.
+    /// - A message with tool results holds only tool results.
+    /// - Each tool use in a message has a tool result in the next message,
+    ///   which is a user message.
+    /// - Each tool result answers a tool use in the message before it.
+    ///
+    /// Blocks of an unknown type are not counted: a later revision decides
+    /// where they may appear.
+    ///
+    /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/client/sampling#message-content-constraints
+    /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/client/sampling#message-roles
+    func toolMessageProblem() -> String? {
+        for (index, message) in messages.enumerated() {
+            let blocks = message.content.asArray
+            var uses: [String] = []
+            var results: [String] = []
+            var others = 0
+            for block in blocks {
+                switch block {
+                case .toolUse(let use): uses.append(use.id)
+                case .toolResult(let result): results.append(result.toolUseId)
+                case .unknown: break
+                default: others += 1
+                }
+            }
+            if !uses.isEmpty, message.role != .assistant {
+                return "messages[\(index)] has tool uses, which belong in an assistant message"
+            }
+            if !results.isEmpty {
+                if message.role != .user {
+                    return "messages[\(index)] has tool results, which belong in a user message"
+                }
+                if others > 0 || !uses.isEmpty {
+                    return "messages[\(index)] has tool results and other content"
+                }
+                let answered = index > 0 ? Self.toolUseIDs(in: messages[index - 1]) : []
+                if let unmatched = results.first(where: { !answered.contains($0) }) {
+                    return "messages[\(index)] has a result for tool use \(unmatched), which is not in the message before it"
+                }
+            }
+            guard !uses.isEmpty else { continue }
+            guard index + 1 < messages.count else {
+                return "messages[\(index)] has tool uses, and no message with their results follows it"
+            }
+            let next = messages[index + 1]
+            let answers = Set(next.content.asArray.compactMap { block -> String? in
+                if case .toolResult(let result) = block { return result.toolUseId }
+                return nil
+            })
+            if next.role != .user || answers.isEmpty {
+                return "messages[\(index + 1)] must be a user message with the results of the tool uses in messages[\(index)]"
+            }
+            if let unanswered = uses.first(where: { !answers.contains($0) }) {
+                return "messages[\(index + 1)] has no result for tool use \(unanswered)"
+            }
+        }
+        return nil
+    }
+
+    private static func toolUseIDs(in message: Sampling.Message) -> Set<String> {
+        Set(message.content.asArray.compactMap { block -> String? in
+            if case .toolUse(let use) = block { return use.id }
+            return nil
+        })
     }
 }

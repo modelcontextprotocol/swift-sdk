@@ -22,6 +22,7 @@ each change that breaks source code.
 | `OAuthAuthorizationError` | A struct with a `code`, not an enum; eight new codes | Read details from properties instead of binding associated values |
 | `GrantType`, `TokenEndpointAuthentication`, `PrivateKeyJWTSigningAlgorithm` | Structs, not enums; new grant type `.jwtBearer` | Add a `default` to `switch` statements; write `.ES256` instead of `init(rawValue:)` |
 | `BearerTokenValidationResult`, `Elicitation.Mode`, `ToolChoice.Mode` | Structs, not enums; `Mode(rawValue:)` is not optional | Add a `default` to `switch` statements; drop the optional binding |
+| `ToolChoice(mode:)` | Takes a `Mode`; the initializer with an optional mode is deprecated | Pass a mode. `.init(mode: .none)` is now the `none` mode, not `nil` (`auto`) |
 | Content blocks, `InputRequest`, `InputResponse`, `CreateElicitation.Parameters` | New case `.unknown` for kinds from a later revision | Add it, or a `default`, to `switch` statements |
 | `HTTPClientAuthorizer` | `authorizationHeader(for:)` became `authorizationHeaders(for:method:)`; new requirement `handleChallenge(statusCode:headers:endpoint:operationKey:sentAuthorization:session:)`, returning `HTTPChallengeResult`, with a default that calls the Bool method | Update custom authorizers |
 | `Client` convenience methods | Return the result type, not a tuple; `startToolCall` replaces the `RequestContext` overload of `callTool`; `initialize()` is removed | Read the result's properties |
@@ -38,6 +39,7 @@ each change that breaks source code.
 | Client handlers | Run outside the receive loop; at most 4 server-to-client requests at once; a server `ping` is answered | Remove `Task` wrappers that worked around the old loop, if you like |
 | `Client` connection | Pending requests fail with `connectionClosed` when the transport ends its stream; `connect(transport:)` on a connected client disconnects the previous transport | Handle `connectionClosed` where requests waited forever |
 | `.stateless(version)` | No retry with another version | Use `.automatic` for negotiation |
+| Sampling with tools | The client refuses tools without `sampling.tools`, and tool messages that break the rules, with -32602; `requestSampling` refuses them before it sends | Declare `sampling.tools` when the sampling handler takes tools |
 | `.none(clientID:)` | A plain client ID is pre-registered: no dynamic registration | Pass `""` to register |
 | `StatelessHTTPServerTransport` with an `initializeHook` | Handshake requests other than `initialize` are refused with -32600 unless a `statelessRequestHook` is set | Set a `statelessRequestHook` |
 | `data:` URL strings | Arrive as sent instead of rewritten as base64 `data:` URLs | Nothing |
@@ -475,6 +477,24 @@ for such a string, which encodes as a base64 `data:` URL.
 - `.stateless(version)` no longer retries with another version on -32022:
   it connects at `version` or throws.
 
+### Sampling with tools
+
+The specification's rules for sampling with tools (SEP-1577) are checked:
+
+- The client answers -32602, and the sampling handler does not run, when a
+  request has `tools` or `toolChoice` and `capabilities` has no
+  `sampling.tools`. The previous release called the handler.
+- The client answers -32602 when the messages break the rules for tool uses
+  and tool results: tool uses are in assistant messages and tool results in
+  user messages, a message with tool results holds only tool results, each
+  tool use has a result in the next message, which is a user message, and
+  each tool result answers a tool use in the message before it.
+  `Server.requestSampling` throws -32602 for such messages before it sends
+  the request. The previous release sent them.
+- `Server.requestSampling` throws -32601 when the request has `tools` or
+  `toolChoice` and the client did not declare `sampling.tools`, also when the
+  server is not strict. The previous release sent the request.
+
 ### HTTP server transports
 
 `StatefulHTTPServerTransport`:
@@ -724,6 +744,7 @@ CODEOWNERS changed (#155, #294, #306, #308, #318, #320, #331, #333).
 | Discovery | `ServerDiscover` | [protocol.md](protocol.md#discovery-and-protocol-modes) |
 | Notification streams | `Client.listen(_:)`, `Client.Subscription`, `unsubscribeFromResource(uri:)`, `subscribedResourceURIs`, `Server.closeSubscriptions()`, `SubscriptionFilter` | [client.md](client.md#notifications-and-subscriptions) |
 | Multi round-trip requests | `.inputRequired(_:requestState:_meta:)`, `InputRequest`, `InputResponse`, `Client.Configuration.multiRoundTrip` | [server.md](server.md#multi-round-trip-requests) |
+| Sampling with tools (SEP-1577) | `Server.requestSampling(...tools:toolChoice:...)`, `.sampling(_:)` input requests with `tools` | [server.md](server.md#sampling-with-tools), [client.md](client.md#sampling) |
 | Skills (SEP-2640) | `Server.withSkills(_:listInResources:)`, `SkillCatalog`, `SkillPackage`, `InMemorySkillCatalog`, `Client.listSkills(cursor:)`, `getSkill(uri:)`, `loadSkill(_:options:)`, `LoadedSkill` | [server.md](server.md#skills), [client.md](client.md#skills) |
 | Tasks (SEP-1686, SEP-2663) | `Server.withTasks(_:)`, `TaskManager`, `HandlerContext.runAsTask(ttl:pollInterval:_:)`, `TaskContext`, `Tool.Execution`, `Client.Configuration.tasks`, `TaskHandle`, `TaskSnapshot`, `SubscriptionFilter.taskIds` | [server.md](server.md#tasks), [client.md](client.md#tasks) |
 | Error codes | `MCPError.Code`, `MCPError.errorCode` | [`MCPError` cases](#mcperror-cases) |

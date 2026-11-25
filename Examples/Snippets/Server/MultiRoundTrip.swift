@@ -64,6 +64,45 @@ func confirmation(_ message: String) -> CallTool.Result {
 }
 // endsnippet
 
+// snippet: mrtr-sampling-tools
+/// Lets the client's model call `get_weather` before it answers. The
+/// history goes in requestState. On the last round the model must answer
+/// without tools.
+func adviseTravel(_ params: CallTool.Parameters, maxRounds: Int = 4) throws -> CallTool.Result {
+    var history: [Sampling.Message] = [.user("Paris or London for a walk today?")]
+    if let state = params.requestState {
+        history = try JSONDecoder().decode([Sampling.Message].self, from: Data(state.utf8))
+    }
+    if let reply = params.inputResponses?["model"]?.sampling {
+        guard reply.stopReason == .toolUse else {
+            let answer = reply.content.asArray.compactMap { block -> Tool.Content? in
+                if case .text(let text) = block { return .text(text: text) }
+                return nil
+            }
+            return CallTool.Result(content: answer)
+        }
+        history.append(.assistant(reply.content))
+        // One tool result for each tool use, and no other content.
+        let results = reply.content.asArray.compactMap { block -> Sampling.Message.Content.ContentBlock? in
+            guard case .toolUse(let call) = block else { return nil }
+            let city = call.input["city"]?.stringValue ?? ""
+            return .toolResult(.init(toolUseId: call.id, content: [.text(currentWeather(in: city))]))
+        }
+        history.append(.user(.multiple(results)))
+    }
+    let round = (history.count + 1) / 2
+    let request = CreateSamplingMessage.Parameters(
+        messages: history, maxTokens: 500, tools: [weatherTool],
+        toolChoice: round >= maxRounds ? .init(mode: .none) : nil)
+    let state = String(decoding: try JSONEncoder().encode(history), as: UTF8.self)
+    return .inputRequired(["model": .sampling(request)], requestState: state)
+}
+// endsnippet
+
+func currentWeather(in city: String) -> String {
+    city == "Paris" ? "Paris: 18°C, partly cloudy" : "\(city): 15°C, rainy"
+}
+
 // snippet: server-requests
 /// Asks the client directly. 2025-11-25 and earlier only: at 2026-07-28
 /// these calls throw -32600; return input requests instead.
