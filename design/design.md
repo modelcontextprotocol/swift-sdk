@@ -15,6 +15,7 @@ Feature notes go deeper on single topics:
 | [mrtr.md](mrtr.md) | SEP-2322 multi round-trip requests and sealed `requestState` |
 | [tasks.md](tasks.md) | Tasks at 2025-11-25 (SEP-1686) and the 2026-07-28 tasks extension (SEP-2663) |
 | [skills.md](skills.md) | The skills extension (SEP-2640): frontmatter, catalogs, serving and verified loading |
+| [server_cards.md](server_cards.md) | Server Cards (SEP-2127): the document, serving, fetching and checks |
 | [auth.md](auth.md) | OAuth client architecture |
 | [linux.md](linux.md) | Linux status and what differs there by design |
 | [threat_model.md](threat_model.md) | Trust boundaries, defenses and their limits |

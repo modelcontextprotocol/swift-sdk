@@ -87,3 +87,4 @@ conformance tier:
 |---|---|---|
 | `io.modelcontextprotocol/tasks` (SEP-2663), and the experimental tasks of 2025-11-25 (SEP-1686) | [Tasks](server.md#tasks) | The 10 `tasks-*` server scenarios; 2025-11-25 against the TypeScript SDK in the interop `tasks` profile |
 | `io.modelcontextprotocol/skills` (SEP-2640) | [Skills](server.md#skills) | The 3 `sep-2640-*` server and 4 client scenarios |
+| Server Cards (SEP-2127), outside the protocol | [Server Cards](server.md#server-cards) | No scenario; the examples of the extension |

@@ -11,6 +11,9 @@
 //   Server and a StatefulHTTPServerTransport, and later requests are routed by
 //   their Mcp-Session-Id header. Idle sessions are closed after 10 minutes.
 //
+// GET /mcp/server-card answers the server's Server Card (SEP-2127), the
+// metadata a client can read before it connects.
+//
 // Limits a deployed server needs too: at most 100 sessions (503 beyond),
 // request bodies of at most 4 MiB (413), and the Host and Origin checks of
 // OriginValidator for this port. The server has no authentication: anyone who
@@ -29,6 +32,8 @@
 //     -d '{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{
 //          "io.modelcontextprotocol/protocolVersion":"2026-07-28",
 //          "io.modelcontextprotocol/clientCapabilities":{}}}}'
+//
+//   curl -s http://127.0.0.1:3000/mcp/server-card -H 'Accept: application/mcp-server-card+json'
 
 import Foundation
 import Logging
@@ -39,9 +44,13 @@ import MCP
 
 // MARK: - The MCP server
 
+/// The server's name: in reverse-DNS format, as its Server Card needs.
+let serverName = "com.example/http-example"
+let serverVersion = "1.0.0"
+
 /// A server with one tool, `echo`. The same code serves both eras.
 func makeServer() async -> Server {
-    let server = Server(name: "http-example", version: "1.0.0", capabilities: .init(tools: .init()))
+    let server = Server(name: serverName, version: serverVersion, capabilities: .init(tools: .init()))
     let echo = Tool(
         name: "echo", description: "Returns its input",
         inputSchema: ["type": "object", "properties": ["text": ["type": "string"]], "required": ["text"]])
@@ -75,9 +84,18 @@ actor Router {
     /// `initialize` requests whose session is not stored yet: they count
     /// toward the limit, since the actor runs other requests at each await.
     private var pendingSessions = 0
+    /// Answers GET /mcp/server-card.
+    nonisolated let card: ServerCardValidator
 
-    init(port: Int) {
+    init(port: Int) throws {
         self.port = port
+        card = try ServerCardValidator(
+            card: ServerCard(
+                info: .init(name: serverName, version: serverVersion),
+                endpoint: URL(string: "http://127.0.0.1:\(port)/mcp")!,
+                protocolVersions: Server.Configuration.default.protocolVersions,
+                description: "Echoes its input, for clients of both protocol eras."),
+            endpointPath: "/mcp")
         stateless = StatelessHTTPServerTransport(
             validationPipeline: StandardValidationPipeline(validators: [
                 OriginValidator.localhost(port: port),
@@ -249,6 +267,8 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 let response: HTTPResponse
                 if request.path == "/mcp" {
                     response = await router.handle(request)
+                } else if let card = router.card.response(to: request) {
+                    response = card
                 } else {
                     response = .error(statusCode: 404, .invalidRequest("Not Found"))
                 }
@@ -307,7 +327,7 @@ if let index = CommandLine.arguments.firstIndex(of: "--port"), index + 1 < Comma
     port = Int(CommandLine.arguments[index + 1]) ?? port
 }
 
-let router = Router(port: port)
+let router = try Router(port: port)
 try await router.start()
 
 let group = MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount)

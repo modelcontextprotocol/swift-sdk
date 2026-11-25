@@ -226,6 +226,10 @@ public enum HTTPHeaderName {
     public static let connection = "Connection"
     /// `Allow`: the methods an endpoint accepts, sent with 405 responses.
     public static let allow = "Allow"
+    /// `ETag`: the entity tag of a response, for revalidation.
+    public static let etag = "ETag"
+    /// `If-None-Match`: the entity tags a client has; 304 when one still matches.
+    public static let ifNoneMatch = "If-None-Match"
 }
 
 // MARK: - Content Types

@@ -239,12 +239,13 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
         default:
             // Validators that answer a request themselves, such as
             // ProtectedResourceMetadataValidator for the resource metadata
-            // document, run for every method. Anything else is 405.
+            // document or ServerCardValidator (which also answers 304), run
+            // for every method. Anything else is 405.
             let context = HTTPValidationContext(
                 httpMethod: request.method.uppercased(), sessionID: nil,
                 supportedProtocolVersions: Set(Version.stateless + Version.handshake))
             if let response = validationPipeline.validate(request, context: context),
-                (200..<300).contains(response.statusCode)
+                (200..<300).contains(response.statusCode) || response.statusCode == 304
             {
                 return response
             }

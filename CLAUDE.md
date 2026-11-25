@@ -266,6 +266,16 @@ regenerates `Tests/MCPTests/Generated/FrontmatterCorpus.swift` from the harness 
 - Fixtures: everything-server serves `pdf-processing` and `acme/billing/refunds`;
   everything-client lists (`no-prefetch`) or loads (`verify-*`). Default leg only.
 
+## Server Cards (SEP-2127)
+
+Outside the protocol (`design/server_cards.md`), pinned to `modelcontextprotocol/ext-server-card`
+at `526201bb`. `Base/ServerCard.swift`: `ServerCard` (the document, `validate()`, `fetch`,
+`cardURL(forEndpoint:)`, `Remote.url(resolving:)`, `mismatches(with:)`), `ServerCardError`.
+`HTTPServer/ServerCardValidator.swift` answers `<endpoint>/server-card` (ETag, 304, HEAD,
+CORS preflight); the stateless transport passes its 304, the stateful one runs validators for
+other methods. `scripts/server-card-examples.mjs` regenerates
+`Tests/MCPTests/Generated/ServerCardExamples.swift`. `Examples/http-server` serves a card.
+
 ## Interop
 
 `scripts/run-interop.sh [--update-results | --check]` runs the Swift, Go and Python SDKs' clients and
