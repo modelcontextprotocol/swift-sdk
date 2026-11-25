@@ -282,4 +282,14 @@ package enum JSONRPCMessageKind {
         }
         return nil
     }
+
+    /// The `requestId` of a `notifications/cancelled` message, rendered like
+    /// a request's ID, or `nil` for any other message.
+    static func cancelledRequestID(in data: Data) -> String? {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            json["method"] as? String == CancelledNotification.name,
+            let params = json["params"] as? [String: Any]
+        else { return nil }
+        return extractID(from: ["id": params["requestId"] as Any])
+    }
 }

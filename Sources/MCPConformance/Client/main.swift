@@ -468,6 +468,33 @@ func runToolsCallScenario(_ args: [String]) async throws {
     logger.debug("Tools call scenario completed successfully")
 }
 
+/// Lists tools and echoes the `json_schema_2020_12_tool` input schema back
+/// through `json_schema_echo`, so the harness can check that no JSON Schema
+/// 2020-12 keyword was dropped while decoding `tools/list`.
+func runJSONSchemaPreservationScenario(_ args: [String]) async throws {
+    var logger = Logger(
+        label: "mcp.conformance.client.json_schema",
+        factory: { StreamLogHandler.standardError(label: $0) }
+    )
+    logger.logLevel = .debug
+
+    guard let serverURLString = args.last,
+          let serverURL = URL(string: serverURLString) else {
+        throw ConformanceError.invalidArguments("Valid server URL is required")
+    }
+
+    let client = Client(name: "test-client", version: "1.0.0")
+    try await client.connect(transport: HTTPClientTransport(endpoint: serverURL, logger: logger))
+
+    let (tools, _) = try await client.listTools()
+    guard let focal = tools.first(where: { $0.name == "json_schema_2020_12_tool" }) else {
+        throw ConformanceError.invalidArguments("json_schema_2020_12_tool not listed")
+    }
+    _ = try await client.callTool(name: "json_schema_echo", arguments: ["schema": focal.inputSchema])
+
+    await client.disconnect()
+}
+
 // MARK: - SSE Scenarios
 
 /// Handler for SSE-related scenarios (retry, reconnection, etc.)
@@ -664,6 +691,7 @@ nonisolated(unsafe) let scenarioHandlers: [String: ScenarioHandler] = [
     "tools_call": runToolsCallScenario,
     "sse-retry": runSSEScenario,
     "elicitation-sep1034-client-defaults": runElicitationSEP1034ClientDefaults,
+    "json-schema-2020-12-preservation": runJSONSchemaPreservationScenario,
 ]
 
 // MARK: - Error Types

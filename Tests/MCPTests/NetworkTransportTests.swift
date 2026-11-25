@@ -593,6 +593,36 @@ import Testing
             await transport.disconnect()
         }
 
+        @Test("Receive buffer releases parsed messages")
+        func testReceiveBufferStaysBounded() async throws {
+            let mockConnection = MockNetworkConnection()
+            let transport = NetworkTransport(
+                mockConnection,
+                heartbeatConfig: .disabled
+            )
+
+            // Chunks end mid-message, so some reads leave a partial message buffered.
+            let messageCount = 5000
+            let bytes = Data(
+                (0..<messageCount).map { #"{"jsonrpc":"2.0","id":\#($0),"method":"ping"}"# + "\n" }
+                    .joined().utf8)
+            for start in stride(from: 0, to: bytes.count, by: 1000) {
+                mockConnection.queueDataForReceiving(
+                    Data(bytes[start..<min(start + 1000, bytes.count)]))
+            }
+
+            try await transport.connect()
+            let stream = await transport.receive()
+            var iterator = stream.makeAsyncIterator()
+            for _ in 0..<messageCount {
+                _ = try await iterator.next()
+            }
+
+            // Every message was parsed; before the fix the buffer spanned every byte received.
+            #expect(await transport.receiveBufferSpan <= 1000)
+            await transport.disconnect()
+        }
+
         @Test("Reconnection Backoff")
         func testReconnectionBackoff() async throws {
             let mockConnection = MockNetworkConnection()

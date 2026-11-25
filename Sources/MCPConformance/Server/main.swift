@@ -376,7 +376,12 @@ func createConformanceServer(state: ServerState, transport: StatefulHTTPServerTr
             Resource(name: "Static Text Resource", uri: "test://static-text", description: "A simple static text resource", mimeType: "text/plain"),
             Resource(name: "Static Binary Resource", uri: "test://static-binary", description: "A simple static binary resource", mimeType: "application/octet-stream"),
             Resource(name: "Watched Resource", uri: "test://watched", description: "A resource that can be subscribed to for updates", mimeType: "text/plain"),
-            Resource(name: "Template Resource", uri: "test://template/{id}", description: "A resource template with URI parameters", mimeType: "text/plain"),
+        ])
+    }
+
+    await server.withMethodHandler(ListResourceTemplates.self) { _ in
+        .init(templates: [
+            Resource.Template(uriTemplate: "test://template/{id}", name: "Template Resource", description: "A resource template with URI parameters", mimeType: "text/plain"),
         ])
     }
 
@@ -397,7 +402,7 @@ func createConformanceServer(state: ServerState, transport: StatefulHTTPServerTr
                 let id = String(params.uri.dropFirst("test://template/".count))
                 return .init(contents: [.text("Template resource with id: \(id)", uri: params.uri)])
             }
-            return .init(contents: [.text("Resource not found: \(params.uri)", uri: params.uri)])
+            throw MCPError.invalidParams("Resource not found: \(params.uri)")
         }
     }
 
@@ -441,7 +446,7 @@ func createConformanceServer(state: ServerState, transport: StatefulHTTPServerTr
                 .user(.text(text: "Please analyze the image above."))
             ])
         default:
-            throw MCPError.invalidRequest("Unknown prompt: \(params.name)")
+            throw MCPError.invalidParams("Unknown prompt: \(params.name)")
         }
     }
 

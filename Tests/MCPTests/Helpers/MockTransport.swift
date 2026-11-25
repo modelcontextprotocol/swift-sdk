@@ -59,6 +59,14 @@ actor MockTransport: Transport {
         sentData.append(message)
     }
 
+    /// Related request IDs passed to `send(_:relatedRequestID:)`, in call order.
+    private(set) var relatedRequestIDs: [ID?] = []
+
+    public func send(_ message: Data, relatedRequestID: ID?) async throws {
+        try await send(message)
+        relatedRequestIDs.append(relatedRequestID)
+    }
+
     public func receive() -> AsyncThrowingStream<Data, Swift.Error> {
         return AsyncThrowingStream<Data, Swift.Error> { continuation in
             dataStreamContinuation = continuation
@@ -114,6 +122,18 @@ actor MockTransport: Transport {
             return try decoder.decode(T.self, from: lastMessage)
         } catch {
             return nil
+        }
+    }
+
+    struct WaitTimedOut: Swift.Error {}
+
+    /// Waits until at least `count` messages were sent. Tests use it instead
+    /// of a fixed sleep, which is too short on a slow machine.
+    func waitForSentMessages(count: Int = 1, timeout: Duration = .seconds(30)) async throws {
+        let deadline = ContinuousClock.now + timeout
+        while sentData.count < count {
+            guard ContinuousClock.now < deadline else { throw WaitTimedOut() }
+            try await Task.sleep(for: .milliseconds(5))
         }
     }
 

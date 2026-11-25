@@ -7,9 +7,5 @@
 # Entries are '<scenario>:<check-id>', or '<scenario>' for a scenario that
 # failed without producing a failing check. The harness fails a run on any
 # unlisted failure and on any listed entry that now passes.
-server:
-  - "elicitation-sep1330-enums:elicitation-sep1330-general"
-  - "resources-list:wire-schema-valid"
-client:
-  - "json-schema-2020-12-preservation:json-schema-2020-12-client-echo-completed"
-  - "json-schema-2020-12-preservation:json-schema-2020-12-client-tool-found"
+server: []
+client: []

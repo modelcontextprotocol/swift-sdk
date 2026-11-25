@@ -190,6 +190,48 @@ struct StdioTransportTests {
         await transport.disconnect()
     }
 
+    @Test("Read buffer releases parsed messages")
+    func testReadBufferStaysBounded() async throws {
+        let (input, writer) = try FileDescriptor.pipe()
+        let (reader, output) = try FileDescriptor.pipe()
+        defer {
+            try? input.close()
+            try? writer.close()
+            try? reader.close()
+            try? output.close()
+        }
+        let transport = StdioTransport(input: input, output: output, logger: nil)
+        try await transport.connect()
+        let stream: AsyncThrowingStream<Data, Swift.Error> = await transport.receive()
+        var iterator = stream.makeAsyncIterator()
+
+        // Chunks end mid-message, so some reads leave a partial message buffered.
+        let messageCount = 2000
+        let bytes = Data(
+            (0..<messageCount).map { #"{"jsonrpc":"2.0","id":\#($0),"method":"ping"}"# + "\n" }
+                .joined().utf8)
+        var written = 0
+        var complete = 0
+        var received = 0
+        var largestSpan = 0
+        while written < bytes.count {
+            let chunk = bytes[written..<min(written + 3000, bytes.count)]
+            try writer.writeAll(chunk)
+            written += chunk.count
+            complete += chunk.count(where: { $0 == UInt8(ascii: "\n") })
+            while received < complete {
+                _ = try await iterator.next()
+                received += 1
+            }
+            largestSpan = max(largestSpan, await transport.receiveBufferSpan)
+        }
+
+        #expect(received == messageCount)
+        // At most one read's remainder; before the fix this was every byte received.
+        #expect(largestSpan <= 4096)
+        await transport.disconnect()
+    }
+
     @Test("Invalid JSON")
     func testStdioTransportInvalidJSON() async throws {
         let (input, writer) = try FileDescriptor.pipe()
