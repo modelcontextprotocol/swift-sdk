@@ -207,6 +207,11 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
         // Handle by message type
         switch messageKind {
         case .notification, .response:
+            // A CancelledNotification must also complete the target request's HTTP exchange.
+            // A cancelled request produces no JSON-RPC response (the server must stay silent),
+            // so nothing else would ever resume its waiter and the original POST would hang
+            // forever (issue #255). Complete it here before forwarding the notification.
+            completeCancelledExchange(body)
             // Yield to server and return 202 Accepted
             incomingContinuation.yield(body)
             return .accepted()
@@ -241,6 +246,69 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
 
         httpRequestContexts.removeValue(forKey: requestID)
         return .data(responseData, headers: [HTTPHeaderName.contentType: ContentType.json])
+    }
+
+    // MARK: - Cancellation
+
+    /// If `data` is a `notifications/cancelled` referencing an in-flight request, completes
+    /// that request's HTTP exchange with a JSON-RPC error so the original POST returns instead
+    /// of hanging. A cancelled request yields no JSON-RPC response, so without this the waiter
+    /// registered in ``handleJSONRPCRequest`` would only ever be resumed by ``terminate()``.
+    /// See issue #255. No-op for any other message or an unknown/absent request id.
+    private func completeCancelledExchange(_ data: Data) {
+        guard let params = Self.decodeCancellation(data), let id = params.requestId else {
+            return
+        }
+        let key = id.description
+        guard let continuation = responseWaiters.removeValue(forKey: key) else {
+            return
+        }
+        httpRequestContexts.removeValue(forKey: key)
+        logger.debug(
+            "Completing a cancelled request's HTTP exchange",
+            metadata: ["requestID": "\(key)"]
+        )
+        continuation.resume(returning: Self.cancelledResponseBody(id: id, reason: params.reason))
+    }
+
+    /// Decodes a `notifications/cancelled` message's parameters, or `nil` if `data` is not a
+    /// cancellation notification.
+    private static func decodeCancellation(_ data: Data) -> CancelledNotification.Parameters? {
+        struct Envelope: Decodable {
+            let method: String
+            let params: CancelledNotification.Parameters?
+        }
+        guard let envelope = try? JSONDecoder().decode(Envelope.self, from: data),
+            envelope.method == CancelledNotification.name
+        else {
+            return nil
+        }
+        return envelope.params
+    }
+
+    /// Builds a JSON-RPC error response body for a cancelled request, echoing the request id so
+    /// the client can correlate it. Uses an implementation-defined server-error code in the
+    /// JSON-RPC `-32000…-32099` range.
+    private static func cancelledResponseBody(id: ID, reason: String?) -> Data {
+        let cancelledErrorCode = -32002
+        var message = "Request cancelled"
+        if let reason, !reason.isEmpty {
+            message += ": \(reason)"
+        }
+        let idValue: Any
+        switch id {
+        case .string(let string): idValue = string
+        case .number(let number): idValue = number
+        }
+        let body: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": idValue,
+            "error": [
+                "code": cancelledErrorCode,
+                "message": message,
+            ] as [String: Any],
+        ]
+        return (try? JSONSerialization.data(withJSONObject: body)) ?? Data()
     }
 
     // MARK: - HTTPContextProviding
