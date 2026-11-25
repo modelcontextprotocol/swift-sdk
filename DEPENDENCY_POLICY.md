@@ -11,17 +11,19 @@ constrain their resolution as little as possible. Related: [VERSIONING.md](VERSI
 | [swift-system](https://github.com/apple/swift-system) | `SystemPackage` | `from: "1.0.0"` | `MCP`, `MCPTests`, `HelloClient` | file descriptors and `Errno` for `StdioTransport` and `MCPError`, where the platform has no `System` module |
 | [swift-log](https://github.com/apple/swift-log) | `Logging` | `from: "1.5.0"` | `MCP`, tests, fixtures, examples | `Logger` on every transport, client and server |
 | [eventsource](https://github.com/mattt/eventsource) | `EventSource` | `from: "1.1.0"` | `MCP` on Apple platforms only | SSE parsing in `HTTPClientTransport` |
-| [swift-crypto](https://github.com/apple/swift-crypto) | `Crypto` | `"3.0.0"..<"5.0.0"` | `MCP` | AES-256-GCM, HKDF-SHA256 and SHA-256 for `requestState` sealing; SHA-256 for PKCE; P-256 for `private_key_jwt` |
+| [swift-crypto](https://github.com/apple/swift-crypto) | `Crypto` | `"3.0.0"..<"5.0.0"` | `MCP` | AES-256-GCM, HKDF-SHA256 and SHA-256 for `requestState` sealing; SHA-256 for PKCE; P-256 for `private_key_jwt` and DPoP proofs |
 | [swift-nio](https://github.com/apple/swift-nio) | `NIOCore`, `NIOPosix`, `NIOHTTP1` | `from: "2.65.0"` | `MCPConformanceServer`, `HTTPServerExample` only | HTTP server in the fixture and the example |
-| [swift-docc-plugin](https://github.com/swiftlang/swift-docc-plugin) | plugin | `branch: "main"` | none | `swift package generate-documentation` |
+| [swift-docc-plugin](https://github.com/swiftlang/swift-docc-plugin) | plugin | `from: "1.4.0"` | none | `swift package generate-documentation` |
 
 Notes:
 
 - swift-nio and swift-docc-plugin are declared only in `Package.swift`. `Package@swift-6.0.swift`
   declares swift-system, swift-log, eventsource and swift-crypto.
+- swift-docc-plugin 1.4.0 is the oldest release that works with current DocC: earlier ones pass
+  `--index`, which `docc convert` no longer accepts.
 - No target of the `MCP` library product depends on swift-nio. HTTP server transports take and
   return `HTTPRequest`/`HTTPResponse`, so applications choose their own HTTP server.
-- swift-crypto was added in this major version for `requestState` sealing
+- swift-crypto was added in 0.13.0 for `requestState` sealing
   ([design/mrtr.md](design/mrtr.md)). Its range spans majors 3 and 4; the APIs used (`AES.GCM`,
   `HKDF`, `SHA256`, `SymmetricKey`, `P256.Signing`) exist in both. CI resolves 4.x. OAuth uses
   it for PKCE and `private_key_jwt`, so those work on Linux too.
@@ -58,8 +60,11 @@ relaxed.
   uses exist unchanged in each of them. CI tests only the version in `Package.resolved`, so build
   against the oldest major by hand when the range or the SDK's use changes.
 - No upper bound below the next major unless a release is known to break the SDK.
-- No `branch:` or `revision:` requirements for the library. swift-docc-plugin is the one
-  exception: it is a build tool, and no product depends on it.
+- No `branch:` or `revision:` requirements, build tools such as swift-docc-plugin included.
+  SwiftPM refuses to resolve a version-based requirement on a package whose manifest has a
+  branch- or revision-based dependency, so a single one would stop every consumer that depends
+  on a released `MCP` version from resolving it. A branch also moves under everyone who builds
+  the package.
 - Moving a dependency to a new major, or adding one to `MCP`, is a breaking change under
   [VERSIONING.md](VERSIONING.md). Raising a floor within a major is allowed in a minor and is
   listed in the release notes.

@@ -16,7 +16,7 @@ Status of the MCP Swift SDK against the MCP specification and what is deferred. 
 A server answers both eras on one `Server`. See [docs/protocol.md](docs/protocol.md) for the
 lifecycle and [docs/migration.md](docs/migration.md) for upgrading.
 
-## Implemented in this major version
+## Implemented in 0.13.0
 
 ### 2026-07-28 core
 

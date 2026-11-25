@@ -1,8 +1,10 @@
 # Migration guide
 
-This guide lists every public API change between the previous release
-(commit `2a44bfd`) and this major version: the changes that break source
-code, the changes in behavior and on the wire, and the new opt-in features.
+This guide lists every public API change between 0.12 (commit `2a44bfd`)
+and 0.13.0: the changes that break source code, the changes in behavior and
+on the wire, and the new opt-in features.
+Under the package's 0.x rules ([VERSIONING.md](../VERSIONING.md)), 0.13.0 is
+the major version that carries them.
 Most code compiles unchanged; the breaking changes are in `MCPError`,
 `HTTPResponse`, `Client.Capabilities.experimental`, `OAuthAuthorizationError`
 and `HTTPClientAuthorizer`.

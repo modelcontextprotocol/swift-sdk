@@ -1,5 +1,5 @@
 {
-  "originHash" : "f7585ddf4cc227314cc8c033e3e166f56fb0099a0f26da0bd7e434b2fb9b4115",
+  "originHash" : "434d426c13091952556928d5e67f8ca349945aeff2eef6daab81f719d9b2843a",
   "pins" : [
     {
       "identity" : "eventsource",
@@ -51,8 +51,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/swiftlang/swift-docc-plugin",
       "state" : {
-        "branch" : "main",
-        "revision" : "e977f65879f82b375a044c8837597f690c067da6"
+        "revision" : "e977f65879f82b375a044c8837597f690c067da6",
+        "version" : "1.4.6"
       }
     },
     {
