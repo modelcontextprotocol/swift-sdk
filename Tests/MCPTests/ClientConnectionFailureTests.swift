@@ -450,7 +450,8 @@ struct OutgoingMessageTests {
 
         override func stopLoading() {
             guard isDiscover else { return }
-            Task { await Self.state.stopped() }
+            let state = Self.state
+            Task { await state.stopped() }
         }
 
         private func body() -> Data {

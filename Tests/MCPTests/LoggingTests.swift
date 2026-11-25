@@ -205,6 +205,7 @@ struct LoggingTests {
     // MARK: - Client Integration Tests
 
     @Test("Client setLoggingLevel sends correct request")
+    @available(*, deprecated, message: "Tests the deprecated logging API (SEP-2577)")
     func testClientSetLoggingLevel() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
@@ -249,6 +250,7 @@ struct LoggingTests {
     }
 
     @Test("Client setLoggingLevel fails without logging capability")
+    @available(*, deprecated, message: "Tests the deprecated logging API (SEP-2577)")
     func testClientSetLoggingLevelFailsWithoutCapability() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
@@ -277,6 +279,7 @@ struct LoggingTests {
     // MARK: - Server Integration Tests
 
     @Test("Server log method sends notification")
+    @available(*, deprecated, message: "Tests the deprecated logging API (SEP-2577)")
     func testServerLogMethod() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
@@ -332,6 +335,7 @@ struct LoggingTests {
     }
 
     @Test("Server log method with codable data")
+    @available(*, deprecated, message: "Tests the deprecated logging API (SEP-2577)")
     func testServerLogMethodWithCodableData() async throws {
         struct LogData: Codable, Hashable {
             let message: String
@@ -402,6 +406,7 @@ struct LoggingTests {
     }
 
     @Test("Server log without logger name")
+    @available(*, deprecated, message: "Tests the deprecated logging API (SEP-2577)")
     func testServerLogWithoutLoggerName() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
@@ -452,6 +457,7 @@ struct LoggingTests {
     }
 
     @Test("Multiple log levels sent correctly")
+    @available(*, deprecated, message: "Tests the deprecated logging API (SEP-2577)")
     func testMultipleLogLevels() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 

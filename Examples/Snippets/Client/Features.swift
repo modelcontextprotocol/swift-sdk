@@ -13,6 +13,7 @@ actor Workspace {
 }
 
 /// Exposes the workspace roots to the server.
+@available(*, deprecated, message: "Uses the deprecated roots API (SEP-2577)")
 func connectWithRoots(transport: any Transport, workspace: Workspace) async throws -> Client {
     // snippet: roots
     let client = Client(
@@ -38,6 +39,7 @@ func generate(_ prompt: String, system: String?, maxTokens: Int) async throws ->
 }
 
 /// Answers `sampling/createMessage` with the application's model.
+@available(*, deprecated, message: "Uses the deprecated sampling API (SEP-2577)")
 func connectWithSampling(transport: any Transport) async throws -> Client {
     // snippet: sampling
     let client = Client(

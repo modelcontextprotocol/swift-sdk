@@ -1681,6 +1681,7 @@ struct ServerHandlerContextTests {
     }
 
     @Test("Handler notifications carry the originating request ID")
+    @available(*, deprecated, message: "Tests the deprecated logging API (SEP-2577)")
     func testHandlerNotificationsCarryRelatedRequestID() async throws {
         let transport = MockTransport()
         let server = Server(
@@ -1707,6 +1708,7 @@ struct ServerHandlerContextTests {
     }
 
     @Test("Handler requests to the client carry the originating request ID")
+    @available(*, deprecated, message: "Tests the deprecated roots API (SEP-2577)")
     func testHandlerRequestsCarryRelatedRequestID() async throws {
         let transport = MockTransport()
         let server = Server(name: "TestServer", version: "1.0", capabilities: .init(tools: .init()))

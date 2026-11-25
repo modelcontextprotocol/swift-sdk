@@ -114,7 +114,7 @@ actor EndableTransport: Transport {
             let response = Initialize.response(
                 id: id,
                 result: .init(
-                    protocolVersion: Version.latest,
+                    protocolVersion: Version.latestHandshake,
                     capabilities: .init(),
                     serverInfo: .init(name: "TestServer", version: "1.0"),
                     instructions: nil

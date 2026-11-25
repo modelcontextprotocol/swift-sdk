@@ -382,14 +382,17 @@ struct ServerCardValidatorTests {
 
         @Test("A Content-Length over the limit is refused before the body is read")
         func contentLength() async throws {
-            let (session, log) = CardURLProtocol.session([
-                url.absoluteString: .stream(chunk: 64 << 10, count: 160, contentLength: 10 << 20, delay: 0.2)
+            let contentLength = 10 << 20
+            let (session, _) = CardURLProtocol.session([
+                url.absoluteString: .stream(chunk: 64 << 10, count: 160, contentLength: contentLength)
             ])
-            await #expect { _ = try await ServerCard.fetch(from: url, session: session) } throws: {
-                ($0 as? ServerCardError)?.reason == .tooLarge
+            let error = await #expect(throws: ServerCardError.self) {
+                _ = try await ServerCard.fetch(from: url, session: session)
             }
-            // The body starts 0.2 s after the headers; the fetch refuses on the headers.
-            #expect(await log.deliveredWhenStopped() < ServerCard.maximumSize)
+            // Refused on the headers: the message gives the Content-Length. A body
+            // read to the limit ends in "more than \(maximumSize) bytes" instead.
+            #expect(error?.reason == .tooLarge)
+            #expect(error?.message == "The card has \(contentLength) bytes, more than \(ServerCard.maximumSize)")
         }
 
         // swift-corelibs-foundation cannot redirect a URLProtocol's request
@@ -503,7 +506,7 @@ struct ServerCardValidatorTests {
         enum Step: Sendable {
             case card
             case redirect(String)
-            case stream(chunk: Int, count: Int, contentLength: Int? = nil, delay: TimeInterval = 0)
+            case stream(chunk: Int, count: Int, contentLength: Int? = nil)
         }
 
         final class Log: @unchecked Sendable {
@@ -574,16 +577,24 @@ struct ServerCardValidatorTests {
                 client?.urlProtocol(self, wasRedirectedTo: next, redirectResponse: response)
                 // A followed redirect stops this loading; a refused one gets
                 // the 3xx as the response.
+                let loader = SendableURLProtocol(self)
                 DispatchQueue.global().asyncAfter(deadline: .now() + 0.05) {
-                    guard !self.isStopped else { return }
-                    self.client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-                    guard !self.isStopped else { return }
-                    self.client?.urlProtocolDidFinishLoading(self)
+                    loader.value.finish(with: response)
                 }
-            case .stream(let chunk, let count, let contentLength, let delay):
+            case .stream(let chunk, let count, let contentLength):
                 respond(url, status: 200, headers: contentLength.map { ["Content-Length": String($0)] } ?? [:])
-                DispatchQueue.global().asyncAfter(deadline: .now() + delay) { self.stream(chunk: chunk, count: count) }
+                let loader = SendableURLProtocol(self)
+                DispatchQueue.global().async {
+                    loader.value.stream(chunk: chunk, count: count)
+                }
             }
+        }
+
+        private func finish(with response: HTTPURLResponse) {
+            guard !isStopped else { return }
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            guard !isStopped else { return }
+            client?.urlProtocolDidFinishLoading(self)
         }
 
         private func stream(chunk: Int, count: Int) {

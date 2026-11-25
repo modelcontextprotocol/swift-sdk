@@ -101,6 +101,7 @@ private func connect(
 }
 
 /// Registers handlers that answer every input request.
+@available(*, deprecated, message: "Uses the deprecated roots and sampling APIs (SEP-2577)")
 private func answerEverything(_ client: Client, elicitations: Counter = Counter()) async {
     await client.withElicitationHandler { _ in
         await elicitations.increment()
@@ -305,6 +306,7 @@ struct RequestStateTests {
 @Suite("Multi Round-Trip Requests")
 struct MultiRoundTripTests {
     @Test("The client fulfills input requests and retries until complete (2026-07-28)")
+    @available(*, deprecated, message: "Uses the deprecated roots and sampling APIs (SEP-2577)")
     func testClientLoop() async throws {
         let calls = Counter()
         let elicitations = Counter()
@@ -390,6 +392,7 @@ struct MultiRoundTripTests {
     @Test(
         "A form elicitation needs form elicitation: a URL-only client gets -32021, an empty declaration is form",
         arguments: [Client.ProtocolMode.automatic, .handshake])
+    @available(*, deprecated, message: "Uses the deprecated roots and sampling APIs (SEP-2577)")
     func testFormElicitationCapability(mode: Client.ProtocolMode) async throws {
         let server = await makeRoundTripServer()
         let urlOnly = try await connect(
@@ -501,6 +504,7 @@ struct MultiRoundTripTests {
     @Test(
         "A data: URL string in a sampling prompt and its result is kept as written",
         arguments: [Client.ProtocolMode.automatic, .handshake])
+    @available(*, deprecated, message: "Tests the deprecated sampling API (SEP-2577)")
     func testDataURLStringsInKnownKinds(mode: Client.ProtocolMode) async throws {
         let server = Server(name: "mrtr", version: "1.0", capabilities: .init(tools: .init()))
         await server.withMethodHandler(CallTool.self) { params in
@@ -525,6 +529,7 @@ struct MultiRoundTripTests {
     }
 
     @Test("A result with content and input requests is a server error")
+    @available(*, deprecated, message: "Uses the deprecated roots and sampling APIs (SEP-2577)")
     func testContentAndInput() async throws {
         let server = await makeRoundTripServer()
         let client = try await connect(server) { await answerEverything($0) }
@@ -540,6 +545,7 @@ struct MultiRoundTripTests {
     @Test(
         "An input-required result with nothing to answer is a server error",
         arguments: [Client.ProtocolMode.automatic, .handshake])
+    @available(*, deprecated, message: "Uses the deprecated roots and sampling APIs (SEP-2577)")
     func testEmptyInputRequests(mode: Client.ProtocolMode) async throws {
         let calls = Counter()
         let server = await makeRoundTripServer(calls: calls)
@@ -575,6 +581,7 @@ struct MultiRoundTripTests {
     }
 
     @Test("For handshake clients the server fulfills input requests itself")
+    @available(*, deprecated, message: "Uses the deprecated roots and sampling APIs (SEP-2577)")
     func testLegacyBridge() async throws {
         let calls = Counter()
         let elicitations = Counter()
@@ -662,6 +669,7 @@ struct MultiRoundTripTests {
     }
 
     @Test("The client refuses a result with more input requests than the limit, before any handler runs")
+    @available(*, deprecated, message: "Uses the deprecated roots and sampling APIs (SEP-2577)")
     func testInputRequestLimit() async throws {
         let server = Server(name: "many", version: "1.0", capabilities: .init(tools: .init()))
         await server.withMethodHandler(CallTool.self) { _ in
@@ -709,6 +717,7 @@ struct MultiRoundTripTests {
     }
 
     @Test("cancelRequest right after send ends the exchange before any round")
+    @available(*, deprecated, message: "Uses the deprecated roots and sampling APIs (SEP-2577)")
     func testCancelBeforeFirstResponse() async throws {
         let server = await makeRoundTripServer()
         let elicitations = Counter()
@@ -768,6 +777,7 @@ struct MultiRoundTripTests {
     }
 
     @Test("The handshake bridge checks client capabilities without strict mode")
+    @available(*, deprecated, message: "Tests the deprecated sampling API (SEP-2577)")
     func testBridgeChecksCapabilities() async throws {
         let server = await makeRoundTripServer()
         let samplings = Counter()

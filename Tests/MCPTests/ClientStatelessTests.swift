@@ -118,6 +118,7 @@ struct ClientStatelessTests {
     }
 
     @Test("setLoggingLevel on a stateless connection stamps the level")
+    @available(*, deprecated, message: "Tests the deprecated logging API (SEP-2577)")
     func testStatelessLogLevel() async throws {
         let server = await makeStatelessServer()
         let (client, _) = try await connectClient(server, mode: .automatic)
@@ -129,6 +130,7 @@ struct ClientStatelessTests {
     }
 
     @Test("Changing configuration.logLevel after init stamps the new level")
+    @available(*, deprecated, message: "Tests the deprecated logging API (SEP-2577)")
     func testConfigurationLogLevelChange() async throws {
         let server = await makeStatelessServer()
         let (client, _) = try await connectClient(server, mode: .automatic, logLevel: .warning)
@@ -149,6 +151,7 @@ struct ClientStatelessTests {
     }
 
     @Test("A reconnect starts from configuration.logLevel")
+    @available(*, deprecated, message: "Tests the deprecated logging API (SEP-2577)")
     func testReconnectResetsLogLevel() async throws {
         let first = await makeStatelessServer()
         let second = await makeStatelessServer()

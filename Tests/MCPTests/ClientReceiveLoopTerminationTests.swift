@@ -385,7 +385,7 @@ struct ClientReceiveLoopTerminationTests {
         let response = Initialize.response(
             id: request.id,
             result: .init(
-                protocolVersion: Version.latest,
+                protocolVersion: Version.latestHandshake,
                 capabilities: .init(),
                 serverInfo: .init(name: "TestServer", version: "1.0"),
                 instructions: nil

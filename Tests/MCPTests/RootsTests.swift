@@ -249,6 +249,7 @@ struct RootsTests {
     // MARK: - Integration Tests
 
     @Test("Server listRoots with client that has roots capability")
+    @available(*, deprecated, message: "Tests the deprecated roots API (SEP-2577)")
     func testServerListRootsWithCapableClient() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
@@ -294,6 +295,7 @@ struct RootsTests {
     }
 
     @Test("Server listRoots fails when client lacks roots capability (strict mode)")
+    @available(*, deprecated, message: "Tests the deprecated roots API (SEP-2577)")
     func testServerListRootsFailsWithoutCapability() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
@@ -328,6 +330,7 @@ struct RootsTests {
     }
 
     @Test("Server listRoots succeeds when client lacks capability (non-strict mode)")
+    @available(*, deprecated, message: "Tests the deprecated roots API (SEP-2577)")
     func testServerListRootsNonStrictMode() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
@@ -367,6 +370,7 @@ struct RootsTests {
     }
 
     @Test("Client sends roots list changed notification")
+    @available(*, deprecated, message: "Tests the deprecated roots API (SEP-2577)")
     func testClientSendsRootsListChangedNotification() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
@@ -412,6 +416,7 @@ struct RootsTests {
     }
 
     @Test("Server listRoots fails when client has no handler registered")
+    @available(*, deprecated, message: "Tests the deprecated roots API (SEP-2577)")
     func testServerListRootsFailsWithoutHandler() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
@@ -450,6 +455,7 @@ struct RootsTests {
     }
 
     @Test("Multiple roots requests work correctly")
+    @available(*, deprecated, message: "Tests the deprecated roots API (SEP-2577)")
     func testMultipleRootsRequests() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 

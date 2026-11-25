@@ -366,6 +366,7 @@ struct ServerDefaultHandlerTests {
     }
 
     @Test("logging/setLevel filters log messages on a handshake connection")
+    @available(*, deprecated, message: "Tests the deprecated logging API (SEP-2577)")
     func setLevelFilters() async throws {
         let server = Server(name: "s", version: "1", capabilities: .init(logging: .init(), tools: .init()))
         await server.withMethodHandler(CallTool.self) { _ in
@@ -556,6 +557,7 @@ struct ServerLifecycleTests {
     }
 
     @Test("a request to the client sent while stop() disconnects fails")
+    @available(*, deprecated, message: "Tests the deprecated sampling API (SEP-2577)")
     func requestDuringStopFails() async throws {
         let server = Server(name: "s", version: "1")
         let transport = EndableTransport(mode: .shared)

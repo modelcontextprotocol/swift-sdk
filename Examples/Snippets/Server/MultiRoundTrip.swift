@@ -104,18 +104,29 @@ func currentWeather(in city: String) -> String {
 }
 
 // snippet: server-requests
-/// Asks the client while it handles `clean`, so the requests belong to that
-/// `tools/call` (SEP-2260). 2025-11-25 and earlier only: at 2026-07-28 these
-/// calls throw -32600; return input requests instead.
-func registerCleanTool(on server: Server, roots: RootsCache) async {
+/// Asks the client while it handles `clean`, so the request belongs to that
+/// `tools/call` (SEP-2260). 2025-11-25 and earlier only: at 2026-07-28 this
+/// call throws -32600; return input requests instead.
+func registerCleanTool(on server: Server) async {
     await server.withMethodHandler(CallTool.self) { [weak server] _ in
         guard let server else { throw MCPError.internalError("Server is gone") }
-        let current = try await roots.roots(of: server)
         let answer = try await server.requestElicitation(
-            message: "Clean \(current.count) workspace roots?",
+            message: "Clean the workspace?",
             requestedSchema: .init(properties: ["confirm": ["type": "boolean"]], required: ["confirm"]))
         let confirmed = answer.action == .accept && answer.content?["confirm"]?.boolValue == true
         return CallTool.Result(content: [.text(text: "\(confirmed)")])
+    }
+}
+// endsnippet
+
+// snippet: server-roots
+/// Reports the client's roots while it handles `roots`, from the cache.
+@available(*, deprecated, message: "Uses the deprecated roots API (SEP-2577)")
+func registerRootsTool(on server: Server, roots: RootsCache) async {
+    await server.withMethodHandler(CallTool.self) { [weak server] _ in
+        guard let server else { throw MCPError.internalError("Server is gone") }
+        let current = try await roots.roots(of: server)
+        return CallTool.Result(content: [.text(text: "\(current.count) roots")])
     }
 }
 
@@ -133,6 +144,7 @@ actor RootsCache {
     }
 
     /// The roots. Call it from a handler.
+    @available(*, deprecated, message: "Uses the deprecated roots API (SEP-2577)")
     func roots(of server: Server) async throws -> [Root] {
         if let cached { return cached }
         let started = generation
