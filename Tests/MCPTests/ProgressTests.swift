@@ -351,7 +351,7 @@ struct ProgressTests {
     @Test("Client notification updates should fire when server sends them")
     func testClientNotificationUpdates() async throws {
         let pair = await InMemoryTransport.createConnectedPair()
-        let client = Client(name: "testClient", version: "1")
+        let client = Client(name: "testClient", version: "1", configuration: .handshake)
         let token = ProgressToken.unique()
 
         var progresses: [Double] = []

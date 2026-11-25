@@ -8,7 +8,7 @@ func versionLists() -> (handshake: [String], stateless: [String], supported: Set
     (
         Version.handshake,  // ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
         Version.stateless,  // ["2026-07-28"]
-        Version.supported,  // Set(Version.handshake): 2026-07-28 is not in it yet
+        Version.supported,  // both lists
         Version.latest  // "2025-11-25": what `initialize` requests
     )
 }
@@ -54,11 +54,11 @@ let statelessOnly = Server.Configuration(protocolVersions: Version.stateless)
 // endsnippet
 
 // snippet: versions-client-modes
-/// `initialize` only: the default.
-let handshakeMode = Client.Configuration(protocolMode: .handshake)
-
-/// `server/discover` at 2026-07-28, with a fallback to `initialize`.
+/// `server/discover` at 2026-07-28, with a fallback to `initialize`: the default.
 let automaticMode = Client.Configuration(protocolMode: .automatic)
+
+/// `initialize` only.
+let handshakeMode = Client.Configuration(protocolMode: .handshake)
 
 /// `server/discover` only, starting at 2026-07-28: no fallback.
 let pinnedMode = Client.Configuration(protocolMode: .stateless(Version.v2026_07_28))

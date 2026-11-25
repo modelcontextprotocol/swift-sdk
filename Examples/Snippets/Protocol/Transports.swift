@@ -50,9 +50,7 @@ func connectOverHTTP(endpoint: URL) async throws -> Client {
             request.setValue("example/1.0", forHTTPHeaderField: "User-Agent")
             return request
         })
-    let client = Client(
-        name: "example-client", version: "1.0.0",
-        configuration: .init(protocolMode: .automatic))
+    let client = Client(name: "example-client", version: "1.0.0")
     try await client.connect(transport: transport)
     // endsnippet
     return client

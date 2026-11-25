@@ -18,8 +18,7 @@ struct ProtocolSnippetTests {
 
     @Test func handlerContextReportsTheEra() async throws {
         let server = await makeLifecycleServer()
-        let client = Client(
-            name: "example-client", version: "1.0.0", configuration: .init(protocolMode: .automatic))
+        let client = Client(name: "example-client", version: "1.0.0")
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
         try await server.start(transport: serverTransport)
         try await client.connect(transport: clientTransport)
@@ -29,11 +28,12 @@ struct ProtocolSnippetTests {
         await server.stop()
     }
 
-    @Test func initializeHookRefusesClient() async throws {
+    @Test(arguments: [Client.ProtocolMode.handshake, .automatic])
+    func initializeHookRefusesClient(mode: Client.ProtocolMode) async throws {
         let server = Server(name: "example", version: "1.0.0")
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
         try await startWithInitializeHook(server, transport: serverTransport)
-        let client = Client(name: "blocked", version: "1.0.0")
+        let client = Client(name: "blocked", version: "1.0.0", configuration: .init(protocolMode: mode))
         await #expect(throws: MCPError.self) { try await client.connect(transport: clientTransport) }
         await client.disconnect()
         await server.stop()
@@ -165,8 +165,7 @@ struct ProtocolSnippetTests {
             headers: ["Content-Type": "application/json", "Accept": "application/json, text/event-stream"],
             body: Data("{}".utf8), path: "/mcp")
         let context = HTTPValidationContext(
-            httpMethod: "POST", sessionID: nil, isInitializationRequest: true,
-            supportedProtocolVersions: Version.supported)
+            httpMethod: "POST", sessionID: nil, isInitializationRequest: true)
         let challenge = try #require(pipeline.validate(post, context: context))
         #expect(challenge.statusCode == 401)
         #expect(challenge.headers[HTTPHeaderName.wwwAuthenticate]?.contains("resource_metadata=") == true)
@@ -180,8 +179,7 @@ struct ProtocolSnippetTests {
 
         let get = HTTPRequest(method: "GET", path: "/.well-known/oauth-protected-resource")
         let getContext = HTTPValidationContext(
-            httpMethod: "GET", sessionID: nil, isInitializationRequest: false,
-            supportedProtocolVersions: Version.supported)
+            httpMethod: "GET", sessionID: nil, isInitializationRequest: false)
         #expect(pipeline.validate(get, context: getContext)?.statusCode == 200)
     }
 }

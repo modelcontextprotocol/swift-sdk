@@ -39,15 +39,14 @@ truth:
 |---|---|
 | `Version.handshake` | Revisions served through `initialize`, newest first. |
 | `Version.stateless` | Revisions served per request, newest first. |
-| `Version.supported` | Today `Set(Version.handshake)`. 2026-07-28 is served, but not listed here yet. |
+| `Version.supported` | Every revision the SDK implements: `Version.handshake` and `Version.stateless`. |
 | `Version.latest` | 2025-11-25. The client requests it in `initialize`, and `HTTPClientTransport` sends it in the `MCP-Protocol-Version` header until a version is negotiated. |
 | `Version.v2024_11_05` ... `Version.v2026_07_28` | One constant per revision. |
 
-A later release adds 2026-07-28 to `Version.supported` and makes
-`.automatic` the client's default mode ([ROADMAP.md](../ROADMAP.md)).
-`Version.latest` stays a handshake revision: it is the version that
-`initialize` requests. Code that needs every served revision reads
-`Version.stateless + Version.handshake`.
+`Version.latest` is a handshake revision because it is the version that
+`initialize` requests. It is not the newest revision the SDK implements;
+that is `Version.stateless[0]`. Code that needs the served revisions in order
+reads `Version.stateless + Version.handshake`.
 
 ## Protocol profiles
 
@@ -160,14 +159,14 @@ For a stateless request, the server also:
 ### Protocol modes
 
 `Client.Configuration.protocolMode` selects how `connect(transport:)` opens the
-connection. The default is `.handshake`.
+connection. The default is `.automatic`.
 
 %include Examples/Snippets/Guides/ProtocolVersions.swift versions-client-modes
 
 | Mode | First request | Fallback |
 |---|---|---|
+| `.automatic` (default) | `server/discover` at `Version.stateless[0]` (2026-07-28) | `initialize` |
 | `.handshake` | `initialize` at `Version.latest` | none |
-| `.automatic` | `server/discover` at `Version.stateless[0]` (2026-07-28) | `initialize` |
 | `.stateless(version)` | `server/discover` at `version` | none; `connect` throws |
 
 ### Negotiation and fallback
@@ -272,5 +271,14 @@ an `.automatic` client connects at 2026-07-28.
 ### Clients
 
 A `.handshake` client never sends `server/discover`. A `.stateless(_:)` client
-never sends `initialize`. See [migration.md](migration.md) for opting in, and
+never sends `initialize`. An `.automatic` client costs one extra request per
+connection to a server that serves only the handshake (`server/discover`,
+then `initialize`); the client does not remember which servers those are, so
+use `.handshake` for many short connections to such a server. A server that
+does not answer requests sent before `initialize` delays each connection by
+up to `Client.Configuration.discoveryTimeout` (10 seconds by default), after
+which the client sends `initialize`; `.handshake` or a shorter
+`discoveryTimeout` avoids the wait. See
+[migration.md](migration.md#clients-connect-at-2026-07-28) for keeping the
+handshake behavior, and
 [troubleshooting.md](troubleshooting.md#era-mix-ups) for era mix-ups.

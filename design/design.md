@@ -1,7 +1,7 @@
 # MCP Swift SDK design
 
 This document records the design of the `MCP` Swift package and the reasons behind it. It covers
-the current major version, which adds the 2026-07-28 revision of the
+1.x, which adds the 2026-07-28 revision of the
 [Model Context Protocol](https://modelcontextprotocol.io) next to the `initialize`-based revisions
 (2025-11-25 and earlier). The base of this major version is commit `2a44bfd`.
 
@@ -19,13 +19,14 @@ User-facing guides: [docs/README.md](../docs/README.md) (index), [docs/protocol.
 [docs/server.md](../docs/server.md), [docs/client.md](../docs/client.md),
 [docs/migration.md](../docs/migration.md).
 
-Current defaults, which a later release step changes (see [ROADMAP.md](../ROADMAP.md)):
+Defaults:
 
-- `Client.Configuration.protocolMode` is `.handshake`.
-- `2026-07-28` is in `Version.stateless`, but not in `Version.supported`, and `Version.latest` is
+- `Client.Configuration.protocolMode` is `.automatic`: `server/discover` at 2026-07-28, with a
+  fallback to `initialize`.
+- `Version.supported` lists both eras; `Version.latest`, the version `initialize` requests, is
   `2025-11-25`.
 - `Server.Configuration.protocolVersions` defaults to `Version.stateless + Version.handshake`, so a
-  server already answers 2026-07-28 requests.
+  server answers both eras.
 
 ## Goals
 
@@ -326,7 +327,7 @@ caller already set win there too.
 |---|---|
 | `Version.handshake` | `2025-11-25`, `2025-06-18`, `2025-03-26`, `2024-11-05` (newest first) |
 | `Version.stateless` | `2026-07-28` |
-| `Version.supported` | `Set(handshake)` |
+| `Version.supported` | `Set(handshake + stateless)` |
 | `Version.latest` | `2025-11-25` |
 | `Version.profile(for:)` | the `ProtocolProfile` of a version |
 
@@ -384,8 +385,8 @@ The client chooses its era once per connection with `Client.ProtocolMode`:
 
 | Mode | Behavior |
 |---|---|
-| `.handshake` | `initialize` (current default) |
-| `.automatic` | `server/discover` at `Version.stateless[0]`; retry once on -32022 with a stateless version from `data.supported`; fall back to `initialize` on other JSON-RPC errors, an HTTP 400/404/405 refusal, no answer within `discoveryTimeout`, when the discover result lists no stateless revision, or on a -32022 whose `data.supported` is empty or lists a handshake revision; rethrow other transport errors |
+| `.handshake` | `initialize` |
+| `.automatic` (default) | `server/discover` at `Version.stateless[0]`; retry once on -32022 with a stateless version from `data.supported`; fall back to `initialize` on other JSON-RPC errors, an HTTP 400/404/405 refusal, no answer within `discoveryTimeout`, when the discover result lists no stateless revision, or on a -32022 whose `data.supported` is empty or lists a handshake revision; rethrow other transport errors |
 | `.stateless(v)` | `server/discover` at `v`; no retry, no fallback |
 
 `connect(transport:)` returns an `Initialize.Result` in every mode. After `server/discover` the
@@ -469,7 +470,8 @@ Each change and the reason for it. [docs/migration.md](../docs/migration.md) has
 | -32000/-32001 from the wire decode as `serverError` | They were decoded as local `connectionClosed`/`transportError`, which hid server errors. |
 | Undecodable params answer -32602, not -32603 | The spec code for bad parameters. |
 | `Client.Capabilities.experimental` is `[String: Value]?` (was `[String: String]?`); `Server.Capabilities` gains `experimental`; both gain `extensions` | The schema allows arbitrary objects; SEP-2133 adds `extensions`. |
-| `Version.latest` is explicit; `Version.supported` derives from `Version.handshake` | `supported.max()` would have made 2026-07-28 the default `initialize` version as soon as it was added. |
+| `Version.latest` is explicit; `Version.supported` lists both eras | `supported.max()` would make 2026-07-28 the `initialize` version. |
+| `Client.Configuration.protocolMode` defaults to `.automatic` | Clients reach 2026-07-28 servers without configuration and fall back to `initialize` for older ones. |
 | `Server.Configuration` gains `protocolVersions`, `cacheHints`, `defaultCacheHint` | Per-server control of the served revisions and SEP-2549 hints. |
 | `Server.init` gains `requestStateProtection:`, default `.ephemeral()` | `requestState` is client-held input; sealing is on by default ([mrtr.md](mrtr.md)). |
 | `CallTool`, `GetPrompt`, `ReadResource` parameters and results gain MRTR fields; results have custom `Codable` | SEP-2322. An input-required result encodes without content. |

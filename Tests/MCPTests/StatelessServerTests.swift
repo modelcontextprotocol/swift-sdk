@@ -989,3 +989,21 @@ struct ParameterHeaderLookupTests {
         #expect(await counter.count == 0)
     }
 }
+
+@Suite("HTTP validation context")
+struct HTTPValidationContextTests {
+    @Test("By default a context serves the handshake revisions only")
+    func defaultsToHandshake() throws {
+        let context = HTTPValidationContext(httpMethod: "POST", sessionID: "s")
+        #expect(context.supportedProtocolVersions == Set(Version.handshake))
+        let request = HTTPRequest(
+            method: "POST", headers: ["MCP-Protocol-Version": Version.v2026_07_28], body: Data("{}".utf8), path: "/mcp")
+        let response = try #require(ProtocolVersionValidator().validate(request, context: context))
+        #expect(response.statusCode == 400)
+        let body = try JSONDecoder().decode(Value.self, from: #require(response.bodyData))
+        #expect(body.objectValue?["error"]?.objectValue?["code"] == -32022)
+        #expect(
+            body.objectValue?["error"]?.objectValue?["data"]?.objectValue?["supported"]?.arrayValue?
+                .contains(.string(Version.v2026_07_28)) == false)
+    }
+}

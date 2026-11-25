@@ -67,7 +67,9 @@ Then connect, list the tools and call `greet`:
 %include Examples/hello-client/main.swift hello-client
 
 - `connect(transport:)` opens the protocol connection. With the default
-  configuration it sends `initialize` and `notifications/initialized`.
+  configuration it sends `server/discover` and connects at 2026-07-28. A
+  server that does not serve 2026-07-28 gets `initialize` and
+  `notifications/initialized` instead.
 - `listTools()` and `callTool(name:arguments:meta:)` return tuples. See
   [client.md](client.md) for the full results.
 - `FileDescriptor` comes from `System` on Apple platforms and from
@@ -112,9 +114,9 @@ self-contained POST, and one `Server` serves every client:
 
 %include Examples/Snippets/QuickStart/QuickStart.swift http-server
 
-`HTTPClientTransport` connects to a Streamable HTTP endpoint. With
-`.automatic`, the client discovers 2026-07-28 with `server/discover` and falls
-back to `initialize` for older servers:
+`HTTPClientTransport` connects to a Streamable HTTP endpoint. The client
+discovers 2026-07-28 with `server/discover` and falls back to `initialize` for
+older servers:
 
 %include Examples/Snippets/QuickStart/QuickStart.swift http-client
 

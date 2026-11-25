@@ -13,8 +13,9 @@ import MCP
 
 // MARK: - Connecting
 
-/// Connects with the default configuration: the `initialize` handshake.
-func connectWithHandshake(transport: any Transport) async throws -> (Client, Initialize.Result) {
+/// Connects with the default configuration: `server/discover` at 2026-07-28,
+/// with a fallback to `initialize`.
+func connectWithDefaults(transport: any Transport) async throws -> (Client, Initialize.Result) {
     // snippet: connect
     let client = Client(name: "my-client", version: "1.0.0")
     let result = try await client.connect(transport: transport)
@@ -91,7 +92,7 @@ func listPromptsStrictly(transport: any Transport) async throws -> Client {
     // snippet: strict
     let client = Client(
         name: "my-client", version: "1.0.0",
-        configuration: .init(strict: true, protocolMode: .automatic))
+        configuration: .strict)
     try await client.connect(transport: transport)
     do {
         _ = try await client.listPrompts()

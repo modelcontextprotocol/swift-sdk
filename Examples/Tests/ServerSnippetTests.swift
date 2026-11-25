@@ -385,7 +385,8 @@ struct ServerSnippetTests {
         let (blockedClientTransport, blockedServerTransport) = await InMemoryTransport.createConnectedPair()
         let running = Task { try await serve(blockedServer, on: blockedServerTransport) }
         try await Task.sleep(for: .milliseconds(50))
-        let blocked = Client(name: "blocked-client", version: "1.0")
+        let blocked = Client(
+            name: "blocked-client", version: "1.0", configuration: .init(protocolMode: .handshake))
         #expect(await code { _ = try await blocked.connect(transport: blockedClientTransport) } == -32600)
         running.cancel()
         _ = await running.result

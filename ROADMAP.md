@@ -1,15 +1,14 @@
 # Roadmap
 
-Status of the MCP Swift SDK against the MCP specification, what is deferred, and the remaining
-release step. Design background: [design/design.md](design/design.md). Versioning rules:
+Status of the MCP Swift SDK against the MCP specification and what is deferred. Design background: [design/design.md](design/design.md). Versioning rules:
 [VERSIONING.md](VERSIONING.md).
 
 ## Specification revisions
 
 | Revision | Era | Server | Client | Notes |
 |---|---|---|---|---|
-| 2026-07-28 | stateless | served by default (`Server.Configuration.protocolVersions`) | opt-in: `ProtocolMode.automatic` or `.stateless("2026-07-28")` | in `Version.stateless`; not yet in `Version.supported` |
-| 2025-11-25 | handshake | yes | yes, default | `Version.latest` |
+| 2026-07-28 | stateless | served by default (`Server.Configuration.protocolVersions`) | default: `ProtocolMode.automatic`, or pinned with `.stateless("2026-07-28")` | `Version.stateless[0]` |
+| 2025-11-25 | handshake | yes | yes; the `.automatic` fallback and `.handshake` | `Version.latest` |
 | 2025-06-18 | handshake | yes | yes | |
 | 2025-03-26 | handshake | yes | yes | |
 | 2024-11-05 | handshake | yes | yes | over stdio and Streamable HTTP; the HTTP+SSE transport of that revision is not implemented |
@@ -67,18 +66,6 @@ scenarios that do not count toward a tier; they are the entries in
 | Workload identity `jwt-bearer` grant | — | 1 (client) |
 
 Other known gaps are listed under "Open questions" in each design note.
-
-## Remaining release step
-
-One change remains before this major version is released:
-
-1. Add `2026-07-28` to `Version.supported`.
-2. Make `Client.ProtocolMode.automatic` the default of `Client.Configuration.protocolMode`.
-3. Update the docs and snippets that state the old defaults.
-4. Verify: every conformance leg, 100% tier score at both revisions, and parity with the Python
-   and Go SDKs.
-
-Until then, a client opts in to 2026-07-28 with `ProtocolMode.automatic`.
 
 ## Conformance
 

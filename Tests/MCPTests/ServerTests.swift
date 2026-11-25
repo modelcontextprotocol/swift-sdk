@@ -193,6 +193,52 @@ struct ServerTests {
         await transport.disconnect()
     }
 
+    @Test(
+        "Initialize hook - gates clients in both protocol modes",
+        arguments: [Client.ProtocolMode.handshake, .automatic])
+    func testInitializeHookGatesClient(mode: Client.ProtocolMode) async throws {
+        actor Seen {
+            var names: [String] = []
+            func add(_ name: String) { names.append(name) }
+        }
+        actor ServerList {
+            var all: [Server] = []
+            func add(_ server: Server) { all.append(server) }
+        }
+        let seen = Seen()
+        let servers = ServerList()
+        func connect(_ name: String) async throws -> Client {
+            let server = Server(name: "TestServer", version: "1.0")
+            await servers.add(server)
+            let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+            try await server.start(transport: serverTransport) { clientInfo, _ in
+                await seen.add(clientInfo.name)
+                if clientInfo.name == "BlockedClient" {
+                    throw MCPError.invalidRequest("Client not allowed")
+                }
+            }
+            let client = Client(name: name, version: "1.0", configuration: .init(protocolMode: mode))
+            try await client.connect(transport: clientTransport)
+            return client
+        }
+
+        // Without a stateless request hook, an `.automatic` client cannot
+        // bypass the initialize hook: it falls back to `initialize`.
+        let allowed = try await connect("AllowedClient")
+        #expect(await allowed.negotiatedProtocolVersion == Version.v2025_11_25)
+        await allowed.disconnect()
+
+        do {
+            _ = try await connect("BlockedClient")
+            Issue.record("Expected the initialize hook to refuse the client")
+        } catch let error as MCPError {
+            #expect(error.code == -32600)
+            #expect(error.localizedDescription.contains("Client not allowed"))
+        }
+        #expect(await seen.names == ["AllowedClient", "BlockedClient"])
+        for server in await servers.all { await server.stop() }
+    }
+
     @Test("JSON-RPC batch processing")
     func testJSONRPCBatchProcessing() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()

@@ -84,9 +84,9 @@ against `InMemoryTransport` or `Helpers/MockTransport.swift` rather than real so
 
 - `Version.handshake` (newest first) are the revisions served through `initialize`;
   `Version.stateless` (`2026-07-28`) are served per request with `_meta`.
-- `Version.supported` (the handshake revisions) and `Version.latest` (2025-11-25, what
-  `initialize` requests) are explicit. `latest` is not `max()`. `Version.negotiate` only ever
-  returns a handshake revision.
+- `Version.supported` (both lists) and `Version.latest` (2025-11-25, what `initialize`
+  requests) are explicit. `latest` is not `max()`. `Version.negotiate` only ever returns a
+  handshake revision. `StatefulHTTPServerTransport` validates against `Version.handshake`.
 - `Version.profile(for:)` returns a `ProtocolProfile` (`usesInitializeHandshake`,
   `usesRequestMeta`, `usesResultType`, `usesSessions`, `allowsServerRequests`,
   `usesSubscriptionsListen`, `usesStandardHeaders`, `allowsPrimingEvents`). Code that
@@ -101,9 +101,10 @@ checks header vs `_meta` version, maps error codes to HTTP status, and streams r
 notifications as SSE. Route with `HTTPRequest.statelessProtocolVersion`; the stateful
 transport answers such requests with -32022 (handshake versions only).
 
-Client: `Client.Configuration.protocolMode` (`.handshake` default, `.automatic`,
+Client: `Client.Configuration.protocolMode` (`.automatic` default, `.handshake`,
 `.stateless(v)`); `.automatic` retries once on -32022 and falls back to `initialize` on
-other MCP errors; `.stateless(v)` never retries. `send` stamps the `_meta` envelope when
+other MCP errors; `.stateless(v)` never retries. Tests that exercise the handshake pin
+`.handshake` (`Tests/MCPTests/Helpers/HandshakeConfiguration.swift`). `send` stamps the `_meta` envelope when
 `isStateless`. `HTTPClientTransport` takes `MCP-Protocol-Version` from the message `_meta`,
 delivers JSON-RPC error bodies of non-2xx replies, and `useStatelessProtocol(_:)` drops the
 session and GET stream. A handshake POST stream that ends before its response is resumed

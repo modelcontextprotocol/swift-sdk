@@ -2,25 +2,14 @@
 
 This file lists known API decisions and gaps, kept for compatibility or
 deferred, with their workarounds. Each item describes the current code. Some
-will change in a later major version; the defaults in
-[Defaults that will change](#defaults-that-will-change) change in a later
-release of this major version.
+will change in a later major version.
 
-## Defaults that will change
+## Versions
 
-These defaults state the current behavior. The remaining release step in
-[ROADMAP.md](../ROADMAP.md) changes them:
-
-| Default | Today | Later |
-|---|---|---|
-| `Client.Configuration.protocolMode` | `.handshake` | `.automatic` |
-| `Version.supported` | `Set(Version.handshake)` | also 2026-07-28 |
-
-`Version.latest` stays 2025-11-25. It is the version `initialize` requests
-and the initial `MCP-Protocol-Version` header of `HTTPClientTransport`. Code
-that must not change behavior sets the mode explicitly; code that wants
-2026-07-28 today uses `.automatic`. See
-[protocol_versions.md](protocol_versions.md).
+- `Version.latest` is 2025-11-25, not the newest revision the SDK
+  implements. It is the version `initialize` requests and the initial
+  `MCP-Protocol-Version` header of `HTTPClientTransport`. The newest revision
+  is `Version.stateless[0]`. See [protocol_versions.md](protocol_versions.md).
 
 ## Client API
 

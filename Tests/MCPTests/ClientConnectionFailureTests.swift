@@ -205,7 +205,7 @@ struct ClientConfigurationCodingTests {
         let configuration = try JSONDecoder().decode(
             Client.Configuration.self, from: Data(#"{"strict":true}"#.utf8))
         #expect(configuration.strict)
-        #expect(configuration.protocolMode == .handshake)
+        #expect(configuration.protocolMode == .automatic)
         #expect(configuration.logLevel == nil)
         #expect(configuration.discoveryTimeout == .seconds(10))
     }

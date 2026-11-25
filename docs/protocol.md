@@ -17,16 +17,18 @@ The SDK speaks two protocol eras at once:
 
 Current defaults:
 
-- `Client.Configuration.protocolMode` defaults to `.handshake`.
-- `Version.supported` and `Version.latest` contain handshake revisions only (`latest` is 2025-11-25). 2026-07-28 is in `Version.stateless`.
+- `Client.Configuration.protocolMode` defaults to `.automatic`: `server/discover` at 2026-07-28, with a fallback to `initialize`.
 - `Server.Configuration.protocolVersions` defaults to `Version.stateless + Version.handshake`, so a server serves both eras.
+- `Version.supported` lists both eras. `Version.latest`, the version `initialize` requests, is 2025-11-25.
 
 ### The initialize handshake
 
-With the default configuration the client sends `initialize` with `Version.latest`, then `notifications/initialized`. The server negotiates: it answers with the requested version when it serves it, and otherwise with its newest handshake revision.
+With `.handshake`, or after an `.automatic` fallback, the client sends `initialize` with `Version.latest`, then `notifications/initialized`. The server negotiates: it answers with the requested version when it serves it, and otherwise with its newest handshake revision.
 
 ```swift
-let client = Client(name: "example-client", version: "1.0.0")  // protocolMode: .handshake
+let client = Client(
+    name: "example-client", version: "1.0.0",
+    configuration: .init(protocolMode: .handshake))
 let result = try await client.connect(transport: clientTransport)
 print(result.protocolVersion)  // 2025-11-25
 print(await client.isStateless)  // false
@@ -56,8 +58,8 @@ At 2026-07-28 there is no handshake. A client may send `server/discover` to lear
 
 | Mode | Behavior |
 |---|---|
-| `.handshake` (default) | `initialize` with `Version.latest`. |
-| `.automatic` | `server/discover` at `Version.stateless[0]`. On -32022 it retries once with the first version in `data.supported` that is in `Version.stateless`. Falls back to `initialize` (see below). |
+| `.automatic` (default) | `server/discover` at `Version.stateless[0]`. On -32022 it retries once with the first version in `data.supported` that is in `Version.stateless`. Falls back to `initialize` (see below). |
+| `.handshake` | `initialize` with `Version.latest`. |
 | `.stateless(v)` | `server/discover` at `v`, with the same single retry on -32022. No fallback: the error is thrown. |
 
 `.automatic` falls back to `initialize` when:
@@ -71,9 +73,7 @@ At 2026-07-28 there is no handshake. A client may send `server/discover` to lear
 Other transport errors are thrown in every mode: authorization failures, 408, 429, 5xx, `transportError`, and errors that are not `MCPError`, such as a `URLError`.
 
 ```swift
-let client = Client(
-    name: "example-client", version: "1.0.0",
-    configuration: .init(protocolMode: .automatic))
+let client = Client(name: "example-client", version: "1.0.0")  // protocolMode: .automatic
 
 let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 try await server.start(transport: serverTransport)
@@ -264,9 +264,7 @@ let transport = HTTPClientTransport(
         request.setValue("example/1.0", forHTTPHeaderField: "User-Agent")
         return request
     })
-let client = Client(
-    name: "example-client", version: "1.0.0",
-    configuration: .init(protocolMode: .automatic))
+let client = Client(name: "example-client", version: "1.0.0")
 try await client.connect(transport: transport)
 ```
 

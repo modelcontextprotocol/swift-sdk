@@ -76,9 +76,8 @@ Allowed in a patch: bug fixes that change no public API.
 | Change behavior at an already supported revision to match the specification | minor, with release notes |
 | Drop a revision | major |
 
-This major version follows that rule: 2026-07-28 support landed with `ProtocolMode.handshake`
-as the default, and the release step that adds 2026-07-28 to `Version.supported` and makes
-`ProtocolMode.automatic` the default ships in the same major version ([ROADMAP.md](ROADMAP.md)).
+1.0.0 follows that rule: it serves 2026-07-28, adds it to `Version.supported`, and
+makes `ProtocolMode.automatic` the client default ([docs/migration.md](docs/migration.md)).
 
 ## Support window for older revisions
 

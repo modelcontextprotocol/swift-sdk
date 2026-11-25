@@ -45,7 +45,8 @@ struct VersioningTests {
         #expect(Version.supported.contains("2025-06-18"))
         #expect(Version.supported.contains("2025-03-26"))
         #expect(Version.supported.contains("2024-11-05"))
-        #expect(Version.supported.count == 4)
+        #expect(Version.supported.contains("2026-07-28"))
+        #expect(Version.supported.count == 5)
     }
 
     @Test("Server's latest version is correct")
@@ -68,7 +69,7 @@ struct ProtocolProfileTests {
         #expect(Set(Version.handshake).isDisjoint(with: Version.stateless))
         #expect(Version.handshake == Version.handshake.sorted(by: >))
         #expect(Version.handshake.first == Version.latest)
-        #expect(Version.supported == Set(Version.handshake))
+        #expect(Version.supported == Set(Version.handshake + Version.stateless))
     }
 
     @Test("A stateless revision is never negotiated through initialize")

@@ -283,7 +283,7 @@ struct CompletionTests {
     func testClientCompleteForPrompt() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
-        let client = Client(name: "TestClient", version: "1.0")
+        let client = Client(name: "TestClient", version: "1.0", configuration: .handshake)
         let server = Server(
             name: "TestServer",
             version: "1.0",
@@ -312,6 +312,7 @@ struct CompletionTests {
 
         try await server.start(transport: serverTransport)
         let initResult = try await client.connect(transport: clientTransport)
+        #expect(await client.negotiatedProtocolVersion == Version.v2025_11_25)
 
         // Verify completions capability is advertised
         #expect(initResult.capabilities.completions != nil)
@@ -335,7 +336,7 @@ struct CompletionTests {
     func testClientCompleteForResource() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
-        let client = Client(name: "TestClient", version: "1.0")
+        let client = Client(name: "TestClient", version: "1.0", configuration: .handshake)
         let server = Server(
             name: "TestServer",
             version: "1.0",
@@ -364,6 +365,7 @@ struct CompletionTests {
 
         try await server.start(transport: serverTransport)
         _ = try await client.connect(transport: clientTransport)
+        #expect(await client.negotiatedProtocolVersion == Version.v2025_11_25)
 
         // Request completions for resource
         let completion = try await client.complete(
@@ -384,7 +386,7 @@ struct CompletionTests {
     func testClientCompleteWithContext() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
-        let client = Client(name: "TestClient", version: "1.0")
+        let client = Client(name: "TestClient", version: "1.0", configuration: .handshake)
         let server = Server(
             name: "TestServer",
             version: "1.0",
@@ -409,6 +411,7 @@ struct CompletionTests {
 
         try await server.start(transport: serverTransport)
         _ = try await client.connect(transport: clientTransport)
+        #expect(await client.negotiatedProtocolVersion == Version.v2025_11_25)
 
         // Request completions with context
         let completion = try await client.complete(
@@ -430,7 +433,7 @@ struct CompletionTests {
     func testClientCompleteFailsWithoutCapability() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
-        let client = Client(name: "TestClient", version: "1.0", configuration: .strict)
+        let client = Client(name: "TestClient", version: "1.0", configuration: .strictHandshake)
         let server = Server(
             name: "TestServer",
             version: "1.0",
@@ -439,6 +442,7 @@ struct CompletionTests {
 
         try await server.start(transport: serverTransport)
         let initResult = try await client.connect(transport: clientTransport)
+        #expect(await client.negotiatedProtocolVersion == Version.v2025_11_25)
 
         // Verify completions capability is NOT advertised
         #expect(initResult.capabilities.completions == nil)
@@ -460,7 +464,7 @@ struct CompletionTests {
     func testEmptyCompletionValues() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
-        let client = Client(name: "TestClient", version: "1.0")
+        let client = Client(name: "TestClient", version: "1.0", configuration: .handshake)
         let server = Server(
             name: "TestServer",
             version: "1.0",
@@ -480,6 +484,7 @@ struct CompletionTests {
 
         try await server.start(transport: serverTransport)
         _ = try await client.connect(transport: clientTransport)
+        #expect(await client.negotiatedProtocolVersion == Version.v2025_11_25)
 
         let completion = try await client.complete(
             promptName: "test",
@@ -499,7 +504,7 @@ struct CompletionTests {
     func testMaximumCompletionValues() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
-        let client = Client(name: "TestClient", version: "1.0")
+        let client = Client(name: "TestClient", version: "1.0", configuration: .handshake)
         let server = Server(
             name: "TestServer",
             version: "1.0",
@@ -520,6 +525,7 @@ struct CompletionTests {
 
         try await server.start(transport: serverTransport)
         _ = try await client.connect(transport: clientTransport)
+        #expect(await client.negotiatedProtocolVersion == Version.v2025_11_25)
 
         let completion = try await client.complete(
             promptName: "test",
@@ -541,7 +547,7 @@ struct CompletionTests {
     func testFuzzyMatchingScenario() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
-        let client = Client(name: "TestClient", version: "1.0")
+        let client = Client(name: "TestClient", version: "1.0", configuration: .handshake)
         let server = Server(
             name: "TestServer",
             version: "1.0",
@@ -567,6 +573,7 @@ struct CompletionTests {
 
         try await server.start(transport: serverTransport)
         _ = try await client.connect(transport: clientTransport)
+        #expect(await client.negotiatedProtocolVersion == Version.v2025_11_25)
 
         // Test with "p" prefix
         let completion1 = try await client.complete(
@@ -591,6 +598,44 @@ struct CompletionTests {
             argumentValue: "ja"
         )
         #expect(completion3.values == ["javascript", "java"])
+
+        await client.disconnect()
+        await server.stop()
+    }
+
+    @Test("Client complete at 2026-07-28 with the default mode")
+    func testClientCompleteStateless() async throws {
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+
+        let client = Client(name: "TestClient", version: "1.0")
+        let server = Server(
+            name: "TestServer",
+            version: "1.0",
+            capabilities: .init(completions: .init())
+        )
+
+        await server.withMethodHandler(Complete.self) { params in
+            #expect(params.argument.name == "framework")
+            #expect(params.argument.value == "fla")
+            #expect(params.context?.arguments["language"] == "python")
+            #expect(Server.currentHandlerContext?.isStateless == true)
+            return .init(completion: .init(values: ["flask"], total: 1, hasMore: false))
+        }
+
+        try await server.start(transport: serverTransport)
+        let initResult = try await client.connect(transport: clientTransport)
+        #expect(await client.negotiatedProtocolVersion == Version.v2026_07_28)
+        #expect(initResult.capabilities.completions != nil)
+
+        let completion = try await client.complete(
+            promptName: "code_review",
+            argumentName: "framework",
+            argumentValue: "fla",
+            context: ["language": "python"]
+        )
+        #expect(completion.values == ["flask"])
+        #expect(completion.total == 1)
+        #expect(completion.hasMore == false)
 
         await client.disconnect()
         await server.stop()

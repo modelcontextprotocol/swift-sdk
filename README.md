@@ -15,9 +15,9 @@ The SDK serves two protocol eras at once:
 | Handshake | 2025-11-25, 2025-06-18, 2025-03-26, 2024-11-05 | `initialize`, then a session |
 | Stateless | 2026-07-28 | none: each request carries its version and client capabilities in `_meta`; clients use `server/discover` |
 
-A `Server` serves both by default. A `Client` uses the handshake by default;
-`Client.Configuration(protocolMode: .automatic)` discovers a 2026-07-28 server
-and falls back to `initialize`. See
+A `Server` serves both by default. A `Client` sends `server/discover` and
+connects at 2026-07-28, and falls back to `initialize` for older servers;
+`Client.Configuration(protocolMode: .handshake)` keeps the handshake. See
 [docs/protocol_versions.md](docs/protocol_versions.md).
 
 At 2026-07-28 the SDK supports server discovery, SEP-2243 request headers,

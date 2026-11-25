@@ -11,9 +11,7 @@ func listenForToolChanges() async throws -> SubscriptionFilter {
         capabilities: .init(tools: .init(listChanged: true)))
     // endsnippet
     await server.withMethodHandler(ListTools.self) { _ in .init(tools: []) }
-    let client = Client(
-        name: "example-client", version: "1.0.0",
-        configuration: .init(protocolMode: .automatic))
+    let client = Client(name: "example-client", version: "1.0.0")
     let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
     try await server.start(transport: serverTransport)
     try await client.connect(transport: clientTransport)

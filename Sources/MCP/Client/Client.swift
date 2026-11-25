@@ -44,7 +44,7 @@ public actor Client {
 
         public init(
             strict: Bool = false,
-            protocolMode: ProtocolMode = .handshake,
+            protocolMode: ProtocolMode = .automatic,
             logLevel: LogLevel? = nil,
             discoveryTimeout: Duration? = .seconds(10),
             multiRoundTrip: MultiRoundTrip = .init()
@@ -64,7 +64,7 @@ public actor Client {
         public init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             strict = try container.decode(Bool.self, forKey: .strict)
-            protocolMode = try container.decodeIfPresent(ProtocolMode.self, forKey: .protocolMode) ?? .handshake
+            protocolMode = try container.decodeIfPresent(ProtocolMode.self, forKey: .protocolMode) ?? .automatic
             logLevel = try container.decodeIfPresent(LogLevel.self, forKey: .logLevel)
             discoveryTimeout =
                 container.contains(.discoveryTimeout)
@@ -132,6 +132,7 @@ public actor Client {
         /// refuses the request with HTTP 400, 404 or 405, or does not answer
         /// within ``Configuration/discoveryTimeout``. Other transport errors,
         /// such as authorization failures, 429 or 5xx, are rethrown.
+        /// The default.
         case automatic
         /// Use one stateless revision; fail if the server does not serve it.
         case stateless(String)
