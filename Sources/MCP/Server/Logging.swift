@@ -70,3 +70,10 @@ public struct LogMessageNotification: Notification {
         }
     }
 }
+
+extension LogLevel: Comparable {
+    /// Severity order, from `debug` (lowest) to `emergency` (highest).
+    public static func < (lhs: LogLevel, rhs: LogLevel) -> Bool {
+        allCases.firstIndex(of: lhs)! < allCases.firstIndex(of: rhs)!
+    }
+}

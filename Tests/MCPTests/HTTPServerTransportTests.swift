@@ -1224,16 +1224,17 @@ struct StatelessHTTPServerTransportTests {
             )
         }
 
-        // Give handleRequest time to register the waiter
-        try await Task.sleep(for: .milliseconds(50))
-
-        // Consume the request from receive and send the response
-        try await transport.send(responseBody)
+        // The server sees the request under an internal id; answer with it.
+        let internalID = try await nextServerRequestID(transport)
+        #expect(internalID != "42")
+        try await transport.send(makeResponseBody(id: internalID))
 
         let httpResponse = await handleTask.value
         #expect(httpResponse.statusCode == 200)
-        #expect(httpResponse.bodyData == responseBody)
+        let body = try JSONSerialization.jsonObject(with: #require(httpResponse.bodyData)) as? [String: Any]
+        #expect(body?["id"] as? String == "42")
         #expect(httpResponse.headers[HTTPHeaderName.contentType] == ContentType.json)
+        _ = responseBody
 
         await transport.disconnect()
     }
@@ -1368,9 +1369,19 @@ struct StatelessHTTPServerTransportTests {
         await transport.disconnect()
 
         let response = await handleTask.value
-        // Should return error (500 or similar) since waiter was cancelled
-        #expect(response.statusCode == 500)
+        // The server never answered: 503 Service Unavailable.
+        #expect(response.statusCode == 503)
     }
+}
+
+/// Reads the next request the stateless transport handed to the server and
+/// returns the internal JSON-RPC id it was given.
+private func nextServerRequestID(_ transport: StatelessHTTPServerTransport) async throws -> String {
+    for try await data in await transport.receive() {
+        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        if let id = json?["id"] as? String { return id }
+    }
+    throw MCPError.connectionClosed
 }
 
 // MARK: - HTTPContextProviding / Server.currentHandlerContext
@@ -1469,19 +1480,18 @@ struct ServerHandlerContextTests {
         // handleRequest blocks until a response is sent — run it concurrently.
         let handleTask = Task { await transport.handleRequest(httpRequest) }
 
-        // Give the handler time to register its waiter (and store the context).
-        try await Task.sleep(for: .milliseconds(50))
-
-        let inFlight = await transport.httpRequestContext(for: .string("99"))
+        // The context is keyed by the id the server sees.
+        let internalID = try await nextServerRequestID(transport)
+        let inFlight = await transport.httpRequestContext(for: .string(internalID))
         #expect(inFlight != nil)
         #expect(inFlight?.header("Authorization") == "Bearer stateless-token")
         #expect(inFlight?.path == "/mcp")
 
         // Send the response to unblock the waiter.
-        try await transport.send(makeResponseBody(id: "99"))
+        try await transport.send(makeResponseBody(id: internalID))
         _ = await handleTask.value
 
-        let afterResponse = await transport.httpRequestContext(for: .string("99"))
+        let afterResponse = await transport.httpRequestContext(for: .string(internalID))
         #expect(afterResponse == nil)
 
         await transport.disconnect()
@@ -1550,7 +1560,11 @@ struct ServerHandlerContextTests {
 
         #expect(await captured.auth == "Bearer server-integration-token")
         #expect(await captured.path == "/mcp")
-        #expect(await captured.id == .string("call-1"))
+        // The stateless transport gives each in-flight request an internal id.
+        #expect(await captured.id != nil)
+        #expect(await captured.id != .string("call-1"))
+        let reply = try JSONSerialization.jsonObject(with: #require(httpResponse.bodyData)) as? [String: Any]
+        #expect(reply?["id"] as? String == "call-1")
     }
 
     @Test("Handler notifications carry the originating request ID")

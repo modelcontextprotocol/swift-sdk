@@ -195,6 +195,8 @@ extension Request {
                         debugDescription: "Missing required params field"))
             }
         } else {
+            // Decode again to report where the parameters are wrong.
+            _ = try container.decode(M.Parameters.self, forKey: .params)
             throw DecodingError.dataCorrupted(
                 DecodingError.Context(
                     codingPath: container.codingPath,
@@ -228,6 +230,29 @@ class RequestHandlerBox: @unchecked Sendable {
 final class TypedRequestHandler<M: Method>: RequestHandlerBox, @unchecked Sendable {
     private let _handle: @Sendable (Request<M>) async throws -> Response<M>
 
+    /// Where decoding failed, without Swift type names or debug text: the
+    /// peer sees the path of the member and the kind of problem only.
+    static func problem(in error: any Error) -> String {
+        guard let error = error as? DecodingError else { return "" }
+        func path(_ codingPath: [any CodingKey], _ last: (any CodingKey)? = nil) -> String {
+            let keys = (codingPath + (last.map { [$0] } ?? []))
+                .map { $0.intValue.map { "[\($0)]" } ?? $0.stringValue }
+            return keys.isEmpty ? "params" : keys.joined(separator: ".")
+        }
+        switch error {
+        case .keyNotFound(let key, let context):
+            return ": missing \(path(context.codingPath, key))"
+        case .valueNotFound(_, let context):
+            return ": missing value at \(path(context.codingPath))"
+        case .typeMismatch(_, let context):
+            return ": wrong type at \(path(context.codingPath))"
+        case .dataCorrupted(let context):
+            return ": invalid value at \(path(context.codingPath))"
+        @unknown default:
+            return ""
+        }
+    }
+
     init(_ handler: @escaping @Sendable (Request<M>) async throws -> Response<M>) {
         self._handle = handler
         super.init()
@@ -240,7 +265,12 @@ final class TypedRequestHandler<M: Method>: RequestHandlerBox, @unchecked Sendab
         // Create a concrete request from the type-erased one; here `data:`
         // URL strings in `Value` fields become `.data`.
         let data = try encoder.encode(request)
-        let request = try decoder.decode(Request<M>.self, from: data)
+        let request: Request<M>
+        do {
+            request = try decoder.decode(Request<M>.self, from: data)
+        } catch {
+            throw MCPError.invalidParams("Invalid params for \(M.name)\(Self.problem(in: error))")
+        }
 
         // Handle with concrete type
         let response = try await _handle(request)
@@ -441,6 +471,8 @@ public struct Message<N: Notification>: Hashable, Codable, Sendable {
                         debugDescription: "Missing required params field"))
             }
         } else {
+            // Decode again to report where the parameters are wrong.
+            _ = try container.decode(N.Parameters.self, forKey: .params)
             throw DecodingError.dataCorrupted(
                 DecodingError.Context(
                     codingPath: container.codingPath,

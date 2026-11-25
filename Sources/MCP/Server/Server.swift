@@ -16,14 +16,65 @@ public actor Server {
         public static let strict = Configuration(strict: true)
 
         /// When strict mode is enabled, the server:
-        /// - Requires clients to send an initialize request before any other requests
-        /// - Rejects all requests from uninitialized clients with a protocol error
+        /// - Requires handshake-era clients to send an initialize request before
+        ///   any other requests
+        /// - Rejects requests from uninitialized handshake-era clients with a
+        ///   protocol error
+        ///
+        /// Stateless requests (2026-07-28 and later) carry their client's
+        /// capabilities and are never initialized; strict mode does not gate
+        /// them. To gate clients, pass an `initializeHook` and a
+        /// `statelessRequestHook` to ``Server/start(transport:initializeHook:statelessRequestHook:)``.
         ///
         /// While the MCP specification requires clients to initialize the connection
         /// before sending other requests, some implementations may not follow this.
         /// Disabling strict mode allows the server to be more lenient with non-compliant
         /// clients, though this may lead to undefined behavior.
         public var strict: Bool
+
+        /// The protocol versions the server serves, newest first.
+        ///
+        /// Handshake revisions are negotiated through `initialize`; stateless
+        /// revisions (2026-07-28 and later) are served per request. Requests
+        /// for other versions are rejected with -32022.
+        public var protocolVersions: [String]
+
+        /// Cache hints for results of cacheable methods that do not set their
+        /// own, keyed by method name (for example `tools/list`). Applies to
+        /// stateless requests only.
+        public var cacheHints: [String: CacheHint]
+
+        /// Cache hint for cacheable methods missing from ``cacheHints``.
+        public var defaultCacheHint: CacheHint
+
+        public init(
+            strict: Bool = false,
+            protocolVersions: [String] = Version.stateless + Version.handshake,
+            cacheHints: [String: CacheHint] = [:],
+            defaultCacheHint: CacheHint = .uncached
+        ) {
+            self.strict = strict
+            self.protocolVersions = protocolVersions
+            self.cacheHints = cacheHints
+            self.defaultCacheHint = defaultCacheHint
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case strict, protocolVersions, cacheHints, defaultCacheHint
+        }
+
+        /// Decodes a configuration; keys added after `strict` take their
+        /// defaults when absent.
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            let defaults = Configuration()
+            strict = try container.decode(Bool.self, forKey: .strict)
+            protocolVersions =
+                try container.decodeIfPresent([String].self, forKey: .protocolVersions) ?? defaults.protocolVersions
+            cacheHints = try container.decodeIfPresent([String: CacheHint].self, forKey: .cacheHints) ?? [:]
+            defaultCacheHint =
+                try container.decodeIfPresent(CacheHint.self, forKey: .defaultCacheHint) ?? defaults.defaultCacheHint
+        }
     }
 
     /// Implementation information
@@ -208,6 +259,18 @@ public actor Server {
     private var subscriptions: [String: Set<ID>] = [:]
     /// The task for the message handling loop
     private var task: Task<Void, Never>?
+    /// Whether ``start(transport:initializeHook:statelessRequestHook:)`` got an initialize hook.
+    private var hasInitializeHook = false
+    /// Runs before each stateless request; see ``start(transport:initializeHook:statelessRequestHook:)``.
+    private var statelessRequestHook: StatelessRequestHook?
+
+    /// A hook that runs before a stateless request (2026-07-28 and later) is
+    /// handled, with the client info and capabilities from its `_meta`.
+    /// ``Server/currentHandlerContext`` is set, so the hook can read the
+    /// originating HTTP request. Throwing refuses the request: an
+    /// ``MCPError`` is sent as is, any other error as -32600.
+    public typealias StatelessRequestHook =
+        @Sendable (_ clientInfo: Client.Info?, _ capabilities: Client.Capabilities) async throws -> Void
 
     public init(
         name: String,
@@ -237,11 +300,20 @@ public actor Server {
     /// - Parameters:
     ///   - transport: The transport to use for the server
     ///   - initializeHook: An optional hook that runs when the client sends an initialize request
+    ///   - statelessRequestHook: An optional hook that runs before every
+    ///     stateless request (2026-07-28 and later), which never sends
+    ///     `initialize`. When `initializeHook` is set and this hook is not,
+    ///     stateless requests are refused with -32022, so a gate in
+    ///     `initializeHook` cannot be bypassed; clients then fall back to
+    ///     `initialize`.
     public func start(
         transport: any Transport,
-        initializeHook: (@Sendable (Client.Info, Client.Capabilities) async throws -> Void)? = nil
+        initializeHook: (@Sendable (Client.Info, Client.Capabilities) async throws -> Void)? = nil,
+        statelessRequestHook: StatelessRequestHook? = nil
     ) async throws {
         self.connection = transport
+        self.hasInitializeHook = initializeHook != nil
+        self.statelessRequestHook = statelessRequestHook
         registerDefaultHandlers(initializeHook: initializeHook)
         registerCancellationHandler()
         try await transport.connect()
@@ -349,9 +421,43 @@ public actor Server {
         /// path.
         public let httpContext: HTTPRequest?
 
-        package init(id: ID, httpContext: HTTPRequest?) {
+        /// The protocol version of the request: from its `_meta` for stateless
+        /// requests, otherwise the version negotiated by `initialize`.
+        public let protocolVersion: String?
+
+        /// The capabilities the client declared for this request, or at
+        /// `initialize` for handshake connections.
+        public let clientCapabilities: Client.Capabilities?
+
+        /// The client implementation, if it identified itself.
+        public let clientInfo: Client.Info?
+
+        /// The lowest log level the client wants for this request. Stateless
+        /// requests that omit it receive no log notifications.
+        public let logLevel: LogLevel?
+
+        /// Whether the request is a self-contained 2026-07-28 request.
+        public let isStateless: Bool
+
+        /// The feature profile of ``protocolVersion``.
+        public var profile: ProtocolProfile? { protocolVersion.map(Version.profile(for:)) }
+
+        package init(
+            id: ID,
+            httpContext: HTTPRequest?,
+            protocolVersion: String? = nil,
+            clientCapabilities: Client.Capabilities? = nil,
+            clientInfo: Client.Info? = nil,
+            logLevel: LogLevel? = nil,
+            isStateless: Bool = false
+        ) {
             self.id = id
             self.httpContext = httpContext
+            self.protocolVersion = protocolVersion
+            self.clientCapabilities = clientCapabilities
+            self.clientInfo = clientInfo
+            self.logLevel = logLevel
+            self.isStateless = isStateless
         }
     }
 
@@ -424,6 +530,11 @@ public actor Server {
     private func send<M: Method>(_ request: Request<M>) throws -> Task<M.Result, Error> {
         guard let connection = connection else {
             throw MCPError.internalError("Server connection not initialized")
+        }
+
+        if let context = Server.currentHandlerContext, context.profile?.allowsServerRequests == false {
+            throw MCPError.invalidRequest(
+                "\(M.name) cannot be sent at protocol version \(context.protocolVersion ?? "")")
         }
 
         let requestData = try encoder.encode(request)
@@ -638,6 +749,11 @@ public actor Server {
         logger: String? = nil,
         data: Value
     ) async throws {
+        // A stateless request receives log notifications only at or above
+        // the level it set in `_meta`, and none when it set no level.
+        if let context = Server.currentHandlerContext, context.isStateless {
+            guard let minimum = context.logLevel, level >= minimum else { return }
+        }
         let notification = LogMessageNotification.message(
             .init(level: level, logger: logger, data: data)
         )
@@ -786,28 +902,71 @@ public actor Server {
                 "id": "\(request.id)",
             ])
 
-        if configuration.strict {
-            // The client SHOULD NOT send requests other than pings
-            // before the server has responded to the initialize request.
-            switch request.method {
-            case Initialize.name, Ping.name:
-                break
-            default:
-                try checkInitialized()
+        // Replies with an error without running a handler.
+        func reject(_ error: MCPError) async throws -> Response<AnyMethod>? {
+            let response = AnyMethod.response(id: request.id, error: error)
+            if sendResponse {
+                try await send(response)
+                return nil
+            }
+            return response
+        }
+
+        let era: RequestEra
+        do {
+            era = try StatelessRequests.classify(
+                request._meta, served: configuration.protocolVersions)
+        } catch let error as MCPError {
+            return try await reject(error)
+        }
+
+        switch era {
+        case .handshake:
+            if StatelessRequests.statelessOnlyMethods.contains(request.method) {
+                return try await reject(
+                    .methodNotFound("\(request.method) requires protocol version 2026-07-28 or later"))
+            }
+            // A server that lists no handshake revision serves no handshake request.
+            if handshakeVersions.isEmpty {
+                let requested =
+                    request.method == Initialize.name
+                    ? request.params.objectValue?["protocolVersion"]?.stringValue
+                    : request._meta?.protocolVersion
+                return try await reject(
+                    .unsupportedProtocolVersion(
+                        supported: configuration.protocolVersions, requested: requested))
+            }
+            if configuration.strict {
+                // The client SHOULD NOT send requests other than pings
+                // before the server has responded to the initialize request.
+                switch request.method {
+                case Initialize.name, Ping.name:
+                    break
+                default:
+                    try checkInitialized()
+                }
+            }
+        case .stateless(let info):
+            // An initialize hook gates handshake clients; without a stateless
+            // hook, stateless requests would bypass it.
+            if hasInitializeHook, statelessRequestHook == nil {
+                return try await reject(
+                    .unsupportedProtocolVersion(supported: handshakeVersions, requested: info.protocolVersion))
+            }
+            if StatelessRequests.removedMethods.contains(request.method) {
+                return try await reject(
+                    .methodNotFound(
+                        "\(request.method) is not available at protocol version \(info.protocolVersion)"))
+            }
+            if !StatelessRequests.isDeclared(request.method, in: capabilities) {
+                return try await reject(
+                    .methodNotFound("\(request.method): capability not declared by the server"))
             }
         }
 
         // Find handler for method name
         guard let handler = methodHandlers[request.method] else {
-            let error = MCPError.methodNotFound("Unknown method: \(request.method)")
-            let response = AnyMethod.response(id: request.id, error: error)
-
-            if sendResponse {
-                try await send(response)
-                return nil
-            }
-
-            return response
+            return try await reject(.methodNotFound("Unknown method: \(request.method)"))
         }
 
         // Ask the transport for the originating HTTP request so handlers can observe
@@ -815,7 +974,36 @@ public actor Server {
         // that don't carry HTTP context (stdio, in-memory) don't conform.
         let httpContext = await (connection as? any HTTPContextProviding)?
             .httpRequestContext(for: request.id)
-        let handlerContext = HandlerContext(id: request.id, httpContext: httpContext)
+        let handlerContext: HandlerContext
+        switch era {
+        case .handshake:
+            handlerContext = HandlerContext(
+                id: request.id, httpContext: httpContext,
+                protocolVersion: protocolVersion,
+                clientCapabilities: clientCapabilities,
+                clientInfo: clientInfo)
+        case .stateless(let info):
+            handlerContext = HandlerContext(
+                id: request.id, httpContext: httpContext,
+                protocolVersion: info.protocolVersion,
+                clientCapabilities: info.clientCapabilities,
+                clientInfo: info.clientInfo,
+                logLevel: info.logLevel,
+                isStateless: true)
+        }
+        let annotate: @Sendable (Response<AnyMethod>) -> Response<AnyMethod> = {
+            [serverInfo, configuration] response in
+            guard handlerContext.isStateless, case .success(let value) = response.result else {
+                return response
+            }
+            let hint = configuration.cacheHints[request.method] ?? configuration.defaultCacheHint
+            return Response(
+                id: response.id,
+                result: StatelessRequests.annotate(
+                    value, method: request.method, serverInfo: serverInfo, cacheHint: hint))
+        }
+
+        let statelessHook = handlerContext.isStateless ? statelessRequestHook : nil
 
         // Create a task to handle the request with cancellation support.
         // Set currentHandlerContext as a task local so handlers see it.
@@ -826,9 +1014,21 @@ public actor Server {
                     // Check if task was cancelled before starting
                     try Task.checkCancellation()
 
+                    if let hook = statelessHook {
+                        do {
+                            try await hook(handlerContext.clientInfo, handlerContext.clientCapabilities ?? .init())
+                        } catch let error as MCPError {
+                            return AnyMethod.response(id: request.id, error: error)
+                        } catch is CancellationError {
+                            throw CancellationError()
+                        } catch {
+                            return AnyMethod.response(
+                                id: request.id, error: .invalidRequest("Request refused: \(error.localizedDescription)"))
+                        }
+                    }
+
                     // Handle request and get response
-                    let response = try await handler(request)
-                    return response
+                    return annotate(try await handler(request))
                 } catch is CancellationError {
                     // Request was cancelled, don't send a response per MCP spec
                     await logger?.debug(
@@ -929,6 +1129,11 @@ public actor Server {
         }
     }
 
+    /// The handshake revisions this server serves, newest first.
+    private var handshakeVersions: [String] {
+        configuration.protocolVersions.filter { Version.handshake.contains($0) }
+    }
+
     private func checkInitialized() throws {
         guard isInitialized else {
             throw MCPError.invalidRequest("Server is not initialized")
@@ -944,7 +1149,9 @@ public actor Server {
         throws
     {
         if configuration.strict {
-            guard let capabilities = clientCapabilities else {
+            guard let capabilities = Server.currentHandlerContext?.clientCapabilities
+                ?? clientCapabilities
+            else {
                 throw MCPError.methodNotFound("Client capabilities not initialized")
             }
             guard capabilities[keyPath: keyPath] != nil else {
@@ -963,15 +1170,22 @@ public actor Server {
                 throw MCPError.invalidRequest("Server is already initialized")
             }
 
+            // Negotiate among the configured handshake revisions.
+            let handshakeVersions = await self.handshakeVersions
+            guard let newest = handshakeVersions.first else {
+                throw MCPError.unsupportedProtocolVersion(
+                    supported: await self.configuration.protocolVersions,
+                    requested: params.protocolVersion)
+            }
+
             // Call initialization hook if registered
             if let hook = initializeHook {
                 try await hook(params.clientInfo, params.capabilities)
             }
 
-            // Perform version negotiation
             let clientRequestedVersion = params.protocolVersion
-            let negotiatedProtocolVersion = Version.negotiate(
-                clientRequestedVersion: clientRequestedVersion)
+            let negotiatedProtocolVersion =
+                handshakeVersions.contains(clientRequestedVersion) ? clientRequestedVersion : newest
 
             // Set initial state with the negotiated protocol version
             await self.setInitialState(
@@ -990,6 +1204,15 @@ public actor Server {
 
         // Ping
         withMethodHandler(Ping.self) { _ in return Empty() }
+
+        // Discovery (2026-07-28 and later)
+        withMethodHandler(ServerDiscover.self) { _ in
+            ServerDiscover.Result(
+                supportedVersions: await self.configuration.protocolVersions,
+                capabilities: await self.capabilities,
+                instructions: self.instructions
+            )
+        }
     }
 
     private func setInitialState(

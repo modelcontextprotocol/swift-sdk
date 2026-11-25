@@ -177,12 +177,11 @@ public struct ProtocolVersionValidator: HTTPRequestValidator {
         }
 
         guard context.supportedProtocolVersions.contains(version) else {
-            let supported = context.supportedProtocolVersions.sorted().joined(separator: ", ")
             return .error(
                 statusCode: 400,
-                .invalidRequest(
-                    "Bad Request: Unsupported protocol version: \(version). Supported: \(supported)"
-                ),
+                .unsupportedProtocolVersion(
+                    supported: context.supportedProtocolVersions.sorted(by: >),
+                    requested: version),
                 sessionID: context.sessionID
             )
         }

@@ -42,14 +42,18 @@ actor HTTPApp {
         }
     }
 
-    /// Factory function to create MCP Server instances for each session.
-    typealias ServerFactory = @Sendable (String, StatefulHTTPServerTransport) async throws -> Server
+    /// Factory function to create MCP Server instances: one per session, and
+    /// one (with a `nil` session ID) for stateless 2026-07-28 requests.
+    typealias ServerFactory = @Sendable (String?, any Transport) async throws -> Server
 
     private let configuration: Configuration
     private let serverFactory: ServerFactory
     private let validationPipeline: (any HTTPRequestValidationPipeline)?
+    private let statelessValidationPipeline: (any HTTPRequestValidationPipeline)?
     private var channel: Channel?
     private var sessions: [String: SessionContext] = [:]
+    private var stateless: (server: Server, transport: StatelessHTTPServerTransport)?
+    private var statelessStart: Task<(server: Server, transport: StatelessHTTPServerTransport), Error>?
 
     nonisolated let logger: Logger
 
@@ -73,12 +77,14 @@ actor HTTPApp {
     init(
         configuration: Configuration = Configuration(),
         validationPipeline: (any HTTPRequestValidationPipeline)? = nil,
+        statelessValidationPipeline: (any HTTPRequestValidationPipeline)? = nil,
         serverFactory: @escaping ServerFactory,
         logger: Logger? = nil
     ) {
         self.configuration = configuration
         self.serverFactory = serverFactory
         self.validationPipeline = validationPipeline
+        self.statelessValidationPipeline = statelessValidationPipeline
         self.logger = logger ?? Logger(
             label: "mcp.http.app",
             factory: { _ in SwiftLogNoOpLogHandler() }
@@ -157,6 +163,17 @@ actor HTTPApp {
     func handleHTTPRequest(_ request: HTTPRequest) async -> HTTPResponse {
         let sessionID = request.header(HTTPHeaderName.sessionID)
 
+        // 2026-07-28 and later: no session; one shared server.
+        if sessionID == nil, request.statelessProtocolVersion != nil {
+            do {
+                return try await statelessTransport().handleRequest(request)
+            } catch {
+                return .error(
+                    statusCode: 500,
+                    .internalError("Failed to start stateless server: \(error.localizedDescription)"))
+            }
+        }
+
         // Route to existing session
         if let sessionID, var session = sessions[sessionID] {
             session.lastAccessedAt = Date()
@@ -189,6 +206,32 @@ actor HTTPApp {
             statusCode: 400,
             .invalidRequest("Bad Request: Missing \(HTTPHeaderName.sessionID) header")
         )
+    }
+
+    // MARK: - Stateless Server
+
+    /// The one stateless server, created by the first request that needs
+    /// it. Requests that arrive while it starts wait for the same task
+    /// instead of starting servers of their own.
+    private func statelessTransport() async throws -> StatelessHTTPServerTransport {
+        if let stateless { return stateless.transport }
+        if let statelessStart { return try await statelessStart.value.transport }
+        let start = Task { [serverFactory, statelessValidationPipeline, logger] in
+            let transport = StatelessHTTPServerTransport(
+                validationPipeline: statelessValidationPipeline, logger: logger)
+            let server = try await serverFactory(nil, transport)
+            try await server.start(transport: transport)
+            return (server: server, transport: transport)
+        }
+        statelessStart = start
+        do {
+            let started = try await start.value
+            stateless = started
+            return started.transport
+        } catch {
+            statelessStart = nil
+            throw error
+        }
     }
 
     // MARK: - Session Management

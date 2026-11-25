@@ -58,6 +58,33 @@ public struct HTTPRequest: Sendable {
         let lowercased = name.lowercased()
         return headers.first { $0.key.lowercased() == lowercased }?.value
     }
+
+    /// The `MCP-Protocol-Version` header when it names a revision served
+    /// without a session (2026-07-28 and later, or an unknown version).
+    ///
+    /// Use it to route a request: a non-`nil` value belongs to
+    /// ``StatelessHTTPServerTransport``; anything else to the session-based
+    /// transport.
+    public var statelessProtocolVersion: String? {
+        guard let version = header(HTTPHeaderName.protocolVersion)?
+            .trimmingCharacters(in: .whitespaces), !version.isEmpty,
+            !Version.handshake.contains(version)
+        else { return nil }
+        return version
+    }
+}
+
+/// HTTP status codes for JSON-RPC errors on stateless (2026-07-28) requests.
+enum JSONRPCErrorStatus {
+    /// -32601 maps to 404; invalid request, invalid params and the
+    /// -32020/-32021/-32022 protocol errors map to 400; anything else to 200.
+    static func statusCode(for code: Int) -> Int {
+        switch code {
+        case -32601: 404
+        case -32600, -32602, -32020, -32021, -32022: 400
+        default: 200
+        }
+    }
 }
 
 // MARK: - HTTP Response
@@ -85,31 +112,35 @@ public enum HTTPResponse: Sendable {
     /// 200 OK, no body. Used for DELETE confirmation.
     case ok(headers: [String: String] = [:])
 
-    /// 200 OK with data body (typically JSON).
-    case data(Data, headers: [String: String] = [:])
+    /// A data body (typically JSON), 200 OK unless `statusCode` says otherwise.
+    case data(Data, statusCode: Int = 200, headers: [String: String] = [:])
 
     /// 200 OK with SSE streaming body.
     case stream(AsyncThrowingStream<Data, Swift.Error>, headers: [String: String] = [:])
 
     /// Error response with a JSON-RPC error body.
-    /// The status code, headers, and body are derived automatically.
-    case error(statusCode: Int, MCPError, sessionID: String? = nil, extraHeaders: [String: String] = [:])
+    /// The status code, headers, and body are derived automatically. `id` is
+    /// the JSON-RPC id of the rejected request, or `nil` when it is unknown.
+    case error(
+        statusCode: Int, MCPError, id: ID? = nil, sessionID: String? = nil,
+        extraHeaders: [String: String] = [:])
 
     // MARK: - Computed Properties
 
     public var statusCode: Int {
         switch self {
         case .accepted: 202
-        case .ok, .data, .stream: 200
-        case .error(let code, _, _, _): code
+        case .ok, .stream: 200
+        case .data(_, let code, _): code
+        case .error(let code, _, _, _, _): code
         }
     }
 
     public var headers: [String: String] {
         switch self {
-        case .accepted(let headers), .ok(let headers), .data(_, let headers), .stream(_, let headers):
+        case .accepted(let headers), .ok(let headers), .data(_, _, let headers), .stream(_, let headers):
             return headers
-        case .error(_, _, let sessionID, let extraHeaders):
+        case .error(_, _, _, let sessionID, let extraHeaders):
             var headers: [String: String] = [HTTPHeaderName.contentType: ContentType.json]
             if let sessionID { headers[HTTPHeaderName.sessionID] = sessionID }
             headers.merge(extraHeaders) { _, new in new }
@@ -122,19 +153,34 @@ public enum HTTPResponse: Sendable {
         switch self {
         case .accepted, .ok, .stream:
             return nil
-        case .data(let data, _):
+        case .data(let data, _, _):
             return data
-        case .error(_, let error, _, _):
-            let errorBody: [String: Any] = [
-                "jsonrpc": "2.0",
-                "error": [
-                    "code": error.code,
-                    "message": error.errorDescription ?? "Unknown error",
-                ],
-                "id": NSNull(),
-            ]
-            return try? JSONSerialization.data(withJSONObject: errorBody)
+        case .error(_, let error, let id, _, _):
+            return try? JSONEncoder().encode(ErrorBody(id: id, error: error))
         }
+    }
+
+    /// Returns the response with `id` as the JSON-RPC id of an error body
+    /// that has none. Other responses are returned unchanged.
+    public func withRequestID(_ id: ID?) -> HTTPResponse {
+        guard let id, case .error(let code, let error, nil, let sessionID, let extra) = self else {
+            return self
+        }
+        return .error(statusCode: code, error, id: id, sessionID: sessionID, extraHeaders: extra)
+    }
+
+    private struct ErrorBody: Encodable {
+        let id: ID?
+        let error: MCPError
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode("2.0", forKey: .jsonrpc)
+            try container.encode(id, forKey: .id)
+            try container.encode(error, forKey: .error)
+        }
+
+        private enum CodingKeys: String, CodingKey { case jsonrpc, id, error }
     }
 }
 
