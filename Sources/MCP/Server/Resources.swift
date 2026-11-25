@@ -319,11 +319,44 @@ public enum ReadResource: Method {
     public struct Parameters: Hashable, Codable, Sendable {
         public let uri: String
 
-        public init(uri: String) {
+        /// The client's responses to the server's input requests, keyed as
+        /// the requests were (2026-07-28, SEP-2322).
+        public var inputResponses: [String: InputResponse]?
+
+        /// The `requestState` of the previous round, echoed unchanged.
+        public var requestState: String?
+
+        public init(
+            uri: String,
+            inputResponses: [String: InputResponse]? = nil,
+            requestState: String? = nil
+        ) {
             self.uri = uri
+            self.inputResponses = inputResponses
+            self.requestState = requestState
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case uri, inputResponses, requestState
+        }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            uri = try container.decode(String.self, forKey: .uri)
+            inputResponses = try MRTR.decodeInputResponses(container, forKey: .inputResponses)
+            requestState = try container.decodeIfPresent(String.self, forKey: .requestState)
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(uri, forKey: .uri)
+            try container.encodeIfPresent(inputResponses, forKey: .inputResponses)
+            try container.encodeIfPresent(requestState, forKey: .requestState)
         }
     }
 
+    /// The resource contents, or, at 2026-07-28, a request for more input
+    /// (see `inputRequired(_:requestState:_meta:)`).
     public struct Result: Hashable, Codable, Sendable, CacheableResult {
         public let contents: [Resource.Content]
         /// Optional metadata about this result
@@ -332,6 +365,16 @@ public enum ReadResource: Method {
         public var ttlMs: Int?
         /// Who may reuse the result (SEP-2549).
         public var cacheScope: CacheScope?
+
+        /// Requests the client must fulfill before the resource can be
+        /// read, keyed by names the server chooses (SEP-2322).
+        public var inputRequests: [String: InputRequest]?
+
+        /// Opaque state the client echoes on the next round. The server
+        /// SDK seals it before it leaves the server.
+        public var requestState: String?
+
+        private var declaredResultType: ResultType?
 
         public init(
             contents: [Resource.Content],
@@ -345,12 +388,43 @@ public enum ReadResource: Method {
             self.cacheScope = cacheScope
         }
 
+        /// A result that asks the client for input and a retry (SEP-2322).
+        ///
+        /// Give at least one of `requests` and `requestState`. For clients
+        /// before 2026-07-28 the server sends the requests itself and calls
+        /// the handler again with the responses.
+        public static func inputRequired(
+            _ requests: [String: InputRequest]? = nil,
+            requestState: String? = nil,
+            _meta: Metadata? = nil
+        ) -> Result {
+            var result = Result(contents: [], _meta: _meta)
+            result.inputRequests = requests
+            result.requestState = requestState
+            result.declaredResultType = .inputRequired
+            return result
+        }
+
+        /// ``ResultType/inputRequired`` when the server asks for input.
+        public var resultType: ResultType {
+            MRTR.resultType(
+                declared: declaredResultType, inputRequests: inputRequests, requestState: requestState)
+        }
+
         private enum CodingKeys: String, CodingKey, CaseIterable {
             case contents, _meta, ttlMs, cacheScope
+            case resultType, inputRequests, requestState
         }
 
         public func encode(to encoder: Encoder) throws {
             var container = encoder.container(keyedBy: CodingKeys.self)
+            if resultType == .inputRequired {
+                try container.encode(resultType, forKey: .resultType)
+                try container.encodeIfPresent(inputRequests, forKey: .inputRequests)
+                try container.encodeIfPresent(requestState, forKey: .requestState)
+                try container.encodeIfPresent(_meta, forKey: ._meta)
+                return
+            }
             try container.encode(contents, forKey: .contents)
             try container.encodeIfPresent(_meta, forKey: ._meta)
             try container.encodeIfPresent(ttlMs, forKey: .ttlMs)
@@ -359,12 +433,36 @@ public enum ReadResource: Method {
 
         public init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
-            contents = try container.decode([Resource.Content].self, forKey: .contents)
+            declaredResultType = MRTR.declared(
+                try container.decodeIfPresent(ResultType.self, forKey: .resultType))
             _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
+            if declaredResultType == .inputRequired {
+                inputRequests = try container.decodeIfPresent(
+                    [String: InputRequest].self, forKey: .inputRequests)
+                requestState = try container.decodeIfPresent(String.self, forKey: .requestState)
+                contents = []
+                return
+            }
+            contents = try container.decode([Resource.Content].self, forKey: .contents)
             ttlMs = container.decodeTTL(forKey: .ttlMs)
             cacheScope = container.decodeCacheScope(forKey: .cacheScope)
         }
     }
+}
+
+extension ReadResource.Parameters: InputRespondingParameters {
+    var stateBinding: (target: String, arguments: Value) { (uri, .object([:])) }
+
+    func retrying(inputResponses: [String: InputResponse]?, requestState: String?) -> Self {
+        var copy = self
+        copy.inputResponses = inputResponses
+        copy.requestState = requestState
+        return copy
+    }
+}
+
+extension ReadResource.Result: InputRequiringResult {
+    var hasContent: Bool { !contents.isEmpty || ttlMs != nil || cacheScope != nil }
 }
 
 /// To discover available resource templates, clients send a `resources/templates/list` request.

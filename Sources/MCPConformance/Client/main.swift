@@ -621,6 +621,39 @@ func runHTTPInvalidToolHeadersScenario(_ args: [String]) async throws {
     await client.disconnect()
 }
 
+// MARK: - Multi round-trip (SEP-2322)
+
+/// Calls the mock's MRTR tools. The first elicitation also calls an
+/// unrelated tool, between the rounds of another call.
+func runMultiRoundTripClientScenario(_ args: [String]) async throws {
+    guard let serverURLString = args.last, let serverURL = URL(string: serverURLString) else {
+        throw ConformanceError.invalidArguments("Valid server URL is required")
+    }
+    let client = makeConformanceClient(capabilities: .init(elicitation: .init()))
+    let calledUnrelated = Flag()
+    await client.withElicitationHandler { _ in
+        if await calledUnrelated.set() {
+            _ = try await client.callTool(name: "test_mrtr_unrelated")
+        }
+        return CreateElicitation.Result(action: .accept, content: ["confirmed": true])
+    }
+    try await client.connect(transport: HTTPClientTransport(endpoint: serverURL))
+    _ = try await client.listTools()
+    for name in ["test_mrtr_echo_state", "test_mrtr_no_state", "test_mrtr_no_result_type"] {
+        _ = try await client.callTool(name: name)
+    }
+    await client.disconnect()
+}
+
+/// Reports whether it was set before.
+actor Flag {
+    private var isSet = false
+    func set() -> Bool {
+        defer { isSet = true }
+        return !isSet
+    }
+}
+
 // MARK: - SSE Scenarios
 
 /// Handler for SSE-related scenarios (retry, reconnection, etc.)
@@ -821,6 +854,7 @@ nonisolated(unsafe) let scenarioHandlers: [String: ScenarioHandler] = [
     "http-standard-headers": runHTTPStandardHeadersScenario,
     "http-custom-headers": runHTTPCustomHeadersScenario,
     "http-invalid-tool-headers": runHTTPInvalidToolHeadersScenario,
+    "sep-2322-client-request-state": runMultiRoundTripClientScenario,
 ]
 
 // MARK: - Error Types

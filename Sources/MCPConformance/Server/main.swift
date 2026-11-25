@@ -122,10 +122,11 @@ func createConformanceServer(state: ServerState, transport: any Transport) async
                 "additionalProperties": false,
             ]),
         ]
-        return .init(tools: listed + (dynamic ? [Tool(name: "test_dynamic_tool", description: "Listed after test_trigger_tool_change", inputSchema: .object(["type": "object", "properties": [:]]))] : []))
+        return .init(tools: listed + inputRequiredTools + (dynamic ? [Tool(name: "test_dynamic_tool", description: "Listed after test_trigger_tool_change", inputSchema: .object(["type": "object", "properties": [:]]))] : []))
     }
 
     await server.withMethodHandler(CallTool.self) { [weak server, transport] params in
+        if let result = try callInputRequiredTool(params) { return result }
         switch params.name {
         case "test_simple_text":
             return .init(content: [.text(text: "This is a simple text response for testing.", annotations: nil, _meta: nil)], isError: false)
@@ -462,11 +463,13 @@ func createConformanceServer(state: ServerState, transport: any Transport) async
             Prompt(name: "test_prompt_with_embedded_resource", description: "A prompt that includes embedded resources", arguments: [Prompt.Argument(name: "resourceUri", description: "URI of the resource to embed", required: true)]),
             Prompt(name: "test_prompt_with_image", description: "A prompt with image content"),
         ]
-        return .init(prompts: listed + (dynamic ? [Prompt(name: "test_dynamic_prompt", description: "Listed after test_trigger_prompt_change")] : []))
+        return .init(prompts: listed + [inputRequiredPrompt] + (dynamic ? [Prompt(name: "test_dynamic_prompt", description: "Listed after test_trigger_prompt_change")] : []))
     }
 
     await server.withMethodHandler(GetPrompt.self) { params in
         switch params.name {
+        case inputRequiredPrompt.name:
+            return getInputRequiredPrompt(params)
         case "test_simple_prompt":
             return .init(description: "Simple prompt response", messages: [.user(.text(text: "This is a simple prompt for testing."))])
         case "test_prompt_with_arguments":

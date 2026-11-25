@@ -7,20 +7,7 @@
 # Entries are '<scenario>:<check-id>', or '<scenario>' for a scenario that
 # failed without producing a failing check. The harness fails a run on any
 # unlisted failure and on any listed entry that now passes.
-server:
-  - "input-required-result-basic-elicitation:sep-2322-elicitation-incomplete"
-  - "input-required-result-basic-list-roots:sep-2322-list-roots-incomplete"
-  - "input-required-result-basic-sampling:sep-2322-sampling-incomplete"
-  - "input-required-result-capability-check:sep-2322-respect-client-capabilities"
-  - "input-required-result-missing-input-response:sep-2322-missing-response-rerequests"
-  - "input-required-result-multi-round:sep-2322-multi-round-r1"
-  - "input-required-result-multiple-input-requests:sep-2322-multiple-inputs-incomplete"
-  - "input-required-result-non-tool-request:sep-2322-non-tool-incomplete"
-  - "input-required-result-request-state:sep-2322-request-state-incomplete"
-  - "input-required-result-result-type:sep-2322-result-type-included"
-  - "input-required-result-tampered-state:sep-2322-reject-tampered-state"
-  - "input-required-result-validate-input:sep-2322-error-on-protocol-error"
-  - "input-required-result-validate-input:sep-2322-validate-input-responses"
+server: []
 client:
   - "auth/authorization-server-migration:sep-2352-reregister-on-as-change"
   - "auth/authorization-server-migration:sep-837-application-type-present"
@@ -48,8 +35,3 @@ client:
   - "auth/scope-retry-limit:sep-837-application-type-present"
   - "auth/scope-step-up:sep-837-application-type-present"
   - "auth/token-endpoint-auth-none:sep-837-application-type-present"
-  - "sep-2322-client-request-state:sep-2322-client-jsonrpc-id-different"
-  - "sep-2322-client-request-state:sep-2322-client-no-state-omitted"
-  - "sep-2322-client-request-state:sep-2322-client-parallel-isolation"
-  - "sep-2322-client-request-state:sep-2322-client-request-state-echoed"
-  - "sep-2322-client-request-state:sep-2322-default-result-type-complete"

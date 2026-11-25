@@ -273,6 +273,10 @@ public actor Server {
 
     /// Pending requests sent to the client, awaiting responses
     private var pendingRequests: [ID: AnyPendingRequest] = [:]
+    /// Requests to the client that `send` created but has not registered in
+    /// `pendingRequests` yet. Removing an id withdraws the request before it
+    /// is sent.
+    private var unsentRequests: Set<ID> = []
 
     /// Whether the server is initialized
     private var isInitialized = false
@@ -306,6 +310,27 @@ public actor Server {
     public typealias StatelessRequestHook =
         @Sendable (_ clientInfo: Client.Info?, _ capabilities: Client.Capabilities) async throws -> Void
 
+    /// Seals and verifies `requestState` at 2026-07-28; `nil` when disabled.
+    private nonisolated let requestStateBoundary: RequestStateBoundary?
+
+    /// Creates a server.
+    ///
+    /// - Parameters:
+    ///   - name: The server name.
+    ///   - version: The server version.
+    ///   - title: A human-readable title for display.
+    ///   - description: What the server does, for display.
+    ///   - websiteUrl: The URL of the server's website.
+    ///   - icons: Icons for display in a user interface.
+    ///   - instructions: How to use the server, for the client's model.
+    ///   - capabilities: The features the server provides.
+    ///   - configuration: Protocol and validation settings.
+    ///   - requestStateProtection: How the `requestState` of input-required
+    ///     results is protected at 2026-07-28 (SEP-2322). The default uses a
+    ///     key held only by this process; servers with several instances pass
+    ///     shared keys. `nil` sends the state as the handler wrote it and
+    ///     trusts what clients echo: use it only when the state cannot affect
+    ///     authorization, resource access or business logic.
     public init(
         name: String,
         version: String,
@@ -315,7 +340,8 @@ public actor Server {
         icons: [Icon]? = nil,
         instructions: String? = nil,
         capabilities: Server.Capabilities = .init(),
-        configuration: Configuration = .default
+        configuration: Configuration = .default,
+        requestStateProtection: RequestStateProtection? = .ephemeral()
     ) {
         self.serverInfo = Server.Info(
             name: name,
@@ -328,6 +354,9 @@ public actor Server {
         self.capabilities = capabilities
         self.configuration = configuration
         self.instructions = instructions
+        self.requestStateBoundary = requestStateProtection.map {
+            RequestStateBoundary(protection: $0, audience: $0.audience ?? name)
+        }
     }
 
     /// Start the server
@@ -367,7 +396,23 @@ public actor Server {
                     do {
                         // Attempt to decode as batch first, then as individual response, request, or notification
                         if let batch = try? decoder.decode(Server.Batch.self, from: data) {
-                            try await handleBatch(batch)
+                            // Recorded before the task, as for a single request,
+                            // so that a cancellation arriving first is kept.
+                            // Placeholders for invalid items (no method) never
+                            // reach the cleanup in `handleRequest`.
+                            for case .request(let request) in batch.items where !request.method.isEmpty {
+                                startingRequests[request.id] = false
+                            }
+                            // Off the receive loop: a batched request may wait
+                            // for the client's answer to a bridged input request.
+                            Task {
+                                do {
+                                    try await self.handleBatch(batch)
+                                } catch {
+                                    await self.logger?.error(
+                                        "Error processing batch", metadata: ["error": "\(error)"])
+                                }
+                            }
                         } else if let response = try? decoder.decode(AnyResponse.self, from: data) {
                             await handleResponse(response)
                         } else if let request = try? decoder.decode(AnyRequest.self, from: data) {
@@ -528,17 +573,209 @@ public actor Server {
     // MARK: - Registration
 
     /// Register a method handler
+    ///
+    /// Handlers for `tools/call`, `prompts/get` and `resources/read` may
+    /// return an input-required result (SEP-2322), made with
+    /// `inputRequired(_:requestState:_meta:)`. At 2026-07-28 it goes to the
+    /// client, which retries with the responses. For earlier clients the
+    /// server sends the input requests itself and calls the handler again
+    /// with the responses, up to 10 rounds, so one handler serves both.
     @discardableResult
     public func withMethodHandler<M: Method>(
         _ type: M.Type,
         handler: @escaping @Sendable (M.Parameters) async throws -> M.Result
     ) -> Self {
-        methodHandlers[M.name] = TypedRequestHandler { (request: Request<M>) -> Response<M> in
-            let result = try await handler(request.params)
+        let roundTrips = MRTR.carriers.contains(M.name)
+        methodHandlers[M.name] = TypedRequestHandler { [weak self] (request: Request<M>) -> Response<M> in
+            guard roundTrips, let self else {
+                return Response(id: request.id, result: try await handler(request.params))
+            }
+            let result = try await self.serveRoundTrips(M.self, request.params, handler: handler)
             return Response(id: request.id, result: result)
         }
         if M.name == ListTools.name { invalidateToolHeaders() }
         return self
+    }
+
+    // MARK: - Multi round-trip requests (SEP-2322)
+
+    /// Runs a handler that may ask for input: verifies and seals
+    /// `requestState` at 2026-07-28, and fulfills input requests itself for
+    /// earlier clients.
+    private nonisolated func serveRoundTrips<M: Method>(
+        _: M.Type, _ params: M.Parameters,
+        handler: @Sendable (M.Parameters) async throws -> M.Result
+    ) async throws -> M.Result {
+        guard let context = Server.currentHandlerContext,
+            var params = params as? any InputRespondingParameters
+        else { return try await handler(params) }
+
+        // Computed once: the arguments do not change between rounds.
+        let original = params
+        var cachedBinding: RequestStateBoundary.Binding?
+        func binding() -> RequestStateBoundary.Binding {
+            if let cachedBinding { return cachedBinding }
+            let (target, arguments) = original.stateBinding
+            let computed = RequestStateBoundary.binding(target: target, arguments: arguments)
+            cachedBinding = computed
+            return computed
+        }
+
+        if context.isStateless {
+            if let token = params.requestState, let boundary = requestStateBoundary {
+                do {
+                    let verified = try boundary.unseal(
+                        token, method: M.name, binding: binding, context: context)
+                    if let consume = boundary.protection.consume {
+                        let fresh: Bool
+                        do {
+                            fresh = try await consume(verified.tokenID, verified.expiry)
+                        } catch let error as CancellationError {
+                            throw error
+                        } catch {
+                            // Not a replay: the check could not be made.
+                            await logger?.error(
+                                "requestState replay check failed",
+                                metadata: ["method": "\(M.name)", "error": "\(error)"])
+                            throw MCPError.internalError("Could not check requestState")
+                        }
+                        if !fresh { throw InvalidRequestState("replayed") }
+                    }
+                    params = params.retrying(inputResponses: params.inputResponses, requestState: verified.state)
+                } catch let error as MCPError {
+                    throw error
+                } catch let error as CancellationError {
+                    throw error
+                } catch {
+                    await logger?.warning(
+                        "requestState rejected",
+                        metadata: ["method": "\(M.name)", "reason": "\((error as? InvalidRequestState)?.reason ?? "\(error)")"])
+                    throw RequestStateBoundary.rejection
+                }
+            }
+        } else if params.inputResponses != nil || params.requestState != nil {
+            // Not part of the protocol before 2026-07-28: only the bridge below sets them.
+            params = params.retrying(inputResponses: nil, requestState: nil)
+        }
+
+        var round = 1
+        var stateOnlyDelay = MRTR.stateOnlyInitialDelay
+        while true {
+            try Task.checkCancellation()
+            let result = try await handler(params as! M.Parameters)
+            guard var asking = result as? any InputRequiringResult else { return result }
+            if asking.isInputRequired, asking.hasContent {
+                await logger?.error("Handler returned both content and input requests", metadata: ["method": "\(M.name)"])
+                throw MCPError.internalError(
+                    "Server bug: result has both content and inputRequests or requestState")
+            }
+            guard asking.isInputRequired else { return result }
+            // An empty `inputRequests` asks for nothing, so the retry would be the same request.
+            if asking.inputRequests?.isEmpty != false, asking.requestState == nil {
+                throw MCPError.internalError("Server bug: input-required result without inputRequests or requestState")
+            }
+
+            if context.isStateless {
+                try Self.checkCapabilities(
+                    asking.inputRequests ?? [:], method: M.name, declared: context.clientCapabilities)
+                if let state = asking.requestState, let boundary = requestStateBoundary {
+                    asking.requestState = try boundary.seal(
+                        state, method: M.name, binding: binding(), context: context)
+                }
+                return asking as! M.Result
+            }
+
+            guard round < MRTR.maxRounds else {
+                throw MCPError.internalError(
+                    "\(M.name) asked for input more than \(MRTR.maxRounds) times")
+            }
+            let requests = asking.inputRequests ?? [:]
+            if requests.isEmpty {
+                // Only state: the handler is not done yet. Wait as a
+                // 2026-07-28 client would before the next round.
+                try await Task.sleep(for: stateOnlyDelay)
+                stateOnlyDelay = min(stateOnlyDelay * 2, MRTR.stateOnlyMaximumDelay)
+            } else {
+                stateOnlyDelay = MRTR.stateOnlyInitialDelay
+                // As at 2026-07-28, whatever `strict` says.
+                try Self.checkCapabilities(requests, method: M.name, declared: context.clientCapabilities)
+            }
+            let responses = try await fulfill(requests)
+            params = params.retrying(
+                inputResponses: responses.isEmpty ? nil : responses, requestState: asking.requestState)
+            round += 1
+        }
+    }
+
+    /// Throws -32021 when input requests need capabilities the client did not declare.
+    private static func checkCapabilities(
+        _ requests: [String: InputRequest], method: String, declared: Client.Capabilities?
+    ) throws {
+        var missing = Client.Capabilities()
+        var methods: Set<String> = []
+        for request in requests.values where !request.isSupported(by: declared ?? .init()) {
+            request.require(in: &missing)
+            methods.insert(request.method)
+        }
+        guard !methods.isEmpty else { return }
+        throw MCPError.missingRequiredClientCapabilities(
+            missing,
+            message: "\(method) needs client capabilities for \(methods.sorted().joined(separator: ", "))")
+    }
+
+    /// Sends input requests to a client before 2026-07-28, concurrently.
+    /// Cancelling the calling task cancels the requests still outstanding.
+    private func fulfill(_ requests: [String: InputRequest]) async throws -> [String: InputResponse] {
+        try await withThrowingTaskGroup(of: (String, InputResponse).self) { group in
+            for (key, request) in requests {
+                group.addTask { (key, try await self.fulfill(request)) }
+            }
+            var responses: [String: InputResponse] = [:]
+            for try await (key, response) in group {
+                responses[key] = response
+            }
+            return responses
+        }
+    }
+
+    private func fulfill(_ request: InputRequest) async throws -> InputResponse {
+        switch request {
+        case .elicitation(let params):
+            return .elicitation(try await ask(CreateElicitation.request(params)))
+        case .sampling(let params):
+            return .sampling(try await ask(CreateSamplingMessage.request(params)))
+        case .listRoots:
+            return .roots(try await ask(ListRoots.request()))
+        }
+    }
+
+    /// Sends one bridged request to the client. A client error fails the
+    /// carrier with -32603; cancellation withdraws the request.
+    private func ask<M: Method>(_ request: Request<M>) async throws -> M.Result {
+        try Task.checkCancellation()
+        let task = try send(request)
+        do {
+            return try await withTaskCancellationHandler {
+                try await task.value
+            } onCancel: {
+                Task { await self.withdraw(request.id) }
+            }
+        } catch let error as MCPError {
+            throw MCPError.internalError("The client failed \(M.name): \(error.localizedDescription)")
+        }
+    }
+
+    /// Ends a bridged request whose carrier was cancelled, and tells the
+    /// client. A request not sent yet is not sent at all.
+    private func withdraw(_ id: ID) async {
+        guard let pending = removePendingResponse(id: id) else {
+            unsentRequests.remove(id)
+            return
+        }
+        pending.resume(throwing: CancellationError())
+        try? await notify(
+            CancelledNotification.message(
+                .init(requestId: id, reason: "The request that needed this input was cancelled")))
     }
 
     /// Register a notification handler
@@ -763,9 +1000,15 @@ public actor Server {
         let requestData = try encoder.encode(request)
         let relatedRequestID = Server.currentHandlerContext?.id
 
+        unsentRequests.insert(request.id)
         let requestTask = Task<M.Result, Error> {
             try await withCheckedThrowingContinuation { continuation in
                 Task {
+                    guard self.unsentRequests.remove(request.id) != nil else {
+                        // Withdrawn before it was registered.
+                        continuation.resume(throwing: CancellationError())
+                        return
+                    }
                     // Add pending response before sending
                     self.addPendingResponse(
                         id: request.id,
