@@ -854,20 +854,69 @@ struct StatefulHTTPServerTransportTests {
         await transport.disconnect()
     }
 
-    @Test("Bearer auth validator returns 400 when authorization header is malformed")
-    func testBearerAuthValidatorMalformedAuthorizationReturns400() async throws {
+    @Test("Bearer auth validator returns 401 with a challenge for another scheme")
+    func testBearerAuthValidatorOtherSchemeReturns401() async throws {
+        let transport = makeAuthenticatedStatefulTransport { _, _, _ in .valid(BearerTokenInfo()) }
+        try await transport.connect()
+
+        for authorization in ["Basic dGVzdA==", "Basic", ""] {
+            let response = await transport.handleRequest(
+                makeStatefulPOSTRequest(
+                    body: makeInitializeBody(),
+                    authorization: authorization
+                )
+            )
+
+            // RFC 6750 §3.1: no Bearer credentials, so no error code.
+            #expect(response.statusCode == 401, "\(authorization)")
+            let challenge = response.headers[HTTPHeaderName.wwwAuthenticate]
+            #expect(
+                challenge?.contains("resource_metadata=\"\(authResourceMetadataURL.absoluteString)\"") == true)
+            #expect(challenge?.contains("error=") == false)
+        }
+
+        await transport.disconnect()
+    }
+
+    @Test(
+        "Bearer auth validator returns 400 with an invalid_request challenge for a malformed Bearer header",
+        arguments: ["Bearer", "Bearer ", "Bearer a b", "Bearer a, Bearer b"])
+    func testBearerAuthValidatorMalformedAuthorizationReturns400(_ authorization: String) async throws {
         let transport = makeAuthenticatedStatefulTransport { _, _, _ in .valid(BearerTokenInfo()) }
         try await transport.connect()
 
         let response = await transport.handleRequest(
             makeStatefulPOSTRequest(
                 body: makeInitializeBody(),
-                authorization: "Basic dGVzdA=="
+                authorization: authorization
             )
         )
 
         #expect(response.statusCode == 400)
-        #expect(response.headers[HTTPHeaderName.wwwAuthenticate] == nil)
+        let challenge = response.headers[HTTPHeaderName.wwwAuthenticate]
+        #expect(challenge?.hasPrefix("Bearer ") == true)
+        #expect(challenge?.contains("error=\"invalid_request\"") == true)
+        #expect(
+            challenge?.contains("resource_metadata=\"\(authResourceMetadataURL.absoluteString)\"") == true)
+
+        await transport.disconnect()
+    }
+
+    @Test("Bearer auth validator answers .malformedRequest with an invalid_request challenge")
+    func testBearerAuthValidatorMalformedRequestResultReturns400() async throws {
+        let transport = makeAuthenticatedStatefulTransport { _, _, _ in
+            .malformedRequest(errorDescription: "Unsupported token format")
+        }
+        try await transport.connect()
+
+        let response = await transport.handleRequest(
+            makeStatefulPOSTRequest(body: makeInitializeBody(), authorization: "Bearer token")
+        )
+
+        #expect(response.statusCode == 400)
+        let challenge = response.headers[HTTPHeaderName.wwwAuthenticate]
+        #expect(challenge?.contains("error=\"invalid_request\"") == true)
+        #expect(challenge?.contains("error_description=\"Unsupported token format\"") == true)
 
         await transport.disconnect()
     }

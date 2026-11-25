@@ -122,20 +122,29 @@ public enum MCPRequestHeaders {
     /// The most `x-mcp-header` annotations of one tool.
     public static let maxAnnotations = 64
 
-    /// The deepest `properties` nesting searched for annotations.
+    /// The deepest `properties` nesting searched for annotations, and the
+    /// deepest subschema nesting inspected for misplaced ones: a subschema
+    /// nested deeper is not read, so an annotation there is ignored.
     public static let maxSchemaDepth = 32
 
     /// The mirrored arguments of a tool input schema.
     ///
     /// Annotations are read on properties reachable through `properties`
-    /// from the schema root. `$ref` is not followed.
+    /// from the schema root. `$ref` is not followed. An annotation anywhere
+    /// else (under `items`, `prefixItems`, `additionalProperties`,
+    /// `anyOf`/`oneOf`/`allOf`, `not`, `if`/`then`/`else`, `$defs`,
+    /// `patternProperties` or another subschema keyword, or on the root)
+    /// makes the schema invalid, down to ``maxSchemaDepth`` subschemas from
+    /// the root; below that it is neither rejected nor mirrored.
     ///
     /// - Throws: ``InvalidAnnotation`` when a header name is empty, not an
     ///   HTTP token, or duplicated (case-insensitively), when the property
-    ///   type is not `string`, `integer` or `boolean`, when the schema has
+    ///   type is not `string`, `integer` or `boolean`, when an annotation is
+    ///   not statically reachable through `properties`, when the schema has
     ///   more than ``maxAnnotations`` annotations, or when `properties` nest
     ///   deeper than ``maxSchemaDepth``. Descriptions name the property path,
     ///   escaped and truncated, never the annotation itself.
+    /// - SeeAlso: https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#schema-extension
     public static func parameters(in schema: Value) throws -> [Parameter] {
         var found: [Parameter] = []
         var names: Set<String> = []
@@ -171,7 +180,57 @@ public enum MCPRequestHeaders {
             }
         }
         try walk(schema, path: [])
+        try rejectUnreachableAnnotations(in: schema)
         return found
+    }
+
+    /// Keywords whose value is one subschema (JSON Schema 2020-12 and draft-07).
+    private static let subschemaKeywords: Set<String> = [
+        "items", "additionalItems", "additionalProperties", "unevaluatedItems", "unevaluatedProperties",
+        "not", "if", "then", "else", "contains", "propertyNames",
+    ]
+    /// Keywords whose value is an array of subschemas.
+    private static let subschemaArrayKeywords: Set<String> = ["prefixItems", "allOf", "anyOf", "oneOf", "items"]
+    /// Keywords whose value maps names to subschemas.
+    private static let subschemaMapKeywords: Set<String> = [
+        "properties", "$defs", "definitions", "patternProperties", "dependentSchemas", "dependencies",
+    ]
+
+    /// Throws for an annotation that is not on a property reached through
+    /// a chain of `properties` keys from the root. Subschemas are found by
+    /// keyword, so values such as `default`, `const` or `enum`, which may
+    /// hold any JSON, are not read. Subschemas more than ``maxSchemaDepth``
+    /// levels down are not read either, so that a deep schema without
+    /// annotations stays valid.
+    private static func rejectUnreachableAnnotations(in schema: Value) throws {
+        func visit(_ schema: Value, path: [String], depth: Int, onChain: Bool) throws {
+            guard let object = schema.objectValue else { return }
+            if object[schemaKeyword] != nil, !onChain || path.isEmpty {
+                throw InvalidAnnotation(
+                    description: "\(describe(path)): \(schemaKeyword) is not statically reachable through properties")
+            }
+            guard depth < maxSchemaDepth else { return }
+            for key in object.keys.sorted() {
+                guard let value = object[key] else { continue }
+                switch value {
+                case .object(let members) where subschemaMapKeywords.contains(key):
+                    for name in members.keys.sorted() {
+                        // A property's path is its name, as in `parameters(in:)`.
+                        let child = key == "properties" ? path + [name] : path + [key, name]
+                        try visit(members[name]!, path: child, depth: depth + 1, onChain: onChain && key == "properties")
+                    }
+                case .object where subschemaKeywords.contains(key):
+                    try visit(value, path: path + [key], depth: depth + 1, onChain: false)
+                case .array(let items) where subschemaArrayKeywords.contains(key):
+                    for (index, item) in items.enumerated() {
+                        try visit(item, path: path + ["\(key)[\(index)]"], depth: depth + 1, onChain: false)
+                    }
+                default:
+                    continue
+                }
+            }
+        }
+        try visit(schema, path: [], depth: 0, onChain: true)
     }
 
     /// A property path for messages: control and non-ASCII characters

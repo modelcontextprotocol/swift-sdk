@@ -50,7 +50,7 @@ The hook runs only for `initialize`. Stateless requests do not reach it; pass a 
 
 With `Server.Configuration.strict` set (`.strict`), the server rejects requests other than `initialize` and `ping` that arrive before `initialize`, with -32600 "Server is not initialized", and ignores notifications other than `notifications/initialized`. The default is lenient. A second `initialize` on one connection fails with -32600 "Server is already initialized". Behind a `StatelessHTTPServerTransport`, which has no connection or session, every `initialize` is answered, the server keeps no client state, and `strict` does not apply to handshake requests. No session ties a later request to the `initialize` that passed the hook, so there the `statelessRequestHook` runs before every other handshake request, with no client info and empty capabilities; with an initialize hook and no stateless hook, those requests are refused with -32600.
 
-A server never answers a notification. A message it cannot read gets a parse error (-32700) with `"id": null`, and an empty batch gets -32600 with `"id": null`.
+A server never answers a notification. A message it cannot read gets a parse error (-32700) with `"id": null`, and an empty batch gets -32600 with `"id": null`. In a batch, each invalid item gets its own -32600, and a response answers the server's request it names and gets no reply.
 
 ### Discovery and protocol modes
 
@@ -220,6 +220,8 @@ A transport moves JSON-RPC messages between a client and a server. In the SDK a 
 | `NetworkTransport` | both | both | Network.framework `NWConnection`; Apple platforms only. |
 
 The HTTP server transports do not open sockets. They take a framework-neutral `HTTPRequest` and return an `HTTPResponse`; an adapter for your HTTP framework converts between the two. [`Examples/http-server/main.swift`](../Examples/http-server/main.swift) is a complete adapter for SwiftNIO that serves both eras.
+
+Build the request with `HTTPRequest(method:headerFields:body:path:)`, passing the header field lines as received (with SwiftNIO, `Array(head.headers)`). The transports then see how many times each header was sent: at 2026-07-28, a repeated `MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name` or `Mcp-Param-*` header is refused with -32020, even when the copies are equal (a repeated handshake `MCP-Protocol-Version` gets -32022). `HTTPRequest(method:headers:body:path:)` takes a dictionary instead; join repeated lines into one value with `", "` (RFC 9110 §5.3). The transports then catch only repeated `MCP-Protocol-Version` and `Mcp-Method` headers, whose values never contain a comma.
 
 ### stdio
 
@@ -580,7 +582,7 @@ The server answers on the request's stream:
 
 1. `notifications/subscriptions/acknowledged` first, with the honored subset of the filter. The server honors a list-change kind only when it declares `listChanged` for that feature, resource URIs only when it declares `resources.subscribe`, and `taskIds` (the tasks extension) only for the caller's own tasks of a server with [tasks](server.md#tasks). Kinds it does not honor are omitted. A filter with `taskIds` from a client that did not declare the tasks extension is refused with -32021.
 2. Every matching notification, each with `_meta["io.modelcontextprotocol/subscriptionId"]` set to the listen request's JSON-RPC id.
-3. A `SubscriptionsListen.Result` (with the same `subscriptionId` in `_meta`) when the server ends the stream gracefully, for example on `stop()` or `closeSubscriptions()`.
+3. A `SubscriptionsListen.Result` (with the same `subscriptionId` in `_meta`) when the server ends the stream gracefully, with `closeSubscriptions()` or `stop()`. On stdio and other message-stream transports a `notifications/cancelled` for the listen request follows it; over HTTP the end of the response is the teardown. `stop()` waits until both are sent before it disconnects the transport. A stream the client cancelled gets neither.
 
 The server keeps the newest 256 events per stream when the client reads slowly. The events are refetch triggers, so dropping older ones loses no state.
 
@@ -901,10 +903,10 @@ Responses:
 
 | Result | HTTP | `WWW-Authenticate` |
 |---|---|---|
-| No `Authorization` header | 401 | `Bearer resource_metadata="…"` plus `scope` from `challengeScopeProvider` |
+| No `Authorization` header, or credentials of another scheme (`Basic …`) | 401 | `Bearer resource_metadata="…"` plus `scope` from `challengeScopeProvider` |
 | `.invalidToken`, expired, wrong audience | 401 | adds `error="invalid_token"` and `error_description` |
 | `.insufficientScope(requiredScopes:)` | 403 | `error="insufficient_scope"`, `scope="…"` |
-| `.malformedRequest`, a malformed header | 400 | none |
+| `.malformedRequest`, a malformed Bearer header (`Bearer` without a token, two tokens, two `Authorization` lines) | 400 | adds `error="invalid_request"` and `error_description` |
 
 Handlers see the request headers, including `Authorization`, through `Server.currentHandlerContext?.httpContext`. The SDK does not pass the validated `BearerTokenInfo` to handlers; decode the token again or cache the result by token (see [Session hijacking](#session-hijacking)).
 

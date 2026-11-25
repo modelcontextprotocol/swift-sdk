@@ -284,13 +284,12 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     }
 
     private func makeRequest(_ head: HTTPRequestHead) -> HTTPRequest {
-        var headers: [String: String] = [:]
-        for (name, value) in head.headers {
-            headers[name] = headers[name].map { "\($0), \(value)" } ?? value
-        }
         let bytes = body.readableBytes > 0 ? body.getBytes(at: body.readerIndex, length: body.readableBytes) : nil
         let path = String(head.uri.split(separator: "?").first ?? "")
-        return HTTPRequest(method: head.method.rawValue, headers: headers, body: bytes.map { Data($0) }, path: path)
+        // The field lines as received, so the transport can refuse a repeated MCP header.
+        return HTTPRequest(
+            method: head.method.rawValue, headerFields: Array(head.headers), body: bytes.map { Data($0) },
+            path: path)
     }
 
     private func write(_ response: HTTPResponse, version: HTTPVersion, context: ChannelHandlerContext) async {

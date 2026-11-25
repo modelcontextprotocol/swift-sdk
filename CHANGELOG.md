@@ -85,6 +85,11 @@ Behavior that can break working code ([docs/migration.md](docs/migration.md#beha
   `Resource.ui` read and write `_meta.ui`, and `Client.readAppResource` reads a view with its
   effective metadata and Content Security Policy. No View-Host bridge.
 - A built-in `logging/setLevel` handler that filters `Server.log`.
+- `HTTPRequest.init(method:headerFields:body:path:)` takes the header field lines as received and
+  `HTTPRequest.headerValues(_:)` returns each line's value, so the HTTP server transports refuse
+  a repeated `MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name` or `Mcp-Param-*` header at
+  2026-07-28 (-32020) without guessing from commas. A repeated `MCP-Protocol-Version` that names
+  only handshake revisions keeps -32022. Adapters should switch to it; the SwiftNIO example does.
 - `statelessRequestHook` on `Server.start`, `HTTPClientTransport.cancelRequest(_:)`,
   `BearerTokenValidationResult.tokenInfo`, and the `HTTPClientAuthorizer` requirement
   `handleChallenge(statusCode:headers:endpoint:operationKey:sentAuthorization:session:)`, with a
@@ -128,6 +133,39 @@ Behavior that can break working code ([docs/migration.md](docs/migration.md#beha
   `Process` on iOS, tvOS, watchOS or visionOS. CI builds every target for the iOS device SDK and
   runs the tests on an iOS simulator; `scripts/ci/apple-platform.sh` also takes tvOS, watchOS,
   visionOS and Mac Catalyst, which CI does not check.
+- A request whose `id` is not a string or an integer (`null`, `1.5`, `[]`, `true`, `1e20`), or
+  whose `jsonrpc` is not `"2.0"`, gets -32600 (HTTP 400) instead of being taken for a notification
+  and left unanswered. `""` is a valid id: the HTTP transports serve it, and `Request` no longer
+  decodes a `null` id as `""`. In a JSON-RPC batch each invalid item gets its own -32600 and the
+  other requests are still answered; a response in a batch answers the server's request it names
+  instead of failing the batch.
+- A server that serves no handshake revision answers a request that names no `_meta` protocol
+  version with -32602 (HTTP 400) and `data.supported`, not -32022 or -32601: the field is required,
+  not unsupported. A `progressToken` that is not a string or an integer gets -32602 in every
+  revision instead of being ignored.
+- `BearerTokenValidator` answers credentials of another scheme (`Basic …`) with 401 and the
+  Bearer challenge, as for no credentials, instead of 400 without one; a malformed Bearer header
+  and `.malformedRequest` get 400 with `WWW-Authenticate: Bearer error="invalid_request"` and
+  `resource_metadata` (RFC 6750 §3.1).
+- A `subscriptions/listen` stream the server ends (`closeSubscriptions()`, `stop()`) is followed,
+  after its result, by `notifications/cancelled` for the listen request on stdio and other
+  message-stream transports, as cancellation.mdx requires; `stop()` sends both before it
+  disconnects the transport. Over HTTP the end of the response stays the teardown.
+- An `x-mcp-header` annotation off the `properties` chain (under `items`, `anyOf`, `$defs` or
+  another subschema keyword, or on the root) makes the tool invalid: the client drops it from
+  `tools/list` and the server hides it, as streamable-http.mdx requires. Before, it was ignored.
+  One under more than `MCPRequestHeaders.maxSchemaDepth` (32) levels of subschemas is still
+  ignored.
+- `HTTPRequest.header(_:)` joins the values of keys that differ only in case, in key order; it
+  returned whichever the dictionary listed first. At 2026-07-28 a repeated `MCP-Protocol-Version`
+  or `Mcp-Method` (joined with commas by the adapter, RFC 9110 §5.3) gets -32020 (HTTP 400)
+  instead of -32022 or a match on one copy. `HTTPRequest.headers` documents the joining.
+- `StatelessHTTPServerTransport` checks `MCP-Protocol-Version` against the versions of its server
+  (`Server.Configuration.protocolVersions`), so -32022 lists those; it listed every version the
+  SDK implements.
+- A response the client cannot decode (an error `code` that is a string, no `jsonrpc`) fails the
+  request it names with `internalError("The server sent an invalid response")` instead of leaving
+  it to wait for its timeout, and the warning logs a sanitized prefix, not the whole message.
 - From `main` after 0.12.1: `Data.parseDataURL(_:)` reads `;base64` from the header only and
   decodes any percent-escaped byte (#309, #310); `client_secret_basic` percent-encodes the client
   credentials (RFC 6749 §2.3.1, #300); PKCE verifier characters are uniformly distributed (#303);

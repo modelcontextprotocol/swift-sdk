@@ -74,6 +74,29 @@ enum StatelessRequests {
                 logLevel: meta.logLevel))
     }
 
+    /// The -32602 answer to a request without
+    /// `io.modelcontextprotocol/protocolVersion` on a server that serves no
+    /// handshake revision, with the served versions in `data.supported`.
+    ///
+    /// - SeeAlso: https://modelcontextprotocol.io/specification/2026-07-28/basic#meta
+    static func missingProtocolVersion(served: [String]) -> MCPError {
+        let detail = "params._meta[\"\(MetaKey.protocolVersion)\"] is required"
+        return .serverError(
+            code: MCPError.Code.invalidParams.rawValue, message: "Invalid params: \(detail)",
+            data: ["detail": .string(detail), "supported": .array(served.map { .string($0) })])
+    }
+
+    /// Checks `_meta.progressToken`, in every revision: when present it
+    /// must be a string or an integer.
+    ///
+    /// - Throws: ``MCPError/invalidParams(_:)`` for a token of another type,
+    ///   including `null` and a fractional number.
+    /// - SeeAlso: https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/progress
+    static func checkProgressToken(_ meta: Metadata?) throws {
+        guard let meta, meta["progressToken"] != nil, meta.progressToken == nil else { return }
+        throw MCPError.invalidParams("params._meta.progressToken must be a string or an integer")
+    }
+
     /// Whether `capabilities` declare the feature a method belongs to.
     /// Methods outside the core features are always allowed.
     static func isDeclared(_ method: String, in capabilities: Server.Capabilities) -> Bool {

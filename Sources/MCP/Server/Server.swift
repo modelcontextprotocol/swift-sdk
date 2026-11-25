@@ -488,6 +488,9 @@ public actor Server {
             registeredCancellationHandler = true
             registerCancellationHandler()
         }
+        if let stateless = transport as? StatelessHTTPServerTransport {
+            await stateless.serve(protocolVersions: configuration.protocolVersions)
+        }
         try await transport.connect()
 
         await logger?.debug(
@@ -508,10 +511,14 @@ public actor Server {
                         if let batch = try? decoder.decode(Server.Batch.self, from: data) {
                             // Recorded before the task, as for a single request,
                             // so that a cancellation arriving first is kept.
-                            // Placeholders for invalid items (no method) never
-                            // reach the cleanup in `handleRequest`.
-                            for case .request(let request) in batch.items where !request.method.isEmpty {
+                            for case .request(let request) in batch.items {
                                 startingRequests[request.id] = false
+                            }
+                            // Answers to this server's requests (JSON-RPC 2.0
+                            // §6) resume their callers now, not after the
+                            // batch's requests are handled.
+                            for case .response(let response) in batch.items {
+                                await handleResponse(response)
                             }
                             // Off the receive loop: a batched request may wait
                             // for the client's answer to a bridged input request.
@@ -535,6 +542,17 @@ public actor Server {
                                 if isListen { self.listenRequests[request.id] = nil }
                             }
                             if isListen { listenRequests[request.id] = handling }
+                        } else if case .invalid(_, let id, let reason) = try? decoder.decode(
+                            JSONRPCMessageKind.self, from: data)
+                        {
+                            // JSON-RPC 2.0 §5: a request whose `id` or
+                            // `jsonrpc` is invalid gets -32600; it is not a
+                            // notification.
+                            if let id {
+                                try? await send(AnyMethod.response(id: id, error: .invalidRequest(reason)))
+                            } else {
+                                await sendUnattributedError(.invalidRequest(reason))
+                            }
                         } else if let message = try? decoder.decode(AnyMessage.self, from: data) {
                             try await handleMessage(message)
                         } else {
@@ -1638,6 +1656,23 @@ public actor Server {
         return SubscriptionsListen.Result(_meta: meta)
     }
 
+    /// After the result that closes a `subscriptions/listen` stream the
+    /// server ended, sends `notifications/cancelled` for it: a server MUST
+    /// send one when it tears a subscription down. Over HTTP the end of the
+    /// response is the teardown, so nothing is sent there; nor after a
+    /// stream the client cancelled.
+    ///
+    /// - SeeAlso: https://modelcontextprotocol.io/specification/2026-07-28/basic/utilities/cancellation
+    private func sendListenTeardown(_ id: ID) async {
+        guard !isSessionless, let connection else { return }
+        let cancelled = CancelledNotification.message(.init(requestId: id, reason: "Subscription closed"))
+        do {
+            try await connection.send(encoder.encode(cancelled))
+        } catch {
+            await logger?.debug("Listen teardown not sent", metadata: ["error": "\(error)"])
+        }
+    }
+
     /// Send a request to the client and return a Task for the response
     private func send<M: Method>(_ request: Request<M>) throws -> Task<M.Result, Error> {
         guard let connection = connection else {
@@ -2032,13 +2067,15 @@ public actor Server {
         return result.roots
     }
 
-    /// A JSON-RPC batch containing multiple requests and/or notifications
+    /// A JSON-RPC batch of requests, notifications and responses
     struct Batch: Sendable {
         /// An item in a JSON-RPC batch
         enum Item: Sendable {
             case request(Request<AnyMethod>)
             case notification(Message<AnyNotification>)
-
+            /// An answer to a request this server sent; it gets no reply.
+            case response(Response<AnyMethod>)
+            case invalid(id: ID?, reason: String)
         }
 
         var items: [Item]
@@ -2046,6 +2083,26 @@ public actor Server {
         init(items: [Item]) {
             self.items = items
         }
+    }
+
+    /// A JSON-RPC response or an error whose `id` is `null` (JSON-RPC 2.0 §5, §6).
+    private enum BatchReply: Encodable {
+        case response(Response<AnyMethod>)
+        case unattributedError(MCPError)
+
+        func encode(to encoder: Encoder) throws {
+            switch self {
+            case .response(let response):
+                try response.encode(to: encoder)
+            case .unattributedError(let error):
+                var container = encoder.container(keyedBy: Keys.self)
+                try container.encode("2.0", forKey: .jsonrpc)
+                try container.encodeNil(forKey: .id)
+                try container.encode(error, forKey: .error)
+            }
+        }
+
+        private enum Keys: String, CodingKey { case jsonrpc, id, error }
     }
 
     /// Process a batch of requests and/or notifications
@@ -2063,7 +2120,7 @@ public actor Server {
         }
 
         // Process each item in the batch and collect responses
-        var responses: [Response<AnyMethod>] = []
+        var replies: [BatchReply] = []
 
         for item in batch.items {
             do {
@@ -2073,26 +2130,38 @@ public actor Server {
                     if let response = try await handleRequest(
                         request, sendResponse: false, generation: generation)
                     {
-                        responses.append(response)
+                        replies.append(.response(response))
                     }
 
                 case .notification(let notification):
                     // Handle notification (no response needed)
                     try await handleMessage(notification)
+
+                case .response:
+                    // Handled by the receive loop.
+                    continue
+
+                case .invalid(let id, let reason):
+                    let error = MCPError.invalidRequest(reason)
+                    if let id {
+                        replies.append(.response(AnyMethod.response(id: id, error: error)))
+                    } else {
+                        replies.append(.unattributedError(error))
+                    }
                 }
             } catch {
                 // Only add errors to response for requests (notifications don't have responses)
                 if case .request(let request) = item {
                     let mcpError =
                         error as? MCPError ?? MCPError.internalError(error.localizedDescription)
-                    responses.append(AnyMethod.response(id: request.id, error: mcpError))
+                    replies.append(.response(AnyMethod.response(id: request.id, error: mcpError)))
                 }
             }
         }
 
         // Send collected responses if any
-        if !responses.isEmpty, generation == connectionGeneration {
-            let responseData = try encoder.encode(responses)
+        if !replies.isEmpty, generation == connectionGeneration {
+            let responseData = try encoder.encode(replies)
 
             guard let connection = connection else {
                 throw MCPError.internalError("Server connection not initialized")
@@ -2116,15 +2185,6 @@ public actor Server {
     private func handleRequest(
         _ request: Request<AnyMethod>, sendResponse: Bool = true, generation: Int
     ) async throws -> Response<AnyMethod>? {
-        // Check if this is a pre-processed error request (empty method)
-        if request.method.isEmpty && !sendResponse {
-            // This is a placeholder for an invalid request that couldn't be parsed in batch mode
-            return AnyMethod.response(
-                id: request.id,
-                error: MCPError.invalidRequest("Invalid batch item format")
-            )
-        }
-
         // Received on a connection that `stop()` ended, whose state is gone.
         guard generation == connectionGeneration else { return nil }
 
@@ -2161,12 +2221,22 @@ public actor Server {
         do {
             era = try StatelessRequests.classify(
                 request._meta, served: configuration.protocolVersions)
+            try StatelessRequests.checkProgressToken(request._meta)
         } catch let error as MCPError {
             return try await reject(error)
         }
 
         switch era {
         case .handshake:
+            // A server that serves no handshake revision serves only requests
+            // that name their version: one that names none is missing a
+            // required `_meta` field (-32602), not at an unsupported version.
+            if handshakeVersions.isEmpty, request.method != Initialize.name,
+                request._meta?[MetaKey.protocolVersion] == nil
+            {
+                return try await reject(
+                    StatelessRequests.missingProtocolVersion(served: configuration.protocolVersions))
+            }
             if StatelessRequests.statelessOnlyMethods.contains(request.method) {
                 return try await reject(
                     .methodNotFound("\(request.method) requires protocol version 2026-07-28 or later"))
@@ -2421,6 +2491,11 @@ public actor Server {
 
             if sendResponse {
                 try await send(response)
+                if request.method == SubscriptionsListen.name, case .success = response.result,
+                    !handlerTask.isCancelled
+                {
+                    await sendListenTeardown(request.id)
+                }
                 return nil
             }
 
@@ -2468,6 +2543,13 @@ public actor Server {
 
         switch try await toolInfo(context: context, request: request, listing: &listing)?[name]?.headers {
         case .valid(let parameters)?:
+            // Single-valued, and a value may contain commas: only separate
+            // field lines count as a repeat.
+            if let repeated = parameters.first(where: {
+                http.isRepeated($0.fieldName, valuesMayContainCommas: true)
+            }) {
+                return .headerMismatch("\(repeated.fieldName) header appears more than once")
+            }
             return MCPRequestHeaders.validate(parameters, arguments: arguments, header: http.header)
                 .map { MCPError.headerMismatch($0) }
         case .invalid?:
@@ -2651,11 +2733,7 @@ public actor Server {
     private func sendUnattributedError(_ error: MCPError) async {
         guard let connection else { return }
         do {
-            let response = AnyMethod.response(id: .string(""), error: error)
-            guard case .object(var object) = try decoder.decode(Value.self, from: encoder.encode(response))
-            else { return }
-            object["id"] = .null
-            try await connection.send(try encoder.encode(Value.object(object)))
+            try await connection.send(try encoder.encode(BatchReply.unattributedError(error)))
         } catch {
             await logger?.error("Failed to send error response", metadata: ["error": "\(error)"])
         }
@@ -2885,50 +2963,62 @@ public actor Server {
     }
 }
 
-extension Server.Batch: Codable {
+extension Server.Batch: Decodable {
     init(from decoder: Decoder) throws {
-        let container = try decoder.singleValueContainer()
-
-        let encoder = JSONEncoder()
-        let decoder = JSONDecoder()
-        decoder.userInfo[.valuePreservesStrings] = true
-
+        var container = try decoder.unkeyedContainer()
         var items: [Item] = []
-        for item in try container.decode([Value].self) {
-            let data = try encoder.encode(item)
-            try items.append(decoder.decode(Item.self, from: data))
+        while !container.isAtEnd {
+            items.append(try container.decode(Item.self))
         }
-
         self.items = items
-    }
-
-    func encode(to encoder: Encoder) throws {
-        var container = encoder.singleValueContainer()
-        try container.encode(items)
     }
 }
 
-extension Server.Batch.Item: Codable {
+extension Server.Batch.Item: Decodable {
     private enum CodingKeys: String, CodingKey {
         case id
     }
 
+    /// Classifies an item as ``JSONRPCMessageKind`` does for a single
+    /// message. An item that is not a request, a notification or a response
+    /// is invalid: its -32600 carries its `id` when it is a string or an
+    /// integer, except for an unreadable response, whose `id` names a request
+    /// of this server, not one of the peer.
     init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        // Check if it's a request (has id) or notification (no id)
-        if container.contains(.id) {
-            self = .request(try Request<AnyMethod>(from: decoder))
-        } else {
-            self = .notification(try Message<AnyNotification>(from: decoder))
+        let format = "Invalid batch item format"
+        guard let container = try? decoder.container(keyedBy: CodingKeys.self) else {
+            _ = try? Value(from: decoder)
+            self = .invalid(id: nil, reason: format)
+            return
         }
-    }
+        let isNull = (try? container.decodeNil(forKey: .id)) == true
+        let id = isNull ? nil : try? container.decode(ID.self, forKey: .id)
 
-    func encode(to encoder: Encoder) throws {
-        switch self {
-        case .request(let request):
-            try request.encode(to: encoder)
-        case .notification(let notification):
-            try notification.encode(to: encoder)
+        switch try? JSONRPCMessageKind(from: decoder) {
+        case .invalid(_, let id, let reason):
+            self = .invalid(id: id, reason: reason)
+        case .request:
+            if let request = try? Request<AnyMethod>(from: decoder) {
+                self = .request(request)
+            } else {
+                self = .invalid(id: id, reason: format)
+            }
+        case .notification:
+            if let notification = try? Message<AnyNotification>(from: decoder) {
+                self = .notification(notification)
+            } else {
+                self = .invalid(id: nil, reason: format)
+            }
+        case .response:
+            if let response = try? Response<AnyMethod>(from: decoder) {
+                self = .response(response)
+            } else {
+                self = .invalid(id: nil, reason: format)
+            }
+        case nil:
+            // No string `method`, and no `result` or `error` with a valid
+            // `id`, such as `{"jsonrpc": "2.0", "id": 7}`.
+            self = .invalid(id: id, reason: format)
         }
     }
 }

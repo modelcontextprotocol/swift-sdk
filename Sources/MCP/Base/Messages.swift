@@ -177,6 +177,12 @@ extension Request {
             throw DecodingError.dataCorruptedError(
                 forKey: .jsonrpc, in: container, debugDescription: "Invalid JSON-RPC version")
         }
+        // `ID` reads `null` as `""` for error responses; a request's id
+        // must not be null, and `""` is a valid string id.
+        if try container.decodeNil(forKey: .id) {
+            throw DecodingError.dataCorruptedError(
+                forKey: .id, in: container, debugDescription: "Request id must not be null")
+        }
         id = try container.decode(ID.self, forKey: .id)
         method = try container.decode(String.self, forKey: .method)
         _meta = (try? container.decodeIfPresent(MetaProbe.self, forKey: .params))??._meta
@@ -441,6 +447,11 @@ public struct Message<N: Notification>: Hashable, Codable, Sendable {
         case jsonrpc, method, params
     }
 
+    /// A member a notification must not have.
+    private enum RequestKeys: String, CodingKey {
+        case id
+    }
+
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(jsonrpc, forKey: .jsonrpc)
@@ -458,6 +469,13 @@ public struct Message<N: Notification>: Hashable, Codable, Sendable {
         guard version == jsonrpc else {
             throw DecodingError.dataCorruptedError(
                 forKey: .jsonrpc, in: container, debugDescription: "Invalid JSON-RPC version")
+        }
+        // A message with an `id` is a request, even when the id is not one
+        // a request may have; it is never a notification.
+        let requestKeys = try decoder.container(keyedBy: RequestKeys.self)
+        guard !requestKeys.contains(.id) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .id, in: requestKeys, debugDescription: "A notification must not have an id")
         }
         method = try container.decode(String.self, forKey: .method)
         _meta = (try? container.decodeIfPresent(MetaProbe.self, forKey: .params))??._meta

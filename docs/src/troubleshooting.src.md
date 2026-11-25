@@ -93,6 +93,8 @@ reaches the peer as -32603 with the error's description.
 | `Invalid params for <method>: ...` | The parameters do not decode as the method's `Parameters`, including `inputResponses: null`. | Fix the request; omit `inputResponses` instead of sending `null`. |
 | `Missing or invalid _meta field "io.modelcontextprotocol/clientCapabilities"` | A stateless request without valid client capabilities. Also `Invalid _meta field` for a bad `protocolVersion` or `clientInfo`. | Send the full `_meta` envelope; `Client` does this. |
 | `Missing _meta field "io.modelcontextprotocol/protocolVersion"` | An HTTP request whose `MCP-Protocol-Version` header names a stateless revision, without the version in `_meta`. | Send both. |
+| `params._meta["io.modelcontextprotocol/protocolVersion"] is required` | A request without a `_meta` version to a server that serves no handshake revision (`protocolVersions: Version.stateless`); `data.supported` lists the versions it serves. | Send the `_meta` envelope; an `.automatic` `Client` does this. |
+| `params._meta.progressToken must be a string or an integer` | A `progressToken` that is `null`, a boolean, a fraction, an array or an object, in any revision. | Use a string or an integer; `ProgressToken.unique()` makes one. |
 | `Invalid or expired requestState` | The `requestState` of an input-required round did not verify. The server logs the reason at `warning` (`requestState rejected`). | See below. |
 | A message with `data.uri` | The resource does not exist: the client decodes it as `MCPError.resourceNotFound(uri:message:)`. Servers throw that case. | Match `resourceNotFound`. |
 

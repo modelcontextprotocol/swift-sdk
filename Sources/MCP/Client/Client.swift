@@ -790,13 +790,22 @@ public actor Client {
                                 inboundQueue?.yield(message)
                             }
                         } else {
-                            var metadata: Logger.Metadata = [:]
-                            if let string = String(data: data, encoding: .utf8) {
-                                metadata["message"] = .string(string)
+                            // An answer that does not decode (an error whose
+                            // code is missing or a string, neither `result`
+                            // nor `error`, no `jsonrpc`) fails the request it
+                            // names, which would otherwise wait for its timeout.
+                            if let id = Self.responseID(of: data), pendingRequests[id] != nil {
+                                await deliver(
+                                    AnyMethod.response(
+                                        id: id, error: .internalError("The server sent an invalid response")))
                             }
+                            // Peer text: only a sanitized prefix is logged.
                             await logger?.warning(
                                 "Unexpected message received by client (not single/batch response or notification)",
-                                metadata: metadata
+                                metadata: [
+                                    "message": .string(
+                                        MCPRequestHeaders.sanitized(String(decoding: data.prefix(512), as: UTF8.self)))
+                                ]
                             )
                         }
                     }
@@ -1744,6 +1753,25 @@ public actor Client {
             let params: Params?
         }
         return (try? JSONDecoder().decode(Probe.self, from: data))?.params?._meta?.progressToken
+    }
+
+    /// The `id` of a message without a `method` (a response, maybe one that
+    /// does not decode), when it is a string or an integer.
+    private static func responseID(of data: Data) -> ID? {
+        struct Probe: Decodable {
+            let id: ID?
+            let hasMethod: Bool
+            private enum Keys: String, CodingKey { case id, method }
+            init(from decoder: Decoder) throws {
+                let container = try decoder.container(keyedBy: Keys.self)
+                // `ID` reads `null` as `""`.
+                let isNull = (try? container.decodeNil(forKey: .id)) == true
+                id = isNull ? nil : try? container.decode(ID.self, forKey: .id)
+                hasMethod = container.contains(.method)
+            }
+        }
+        guard let probe = try? JSONDecoder().decode(Probe.self, from: data), !probe.hasMethod else { return nil }
+        return probe.id
     }
 
     private static func decode<T: Decodable>(_ value: Value, as type: T.Type) -> T? {

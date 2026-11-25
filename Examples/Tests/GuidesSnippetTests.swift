@@ -198,10 +198,11 @@ struct GuidesSnippetTests {
         }
         await refusing.stop()
 
-        // A handshake-era request without `initialize` is refused too.
+        // A request that names no version is missing a required `_meta`
+        // field: -32602, not -32022.
         let strict = await eraServer(statelessOnly)
         let reply = try await rawExchange(strict, #"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#)
-        #expect(errorCode(reply) == -32022)
+        #expect(errorCode(reply) == -32602)
 
         let modern = await eraServer(statelessOnly)
         let client = try await connectInMemory(to: modern, mode: .automatic)
