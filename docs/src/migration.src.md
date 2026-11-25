@@ -4,8 +4,8 @@ This guide lists every public API change between the previous release
 (commit `2a44bfd`) and this major version: the changes that break source
 code, the changes in behavior and on the wire, and the new opt-in features.
 Most code compiles unchanged; the breaking changes are in `MCPError`,
-`HTTPResponse`, `Client.Capabilities.experimental` and
-`OAuthAuthorizationError`.
+`HTTPResponse`, `Client.Capabilities.experimental`, `OAuthAuthorizationError`
+and `HTTPClientAuthorizer`.
 
 ## Summary
 
@@ -15,8 +15,10 @@ Most code compiles unchanged; the breaking changes are in `MCPError`,
 | `MCPError` decoding | -32000 and -32001 decode as `serverError`; -32602 with `data.uri` as `resourceNotFound` | Match the new cases |
 | `HTTPResponse` | `.data` and `.error` have new associated values | Update patterns |
 | `Client.Capabilities.experimental` | `[String: String]?` became `[String: Value]?` | Pass `Value`s |
-| `OAuthAuthorizationError` | Six new cases | Update exhaustive `switch` statements |
+| `OAuthAuthorizationError` | Eight new cases | Update exhaustive `switch` statements |
 | `OAuthConfiguration.GrantType` | New case `.jwtBearer` | Update exhaustive `switch` statements |
+| `HTTPClientAuthorizer` | `authorizationHeader(for:)` became `authorizationHeaders(for:method:)` | Update custom authorizers |
+| `OAuthWWWAuthenticateParsing` | New requirement `parseChallenge(scheme:from:)`, with a default | Nothing |
 | `Server` | Serves 2026-07-28 requests by default | Nothing, or opt out |
 | `Client` | Connects at 2026-07-28 by default, with a fallback to `initialize` | Nothing, or opt out |
 | `Version.supported` | Lists 2026-07-28 | Read `Version.handshake` for the `initialize` revisions |
@@ -132,16 +134,32 @@ compile; variables of type `[String: String]` do not.
 
 ### `OAuthAuthorizationError`
 
-Six cases are new: `authorizationResponseIssuerMismatch(expected:actual:)`,
+Eight cases are new: `authorizationResponseIssuerMismatch(expected:actual:)`,
 `authorizationResponseMissingIssuer`, `assertionProviderMissing`,
-`issuedTokenTypeMismatch(expected:actual:)`, `authorizationServerNotConfigured`
-and `assertionAudienceMismatch(expected:actual:)`. Add them, or a `default`, to
+`issuedTokenTypeMismatch(expected:actual:)`, `authorizationServerNotConfigured`,
+`assertionAudienceMismatch(expected:actual:)`, `dpopRequired` and
+`dpopAlgorithmUnsupported(supported:)`. Add them, or a `default`, to
 exhaustive `switch` statements. See [Authorization](#authorization).
 
 ### `OAuthConfiguration.GrantType`
 
 `GrantType` has a new case, `.jwtBearer`. A `switch` over `grantType` needs it,
 or a `default`.
+
+### `HTTPClientAuthorizer`
+
+`authorizationHeader(for endpoint: URL) -> String?` is replaced by
+`authorizationHeaders(for url: URL, method: String) throws -> [String: String]`,
+so that an authorizer can sign the request (a DPoP proof covers the method and
+the URL). Return `["Authorization": value]` where the old method returned
+`value`, and `[:]` for `nil`. The transport now sets these headers after the
+`requestModifier`, for the final URL and method; they replace an
+`Authorization` header the modifier set. A thrown error fails the request with
+`internalError("Authorization flow failed: …")`.
+
+`OAuthAccessToken` has a new stored property, `keyThumbprint`, with a
+defaulted initializer parameter; tokens saved by the previous release decode
+with `nil`.
 
 ## Behavior changes
 
@@ -335,7 +353,9 @@ session ended.
   `fe8b`: only IP literals are checked;
 - compute PKCE challenges and sign `private_key_jwt` assertions with
   swift-crypto, so they work on Linux. `pkceS256Unavailable` and
-  `cryptographyUnavailable` are no longer thrown.
+  `cryptographyUnavailable` are no longer thrown;
+- read a `DPoP` challenge (RFC 9449) for `resource_metadata`, `scope` and
+  `error` when the response has no `Bearer` challenge.
 
 ### Package
 
@@ -366,5 +386,6 @@ It seals `requestState` with AES-GCM, computes PKCE challenges and signs
 | Log level order | `LogLevel: Comparable` | [server.md](server.md#logging) |
 | OAuth | `OAuthConfiguration.ApplicationType`, `OAuthAuthorizationCodeFlow.ExpectedIssuer` | [protocol.md](protocol.md#authorization) |
 | Enterprise-managed authorization, workload identity | `OAuthConfiguration.enterpriseManaged(...)`, `GrantType.jwtBearer`, `assertionProvider`, `OAuthTokenExchange` | [protocol.md](protocol.md#enterprise-managed-authorization) |
+| DPoP-bound tokens | `OAuthConfiguration.dpop`, `OAuthConfiguration.DPoP`, `DPoPSigningKey`, `OAuthAccessToken.keyThumbprint`, `HTTPHeaderName.dpop`, `HTTPClientAuthorizer.didReceiveResponse(headers:for:)` | [protocol.md](protocol.md#dpop) |
 | Replay store size | `StatefulHTTPServerTransport(eventStoreCapacity:)` | [protocol.md](protocol.md#transports) |
 

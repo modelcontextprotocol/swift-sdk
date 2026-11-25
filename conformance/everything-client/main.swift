@@ -201,6 +201,13 @@ private func makeOAuthConfiguration(
             assertionProvider: { _, _ in workloadJWT },
             allowsDiscoveredAuthorizationServer: true)
 
+    case "auth/dpop", "auth/dpop-nonce":
+        // SEP-1932: DPoP-bound tokens for a dynamically registered client.
+        configuration = .init(
+            grantType: .authorizationCode,
+            authentication: .none(clientID: ""),
+            dpop: .init())
+
     // An empty client ID registers dynamically; a supplied one is pre-registered.
     case let s where s.hasPrefix("auth/client-credentials"):
         configuration = .init(

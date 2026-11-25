@@ -26,6 +26,8 @@ final class RecordingTokenClient: OAuthTokenRequesting, @unchecked Sendable {
     var refusedGrants: Set<String> = []
     var expiresIn = 3600
     var delay: Duration = .zero
+    /// Answers without `refresh_token`, as RFC 6749 §6 allows.
+    var omitsRefreshToken = false
 
     var calls: [Call] { lock.withLock { recorded } }
 
@@ -33,6 +35,7 @@ final class RecordingTokenClient: OAuthTokenRequesting, @unchecked Sendable {
         parameters: inout [String: String],
         endpoint: URL,
         authentication: OAuthConfiguration.TokenEndpointAuthentication,
+        dpop: DPoPProofSigner?,
         session: URLSession
     ) async throws -> OAuthTokenResponse {
         let grant = parameters[OAuthParameterName.grantType]
@@ -50,7 +53,7 @@ final class RecordingTokenClient: OAuthTokenRequesting, @unchecked Sendable {
         }
         return OAuthTokenResponse(
             accessToken: "token-\(number)", tokenType: "Bearer", expiresIn: expiresIn, scope: nil,
-            refreshToken: "refresh-\(number)")
+            refreshToken: omitsRefreshToken ? nil : "refresh-\(number)")
     }
 }
 
@@ -209,7 +212,8 @@ struct OAuthAuthorizerStateTests {
     ) async throws -> Bool {
         try await authorizer.handleChallenge(
             statusCode: status, headers: headers ?? challenge, endpoint: endpoint, operationKey: "tools/call",
-            sentAuthorization: sent, session: .shared)
+            sentAuthorization: sent, session: .shared
+        ).retry
     }
 
     @Test("A 401 for a token another challenge already refreshed retries with the new token")
@@ -242,6 +246,28 @@ struct OAuthAuthorizerStateTests {
         #expect(tokens.calls.map(\.grantType) == ["client_credentials", "refresh_token", "refresh_token"])
         #expect(tokens.calls.last?.refreshToken == "refresh-2")
         #expect(storage.load()?.value == "token-3")
+    }
+
+    @Test("A refresh response without a refresh token keeps the previous one (RFC 6749 section 6)")
+    func refreshWithoutRefreshTokenKeepsIt() async throws {
+        let storage = InMemoryTokenStorage()
+        let tokens = RecordingTokenClient()
+        let authorizer = makeAuthorizer(discovery: discovery(listing: serverA), tokens: tokens, storage: storage)
+        #expect(try await challenge(authorizer, sent: nil, headers: ["WWW-Authenticate": #"Bearer scope="files:read""#]))
+        let previous = try #require(storage.load())
+        #expect(previous.scopes == ["files:read"])
+        tokens.omitsRefreshToken = true
+        #expect(try await challenge(authorizer, sent: "Bearer token-1"))  // refresh
+        #expect(storage.load()?.value == "token-2")
+        #expect(storage.load()?.refreshToken == "refresh-1")
+        // Neither the refresh request nor the response names a scope: the
+        // token keeps the scopes granted before.
+        #expect(storage.load()?.scopes == previous.scopes)
+
+        // The kept refresh token refreshes again instead of a new grant.
+        #expect(try await challenge(authorizer, sent: "Bearer token-2"))
+        #expect(tokens.calls.map(\.grantType) == ["client_credentials", "refresh_token", "refresh_token"])
+        #expect(tokens.calls.last?.refreshToken == "refresh-1")
     }
 
     @Test("A transient failure to read the authorization server metadata keeps the stored tokens")
@@ -346,7 +372,7 @@ struct OAuthAuthorizerStateTests {
             for try await handled in group { #expect(handled) }
         }
         #expect(tokens.calls.count == 2)
-        #expect(authorizer.authorizationHeader(for: endpoint) == "Bearer token-2")
+        #expect(try authorizer.authorizationHeaders(for: endpoint, method: "POST")["Authorization"] == "Bearer token-2")
     }
 
     @Test("A registration that failed is tried again by the next challenge")
@@ -404,7 +430,7 @@ struct OAuthAuthorizerStateTests {
         #expect(try await first.value)
         await observer.value
         #expect(flow.performCount == 1)
-        #expect(authorizer.authorizationHeader(for: endpoint) == "Bearer token-1")
+        #expect(try authorizer.authorizationHeaders(for: endpoint, method: "POST")["Authorization"] == "Bearer token-1")
     }
 
     @Test("A 401 refreshes at the token's server before reading the resource metadata again")
@@ -418,7 +444,7 @@ struct OAuthAuthorizerStateTests {
         #expect(try await challenge(authorizer))
         #expect(tokens.calls.map(\.grantType) == ["client_credentials", "refresh_token"])
         #expect(discovery.fetchProtectedResourceMetadataCallCount == fetches)
-        #expect(authorizer.authorizationHeader(for: endpoint) == "Bearer token-2")
+        #expect(try authorizer.authorizationHeaders(for: endpoint, method: "POST")["Authorization"] == "Bearer token-2")
     }
 
     @Test("A transient failure to read the metadata keeps the token's server; nothing goes to the MCP origin")
@@ -518,7 +544,7 @@ struct OAuthAuthorizerStateTests {
         ]
         tokens.refusedGrants = ["client_credentials"]
         await #expect(throws: (any Error).self) { _ = try await challenge(authorizer, status: 403, headers: moved) }
-        #expect(authorizer.authorizationHeader(for: endpoint) == nil)
+        #expect(try authorizer.authorizationHeaders(for: endpoint, method: "POST")["Authorization"] == nil)
 
         try await authorizer.prepareAuthorization(for: endpoint, session: .shared)
         #expect(!tokens.calls.contains { $0.grantType == "refresh_token" })

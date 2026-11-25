@@ -34,12 +34,4 @@ server:
   - "tasks-wire-fields:tasks-no-early-ttl-expiry"
   - "tasks-wire-fields:tasks-no-related-task-meta-on-inlined-result"
   - "tasks-wire-fields:tasks-wire-field-renames"
-client:
-  - "auth/dpop-nonce:sep-1932-client-as-nonce"
-  - "auth/dpop-nonce:sep-1932-client-dpop-auth-scheme"
-  - "auth/dpop-nonce:sep-1932-client-fresh-proof"
-  - "auth/dpop-nonce:sep-1932-client-rs-nonce"
-  - "auth/dpop-nonce:sep-1932-client-token-request-proof"
-  - "auth/dpop:sep-1932-client-dpop-auth-scheme"
-  - "auth/dpop:sep-1932-client-fresh-proof"
-  - "auth/dpop:sep-1932-client-token-request-proof"
+client: []

@@ -160,8 +160,9 @@ public actor HTTPClientTransport: Transport {
     ///   - streaming: Whether to enable SSE streaming mode (default: true)
     ///   - sseInitializationTimeout: Maximum time to wait for session ID before proceeding with SSE (default: 10 seconds)
     ///   - protocolVersion: The MCP protocol version to use (default: "2025-11-25")
-    ///   - authorizer: Optional ``HTTPClientAuthorizer`` for automatic Bearer token acquisition and retries.
-    ///   - requestModifier: Optional closure to customize requests before they are sent (default: no modification)
+    ///   - authorizer: Optional ``HTTPClientAuthorizer`` for automatic token acquisition and retries.
+    ///   - requestModifier: Optional closure to customize requests before they are sent (default: no modification).
+    ///     The `authorizer`'s headers are set after it, for the final URL and method.
     ///   - logger: Optional logger instance for transport events
     public init(
         endpoint: URL,
@@ -406,6 +407,7 @@ public actor HTTPClientTransport: Transport {
         }
 
         var attempts = 0
+        var retriedNonce = false
         let operationKey = message.operationKey
         // A stateless request names its version in `_meta`; the header must match.
         let version = message.protocolVersion ?? protocolVersion
@@ -440,18 +442,17 @@ public actor HTTPClientTransport: Transport {
                 request.addValue(sessionID, forHTTPHeaderField: HTTPHeaderName.sessionID)
             }
 
-            if let authValue = authorizer?.authorizationHeader(for: endpoint) {
-                request.setValue(authValue, forHTTPHeaderField: HTTPHeaderName.authorization)
-            }
-
             request = requestModifier(request)
+            try applyAuthorization(to: &request)
 
             do {
                 #if os(Linux)
                     let (responseData, response) = try await session.data(for: request)
+                    noteResponse(response, to: request)
                     try await processResponse(response: response, data: responseData, request: message)
                 #else
                     let (responseStream, response) = try await session.bytes(for: request)
+                    noteResponse(response, to: request)
                     try await processResponse(response: response, stream: responseStream, request: message)
                 #endif
                 return
@@ -460,7 +461,7 @@ public actor HTTPClientTransport: Transport {
                     throw mapAuthenticationChallengeError(authError)
                 }
 
-                let handled: Bool
+                let handled: HTTPChallengeResult
                 do {
                     handled = try await authorizer.handleChallenge(
                         statusCode: authError.statusCode,
@@ -475,9 +476,18 @@ public actor HTTPClientTransport: Transport {
                         "Authorization flow failed: \(error.localizedDescription)")
                 }
 
-                attempts += 1
+                // RFC 9449 §9: the authorizer says whether the retry only
+                // answers a DPoP nonce challenge, retried once per request.
+                if handled.isDPoPNonceRetry {
+                    if retriedNonce {
+                        throw mapAuthenticationChallengeError(authError)
+                    }
+                    retriedNonce = true
+                } else {
+                    attempts += 1
+                }
 
-                if handled, attempts < authorizer.maxAuthorizationAttempts {
+                if handled.retry, attempts < authorizer.maxAuthorizationAttempts {
                     continue
                 }
 
@@ -637,6 +647,28 @@ public actor HTTPClientTransport: Transport {
         }
     }
 
+    /// Sets the authorizer's headers for the final URL and method of `request`.
+    private func applyAuthorization(to request: inout URLRequest) throws {
+        guard let authorizer else { return }
+        let headers: [String: String]
+        do {
+            headers = try authorizer.authorizationHeaders(
+                for: request.url ?? endpoint, method: request.httpMethod ?? "POST")
+        } catch {
+            throw MCPError.internalError("Authorization flow failed: \(error.localizedDescription)")
+        }
+        for (name, value) in headers {
+            request.setValue(value, forHTTPHeaderField: name)
+        }
+    }
+
+    /// Shows the authorizer the headers of a response to `request`.
+    private func noteResponse(_ response: URLResponse, to request: URLRequest) {
+        guard let authorizer, let response = response as? HTTPURLResponse else { return }
+        authorizer.didReceiveResponse(
+            headers: responseHeaders(from: response), for: request.url ?? endpoint)
+    }
+
     private func mapAuthenticationChallengeError(_ error: HTTPAuthenticationChallengeError) -> MCPError {
         switch error.statusCode {
         case 401:
@@ -709,6 +741,21 @@ public actor HTTPClientTransport: Transport {
         guard case .internalError(let detail?) = error as? MCPError else { return false }
         return [StatusMessage.badRequest, StatusMessage.notFound, StatusMessage.methodNotAllowed,
             StatusMessage.streamingUnsupported].contains(detail)
+    }
+
+    /// Whether a challenge is a resource server's `use_dpop_nonce` with the
+    /// `DPoP-Nonce` header it requires (RFC 9449 §9). Without the header the
+    /// authorizer cannot retry with a nonce, so the challenge counts as an
+    /// ordinary attempt.
+    private static func isDPoPNonceChallenge(_ challenge: HTTPAuthenticationChallengeError) -> Bool {
+        challenge.statusCode == 401
+            && DefaultOAuthWWWAuthenticateParser()
+                .parseChallenge(scheme: OAuthTokenType.dpop, from: challenge.headers)?.error
+                == OAuthErrorCode.useDPoPNonce
+            && challenge.headers.contains {
+                $0.key.caseInsensitiveCompare(HTTPHeaderName.dpopNonce) == .orderedSame
+                    && !$0.value.trimmingCharacters(in: .whitespaces).isEmpty
+            }
     }
 
     /// Error details for HTTP status replies.
@@ -898,12 +945,11 @@ public actor HTTPClientTransport: Transport {
                 if let lastEventID {
                     request.addValue(lastEventID, forHTTPHeaderField: HTTPHeaderName.lastEventID)
                 }
-                if let authValue = authorizer?.authorizationHeader(for: endpoint) {
-                    request.setValue(authValue, forHTTPHeaderField: HTTPHeaderName.authorization)
-                }
                 request = requestModifier(request)
+                try applyAuthorization(to: &request)
 
                 let (stream, response) = try await session.bytes(for: request)
+                noteResponse(response, to: request)
                 guard let httpResponse = response as? HTTPURLResponse else {
                     stream.task.cancel()
                     throw MCPError.internalError("Invalid HTTP response")

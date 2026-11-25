@@ -273,6 +273,15 @@ authorizer, a 401 is `Authentication required` and a 403 is
 | `Token exchange issued` | `issuedTokenTypeMismatch` | The identity provider returned another token type than requested, for example an access token instead of an ID-JAG. |
 | `Token request failed with status 400 (oauth_error: invalid_grant)` | `tokenRequestFailed` | With `.jwtBearer`: the assertion is expired, has the wrong audience, or is not trusted. The request is not retried. |
 | `Authorization response state mismatch` | `authorizationResponseStateMismatch` | The redirect does not belong to this authorization request. |
+| `The protected resource requires DPoP-bound tokens` | `dpopRequired` | The protected resource metadata has `dpop_bound_access_tokens_required: true`; set `OAuthConfiguration.dpop`. |
+| `The authorization server does not accept ES256 DPoP proofs` | `dpopAlgorithmUnsupported` | `dpop_signing_alg_values_supported` lacks `ES256`, the only algorithm the SDK signs with. |
+| `Token request failed with status 400 (oauth_error: use_dpop_nonce)` | `tokenRequestFailed` | The token endpoint asked for a nonce twice in a row, or sent no `DPoP-Nonce` header. |
+| `Token response is invalid` | `tokenResponseInvalid` | Among other causes: a `token_type` other than `Bearer`, or `DPoP` for a request without `dpop`. |
+
+A DPoP client that keeps asking for authorization after a relaunch has stored
+tokens bound to a key it no longer has: the authorizer discards a token whose
+`keyThumbprint` differs from the configured key's, with its refresh token.
+Persist the key with the tokens.
 
 Issuer mismatches are configuration errors on the server side: the issuer in
 the metadata must equal the URL that serves it, with no other normalization.

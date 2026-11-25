@@ -157,7 +157,7 @@ struct OAuthIssuerTests {
         _ = try await authorizer.handleChallenge(
             statusCode: 401, headers: headers401, endpoint: endpoint, session: .shared)
         #expect(registrar.registerCallCount == 1)
-        #expect(authorizer.authorizationHeader(for: endpoint) != nil)
+        #expect((try authorizer.authorizationHeaders(for: endpoint, method: "POST"))[HTTPHeaderName.authorization] != nil)
 
         // The same 401 again, but the metadata now names another server.
         let second = URL(string: "https://auth2.example.com")!

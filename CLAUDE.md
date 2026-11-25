@@ -51,7 +51,10 @@ Keep the two manifests' target/dependency lists in sync when adding to the `MCP`
 - `Authorization/` implements OAuth 2.1 client-side flows: discovery (RFC 9728/8414), dynamic
   client registration (RFC 7591), PKCE, token endpoint calls, `private_key_jwt` assertions, the
   RFC 7523 jwt-bearer grant (`assertionProvider`, no DCR, no retry), RFC 8693 token exchange
-  (`OAuthTokenExchange`) and `OAuthConfiguration.enterpriseManaged(...)` (SEP-990).
+  (`OAuthTokenExchange`), `OAuthConfiguration.enterpriseManaged(...)` (SEP-990) and DPoP
+  (`OAuthConfiguration.dpop`, `OAuthDPoP.swift`, any `DPoPSigningKey`). The transport sets
+  `authorizationHeaders(for:method:)` after `requestModifier` and passes every response to
+  `didReceiveResponse(headers:for:)` (DPoP nonces).
   This is opt-in — wired in via an `OAuthAuthorizer` passed to `HTTPClientTransport`.
 - `Utilities/` holds cross-cutting concerns used by both Client and Server: `Cancellation`,
   `Progress`, `Ping`, and `RequestContext` (the client's handle on a pending request: id and

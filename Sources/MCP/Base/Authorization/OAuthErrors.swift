@@ -167,6 +167,16 @@ public enum OAuthAuthorizationError: LocalizedError {
     ///   - actual: The `aud` claim of the assertion; empty when it has none.
     case assertionAudienceMismatch(expected: [String], actual: [String])
 
+    /// The protected resource requires DPoP-bound tokens
+    /// (`dpop_bound_access_tokens_required`) and ``OAuthConfiguration/dpop``
+    /// is not set.
+    case dpopRequired
+
+    /// The authorization server does not accept ES256 DPoP proofs.
+    ///
+    /// - Parameter supported: The server's `dpop_signing_alg_values_supported`.
+    case dpopAlgorithmUnsupported(supported: [String])
+
     public var errorDescription: String? {
         switch self {
         case .missingAuthorizationServer:
@@ -248,6 +258,11 @@ public enum OAuthAuthorizationError: LocalizedError {
         case .assertionAudienceMismatch(let expected, let actual):
             return
                 "The assertion audience \(actual.joined(separator: ", ")) is none of \(expected.joined(separator: ", "))"
+        case .dpopRequired:
+            return "The protected resource requires DPoP-bound tokens; set OAuthConfiguration.dpop"
+        case .dpopAlgorithmUnsupported(let supported):
+            return
+                "The authorization server does not accept ES256 DPoP proofs (supported: \(supported.joined(separator: ", ")))"
         }
     }
 }

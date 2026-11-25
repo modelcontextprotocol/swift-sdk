@@ -2,7 +2,7 @@ import Foundation
 
 // MARK: - WWW-Authenticate Parsing Protocol
 
-/// Parses the `WWW-Authenticate` response header to extract Bearer challenge parameters.
+/// Parses the `WWW-Authenticate` response header to extract challenge parameters.
 ///
 /// ``OAuthAuthorizer`` uses this protocol to inspect 401 and 403 responses from the server.
 /// Override the default ``DefaultOAuthWWWAuthenticateParser`` to handle custom challenge formats.
@@ -12,6 +12,23 @@ public protocol OAuthWWWAuthenticateParsing {
     /// - Parameter headers: The full set of HTTP response headers (case-insensitive lookup is expected).
     /// - Returns: An ``OAuthBearerChallenge`` if a `Bearer` scheme is found, or `nil` otherwise.
     func parseBearer(from headers: [String: String]) -> OAuthBearerChallenge?
+
+    /// Parses the challenge of an authentication scheme, such as `DPoP`
+    /// (RFC 9449 §7.1), from the `WWW-Authenticate` header.
+    ///
+    /// - Parameters:
+    ///   - scheme: The scheme name, matched case-insensitively.
+    ///   - headers: The full set of HTTP response headers.
+    /// - Returns: The challenge parameters, or `nil` if the scheme is absent.
+    func parseChallenge(scheme: String, from headers: [String: String]) -> OAuthBearerChallenge?
+}
+
+extension OAuthWWWAuthenticateParsing {
+    public func parseChallenge(scheme: String, from headers: [String: String])
+        -> OAuthBearerChallenge?
+    {
+        DefaultOAuthWWWAuthenticateParser().parseChallenge(scheme: scheme, from: headers)
+    }
 }
 
 // MARK: - Default Implementation
@@ -29,18 +46,26 @@ public struct DefaultOAuthWWWAuthenticateParser: OAuthWWWAuthenticateParsing {
     )
 
     public func parseBearer(from headers: [String: String]) -> OAuthBearerChallenge? {
+        parseChallenge(scheme: OAuthTokenType.bearer, from: headers)
+    }
+
+    public func parseChallenge(scheme: String, from headers: [String: String])
+        -> OAuthBearerChallenge?
+    {
         guard let value = headers.first(where: {
             $0.key.caseInsensitiveCompare(HTTPHeaderName.wwwAuthenticate) == .orderedSame
         })?.value else {
             return nil
         }
-        return parseBearerHeader(value)
+        return parseHeader(value, scheme: scheme)
     }
 
-    private func parseBearerHeader(_ header: String) -> OAuthBearerChallenge? {
+    private func parseHeader(_ header: String, scheme: String) -> OAuthBearerChallenge? {
         let trimmed = header.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
-        guard let parametersPart = extractBearerParameters(from: trimmed) else { return nil }
+        guard let parametersPart = extractParameters(from: trimmed, scheme: scheme) else {
+            return nil
+        }
 
         if parametersPart.isEmpty {
             return OAuthBearerChallenge(parameters: [:])
@@ -78,15 +103,15 @@ public struct DefaultOAuthWWWAuthenticateParser: OAuthWWWAuthenticateParsing {
         return OAuthBearerChallenge(parameters: parameters)
     }
 
-    private func extractBearerParameters(from header: String) -> String? {
+    private func extractParameters(from header: String, scheme: String) -> String? {
         let segments = splitParameters(header)
 
         for index in segments.indices {
             let segment = segments[index].trimmingCharacters(in: .whitespacesAndNewlines)
-            guard isBearerChallengeStart(segment) else { continue }
+            guard isChallengeStart(segment, scheme: scheme) else { continue }
 
             var parameters: [String] = []
-            let initial = stripBearerScheme(from: segment)
+            let initial = stripScheme(scheme, from: segment)
             if !initial.isEmpty {
                 parameters.append(initial)
             }
@@ -98,7 +123,7 @@ public struct DefaultOAuthWWWAuthenticateParser: OAuthWWWAuthenticateParsing {
                     nextIndex = segments.index(after: nextIndex)
                     continue
                 }
-                if startsNewChallenge(next) {
+                if startsNewChallenge(next, scheme: scheme) {
                     break
                 }
                 parameters.append(next)
@@ -111,11 +136,11 @@ public struct DefaultOAuthWWWAuthenticateParser: OAuthWWWAuthenticateParsing {
         return nil
     }
 
-    private func isBearerChallengeStart(_ segment: String) -> Bool {
-        guard segment.count >= OAuthTokenType.bearer.count else { return false }
-        let schemeEnd = segment.index(segment.startIndex, offsetBy: OAuthTokenType.bearer.count)
+    private func isChallengeStart(_ segment: String, scheme name: String) -> Bool {
+        guard segment.count >= name.count else { return false }
+        let schemeEnd = segment.index(segment.startIndex, offsetBy: name.count)
         let scheme = segment[..<schemeEnd]
-        guard String(scheme).caseInsensitiveCompare(OAuthTokenType.bearer) == .orderedSame else {
+        guard String(scheme).caseInsensitiveCompare(name) == .orderedSame else {
             return false
         }
 
@@ -125,14 +150,14 @@ public struct DefaultOAuthWWWAuthenticateParser: OAuthWWWAuthenticateParsing {
         return segment[schemeEnd].isWhitespace
     }
 
-    private func stripBearerScheme(from segment: String) -> String {
-        guard segment.count > OAuthTokenType.bearer.count else { return "" }
-        let index = segment.index(segment.startIndex, offsetBy: OAuthTokenType.bearer.count)
+    private func stripScheme(_ scheme: String, from segment: String) -> String {
+        guard segment.count > scheme.count else { return "" }
+        let index = segment.index(segment.startIndex, offsetBy: scheme.count)
         return String(segment[index...]).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func startsNewChallenge(_ segment: String) -> Bool {
-        if isBearerChallengeStart(segment) {
+    private func startsNewChallenge(_ segment: String, scheme: String) -> Bool {
+        if isChallengeStart(segment, scheme: scheme) {
             return true
         }
 

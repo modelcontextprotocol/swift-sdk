@@ -109,7 +109,7 @@ struct OAuthJWTBearerGrantTests {
         #expect(context.resource == endpoint)
         #expect(context.tokenEndpoint == URL(string: "https://auth.example.com/token")!)
         #expect(context.requestedScopes == ["read", "write"])
-        #expect(authorizer.authorizationHeader(for: endpoint) == "Bearer mock-access-token")
+        #expect((try authorizer.authorizationHeaders(for: endpoint, method: "POST"))[HTTPHeaderName.authorization] == "Bearer mock-access-token")
     }
 
     @Test("Every token request gets a new assertion")
@@ -422,7 +422,7 @@ struct OAuthJWTBearerGrantTests {
                 configuration: configuration(pinned: URL(string: "https://auth.example.com")!))
             #expect(try await authorizer.handleChallenge(
                 statusCode: 401, headers: headers401, endpoint: endpoint, session: session))
-            #expect(authorizer.authorizationHeader(for: endpoint) == "Bearer mcp-token")
+            #expect((try authorizer.authorizationHeaders(for: endpoint, method: "POST"))[HTTPHeaderName.authorization] == "Bearer mcp-token")
 
             let sent = await requests.values
             let paths = sent.map(\.0)
