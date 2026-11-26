@@ -36,6 +36,8 @@ fixes merged to `main` after it (up to `234e412`), with before and after code:
 
 Behavior that can break working code ([docs/migration.md](docs/migration.md#behavior-changes)):
 
+- A -32042 error without a `data.elicitations` array now decodes as `serverError` and keeps
+  its data, instead of becoming `urlElicitationRequired` with no elicitations.
 - `MCPError` decoding: -32000 and -32001 decode as `serverError`, -32602 with `data.uri` as
   `resourceNotFound`, and the standard cases without `data.detail` drop their own message text
   ([details](docs/migration.md#mcperror-decoding)).

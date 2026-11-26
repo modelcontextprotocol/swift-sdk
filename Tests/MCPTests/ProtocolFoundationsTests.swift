@@ -124,6 +124,35 @@ struct MCPErrorWireTests {
             message: "Sign in",
             elicitations: [.init(elicitationId: "e1", url: "https://example.com", message: "m")])
         #expect(try decode(MCPError.self, json(error)) == error)
+
+        let empty = try decode(
+            MCPError.self, ["code": -32042, "message": "Sign in", "data": ["elicitations": [Any]()]])
+        #expect(empty == .urlElicitationRequired(message: "Sign in", elicitations: []))
+    }
+
+    @Test("-32042 without an elicitations array keeps its data")
+    func testURLElicitationWithoutArray() throws {
+        let bare = try decode(MCPError.self, ["code": -32042, "message": "Sign in"])
+        #expect(bare == .serverError(code: -32042, message: "Sign in"))
+
+        let challenges: Value = ["challenges": ["scheme": "Bearer"]]
+        let withoutElicitations = try decode(
+            MCPError.self,
+            ["code": -32042, "message": "Sign in", "data": ["challenges": ["scheme": "Bearer"]]])
+        #expect(withoutElicitations == .serverError(
+            code: -32042, message: "Sign in", data: challenges))
+
+        let invalidArray: Value = ["elicitations": "unexpected", "challenges": ["scheme": "Bearer"]]
+        let malformed = try decode(
+            MCPError.self,
+            ["code": -32042, "message": "Sign in",
+             "data": ["elicitations": "unexpected", "challenges": ["scheme": "Bearer"]]])
+        #expect(malformed == .serverError(code: -32042, message: "Sign in", data: invalidArray))
+
+        let encoded = try JSONDecoder().decode(Value.self, from: JSONEncoder().encode(malformed))
+        expectWire(encoded, matches: [
+            "code": -32042, "message": "Sign in", "data": invalidArray,
+        ])
     }
 
     @Test(

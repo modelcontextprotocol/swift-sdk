@@ -441,6 +441,8 @@ The result's `action` is `.accept`, `.decline` or `.cancel`. Only a form `.accep
 
 A server can refuse a request until the user completes URL elicitations. It answers with `urlElicitationRequired` (-32042), whose `data.elicitations` lists `URLElicitationInfo` values (`elicitationId`, `url`, `message`). The SDK neither opens the URLs nor retries.
 
+If a -32042 error has no `data.elicitations` array, the client receives `serverError` with its original `data` instead.
+
 ```swift
 var pending: [URLElicitationInfo] = []
 await client.onNotification(ElicitationCompleteNotification.self) { message in

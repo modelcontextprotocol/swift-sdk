@@ -384,15 +384,19 @@ extension MCPError: Codable {
             self = .unsupportedProtocolVersion(
                 supported: supported, requested: fields?["requested"]?.stringValue)
         case -32042:
-            var elicitations: [URLElicitationInfo] = []
-            for item in fields?["elicitations"]?.arrayValue ?? [] {
-                if let info = try? JSONDecoder().decode(
-                    URLElicitationInfo.self, from: JSONEncoder().encode(item))
-                {
-                    elicitations.append(info)
+            if let items = fields?["elicitations"]?.arrayValue {
+                var elicitations: [URLElicitationInfo] = []
+                for item in items {
+                    if let info = try? JSONDecoder().decode(
+                        URLElicitationInfo.self, from: JSONEncoder().encode(item))
+                    {
+                        elicitations.append(info)
+                    }
                 }
+                self = .urlElicitationRequired(message: message, elicitations: elicitations)
+            } else {
+                self = .serverError(code: code, message: message, data: serverData)
             }
-            self = .urlElicitationRequired(message: message, elicitations: elicitations)
         default:
             // -32000 and -32001 are used by the SDK for local transport errors
             // only; on the wire they are implementation-defined server errors.

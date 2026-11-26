@@ -442,6 +442,7 @@ Decoding rules:
 - Standard cases read `data.detail`, else the message.
 - -32602 with `data.uri` and no `data.detail` decodes as `resourceNotFound`. So does -32002 with
   `data.uri`, the code earlier servers used.
+- -32042 without a `data.elicitations` array decodes as `serverError` and keeps its `data`.
 - -32000 and -32001 are local transport conditions in this SDK. From the wire they decode as
   `serverError`, because servers use those codes for their own errors.
 - Unknown codes decode as `serverError` and keep `data`.
