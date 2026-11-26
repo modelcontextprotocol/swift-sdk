@@ -415,7 +415,7 @@ struct OutgoingMessageTests {
 #if swift(>=6.1)
     /// Never answers `server/discover`, answers `initialize`, and records
     /// when the `server/discover` request is stopped.
-    private final class UnansweredDiscoverProtocol: URLProtocol, @unchecked Sendable {
+    private final class UnansweredDiscoverProtocol: URLProtocol {
         actor State {
             private(set) var discoverStopped = false
             func stopped() { discoverStopped = true }
@@ -662,7 +662,7 @@ struct OutgoingMessageTests {
     /// Answers 401 to a request without credentials. With them, hosts ending
     /// in `.silent.test` never answer `server/discover`; others serve
     /// 2026-07-28, and all answer `initialize`.
-    private final class ChallengedDiscoverProtocol: URLProtocol, @unchecked Sendable {
+    private final class ChallengedDiscoverProtocol: URLProtocol {
         final class State: @unchecked Sendable {
             private let lock = NSLock()
             private var authorized: [String: [String]] = [:]

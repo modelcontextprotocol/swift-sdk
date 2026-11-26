@@ -502,7 +502,7 @@ struct ServerCardValidatorTests {
 
     /// Serves cards, redirects and long bodies by URL, and records the
     /// requests and the bytes delivered.
-    private final class CardURLProtocol: URLProtocol, @unchecked Sendable {
+    private final class CardURLProtocol: URLProtocol {
         enum Step: Sendable {
             case card
             case redirect(String)

@@ -97,7 +97,7 @@ import Testing
 
     // MARK: - Mock URL Protocol
 
-    final class MockURLProtocol: URLProtocol, @unchecked Sendable {
+    final class MockURLProtocol: URLProtocol {
         static let requestHandlerStorage = RequestHandlerStorage()
 
         static func setHandler(
@@ -2522,7 +2522,7 @@ import Testing
     }
 
     /// Never answers and never calls its client.
-    private final class SilentURLProtocol: URLProtocol, @unchecked Sendable {
+    private final class SilentURLProtocol: URLProtocol {
         override class func canInit(with request: URLRequest) -> Bool { true }
         override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
         override func startLoading() {}
@@ -2531,7 +2531,7 @@ import Testing
 
     /// Reports two responses for one request, each with half of a JSON-RPC
     /// response that is valid only when the halves are joined.
-    private final class TwoResponsesURLProtocol: URLProtocol, @unchecked Sendable {
+    private final class TwoResponsesURLProtocol: URLProtocol {
         /// Set by `stopLoading()`, as in `IsolatedMockURLProtocol`: the
         /// client cancels the task at the second response, and corelibs traps
         /// on a call for a cancelled task.
@@ -2558,7 +2558,7 @@ import Testing
 
     /// Answers a request with the first half of a JSON-RPC response and keeps
     /// the body open; it never calls its client again.
-    private final class PartialBodyURLProtocol: URLProtocol, @unchecked Sendable {
+    private final class PartialBodyURLProtocol: URLProtocol {
         /// Yields once a POST's partial body has been sent.
         static let (postBodyStarted, postBodyStartedContinuation) = AsyncStream<Void>.makeStream()
 
@@ -2819,7 +2819,7 @@ import Testing
         }
     }
 
-    private final class ReleaseTestProtocol: URLProtocol, @unchecked Sendable {
+    private final class ReleaseTestProtocol: URLProtocol {
         static let keyHeader = "X-Release-Test-Key"
 
         private final class Registry: @unchecked Sendable {

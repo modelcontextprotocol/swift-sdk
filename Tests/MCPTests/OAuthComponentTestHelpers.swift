@@ -33,7 +33,7 @@
         }
     }
 
-    final class IsolatedMockURLProtocol: URLProtocol, @unchecked Sendable {
+    final class IsolatedMockURLProtocol: URLProtocol {
         static let sessionKeyHeader = "X-Mock-Key"
 
         static func makeSession(key: String) -> URLSession {

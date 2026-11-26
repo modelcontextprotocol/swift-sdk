@@ -586,7 +586,7 @@ struct ClientAppSnippetTests {
 
 /// Answers every request with the same Server Card, or 404 for a path other
 /// than /mcp/server-card.
-private final class FixedCardProtocol: URLProtocol, @unchecked Sendable {
+private final class FixedCardProtocol: URLProtocol {
     static let card = ServerCard(
         name: "com.example/weather", version: "1.2.0", description: "Current weather for a city.",
         remotes: [
