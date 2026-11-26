@@ -303,20 +303,22 @@ public struct OriginValidator: HTTPRequestValidator {
 
     /// Protection for localhost-bound servers.
     /// Allows requests from `localhost`, `127.0.0.1`, and `[::1]` on the given port.
-    /// Pass `nil` to allow any port, or none.
+    /// Pass `nil` to allow any port, including none. Port 80 also accepts a request with no port.
     public static func localhost(port: Int? = nil) -> OriginValidator {
         let portPattern = port.map { String($0) } ?? "*"
+        // A request without a port uses the scheme's default (RFC 9110, section 7.2): 80 for `http`.
+        let withoutPort = port == 80 ? ["127.0.0.1", "localhost", "[::1]"] : []
         return OriginValidator(
             allowedHosts: [
                 "127.0.0.1:\(portPattern)",
                 "localhost:\(portPattern)",
                 "[::1]:\(portPattern)",
-            ],
+            ] + withoutPort,
             allowedOrigins: [
                 "http://127.0.0.1:\(portPattern)",
                 "http://localhost:\(portPattern)",
                 "http://[::1]:\(portPattern)",
-            ]
+            ] + withoutPort.map { "http://\($0)" }
         )
     }
 
