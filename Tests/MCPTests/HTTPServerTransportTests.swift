@@ -132,6 +132,28 @@ private func makeStatelessTransport() -> StatelessHTTPServerTransport {
     )
 }
 
+private let invalidMessageBodies: [(String, Int)] = [
+    (#"{"not_a_valid_request":true}"#, -32600),
+    (#"{"jsonrpc":"2.0","id":7}"#, -32600),
+    (#"{"jsonrpc":"2.0","id":"request"}"#, -32600),
+    (#"{"jsonrpc":"2.0","method":42}"#, -32600),
+    ("{}", -32600),
+    ("[]", -32600),
+    ("[1,2,3]", -32600),
+    (#"[{"jsonrpc":"2.0","id":1,"method":"ping"}]"#, -32600),
+    ("null", -32600),
+    ("true", -32600),
+    ("false", -32600),
+    ("42", -32600),
+    ("1.5", -32600),
+    (#""text""#, -32600),
+    ("not valid json{", -32700),
+    (#"{"jsonrpc":"2.0","id":7"#, -32700),
+    ("[1,", -32700),
+    ("true false", -32700),
+    (" \n\t", -32700),
+]
+
 /// Drains an SSE stream, collecting raw SSE chunks.
 private actor ChunkCollector {
     var chunks: [Data] = []
@@ -814,17 +836,23 @@ struct StatefulHTTPServerTransportTests {
         await transport.disconnect()
     }
 
-    @Test("Invalid JSON body returns 400")
-    func testInvalidJSONReturns400() async throws {
+    @Test("Invalid bodies return the appropriate JSON-RPC error", arguments: invalidMessageBodies.indices)
+    func testInvalidBodyErrorCode(_ index: Int) async throws {
+        let (body, expectedCode) = invalidMessageBodies[index]
         let transport = makeStatefulTransport()
         let sessionID = try await initializeSession(transport: transport)
 
         let response = await transport.handleRequest(
-            makeStatefulPOSTRequest(body: Data("not json".utf8), sessionID: sessionID)
+            makeStatefulPOSTRequest(body: Data(body.utf8), sessionID: sessionID)
         )
+        await transport.disconnect()
 
         #expect(response.statusCode == 400)
-        await transport.disconnect()
+        #expect(response.headers[HTTPHeaderName.sessionID] == sessionID)
+        #expect(response.headers[HTTPHeaderName.contentType] == "application/json")
+        let data = try #require(response.bodyData)
+        let json = try JSONDecoder().decode(Value.self, from: data)
+        expectWire(json, matches: ["jsonrpc": "2.0", "id": .null, "error": ["code": .int(expectedCode)]])
     }
 
     // MARK: - OAuth Bearer Validation
@@ -1409,17 +1437,33 @@ struct StatelessHTTPServerTransportTests {
         await transport.disconnect()
     }
 
-    @Test("Invalid JSON body returns 400")
-    func testInvalidJSONReturns400() async throws {
+    @Test(
+        "Invalid bodies return the appropriate JSON-RPC error in both protocol eras",
+        arguments: invalidMessageBodies.indices, [Version.v2025_11_25, Version.v2026_07_28]
+    )
+    func testInvalidBodyErrorCode(_ index: Int, protocolVersion: String) async throws {
+        let (body, expectedCode) = invalidMessageBodies[index]
         let transport = makeStatelessTransport()
         try await transport.connect()
 
         let response = await transport.handleRequest(
-            makeStatelessPOSTRequest(body: Data("not json".utf8))
+            HTTPRequest(
+                method: "POST",
+                headers: [
+                    HTTPHeaderName.contentType: "application/json",
+                    HTTPHeaderName.accept: "application/json",
+                    HTTPHeaderName.protocolVersion: protocolVersion,
+                ],
+                body: Data(body.utf8))
         )
+        await transport.disconnect()
 
         #expect(response.statusCode == 400)
-        await transport.disconnect()
+        #expect(response.headers[HTTPHeaderName.sessionID] == nil)
+        #expect(response.headers[HTTPHeaderName.contentType] == "application/json")
+        let data = try #require(response.bodyData)
+        let json = try JSONDecoder().decode(Value.self, from: data)
+        expectWire(json, matches: ["jsonrpc": "2.0", "id": .null, "error": ["code": .int(expectedCode)]])
     }
 
     // MARK: - Terminated State

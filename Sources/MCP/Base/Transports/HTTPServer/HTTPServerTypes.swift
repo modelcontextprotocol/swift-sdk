@@ -408,6 +408,18 @@ package enum JSONRPCMessageKind: Decodable {
         self = decoded
     }
 
+    /// The error for data that could not be classified as a JSON-RPC message.
+    static func classificationError(for data: Data) -> MCPError {
+        // JSON-RPC 2.0 §5.1 reserves -32700 for invalid JSON. Scalars and arrays
+        // are valid JSON, but are not single messages on the HTTP transport.
+        do {
+            _ = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
+            return .invalidRequest("Invalid JSON-RPC message")
+        } catch {
+            return .parseError("Invalid JSON-RPC message")
+        }
+    }
+
     /// Classifies a JSON-RPC object.
     ///
     /// A message with a string `method` is a request when it has an `id`
