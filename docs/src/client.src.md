@@ -95,7 +95,7 @@ When `isStateless` is `true`:
 
 %include Examples/Snippets/Client/Client.swift transports
 
-`StdioTransport()` without arguments uses the current process's standard input and output. Tests use `InMemoryTransport.createConnectedPair()`. See [protocol.md](protocol.md) for transports and authorization, and [testing.md](testing.md) for in-memory tests.
+`StdioTransport()` without arguments uses the current process's standard input and output. An app on iOS, tvOS, watchOS or visionOS cannot launch a process, so it cannot start a local stdio server. On these platforms, use `HTTPClientTransport` to connect to a remote server. Tests use `InMemoryTransport.createConnectedPair()`. See [protocol.md](protocol.md) for transports and authorization, and [testing.md](testing.md) for in-memory tests.
 
 ### Strict mode
 
