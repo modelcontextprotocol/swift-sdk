@@ -19,7 +19,8 @@ struct ResponseBody: AsyncSequence, Sendable {
 
         /// Whether `chunks` ended because its reader's task was cancelled:
         /// the stream's iterator then returns `nil`, as at the end of the
-        /// body. A body that ended before its reader was cancelled is whole.
+        /// body, or throws the error of the data task it cancelled. A body
+        /// that ended before its reader was cancelled is whole.
         /// `@unchecked Sendable`: `lock` guards `cancelled`.
         final class Cancellation: @unchecked Sendable {
             private let lock = NSLock()
@@ -38,7 +39,16 @@ struct ResponseBody: AsyncSequence, Sendable {
 
             mutating func next() async throws -> UInt8? {
                 while index >= chunk.endIndex {
-                    guard let next = try await chunks.next() else {
+                    let next: Data?
+                    do {
+                        next = try await chunks.next()
+                    } catch _ where cancellation.isCancelled {
+                        // A cancelled stream runs `onTermination` before it
+                        // finishes, and the data task that handler cancels
+                        // can finish the stream first with its own error.
+                        throw CancellationError()
+                    }
+                    guard let next else {
                         // A cut body must not pass for a whole one; this
                         // throws where `URLSession.AsyncBytes` would.
                         if cancellation.isCancelled { throw CancellationError() }
