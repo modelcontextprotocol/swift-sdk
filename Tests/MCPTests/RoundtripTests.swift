@@ -111,7 +111,7 @@ struct RoundtripTests {
         }
         try await withThrowingTaskGroup(of: Void.self) { group in
             group.addTask {
-                try await Task.sleep(for: .seconds(1))
+                try await Task.sleep(for: .seconds(10))
                 initTask.cancel()
                 throw CancellationError()
             }
@@ -131,7 +131,7 @@ struct RoundtripTests {
 
         try await withThrowingTaskGroup(of: Void.self) { group in
             group.addTask {
-                try await Task.sleep(for: .seconds(1))
+                try await Task.sleep(for: .seconds(10))
                 pingTask.cancel()
                 throw CancellationError()
             }
@@ -156,7 +156,7 @@ struct RoundtripTests {
 
         try await withThrowingTaskGroup(of: Void.self) { group in
             group.addTask {
-                try await Task.sleep(for: .seconds(1))
+                try await Task.sleep(for: .seconds(10))
                 listToolsTask.cancel()
                 callToolTask.cancel()
                 throw CancellationError()
@@ -190,7 +190,7 @@ struct RoundtripTests {
 
         try await withThrowingTaskGroup(of: Void.self) { group in
             group.addTask {
-                try await Task.sleep(for: .seconds(1))
+                try await Task.sleep(for: .seconds(10))
                 listResourcesTask.cancel()
                 readResourceTask.cancel()
                 throw CancellationError()

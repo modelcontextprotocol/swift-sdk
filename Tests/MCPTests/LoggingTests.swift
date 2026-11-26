@@ -205,6 +205,7 @@ struct LoggingTests {
     // MARK: - Client Integration Tests
 
     @Test("Client setLoggingLevel sends correct request")
+    @available(*, deprecated, message: "Tests the deprecated logging API (SEP-2577)")
     func testClientSetLoggingLevel() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
@@ -238,9 +239,6 @@ struct LoggingTests {
         // Call setLoggingLevel
         try await client.setLoggingLevel(.warning)
 
-        // Give time for message processing
-        try await Task.sleep(for: .milliseconds(100))
-
         // Verify the handler was called
         #expect(await state.getLevel() == .warning)
 
@@ -249,6 +247,7 @@ struct LoggingTests {
     }
 
     @Test("Client setLoggingLevel fails without logging capability")
+    @available(*, deprecated, message: "Tests the deprecated logging API (SEP-2577)")
     func testClientSetLoggingLevelFailsWithoutCapability() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
@@ -277,6 +276,7 @@ struct LoggingTests {
     // MARK: - Server Integration Tests
 
     @Test("Server log method sends notification")
+    @available(*, deprecated, message: "Tests the deprecated logging API (SEP-2577)")
     func testServerLogMethod() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
@@ -318,11 +318,11 @@ struct LoggingTests {
         try await server.log(level: .info, logger: "test", data: logData)
 
         // Wait for message processing
-        try await Task.sleep(for: .milliseconds(100))
+        #expect(await eventually { await state.getLogs().count == 1 })
 
         // Verify the notification was received
         let logs = await state.getLogs()
-        #expect(logs.count == 1)
+        try #require(logs.count == 1)
         #expect(logs[0].level == LogLevel.info)
         #expect(logs[0].logger == "test")
         #expect(logs[0].data == logData)
@@ -332,6 +332,7 @@ struct LoggingTests {
     }
 
     @Test("Server log method with codable data")
+    @available(*, deprecated, message: "Tests the deprecated logging API (SEP-2577)")
     func testServerLogMethodWithCodableData() async throws {
         struct LogData: Codable, Hashable {
             let message: String
@@ -380,11 +381,11 @@ struct LoggingTests {
         try await server.log(level: .error, logger: "api", data: logData)
 
         // Wait for message processing
-        try await Task.sleep(for: .milliseconds(100))
+        #expect(await eventually { await state.getLogs().count == 1 })
 
         // Verify the notification was received
         let logs = await state.getLogs()
-        #expect(logs.count == 1)
+        try #require(logs.count == 1)
         #expect(logs[0].level == LogLevel.error)
         #expect(logs[0].logger == "api")
 
@@ -402,6 +403,7 @@ struct LoggingTests {
     }
 
     @Test("Server log without logger name")
+    @available(*, deprecated, message: "Tests the deprecated logging API (SEP-2577)")
     func testServerLogWithoutLoggerName() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
@@ -439,11 +441,11 @@ struct LoggingTests {
         try await server.log(level: .debug, data: logData)
 
         // Wait for message processing
-        try await Task.sleep(for: .milliseconds(100))
+        #expect(await eventually { await state.getLogs().count == 1 })
 
         // Verify the notification was received
         let logs = await state.getLogs()
-        #expect(logs.count == 1)
+        try #require(logs.count == 1)
         #expect(logs[0].level == LogLevel.debug)
         #expect(logs[0].logger == nil)
 
@@ -452,6 +454,7 @@ struct LoggingTests {
     }
 
     @Test("Multiple log levels sent correctly")
+    @available(*, deprecated, message: "Tests the deprecated logging API (SEP-2577)")
     func testMultipleLogLevels() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
@@ -492,11 +495,11 @@ struct LoggingTests {
         try await server.log(level: .critical, data: Value.object(["msg": Value.string("Critical message")]))
 
         // Wait for message processing
-        try await Task.sleep(for: .milliseconds(200))
+        #expect(await eventually { await state.getLogs().count == 5 })
 
         // Verify all notifications were received
         let logs = await state.getLogs()
-        #expect(logs.count == 5)
+        try #require(logs.count == 5)
         #expect(logs[0].level == LogLevel.debug)
         #expect(logs[1].level == LogLevel.info)
         #expect(logs[2].level == LogLevel.warning)

@@ -65,6 +65,7 @@ func watchNotes(_ client: Client) async throws -> Set<String> {
 // MARK: - Logging
 
 /// Receives server log messages at `info` and above.
+@available(*, deprecated, message: "Uses the deprecated logging API (SEP-2577)")
 func receiveLogs(_ client: Client, into log: LogInbox) async throws {
     // snippet: logging
     await client.onNotification(LogMessageNotification.self) { message in

@@ -40,19 +40,7 @@ private actor RecordingTransport: Transport {
     var methods: [String?] { sent.map { $0.objectValue?["method"]?.stringValue } }
 }
 
-private actor Flag {
-    private(set) var isSet = false
-    func set() { isSet = true }
-}
-
-private func eventually(_ condition: @Sendable () async -> Bool) async -> Bool {
-    for _ in 0..<200 {
-        if await condition() { return true }
-        try? await Task.sleep(for: .milliseconds(10))
-    }
-    return false
-}
-
+@available(*, deprecated, message: "Uses the deprecated sampling and logging APIs (SEP-2577)")
 private func makeServer(configuration: Server.Configuration = .default) async -> Server {
     let server = Server(
         name: "fixes", version: "1.0",
@@ -98,6 +86,7 @@ private func text(_ result: CallTool.Result) -> String? {
 @Suite("Request lifecycle", .timeLimit(.minutes(1)))
 struct RequestLifecycleTests {
     @Test("cancelRequest right after send always cancels, and never overtakes the request")
+    @available(*, deprecated, message: "Uses the deprecated sampling and logging APIs (SEP-2577)")
     func cancelRightAfterSend() async throws {
         let server = await makeServer()
         let (clientEnd, serverEnd) = await InMemoryTransport.createConnectedPair()
@@ -130,6 +119,7 @@ struct RequestLifecycleTests {
     }
 
     @Test("A notification handler can wait for a request on the same client")
+    @available(*, deprecated, message: "Uses the deprecated sampling and logging APIs (SEP-2577)")
     func notificationHandlerAwaitsRequest() async throws {
         let server = await makeServer()
         let (clientEnd, serverEnd) = await InMemoryTransport.createConnectedPair()
@@ -149,6 +139,7 @@ struct RequestLifecycleTests {
     }
 
     @Test("A server-to-client request handler can wait for a request on the same client")
+    @available(*, deprecated, message: "Tests the deprecated sampling API (SEP-2577)")
     func requestHandlerAwaitsRequest() async throws {
         let server = await makeServer()
         let (clientEnd, serverEnd) = await InMemoryTransport.createConnectedPair()
@@ -167,6 +158,7 @@ struct RequestLifecycleTests {
     }
 
     @Test("The server cancels its request: the client handler stops and does not answer")
+    @available(*, deprecated, message: "Tests the deprecated roots API (SEP-2577)")
     func serverCancelsItsRequest() async throws {
         let (clientEnd, serverEnd) = await InMemoryTransport.createConnectedPair()
         try await serverEnd.connect()
@@ -212,6 +204,7 @@ struct RequestLifecycleTests {
     }
 
     @Test("Progress notifications of a request are handled before its response is delivered")
+    @available(*, deprecated, message: "Uses the deprecated sampling and logging APIs (SEP-2577)")
     func progressBeforeResponse() async throws {
         let server = await makeServer()
         let (clientEnd, serverEnd) = await InMemoryTransport.createConnectedPair()
@@ -230,6 +223,7 @@ struct RequestLifecycleTests {
     }
 
     @Test("A notification handler can await a request started elsewhere")
+    @available(*, deprecated, message: "Uses the deprecated sampling and logging APIs (SEP-2577)")
     func handlerAwaitsOtherRequest() async throws {
         let server = await makeServer()
         let (clientEnd, serverEnd) = await InMemoryTransport.createConnectedPair()
@@ -255,6 +249,7 @@ struct RequestLifecycleTests {
     }
 
     @Test("Handlers registered for notifications/cancelled run outside the receive loop")
+    @available(*, deprecated, message: "Uses the deprecated sampling and logging APIs (SEP-2577)")
     func cancelledHandlerMayAwait() async throws {
         let server = await makeServer()
         let (clientEnd, serverEnd) = await InMemoryTransport.createConnectedPair()
@@ -344,6 +339,7 @@ struct RequestLifecycleTests {
     }
 
     @Test("A connect replaced during discovery does not initialize the new connection")
+    @available(*, deprecated, message: "Uses the deprecated sampling and logging APIs (SEP-2577)")
     func connectReplacedDuringDiscovery() async throws {
         let (firstEnd, silentEnd) = await InMemoryTransport.createConnectedPair()
         try await silentEnd.connect()
@@ -399,6 +395,7 @@ struct ServerToClientLimitTests {
     }
 
     @Test("At most the configured number of handlers run at once; the rest wait")
+    @available(*, deprecated, message: "Tests the deprecated roots API (SEP-2577)")
     func concurrencyLimit() async throws {
         var configuration = Client.Configuration.handshake
         configuration.maxConcurrentServerRequests = 2
@@ -432,6 +429,7 @@ struct ServerToClientLimitTests {
     }
 
     @Test("A cancelled handler keeps its slot until it returns")
+    @available(*, deprecated, message: "Tests the deprecated roots API (SEP-2577)")
     func cancelledHandlerKeepsSlot() async throws {
         var configuration = Client.Configuration.handshake
         configuration.maxConcurrentServerRequests = 1
@@ -461,6 +459,7 @@ struct ServerToClientLimitTests {
     }
 
     @Test("A handler still running after a reconnect keeps its slot")
+    @available(*, deprecated, message: "Tests the deprecated roots API (SEP-2577)")
     func reconnectKeepsDrainingSlot() async throws {
         var configuration = Client.Configuration.handshake
         configuration.maxConcurrentServerRequests = 1
@@ -491,6 +490,7 @@ struct ServerToClientLimitTests {
     }
 
     @Test("A ping is answered while every handler slot is busy")
+    @available(*, deprecated, message: "Tests the deprecated roots API (SEP-2577)")
     func pingWhileBusy() async throws {
         var configuration = Client.Configuration.handshake
         configuration.maxConcurrentServerRequests = 1
@@ -513,16 +513,19 @@ struct ServerToClientLimitTests {
     }
 
     @Test("A request whose id is already running is refused")
+    @available(*, deprecated, message: "Tests the deprecated roots API (SEP-2577)")
     func duplicateID() async throws {
         let (client, serverEnd, incoming) = try await connected()
         var replies = incoming
         let (release, open) = AsyncStream<Void>.makeStream()
+        let running = Flag()
         await client.withRootsHandler {
+            await running.set()
             for await _ in release { break }
             return []
         }
         try await serverEnd.send(Data(#"{"jsonrpc":"2.0","id":"dup","method":"roots/list"}"#.utf8))
-        try await Task.sleep(for: .milliseconds(50))
+        #expect(await eventually { await running.isSet })
         try await serverEnd.send(Data(#"{"jsonrpc":"2.0","id":"dup","method":"roots/list"}"#.utf8))
         let refused = try JSONDecoder().decode(Value.self, from: try #require(await replies.next()))
         #expect(refused.objectValue?["error"]?.objectValue?["code"] == -32600)
@@ -533,15 +536,10 @@ struct ServerToClientLimitTests {
     }
 }
 
-private actor Counter {
-    private(set) var value = 0
-    func increment() { value += 1 }
-}
-
-
 @Suite("Batches", .timeLimit(.minutes(1)))
 struct BatchTests {
     @Test("Batched requests on a stateless connection carry _meta and run the round-trip loop")
+    @available(*, deprecated, message: "Uses the deprecated sampling and logging APIs (SEP-2577)")
     func statelessBatch() async throws {
         let server = await makeServer()
         let (clientEnd, serverEnd) = await InMemoryTransport.createConnectedPair()
@@ -564,6 +562,7 @@ struct BatchTests {
     }
 
     @Test("A batch at 2025-11-25 is sent as one array and answered")
+    @available(*, deprecated, message: "Uses the deprecated sampling and logging APIs (SEP-2577)")
     func handshakeBatch() async throws {
         let server = await makeServer()
         let (clientEnd, serverEnd) = await InMemoryTransport.createConnectedPair()
@@ -587,6 +586,7 @@ struct BatchTests {
     }
 
     @Test("A batch whose body throws fails the requests it added")
+    @available(*, deprecated, message: "Uses the deprecated sampling and logging APIs (SEP-2577)")
     func throwingBody() async throws {
         struct Stop: Error {}
         let server = await makeServer()
@@ -610,28 +610,39 @@ struct BatchTests {
 
 @Suite("Server replies", .timeLimit(.minutes(1)))
 struct ServerReplyTests {
-    /// Sends raw lines to a started server; returns what it sent back
-    /// within a short time.
+    private actor Inbox {
+        var values: [Value] = []
+        func add(_ value: Value) { values.append(value) }
+    }
+
+    /// Sends raw lines to a started server; returns what it sent back once
+    /// a reply arrived and a short time after.
     private func exchange(_ server: Server, _ lines: [String]) async throws -> [Value] {
         let (clientEnd, serverEnd) = await InMemoryTransport.createConnectedPair()
         try await server.start(transport: serverEnd)
         try await clientEnd.connect()
         let replies = await clientEnd.receive()
-        let collected = Task { () -> [Value] in
-            var values: [Value] = []
+        let inbox = Inbox()
+        let collected = Task {
             for try await data in replies {
-                values.append(try JSONDecoder().decode(Value.self, from: data))
+                await inbox.add(try JSONDecoder().decode(Value.self, from: data))
             }
-            return values
         }
         for line in lines { try await clientEnd.send(Data(line.utf8)) }
+        let deadline = ContinuousClock.now + .seconds(30)
+        while await inbox.values.isEmpty, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        // Time for a reply that should not come.
         try await Task.sleep(for: .milliseconds(200))
         await clientEnd.disconnect()
         await server.stop()
-        return (try? await collected.value) ?? []
+        _ = await collected.result
+        return await inbox.values
     }
 
     @Test("A strict server ignores a notification before initialize")
+    @available(*, deprecated, message: "Uses the deprecated sampling and logging APIs (SEP-2577)")
     func strictNotification() async throws {
         let server = await makeServer(configuration: .strict)
         let replies = try await exchange(server, [
@@ -674,6 +685,7 @@ struct ServerReplyTests {
     }
 
     @Test("A message that cannot be read is answered with a null id")
+    @available(*, deprecated, message: "Uses the deprecated sampling and logging APIs (SEP-2577)")
     func unreadableMessage() async throws {
         let server = await makeServer()
         let replies = try await exchange(server, [#"{"jsonrpc":"2.0","bogus":true}"#])
@@ -683,6 +695,7 @@ struct ServerReplyTests {
     }
 
     @Test("An empty batch is answered with a null id")
+    @available(*, deprecated, message: "Uses the deprecated sampling and logging APIs (SEP-2577)")
     func emptyBatch() async throws {
         let server = await makeServer()
         let replies = try await exchange(server, ["[]"])
@@ -691,6 +704,7 @@ struct ServerReplyTests {
     }
 
     @Test("Behind the stateless HTTP transport every initialize is answered")
+    @available(*, deprecated, message: "Uses the deprecated sampling and logging APIs (SEP-2577)")
     func sessionlessInitialize() async throws {
         let server = await makeServer(configuration: .strict)
         let transport = StatelessHTTPServerTransport()
@@ -758,6 +772,7 @@ struct ServerReplyTests {
     }
 
     @Test("Behind the stateless HTTP transport the round-trip bridge sends input requests")
+    @available(*, deprecated, message: "Uses the deprecated sampling and logging APIs (SEP-2577)")
     func sessionlessBridge() async throws {
         let server = await makeServer()
         let transport = StatelessHTTPServerTransport()
@@ -786,6 +801,7 @@ struct ServerReplyTests {
     }
 
     @Test("Behind the stateless HTTP transport the hooks gate handshake requests")
+    @available(*, deprecated, message: "Uses the deprecated sampling and logging APIs (SEP-2577)")
     func sessionlessHooks() async throws {
         let call = #"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"era"}}"#
         let initialize =

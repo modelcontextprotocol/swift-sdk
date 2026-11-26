@@ -62,6 +62,7 @@ private func modelAnswer(_ params: CreateSamplingMessage.Parameters) -> CreateSa
 /// - `direct` calls `requestSampling` twice (2025-11-25 and earlier).
 /// - `agent` runs the same loop with input requests (both eras), keeping the
 ///   history in `requestState`.
+@available(*, deprecated, message: "Uses the deprecated sampling API (SEP-2577)")
 private func makeServer(configuration: Server.Configuration = .default) async -> Server {
     let server = Server(
         name: "sampler", version: "1.0", capabilities: .init(tools: .init()), configuration: configuration)
@@ -119,11 +120,7 @@ private func textOf(_ block: Sampling.Message.Content.ContentBlock) -> String? {
     return nil
 }
 
-private actor Counter {
-    private(set) var value = 0
-    func increment() { value += 1 }
-}
-
+@available(*, deprecated, message: "Uses the deprecated sampling API (SEP-2577)")
 private func connect(
     _ server: Server, mode: Client.ProtocolMode, capabilities: Client.Capabilities,
     samplings: Counter = Counter()
@@ -323,6 +320,7 @@ struct SamplingToolWireTests {
     }
 
     @Test("2025-11-25: requestSampling sends the specification's tool loop", arguments: ["direct", "agent"])
+    @available(*, deprecated, message: "Uses the deprecated sampling API (SEP-2577)")
     func handshakeLoop(tool: String) async throws {
         let wire = WireExchange(server: await makeServer())
         try await wire.start()
@@ -347,6 +345,7 @@ struct SamplingToolWireTests {
     }
 
     @Test("2026-07-28: the tool loop as input requests")
+    @available(*, deprecated, message: "Uses the deprecated sampling API (SEP-2577)")
     func statelessLoop() async throws {
         let wire = WireExchange(server: await makeServer())
         try await wire.start()
@@ -406,6 +405,7 @@ struct SamplingToolWireTests {
 @Suite("Sampling with tools: capabilities", .timeLimit(.minutes(1)))
 struct SamplingToolCapabilityTests {
     @Test("The tool loop runs end to end", arguments: [Client.ProtocolMode.handshake, .automatic])
+    @available(*, deprecated, message: "Uses the deprecated sampling API (SEP-2577)")
     func loop(mode: Client.ProtocolMode) async throws {
         let server = await makeServer()
         let samplings = Counter()
@@ -419,6 +419,7 @@ struct SamplingToolCapabilityTests {
     }
 
     @Test("2025-11-25: requestSampling with tools fails before sending when the client did not declare sampling.tools")
+    @available(*, deprecated, message: "Uses the deprecated sampling API (SEP-2577)")
     func handshakeToolsNeedCapability() async throws {
         for configuration in [Server.Configuration.default, .strict] {
             let server = await makeServer(configuration: configuration)
@@ -440,6 +441,7 @@ struct SamplingToolCapabilityTests {
     }
 
     @Test("2025-11-25: includeContext without sampling.context fails in strict mode only")
+    @available(*, deprecated, message: "Uses the deprecated sampling API (SEP-2577)")
     func handshakeContext() async throws {
         let thisServer = try #require(Sampling.ContextInclusion(rawValue: "thisServer"))
         let params = CreateSamplingMessage.Parameters(messages: [.user("Hi")], includeContext: thisServer, maxTokens: 10)
@@ -463,6 +465,7 @@ struct SamplingToolCapabilityTests {
     }
 
     @Test("requestSampling refuses messages that break the rules", arguments: [false, true])
+    @available(*, deprecated, message: "Uses the deprecated sampling API (SEP-2577)")
     func handshakeMessageRules(strict: Bool) async throws {
         let server = await makeServer(configuration: strict ? .strict : .default)
         let samplings = Counter()
@@ -481,6 +484,7 @@ struct SamplingToolCapabilityTests {
 
     @Test("Input requests with tools or context need the sub-capability: -32021 at both eras",
         arguments: [Client.ProtocolMode.handshake, .automatic])
+    @available(*, deprecated, message: "Uses the deprecated sampling API (SEP-2577)")
     func inputRequestCapabilities(mode: Client.ProtocolMode) async throws {
         let server = await makeServer()
         let samplings = Counter()
@@ -507,6 +511,7 @@ struct SamplingToolCapabilityTests {
     }
 
     @Test("An input request that breaks the message rules is a server error", arguments: [Client.ProtocolMode.handshake, .automatic])
+    @available(*, deprecated, message: "Uses the deprecated sampling API (SEP-2577)")
     func inputRequestMessageRules(mode: Client.ProtocolMode) async throws {
         let server = await makeServer()
         let samplings = Counter()
@@ -537,6 +542,7 @@ private struct ScriptedServer {
     private let end: InMemoryTransport
     private var incoming: AsyncThrowingStream<Data, Error>.AsyncIterator
 
+    @available(*, deprecated, message: "Uses the deprecated sampling API (SEP-2577)")
     static func connect(capabilities: Client.Capabilities) async throws -> ScriptedServer {
         let (clientEnd, serverEnd) = await InMemoryTransport.createConnectedPair()
         try await serverEnd.connect()
@@ -573,6 +579,7 @@ private struct ScriptedServer {
 @Suite("Sampling with tools: client", .timeLimit(.minutes(1)))
 struct SamplingToolClientTests {
     @Test("The client refuses tools it did not declare, before the handler runs")
+    @available(*, deprecated, message: "Uses the deprecated sampling API (SEP-2577)")
     func refusesUndeclaredTools() async throws {
         var server = try await ScriptedServer.connect(capabilities: .init(sampling: .init()))
         let client = server.client
@@ -593,6 +600,7 @@ struct SamplingToolClientTests {
     }
 
     @Test("The client refuses messages that break the rules, before the handler runs")
+    @available(*, deprecated, message: "Uses the deprecated sampling API (SEP-2577)")
     func refusesBrokenMessages() async throws {
         var server = try await ScriptedServer.connect(capabilities: toolsCapability)
         let client = server.client
@@ -626,6 +634,7 @@ struct SamplingToolClientTests {
     }
 
     @Test("2026-07-28: an input request with undeclared tools fails the call; the handler does not run")
+    @available(*, deprecated, message: "Tests the deprecated sampling API (SEP-2577)")
     func statelessRefusal() async throws {
         // A server built on another SDK could ask anyway; the Swift server
         // answers -32021 first, so decode the input request here.

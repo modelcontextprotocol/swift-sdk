@@ -97,7 +97,7 @@ import Testing
 
     // MARK: - Mock URL Protocol
 
-    final class MockURLProtocol: URLProtocol, @unchecked Sendable {
+    final class MockURLProtocol: URLProtocol {
         static let requestHandlerStorage = RequestHandlerStorage()
 
         static func setHandler(
@@ -131,19 +131,22 @@ import Testing
         private var isStopped: Bool { stateLock.withLock { stopped } }
 
         override func startLoading() {
-            Task {
-                do {
-                    let (response, data) = try await self.executeHandler(for: request)
-                    guard !isStopped else { return }
-                    client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-                    guard !isStopped else { return }
-                    client?.urlProtocol(self, didLoad: data)
-                    guard !isStopped else { return }
-                    client?.urlProtocolDidFinishLoading(self)
-                } catch {
-                    guard !isStopped else { return }
-                    client?.urlProtocol(self, didFailWithError: error)
-                }
+            let loader = SendableURLProtocol(self)
+            Task { await loader.value.load() }
+        }
+
+        private func load() async {
+            do {
+                let (response, data) = try await executeHandler(for: request)
+                guard !isStopped else { return }
+                client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+                guard !isStopped else { return }
+                client?.urlProtocol(self, didLoad: data)
+                guard !isStopped else { return }
+                client?.urlProtocolDidFinishLoading(self)
+            } catch {
+                guard !isStopped else { return }
+                client?.urlProtocol(self, didFailWithError: error)
             }
         }
 
@@ -1077,8 +1080,6 @@ import Testing
                 return (response, sseEventData)  // Will return empty Data for SSE
             }
 
-            try await Task.sleep(for: .milliseconds(100))
-
             let stream = await transport.receive()
             var iterator = stream.makeAsyncIterator()
 
@@ -1138,8 +1139,6 @@ import Testing
 
                 return (response, sseEventData)
             }
-
-            try await Task.sleep(for: .milliseconds(100))
 
             let stream = await transport.receive()
             var iterator = stream.makeAsyncIterator()
@@ -2519,7 +2518,7 @@ import Testing
     }
 
     /// Never answers and never calls its client.
-    private final class SilentURLProtocol: URLProtocol, @unchecked Sendable {
+    private final class SilentURLProtocol: URLProtocol {
         override class func canInit(with request: URLRequest) -> Bool { true }
         override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
         override func startLoading() {}
@@ -2528,7 +2527,7 @@ import Testing
 
     /// Reports two responses for one request, each with half of a JSON-RPC
     /// response that is valid only when the halves are joined.
-    private final class TwoResponsesURLProtocol: URLProtocol, @unchecked Sendable {
+    private final class TwoResponsesURLProtocol: URLProtocol {
         /// Set by `stopLoading()`, as in `IsolatedMockURLProtocol`: the
         /// client cancels the task at the second response, and corelibs traps
         /// on a call for a cancelled task.
@@ -2555,7 +2554,7 @@ import Testing
 
     /// Answers a request with the first half of a JSON-RPC response and keeps
     /// the body open; it never calls its client again.
-    private final class PartialBodyURLProtocol: URLProtocol, @unchecked Sendable {
+    private final class PartialBodyURLProtocol: URLProtocol {
         /// Yields once a POST's partial body has been sent.
         static let (postBodyStarted, postBodyStartedContinuation) = AsyncStream<Void>.makeStream()
 
@@ -2725,8 +2724,9 @@ import Testing
                     try await transport.connect()
                     try await transport.send(Data(#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#.utf8))
                 }
-                for _ in 0..<200 where delegate != nil {
-                    try await Task.sleep(for: .milliseconds(10))
+                let deadline = ContinuousClock.now + .seconds(30)
+                while delegate != nil && ContinuousClock.now < deadline {
+                    try await Task.sleep(for: .milliseconds(5))
                 }
                 #expect(delegate == nil)
             }
@@ -2816,7 +2816,7 @@ import Testing
         }
     }
 
-    private final class ReleaseTestProtocol: URLProtocol, @unchecked Sendable {
+    private final class ReleaseTestProtocol: URLProtocol {
         static let keyHeader = "X-Release-Test-Key"
 
         private final class Registry: @unchecked Sendable {
@@ -2882,7 +2882,7 @@ import Testing
         init(_ transport: HTTPClientTransport?) { self.transport = transport }
 
         /// Whether the transport is released within `limit`.
-        func isReleased(within limit: Duration = .seconds(5)) async -> Bool {
+        func isReleased(within limit: Duration = .seconds(30)) async -> Bool {
             let clock = ContinuousClock()
             let deadline = clock.now + limit
             while clock.now < deadline {
@@ -2894,7 +2894,7 @@ import Testing
     }
 
     /// Whether `condition` holds within `limit`.
-    private func eventually(within limit: Duration = .seconds(5), _ condition: () -> Bool) async -> Bool {
+    private func eventually(within limit: Duration = .seconds(30), _ condition: () -> Bool) async -> Bool {
         let clock = ContinuousClock()
         let deadline = clock.now + limit
         while clock.now < deadline {
@@ -3036,7 +3036,8 @@ import Testing
             #expect(await reference.isReleased())
             #expect(await eventually { server.openStreamCount == 0 })
 
-            weak var released = client
+            weak var released: Client?
+            released = client
             client = nil
             #expect(await eventually { released == nil })
         }

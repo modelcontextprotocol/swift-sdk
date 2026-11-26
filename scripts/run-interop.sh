@@ -72,10 +72,10 @@ BIN_SWIFT="$(cd "$ROOT" && swift build --show-bin-path)"
 
 info "building Go SDK $GO_SDK_VERSION fixtures"
 (cd "$ROOT/interop/go-client" \
-    && go build -o "$BIN_GO/go-interop-client" . \
-    && go build -o "$BIN_GO/go-everything-server" "$GO_MODULE/conformance/everything-server" \
-    && go build -o "$BIN_GO/go-hello-server" "$GO_MODULE/examples/server/hello" \
-    && go build -o "$BIN_GO/go-listfeatures" "$GO_MODULE/examples/client/listfeatures")
+    && go build -buildvcs=false -o "$BIN_GO/go-interop-client" . \
+    && go build -buildvcs=false -o "$BIN_GO/go-everything-server" "$GO_MODULE/conformance/everything-server" \
+    && go build -buildvcs=false -o "$BIN_GO/go-hello-server" "$GO_MODULE/examples/server/hello" \
+    && go build -buildvcs=false -o "$BIN_GO/go-listfeatures" "$GO_MODULE/examples/client/listfeatures")
 
 info "installing Python SDK $PY_SDK_TAG"
 VENV="$WORK/py-venv"

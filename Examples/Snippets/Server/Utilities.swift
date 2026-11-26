@@ -28,6 +28,7 @@ func registerCompletions(on server: Server) async {
 // snippet: logging-level
 /// A server that logs. With the `logging` capability, `log` applies the
 /// level the client chose, in either era.
+@available(*, deprecated, message: "Uses the deprecated logging API (SEP-2577)")
 func makeLoggingServer() async -> Server {
     let server = Server(
         name: "deployer", version: "1.0.0",

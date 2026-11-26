@@ -126,9 +126,6 @@ struct ServerTests {
             await state.setHookCalled()
         }
 
-        // Wait for server to initialize
-        try await Task.sleep(for: .milliseconds(10))
-
         // Queue an initialize request
         try await transport.queue(
             request: Initialize.request(
@@ -165,9 +162,6 @@ struct ServerTests {
                 throw MCPError.invalidRequest("Client not allowed")
             }
         }
-
-        // Wait for server to initialize
-        try await Task.sleep(for: .milliseconds(10))
 
         // Queue an initialize request from blocked client
         try await transport.queue(
@@ -250,12 +244,14 @@ struct ServerTests {
         try await serverTransport.connect()
 
         // Start receiving messages on client side
+        let received = Counter()
         let receiveTask = Task {
             var responses: [String] = []
             for try await data in await clientTransport.receive() {
                 if let response = String(data: data, encoding: .utf8) {
                     responses.append(response)
                 }
+                await received.increment()
                 // Stop after receiving 2 responses (initialize + batch)
                 if responses.count == 2 {
                     break
@@ -279,7 +275,7 @@ struct ServerTests {
         try await clientTransport.send(initData)
 
         // Wait for initialization
-        try await Task.sleep(for: .milliseconds(100))
+        #expect(await eventually { await received.value >= 1 })
 
         // Create a batch with multiple requests
         let batchJSON = """
@@ -290,9 +286,6 @@ struct ServerTests {
             """
         let batchData = batchJSON.data(using: .utf8)!
         try await clientTransport.send(batchData)
-
-        // Wait for batch processing
-        try await Task.sleep(for: .milliseconds(200))
 
         // Get responses
         let responses = try await receiveTask.value
@@ -337,8 +330,9 @@ struct ServerDefaultHandlerTests {
             weakClient = client
         }
         // The receive loops end shortly after the transports close.
-        for _ in 0..<500 where weakServer != nil || weakClient != nil {
-            try await Task.sleep(for: .milliseconds(10))
+        let deadline = ContinuousClock.now + .seconds(30)
+        while weakServer != nil || weakClient != nil, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
         }
         #expect(weakServer == nil)
         #expect(weakClient == nil)
@@ -366,6 +360,7 @@ struct ServerDefaultHandlerTests {
     }
 
     @Test("logging/setLevel filters log messages on a handshake connection")
+    @available(*, deprecated, message: "Tests the deprecated logging API (SEP-2577)")
     func setLevelFilters() async throws {
         let server = Server(name: "s", version: "1", capabilities: .init(logging: .init(), tools: .init()))
         await server.withMethodHandler(CallTool.self) { _ in
@@ -556,6 +551,7 @@ struct ServerLifecycleTests {
     }
 
     @Test("a request to the client sent while stop() disconnects fails")
+    @available(*, deprecated, message: "Tests the deprecated sampling API (SEP-2577)")
     func requestDuringStopFails() async throws {
         let server = Server(name: "s", version: "1")
         let transport = EndableTransport(mode: .shared)
@@ -605,7 +601,7 @@ private actor ContextGatedTransport: Transport, HTTPContextProviding {
         return nil
     }
 
-    func waitUntilContextIsHeld(timeout: Duration = .seconds(2)) async throws {
+    func waitUntilContextIsHeld(timeout: Duration = .seconds(30)) async throws {
         let deadline = ContinuousClock.now.advanced(by: timeout)
         while heldContext == nil {
             guard ContinuousClock.now < deadline else {

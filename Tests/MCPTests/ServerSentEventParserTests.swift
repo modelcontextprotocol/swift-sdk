@@ -3,7 +3,9 @@ import Testing
 
 @testable import MCP
 
-@Suite("Server-sent event parser")
+// The tests that feed megabytes to the parser byte by byte run their parsing
+// through offThreadPool, so they do not hold the cooperative pool's threads.
+@Suite("Server-sent event parser", .serialized)
 struct ServerSentEventParserTests {
     /// Parses `text` and returns the events, then checks that `finish()` returns none.
     func events(_ text: String) throws -> [ServerSentEvent] {
@@ -96,30 +98,41 @@ struct ServerSentEventParserTests {
     }
 
     @Test("A line longer than the limit fails the stream")
-    func lineLimit() throws {
-        var parser = ServerSentEventParser()
-        let limit = ServerSentEventParser.maxLineLength
-        for _ in 0..<limit { _ = try parser.consume(UInt8(ascii: "a")) }
-        #expect(throws: ServerSentEventParser.LineTooLong.self) { try parser.consume(UInt8(ascii: "a")) }
+    func lineLimit() async throws {
+        let error = try await offThreadPool { () -> (any Error)? in
+            var parser = ServerSentEventParser()
+            for _ in 0..<ServerSentEventParser.maxLineLength { _ = try parser.consume(UInt8(ascii: "a")) }
+            do {
+                _ = try parser.consume(UInt8(ascii: "a"))
+                return nil
+            } catch {
+                return error
+            }
+        }
+        #expect(error is ServerSentEventParser.LineTooLong)
     }
 
     @Test("Data lines are appended in place")
-    func manyDataLines() throws {
+    func manyDataLines() async throws {
         let lines = 1 << 20
-        var bytes = [UInt8]()
-        bytes.reserveCapacity(lines * 7 + 1)
-        for _ in 0..<lines { bytes += Array("data:x\n".utf8) }
-        bytes.append(0x0A)
-        var parser = ServerSentEventParser()
-        let start = ContinuousClock.now
-        var event: ServerSentEvent?
-        // Copying the data per line took minutes for this event.
-        for (index, byte) in bytes.enumerated() {
-            if let completed = try parser.consume(byte) { event = completed }
-            if index % 65536 == 0, ContinuousClock.now - start > .seconds(20) {
-                Issue.record("\(index) of \(bytes.count) bytes parsed in 20 s")
-                return
+        let (event, stoppedAt) = try await offThreadPool { () -> (ServerSentEvent?, Int?) in
+            var bytes = [UInt8]()
+            bytes.reserveCapacity(lines * 7 + 1)
+            for _ in 0..<lines { bytes += Array("data:x\n".utf8) }
+            bytes.append(0x0A)
+            var parser = ServerSentEventParser()
+            let start = ContinuousClock.now
+            var event: ServerSentEvent?
+            // Copying the data per line took minutes for this event.
+            for (index, byte) in bytes.enumerated() {
+                if let completed = try parser.consume(byte) { event = completed }
+                if index % 65536 == 0, ContinuousClock.now - start > .seconds(20) { return (nil, index) }
             }
+            return (event, nil)
+        }
+        if let stoppedAt {
+            Issue.record("\(stoppedAt) of \(lines * 7 + 1) bytes parsed in 20 s")
+            return
         }
         let data = try #require(event).data
         #expect(data.utf8.count == lines * 2 - 1)
@@ -127,32 +140,47 @@ struct ServerSentEventParserTests {
     }
 
     @Test("An event whose data is longer than the limit fails the stream")
-    func eventLimit() throws {
-        var parser = ServerSentEventParser()
+    func eventLimit() async throws {
         let half = Array(repeating: UInt8(ascii: "a"), count: ServerSentEventParser.maxEventLength / 2)
         let line = Array("data:".utf8) + half + [0x0A]
-        for byte in line { _ = try parser.consume(byte) }
-        // The second line's feed takes the data one byte over the limit.
-        #expect(throws: ServerSentEventParser.EventTooLong.self) {
+        let (error, emitted) = try await offThreadPool { () -> ((any Error)?, [ServerSentEvent]) in
+            var parser = ServerSentEventParser()
             for byte in line { _ = try parser.consume(byte) }
+            // The second line's feed takes the data one byte over the limit.
+            var error: (any Error)?
+            do {
+                for byte in line { _ = try parser.consume(byte) }
+            } catch let thrown {
+                error = thrown
+            }
+            // Exactly at the limit is accepted.
+            var exact = ServerSentEventParser()
+            var emitted: [ServerSentEvent] = []
+            for byte in line + Array("data:".utf8) + half.dropLast() + [0x0A, 0x0A] {
+                if let event = try exact.consume(byte) { emitted.append(event) }
+            }
+            return (error, emitted)
         }
-        // Exactly at the limit is accepted.
-        var exact = ServerSentEventParser()
-        var emitted: [ServerSentEvent] = []
-        for byte in line + Array("data:".utf8) + half.dropLast() + [0x0A, 0x0A] {
-            if let event = try exact.consume(byte) { emitted.append(event) }
-        }
+        #expect(error is ServerSentEventParser.EventTooLong)
         #expect(emitted.count == 1)
         let event = try #require(emitted.first)
         #expect(event.data.utf8.count == ServerSentEventParser.maxEventLength)
     }
 
     @Test("Events after a long line parse as before")
-    func afterLongLine() throws {
+    func afterLongLine() async throws {
         let long = String(repeating: "a", count: 1 << 20)
-        #expect(
-            try events("data: \(long)\n\ndata: x\n\nid: 2\ndata: y\n\n")
-                == [ServerSentEvent(data: long), ServerSentEvent(data: "x"), ServerSentEvent(id: "2", data: "y")])
+        let bytes = Array("data: \(long)\n\ndata: x\n\nid: 2\ndata: y\n\n".utf8)
+        let (events, rest) = try await offThreadPool { () -> ([ServerSentEvent], ServerSentEvent?) in
+            var parser = ServerSentEventParser()
+            var events: [ServerSentEvent] = []
+            for byte in bytes {
+                if let event = try parser.consume(byte) { events.append(event) }
+            }
+            return (events, parser.finish())
+        }
+        #expect(rest == nil)
+        #expect(events == [ServerSentEvent(data: long), ServerSentEvent(data: "x"), ServerSentEvent(id: "2", data: "y")])
     }
 
     @Test("serverSentEvents reads an async byte sequence")

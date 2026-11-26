@@ -118,6 +118,7 @@ struct ClientStatelessTests {
     }
 
     @Test("setLoggingLevel on a stateless connection stamps the level")
+    @available(*, deprecated, message: "Tests the deprecated logging API (SEP-2577)")
     func testStatelessLogLevel() async throws {
         let server = await makeStatelessServer()
         let (client, _) = try await connectClient(server, mode: .automatic)
@@ -129,6 +130,7 @@ struct ClientStatelessTests {
     }
 
     @Test("Changing configuration.logLevel after init stamps the new level")
+    @available(*, deprecated, message: "Tests the deprecated logging API (SEP-2577)")
     func testConfigurationLogLevelChange() async throws {
         let server = await makeStatelessServer()
         let (client, _) = try await connectClient(server, mode: .automatic, logLevel: .warning)
@@ -149,6 +151,7 @@ struct ClientStatelessTests {
     }
 
     @Test("A reconnect starts from configuration.logLevel")
+    @available(*, deprecated, message: "Tests the deprecated logging API (SEP-2577)")
     func testReconnectResetsLogLevel() async throws {
         let first = await makeStatelessServer()
         let second = await makeStatelessServer()
@@ -176,9 +179,7 @@ private actor ToolListing {
 
 /// Waits until the client has sent `count` messages and returns the last one.
 private func sent(_ transport: MockTransport, count: Int) async throws -> [String: Value] {
-    for _ in 0..<200 where await transport.sentData.count < count {
-        try await Task.sleep(for: .milliseconds(5))
-    }
+    try await transport.waitForSentMessages(count: count)
     let data = try #require(await transport.sentData.dropFirst(count - 1).first)
     return try #require(try JSONDecoder().decode(Value.self, from: data).objectValue)
 }

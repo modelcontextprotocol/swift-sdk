@@ -487,6 +487,7 @@ struct GuidesSnippetTests {
     }
 
     @Test("Server requests at 2026-07-28 are -32600")
+    @available(*, deprecated, message: "Tests the deprecated sampling API (SEP-2577)")
     func serverRequestAtStateless() async throws {
         let server = Server(name: "s", version: "1", capabilities: .init(tools: .init()))
         await server.withMethodHandler(CallTool.self) { [weak server] _ in

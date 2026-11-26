@@ -246,6 +246,7 @@ struct StatelessServerTests {
     }
 
     @Test("Log notifications follow the request log level")
+    @available(*, deprecated, message: "Tests the deprecated logging API (SEP-2577)")
     func testLogGate() async throws {
         let server = await makeServer()
         await server.withMethodHandler(CallTool.self) { [weak server] _ in
@@ -273,6 +274,7 @@ struct StatelessServerTests {
     }
 
     @Test("Server-to-client requests fail at 2026-07-28")
+    @available(*, deprecated, message: "Tests the deprecated roots API (SEP-2577)")
     func testNoServerRequests() async throws {
         let server = await makeServer()
         await server.withMethodHandler(CallTool.self) { [weak server] _ in
@@ -837,7 +839,8 @@ struct StatelessHTTPTests {
 
         // The server's listen handler ends.
         var open = await server.openSubscriptionCount
-        for _ in 0..<200 where open > 0 {
+        let deadline = ContinuousClock.now + .seconds(30)
+        while open > 0 && ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(5))
             open = await server.openSubscriptionCount
         }

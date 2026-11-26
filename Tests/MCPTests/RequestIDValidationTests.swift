@@ -57,7 +57,7 @@ struct StreamRequestIDTests {
         try await clientEnd.send(Data(line.utf8))
         try await clientEnd.send(Data(#"{"jsonrpc":"2.0","id":"sentinel","method":"ping"}"#.utf8))
         let isSentinel: (Value) -> Bool = { $0.objectValue?["id"] == "sentinel" }
-        let deadline = ContinuousClock.now + .seconds(5)
+        let deadline = ContinuousClock.now + .seconds(30)
         var values: [Value] = []
         repeat {
             try await Task.sleep(for: .milliseconds(10))

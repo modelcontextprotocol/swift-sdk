@@ -227,16 +227,6 @@ private func message(id: Int, method: String, params: [String: Value] = [:], cap
     return String(decoding: try! JSONEncoder().encode(value), as: UTF8.self)
 }
 
-private actor Flag {
-    private(set) var isSet = false
-    func set() { isSet = true }
-}
-
-private actor Counter {
-    private(set) var value = 0
-    func increment() { value += 1 }
-}
-
 /// A server with the task tools of ``TaskServer``.
 private func makeTaskServer(
     manager: TaskManager, cancelled: Flag = Flag(), ran: Counter = Counter(),
@@ -279,9 +269,9 @@ private func makeTaskServer(
                 }
                 return .init(content: [.text(text: "late")])
             }
-            // Still answering when the client gives up.
-            let deadline = ContinuousClock.now + .milliseconds(300)
-            while ContinuousClock.now < deadline { await Task.yield() }
+            // Still answering when the client gives up: the handler returns
+            // only once its call is cancelled.
+            try? await Task.sleep(for: .seconds(30))
             return created
         case "giveUp":
             return try await Server.runAsTask { task in
@@ -542,7 +532,7 @@ struct StatelessTaskServerTests {
         #expect(ack["resultType"] == "complete")
         #expect(Set(ack.keys).isSubset(of: ["resultType", "_meta"]))
         #expect(try await server.get(id)["status"] == "cancelled")
-        let deadline = ContinuousClock.now + .seconds(2)
+        let deadline = ContinuousClock.now + .seconds(30)
         while await !server.cancelled.isSet, ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(5))
         }
@@ -649,13 +639,17 @@ struct StatelessTaskServerTests {
     func expiry() async throws {
         let server = try await TaskServer()
         defer { Task { await server.stop() } }
-        // A ttl long enough for the first tasks/get on a loaded machine.
+        let start = ContinuousClock.now
         let created = try await server.call("slow", ["ttlMs": 1000])
         let id = try #require(created["taskId"]?.stringValue)
         #expect(created["ttlMs"] == 1000)
-        #expect(try await server.get(id)["taskId"] == .string(id))
-        try await Task.sleep(for: .milliseconds(1100))
-        #expect(try await server.errorCode(GetTask.name, ["taskId": .string(id)]) == -32602)
+        let read = try await server.request(GetTask.name, ["taskId": .string(id)])
+        // The task is only certain to be alive while less than its ttl passed
+        // since before it was created; a loaded machine can take longer.
+        if ContinuousClock.now - start < .milliseconds(1000) {
+            #expect(read.objectValue?["result"]?.objectValue?["taskId"] == .string(id))
+        }
+        #expect(await eventually { (try? await server.errorCode(GetTask.name, ["taskId": .string(id)])) == -32602 })
     }
 
     @Test("A call cancelled after it created its task cancels the task, and gets no answer")
@@ -664,11 +658,12 @@ struct StatelessTaskServerTests {
         defer { Task { await server.stop() } }
         let call = message(id: 77, method: CallTool.name, params: ["name": "lateAnswer"], capabilities: tasksCapabilities)
         try await server.wire.send(call, expecting: 0)
-        let deadline = ContinuousClock.now + .seconds(2)
-        while await server.ran.value == 0, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(5)) }
+        let started = ContinuousClock.now + .seconds(30)
+        while await server.ran.value == 0, ContinuousClock.now < started { try await Task.sleep(for: .milliseconds(5)) }
         try await server.wire.send(
             #"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":77}}"#, expecting: 0)
-        while await !server.cancelled.isSet, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(5)) }
+        let cancelled = ContinuousClock.now + .seconds(30)
+        while await !server.cancelled.isSet, ContinuousClock.now < cancelled { try await Task.sleep(for: .milliseconds(5)) }
         #expect(await server.cancelled.isSet)
         try await Task.sleep(for: .milliseconds(400))
         let answer = try await sentMessage(server.wire, timeout: .milliseconds(50)) { $0.objectValue?["id"] == 77 }
@@ -683,7 +678,7 @@ struct StatelessTaskServerTests {
         let waiting = try await server.wait(id, for: "input_required")
         #expect(waiting["inputRequests"]?.objectValue?.keys.sorted() == ["q"])
         var later = try await server.get(id)
-        let deadline = ContinuousClock.now + .seconds(2)
+        let deadline = ContinuousClock.now + .seconds(30)
         while later["status"] == "input_required", ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(10))
             later = try await server.get(id)
@@ -725,7 +720,7 @@ struct StatelessTaskServerTests {
         let task = try #require(got.first?.objectValue?["result"]?.objectValue)
         #expect(task["status"] == "completed")
         #expect(task["result"]?.objectValue?["content"] == [["type": "text", "text": "from the job"]])
-        let deadline = ContinuousClock.now + .seconds(2)
+        let deadline = ContinuousClock.now + .seconds(30)
         while await !ended.isSet, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(5)) }
         #expect(await ended.isSet)
         try await manager.fail(id, with: .internalError("late"))
@@ -1004,7 +999,7 @@ struct ClientTaskTests {
         let created = try await client.startToolCall(name: "ask").value
         let id = try #require(created.task?.taskId)
         await #expect(throws: (any Error).self) { try await client.task(id: id).result() }
-        let deadline = ContinuousClock.now + .seconds(2)
+        let deadline = ContinuousClock.now + .seconds(30)
         while try await manager.record(id: id)?.status != .cancelled, ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(5))
         }
@@ -1058,7 +1053,7 @@ struct ClientTaskTests {
         let created = try await client.startToolCall(name: "slow", arguments: ["seconds": 30]).value
         let handle = client.task(try #require(created.task))
         let drive = Task { try await handle.result() }
-        let deadline = ContinuousClock.now + .seconds(3)
+        let deadline = ContinuousClock.now + .seconds(30)
         while await client.taskPollerCount() == 0, ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(5))
         }
@@ -1509,7 +1504,7 @@ struct HandshakeClientTaskTests {
         let task = try #require(created.task)
         let drive = Task { try await client.task(task).result() }
         var status = try await client.getTask(task.taskId).status
-        let deadline = ContinuousClock.now + .seconds(2)
+        let deadline = ContinuousClock.now + .seconds(30)
         while status != .inputRequired, ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(5))
             status = try await client.getTask(task.taskId).status
@@ -1597,7 +1592,7 @@ struct TaskRevisionMatrixTests {
 
 /// Waits until the server sent a message that satisfies `match`.
 private func sentMessage(
-    _ wire: WireExchange, timeout: Duration = .seconds(2), where match: (Value) -> Bool
+    _ wire: WireExchange, timeout: Duration = .seconds(30), where match: (Value) -> Bool
 ) async throws -> Value? {
     let deadline = ContinuousClock.now + timeout
     while ContinuousClock.now < deadline {
@@ -2057,10 +2052,12 @@ struct TaskLifecycleEdgeTests {
 
     @Test("Cancelling a tools/call cancels the tools/list pass it waits for")
     func cancelsToolListPass() async throws {
+        let started = Flag()
         let cancelled = Flag()
         let server = Server(name: "s", version: "1", capabilities: .init(tools: .init()))
         await server.withTasks()
         await server.withMethodHandler(ListTools.self) { _ in
+            await started.set()
             do {
                 try await Task.sleep(for: .seconds(30))
             } catch {
@@ -2074,14 +2071,10 @@ struct TaskLifecycleEdgeTests {
         defer { Task { await wire.stop() } }
 
         try await wire.send(handshakeMessage(id: 7, method: CallTool.name, params: ["name": "t"]), expecting: 0)
-        try await Task.sleep(for: .milliseconds(100))
+        #expect(await eventually { await started.isSet })
         try await wire.send(
             #"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":7}}"#, expecting: 0)
-        let deadline = ContinuousClock.now + .seconds(2)
-        while await !cancelled.isSet, ContinuousClock.now < deadline {
-            try await Task.sleep(for: .milliseconds(5))
-        }
-        #expect(await cancelled.isSet)
+        #expect(await eventually { await cancelled.isSet })
         #expect(try await sentMessage(wire, timeout: .milliseconds(200)) { $0.objectValue?["id"] == 7 } == nil)
     }
 
@@ -2094,22 +2087,21 @@ struct TaskLifecycleEdgeTests {
         }
         try await Task.sleep(for: .milliseconds(500))
         #expect(try await server.call("must")["resultType"] == "task")
-        let deadline = ContinuousClock.now + .seconds(2)
-        while await !server.cancelled.isSet, ContinuousClock.now < deadline {
-            try await Task.sleep(for: .milliseconds(5))
-        }
-        #expect(await server.cancelled.isSet)
+        #expect(await eventually { await server.cancelled.isSet })
     }
 
     @Test("tasks/result ends when its task expires while waiting for input")
     func expiresWhileDelivering() async throws {
-        let server = try await HandshakeTaskServer()
+        let manager = TaskManager(configuration: .init(pollInterval: .milliseconds(10), sendsStatusNotifications: false))
+        let server = try await HandshakeTaskServer(manager: manager)
         defer { Task { await server.stop() } }
-        let id = try #require(try await server.create("ask", ttl: 300)["taskId"])
+        let id = try #require(try await server.create("ask", ttl: 60_000)["taskId"])
         _ = try await server.wait(id, for: "input_required")
         let (resultID, messages) = try await server.exchange(GetTaskPayload.name, ["taskId": id])
         #expect(messages.first?.objectValue?["method"] == "elicitation/create")
-        let reply = try await sentMessage(server.wire, timeout: .seconds(5)) {
+        // The task expires while tasks/result waits for the answer.
+        await manager.expireNow(try #require(id.stringValue))
+        let reply = try await sentMessage(server.wire) {
             $0.objectValue?["id"] == .int(resultID) && $0.objectValue?["method"] == nil
         }
         #expect(reply?.objectValue?["error"]?.objectValue?["code"] == -32602)

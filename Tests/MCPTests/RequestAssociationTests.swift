@@ -43,6 +43,7 @@ private struct Connection {
     /// Connects a new client, to a new server or, after `previous` was
     /// closed, to its server started again with the same log. The client
     /// uses the handshake unless `configuration` says otherwise.
+    @available(*, deprecated, message: "Uses the deprecated roots and sampling APIs (SEP-2577)")
     static func make(
         restarting previous: Connection? = nil, configuration: Client.Configuration = .handshake
     ) async throws -> Connection {
@@ -63,6 +64,7 @@ private struct Connection {
         return connection
     }
 
+    @available(*, deprecated, message: "Uses the deprecated roots and sampling APIs (SEP-2577)")
     private func register() async {
         let gate = gate, late = late
         await server.withMethodHandler(CallTool.self) { [weak server] params in
@@ -105,6 +107,7 @@ private struct Connection {
 @Suite("Request association (SEP-2260)", .timeLimit(.minutes(1)))
 struct RequestAssociationTests {
     @Test("Requests sent from a handler or by the bridge, and roots/list: no warning")
+    @available(*, deprecated, message: "Tests the deprecated roots API (SEP-2577)")
     func associated() async throws {
         let connection = try await Connection.make()
         defer { Task { await connection.close() } }
@@ -117,6 +120,7 @@ struct RequestAssociationTests {
     }
 
     @Test("A request outside a handler is sent, with one warning for each method")
+    @available(*, deprecated, message: "Tests the deprecated sampling API (SEP-2577)")
     func outsideHandler() async throws {
         let connection = try await Connection.make()
         defer { Task { await connection.close() } }
@@ -134,6 +138,7 @@ struct RequestAssociationTests {
     }
 
     @Test("A restarted server warns again for a new client")
+    @available(*, deprecated, message: "Tests the deprecated sampling API (SEP-2577)")
     func restart() async throws {
         let first = try await Connection.make()
         _ = try await first.server.requestSampling(messages: [.user("Hi")], maxTokens: 10)
@@ -148,6 +153,7 @@ struct RequestAssociationTests {
     }
 
     @Test("A request after the handler returned is sent, with a warning")
+    @available(*, deprecated, message: "Uses the deprecated roots and sampling APIs (SEP-2577)")
     func afterHandler() async throws {
         let connection = try await Connection.make()
         defer { Task { await connection.close() } }
@@ -162,6 +168,7 @@ struct RequestAssociationTests {
     }
 
     @Test("At 2026-07-28 a request from a handler throws")
+    @available(*, deprecated, message: "Uses the deprecated roots and sampling APIs (SEP-2577)")
     func statelessInHandler() async throws {
         let connection = try await Connection.make(configuration: .init())
         defer { Task { await connection.close() } }
@@ -172,6 +179,7 @@ struct RequestAssociationTests {
     }
 
     @Test("At 2026-07-28 a request outside a handler throws, with no warning")
+    @available(*, deprecated, message: "Tests the deprecated roots and sampling APIs (SEP-2577)")
     func statelessOutsideHandler() async throws {
         // The client connected with server/discover: the connection served a
         // stateless request.
@@ -191,6 +199,7 @@ struct RequestAssociationTests {
     }
 
     @Test("A server that serves no handshake revision throws before any request")
+    @available(*, deprecated, message: "Tests the deprecated sampling API (SEP-2577)")
     func statelessOnlyServer() async throws {
         let (_, serverEnd) = await InMemoryTransport.createConnectedPair()
         let server = Server(
@@ -204,6 +213,7 @@ struct RequestAssociationTests {
     }
 
     @Test("Behind a sessionless transport a request outside a handler throws")
+    @available(*, deprecated, message: "Tests the deprecated sampling API (SEP-2577)")
     func sessionlessOutsideHandler() async throws {
         let server = Server(name: "s", version: "1", capabilities: .init())
         try await server.start(transport: StatelessHTTPServerTransport())

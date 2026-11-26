@@ -20,23 +20,23 @@ struct CancellationTests {
         // Start server
         try await server.start(transport: serverTransport)
 
+        let pingRequest = Ping.request()
+        let received = Flag()
+        await server.onNotification(CancelledNotification.self) { message in
+            if message.params.requestId == pingRequest.id { await received.set() }
+        }
+
         // Connect client
         _ = try await client.connect(transport: clientTransport)
-        try await Task.sleep(for: .milliseconds(50))
 
         // Send a ping request
-        let pingRequest = Ping.request()
         let context = try await client.send(pingRequest)
-
-        try await Task.sleep(for: .milliseconds(10))
 
         // Cancel the request
         try await client.cancelRequest(context.requestID, reason: "Test cancellation")
 
-        try await Task.sleep(for: .milliseconds(50))
-
         // Verify cancellation was sent (server should have received it)
-        // The test passes if no errors occur and the request is cancelled
+        #expect(await eventually { await received.isSet })
 
         await client.disconnect()
         await server.stop()
@@ -47,9 +47,7 @@ struct CancellationTests {
         let transport = MockTransport()
         let client = Client(name: "TestClient", version: "1.0", configuration: .handshake)
         let connecting = Task { try await client.connect(transport: transport) }
-        for _ in 0..<200 where await transport.sentMessages.isEmpty {
-            try await Task.sleep(for: .milliseconds(10))
-        }
+        try await transport.waitForSentMessages()
         connecting.cancel()
         await #expect(throws: CancellationError.self) { _ = try await connecting.value }
         try await Task.sleep(for: .milliseconds(100))
@@ -75,19 +73,20 @@ struct CancellationTests {
         try await server.start(transport: serverTransport)
 
         // Register a slow ping handler (must be after start to override default)
+        let started = Flag()
         await server.withMethodHandler(Ping.self) { _ in
+            await started.set()
             try await Task.sleep(for: .seconds(5))
             return Empty()
         }
         _ = try await client.connect(transport: clientTransport)
-        try await Task.sleep(for: .milliseconds(50))
 
         // Send a request using send
         let pingRequest = Ping.request()
         let context = try await client.send(pingRequest)
 
         // Server cancels the request while it's being awaited
-        try await Task.sleep(for: .milliseconds(50))
+        #expect(await eventually { await started.isSet })
         try await server.cancelRequest(pingRequest.id, reason: "Server cancelled")
 
         // Try to get result - should throw CancellationError
@@ -118,7 +117,6 @@ struct CancellationTests {
         // Start server and connect client
         try await server.start(transport: serverTransport)
         _ = try await client.connect(transport: clientTransport)
-        try await Task.sleep(for: .milliseconds(50))
 
         // Create a request with send
         let pingRequest = Ping.request()
@@ -158,7 +156,6 @@ struct CancellationTests {
         // Start server and connect client
         try await server.start(transport: serverTransport)
         _ = try await client.connect(transport: clientTransport)
-        try await Task.sleep(for: .milliseconds(50))
 
         // Use the callTool overload that returns RequestContext (non-async version)
         let context = try await client.startToolCall(name: "testTool", arguments: ["test": "value"])
@@ -191,7 +188,9 @@ struct CancellationTests {
             .init(tools: [Tool(name: "slowTool", description: "A slow tool", inputSchema: .object([:]))])
         }
 
+        let started = Flag()
         await server.withMethodHandler(CallTool.self) { params in
+            await started.set()
             try await Task.sleep(for: .seconds(5))
             return .init(content: [.text(text: "Should not reach here")], isError: false)
         }
@@ -199,13 +198,12 @@ struct CancellationTests {
         // Start server and connect client
         try await server.start(transport: serverTransport)
         _ = try await client.connect(transport: clientTransport)
-        try await Task.sleep(for: .milliseconds(50))
 
         // Use the callTool overload that returns RequestContext (non-async version)
         let context = try await client.startToolCall(name: "slowTool", arguments: [:])
 
-        // Cancel after a short delay
-        try await Task.sleep(for: .milliseconds(50))
+        // Cancel once the tool is running
+        #expect(await eventually { await started.isSet })
         try await client.cancelRequest(context.requestID, reason: "Test timeout")
 
         // Try to get result - should throw CancellationError
@@ -237,19 +235,20 @@ struct CancellationTests {
         try await server.start(transport: serverTransport)
 
         // Register a slow handler (must be after start to override default)
+        let started = Flag()
         await server.withMethodHandler(Ping.self) { _ in
+            await started.set()
             try await Task.sleep(for: .seconds(10))
             return Empty()
         }
         _ = try await client.connect(transport: clientTransport)
-        try await Task.sleep(for: .milliseconds(50))
 
         // Send a ping request
         let pingRequest = Ping.request()
         let context = try await client.send(pingRequest)
 
         // Cancel the request while it's being awaited
-        try await Task.sleep(for: .milliseconds(50))
+        #expect(await eventually { await started.isSet })
         try await client.cancelRequest(context.requestID, reason: "Test cancellation")
 
         // Try to get result - should throw CancellationError (proving no response was sent)
@@ -314,7 +313,7 @@ struct CancellationTests {
             await gate.ran(params.name)
             if params.name == "first" {
                 // The batch runs its items one after another: "second" waits for this.
-                for _ in 0..<1000 where await !gate.isOpen { try await Task.sleep(for: .milliseconds(5)) }
+                _ = await eventually { await gate.isOpen }
             }
             return CallTool.Result(content: [.text(text: params.name, annotations: nil, _meta: nil)])
         }
@@ -327,7 +326,7 @@ struct CancellationTests {
         try await peer.send(
             #"[{"jsonrpc":"2.0","id":"a","method":"tools/call","params":{"name":"first"}},{"jsonrpc":"2.0","id":"b","method":"tools/call","params":{"name":"second"}}]"#
         )
-        for _ in 0..<1000 where await gate.names.isEmpty { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(await eventually { await !gate.names.isEmpty })
         try await peer.send(
             #"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"b"}}"#)
         try await peer.sync("after-cancel")

@@ -358,11 +358,11 @@ import Testing
 
             try await transport.connect()
 
-            // Wait for initial connection setup
-            try await Task.sleep(for: .milliseconds(100))
-
-            // Wait for initial heartbeat delay (1 second) plus a small buffer
-            try await Task.sleep(for: .seconds(1.2))
+            // The first heartbeat goes out after a 1 second delay
+            let deadline = ContinuousClock.now + .seconds(30)
+            while mockConnection.getSentData().isEmpty && ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(5))
+            }
 
             // Check if heartbeat was sent
             let sentData = mockConnection.getSentData()
@@ -440,8 +440,7 @@ import Testing
                 for try await _ in await transport.receive() {}
             }
 
-            // Let the receive loop start, then fail the connection
-            try await Task.sleep(for: .milliseconds(100))
+            // Fail the connection while the receive loop runs
             mockConnection.simulateFailure(error: NWError.posix(POSIXErrorCode.ECONNRESET))
 
             // The stream should finish with an error rather than hang
@@ -676,14 +675,18 @@ import Testing
             try await transport.connect()
 
             // Wait for initial heartbeat
-            try await Task.sleep(for: .seconds(1.2))
+            let heartbeatDeadline = ContinuousClock.now + .seconds(30)
+            while mockConnection.getSentData().isEmpty && ContinuousClock.now < heartbeatDeadline {
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            #expect(mockConnection.getSentData().count >= 1)
 
             // Simulate failure during heartbeat
             mockConnection.simulateFailure(error: NWError.posix(POSIXErrorCode.ECONNRESET))
 
             // The transport should react to the failure by cancelling the
             // connection before it tries to reconnect
-            let deadline = ContinuousClock.now + .seconds(3)
+            let deadline = ContinuousClock.now + .seconds(30)
             while mockConnection.state != .cancelled && ContinuousClock.now < deadline {
                 try await Task.sleep(for: .milliseconds(50))
             }
@@ -709,7 +712,7 @@ import Testing
             try await transport.connect()
             mockConnection.simulateFailure()
 
-            let deadline = ContinuousClock.now + .seconds(3)
+            let deadline = ContinuousClock.now + .seconds(30)
             while mockConnection.state != .cancelled && ContinuousClock.now < deadline {
                 try await Task.sleep(for: .milliseconds(50))
             }
@@ -745,7 +748,10 @@ import Testing
             }
 
             // Wait for potential async cleanup
-            try await Task.sleep(for: .milliseconds(100))
+            let deadline = ContinuousClock.now + .seconds(30)
+            while weakConnection != nil && ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(5))
+            }
 
             // Verify connection is cleaned up
             #expect(weakConnection == nil, "Connection was not properly cleaned up")

@@ -49,7 +49,8 @@ private actor Inbox<T: Sendable> {
 }
 
 private func eventually(_ condition: @Sendable () async -> Bool) async -> Bool {
-    for _ in 0..<400 {
+    let deadline = ContinuousClock.now + .seconds(30)
+    while ContinuousClock.now < deadline {
         if await condition() { return true }
         try? await Task.sleep(for: .milliseconds(5))
     }
@@ -207,6 +208,7 @@ struct ServerSnippetTests {
     }
 
     @Test("Multi round-trip: several requests in one round", arguments: eras)
+    @available(*, deprecated, message: "Tests the deprecated roots and sampling APIs (SEP-2577)")
     func multiRoundTripSeveral(mode: Client.ProtocolMode) async throws {
         let server = Server(name: "workspace", version: "1.0", capabilities: .init(tools: .init()))
         await server.withMethodHandler(CallTool.self) { summarizeWorkspace($0) }
@@ -221,6 +223,7 @@ struct ServerSnippetTests {
     }
 
     @Test("Multi round-trip: sampling with tools", arguments: eras)
+    @available(*, deprecated, message: "Tests the deprecated sampling API (SEP-2577)")
     func multiRoundTripSamplingTools(mode: Client.ProtocolMode) async throws {
         for maxRounds in [4, 1] {
             let server = Server(name: "travel", version: "1.0", capabilities: .init(tools: .init()))
@@ -305,37 +308,48 @@ struct ServerSnippetTests {
     @Test("Requests to the client work at handshake only", arguments: eras)
     func serverRequests(mode: Client.ProtocolMode) async throws {
         let server = Server(name: "cleaner", version: "1.0", capabilities: .init(tools: .init()))
-        let cache = RootsCache()
-        await watchRoots(on: server, cache: cache)
-        await registerCleanTool(on: server, roots: cache)
-        let fetches = Inbox<Bool>()
-        let client = try await connect(
-            server, mode: mode, capabilities: .init(elicitation: .init(), roots: .init(listChanged: true))
-        ) { client in
-            await client.withRootsHandler {
-                await fetches.add(true)
-                return [Root(uri: "file:///work", name: "work")]
-            }
+        await registerCleanTool(on: server)
+        let client = try await connect(server, mode: mode, capabilities: .init(elicitation: .init())) { client in
             await client.withElicitationHandler { _ in .init(action: .accept, content: ["confirm": true]) }
         }
         defer { Task { await client.disconnect(); await server.stop() } }
         if await client.isStateless {
             #expect(await code { _ = try await client.callTool(name: "clean") } == -32600)
         } else {
-            // The roots are fetched once, and again after they changed.
             #expect(text(try await client.callTool(name: "clean").content) == "true")
-            #expect(text(try await client.callTool(name: "clean").content) == "true")
-            #expect(await fetches.items.count == 1)
-            try await client.notifyRootsChanged()
-            #expect(
-                await eventually {
-                    _ = try? await client.callTool(name: "clean")
-                    return await fetches.items.count == 2
-                })
         }
     }
 
+    @Test("Roots are fetched once in a handler, and again after they changed")
+    @available(*, deprecated, message: "Tests the deprecated roots API (SEP-2577)")
+    func rootsInHandler() async throws {
+        let server = Server(name: "cleaner", version: "1.0", capabilities: .init(tools: .init()))
+        let cache = RootsCache()
+        await watchRoots(on: server, cache: cache)
+        await registerRootsTool(on: server, roots: cache)
+        let fetches = Inbox<Bool>()
+        let client = try await connect(
+            server, mode: .handshake, capabilities: .init(roots: .init(listChanged: true))
+        ) { client in
+            await client.withRootsHandler {
+                await fetches.add(true)
+                return [Root(uri: "file:///work", name: "work")]
+            }
+        }
+        defer { Task { await client.disconnect(); await server.stop() } }
+        #expect(text(try await client.callTool(name: "roots").content) == "1 roots")
+        #expect(text(try await client.callTool(name: "roots").content) == "1 roots")
+        #expect(await fetches.items.count == 1)
+        try await client.notifyRootsChanged()
+        #expect(
+            await eventually {
+                _ = try? await client.callTool(name: "roots")
+                return await fetches.items.count == 2
+            })
+    }
+
     @Test("RootsCache keeps no roots fetched before an invalidation")
+    @available(*, deprecated, message: "Tests the deprecated roots API (SEP-2577)")
     func rootsCacheInvalidation() async throws {
         let server = Server(name: "cleaner", version: "1.0", capabilities: .init(tools: .init()))
         let cache = RootsCache()
@@ -397,6 +411,7 @@ struct ServerSnippetTests {
     }
 
     @Test("Logging honors the level of each era", arguments: eras)
+    @available(*, deprecated, message: "Tests the deprecated logging API (SEP-2577)")
     func logging(mode: Client.ProtocolMode) async throws {
         let server = await makeLoggingServer()
         let inbox = Inbox<LogLevel>()

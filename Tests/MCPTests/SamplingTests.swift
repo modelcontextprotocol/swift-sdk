@@ -205,6 +205,7 @@ struct SamplingTests {
     }
 
     @Test("Client sampling handler registration")
+    @available(*, deprecated, message: "Tests the deprecated sampling API (SEP-2577)")
     func testClientSamplingHandlerRegistration() async throws {
         let client = Client(name: "TestClient", version: "1.0", configuration: .handshake)
 
@@ -489,6 +490,7 @@ struct SamplingTests {
 struct SamplingIntegrationTests {
 
     @Test
+    @available(*, deprecated, message: "Tests the deprecated sampling API (SEP-2577)")
     func testSamplingHandlerRegistration() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
@@ -535,6 +537,7 @@ struct SamplingIntegrationTests {
     }
 
     @Test
+    @available(*, deprecated, message: "Tests the deprecated sampling API (SEP-2577)")
     func testServerSamplingRequestAPI() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
@@ -703,6 +706,7 @@ struct SamplingIntegrationTests {
     }
 
     @Test
+    @available(*, deprecated, message: "Tests the deprecated sampling API (SEP-2577)")
     func testSamplingErrorHandling() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
@@ -738,6 +742,7 @@ struct SamplingIntegrationTests {
     }
 
     @Test("Strict mode succeeds when client declares sampling capability")
+    @available(*, deprecated, message: "Tests the deprecated sampling API (SEP-2577)")
     func testSamplingStrictCapabilitiesSuccess() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
@@ -786,6 +791,7 @@ struct SamplingIntegrationTests {
     }
 
     @Test("Strict mode fails when client doesn't declare sampling capability")
+    @available(*, deprecated, message: "Tests the deprecated sampling API (SEP-2577)")
     func testSamplingStrictCapabilitiesError() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
@@ -819,6 +825,7 @@ struct SamplingIntegrationTests {
     }
 
     @Test("Non-strict mode succeeds even without client capability declaration")
+    @available(*, deprecated, message: "Tests the deprecated sampling API (SEP-2577)")
     func testSamplingNonStrictCapabilities() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 

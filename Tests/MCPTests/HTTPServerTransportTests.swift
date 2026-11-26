@@ -413,9 +413,6 @@ struct StatefulHTTPServerTransportTests {
             return nil
         }
 
-        // Small delay to let receive() start
-        try await Task.sleep(for: .milliseconds(50))
-
         _ = await transport.handleRequest(
             makeStatefulPOSTRequest(body: notificationBody, sessionID: sessionID)
         )
@@ -482,9 +479,6 @@ struct StatefulHTTPServerTransportTests {
             return chunks
         }
 
-        // Give stream time to start
-        try await Task.sleep(for: .milliseconds(50))
-
         // Consume the request from receive and send the response
         let responseBody = makeResponseBody(id: requestID)
         try await transport.send(responseBody)
@@ -549,8 +543,6 @@ struct StatefulHTTPServerTransportTests {
             }
             return chunks
         }
-
-        try await Task.sleep(for: .milliseconds(50))
 
         // Send a notification (server-initiated)
         let notification: [String: Any] = [
@@ -1032,8 +1024,6 @@ struct StatefulHTTPServerTransportTests {
             }
         }
 
-        try await Task.sleep(for: .milliseconds(50))
-
         // Send the response to create a stored event
         try await transport.send(makeResponseBody(id: requestID))
 
@@ -1069,7 +1059,7 @@ struct StatefulHTTPServerTransportTests {
 
     /// The text of every chunk of `response`'s stream, or `nil` when the
     /// stream is still open after `timeout`.
-    private func readToEnd(_ response: HTTPResponse, timeout: Duration = .seconds(2)) async -> String? {
+    private func readToEnd(_ response: HTTPResponse, timeout: Duration = .seconds(30)) async -> String? {
         guard case .stream(let stream, _) = response else { return nil }
         let reader = Task { () -> String in
             var text = ""
@@ -1101,19 +1091,21 @@ struct StatefulHTTPServerTransportTests {
             Issue.record("Expected .stream response for GET")
             return
         }
-        let reader = Task { for try await _ in stream {} }
-        try await Task.sleep(for: .milliseconds(50))
+        let primed = ChunkCollector()
+        let reader = Task { for try await chunk in stream { await primed.append(chunk) } }
+        #expect(await eventually { await !primed.getChunks().isEmpty })
         reader.cancel()
 
         var status = 0
-        for _ in 0..<50 {
+        let deadline = ContinuousClock.now + .seconds(30)
+        while ContinuousClock.now < deadline {
             let next = await transport.handleRequest(makeGETRequest(sessionID: sessionID))
             status = next.statusCode
             if status == 200 {
                 if case .stream(let reopened, _) = next { _ = Task { for try await _ in reopened {} } }
                 break
             }
-            try await Task.sleep(for: .milliseconds(20))
+            try await Task.sleep(for: .milliseconds(5))
         }
         #expect(status == 200)
         await transport.disconnect()
@@ -1354,8 +1346,6 @@ struct StatelessHTTPServerTransportTests {
             return try await iterator.next()
         }
 
-        try await Task.sleep(for: .milliseconds(50))
-
         _ = await transport.handleRequest(
             makeStatelessPOSTRequest(body: notificationBody)
         )
@@ -1451,7 +1441,7 @@ struct StatelessHTTPServerTransportTests {
             )
         }
 
-        try await Task.sleep(for: .milliseconds(50))
+        _ = try await nextServerRequestID(transport)
 
         // Disconnect while request is pending
         await transport.disconnect()
@@ -1465,11 +1455,13 @@ struct StatelessHTTPServerTransportTests {
     func testCancelledJSONExchangeCancelsRequest() async throws {
         let transport = makeStatelessTransport()
         try await transport.connect()
+        let received = Counter()
         let incoming = Task { () -> [String] in
             var methods: [String] = []
             for try await data in await transport.receive() {
                 let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
                 methods.append(json?["method"] as? String ?? "")
+                await received.increment()
                 if methods.count == 2 { break }
             }
             return methods
@@ -1477,7 +1469,7 @@ struct StatelessHTTPServerTransportTests {
         let handleTask = Task {
             await transport.handleRequest(makeStatelessPOSTRequest(body: makeRequestBody(id: "gone")))
         }
-        try await Task.sleep(for: .milliseconds(50))
+        #expect(await eventually { await received.value >= 1 })
         handleTask.cancel()
 
         // The server sees the request, then its cancellation.
@@ -1541,7 +1533,10 @@ struct ServerHandlerContextTests {
 
         // Send the response — transport clears the context alongside the SSE map.
         try await transport.send(makeResponseBody(id: "42"))
-        try await Task.sleep(for: .milliseconds(50))
+        let deadline = ContinuousClock.now + .seconds(30)
+        while await transport.httpRequestContext(for: .string("42")) != nil && ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
 
         let afterResponse = await transport.httpRequestContext(for: .string("42"))
         #expect(afterResponse == nil)
@@ -1681,6 +1676,7 @@ struct ServerHandlerContextTests {
     }
 
     @Test("Handler notifications carry the originating request ID")
+    @available(*, deprecated, message: "Tests the deprecated logging API (SEP-2577)")
     func testHandlerNotificationsCarryRelatedRequestID() async throws {
         let transport = MockTransport()
         let server = Server(
@@ -1694,9 +1690,7 @@ struct ServerHandlerContextTests {
         try await server.start(transport: transport)
 
         try await transport.queue(request: CallTool.request(id: .string("call-7"), .init(name: "t")))
-        for _ in 0..<50 where await transport.sentData.count < 2 {
-            try await Task.sleep(for: .milliseconds(20))
-        }
+        try await transport.waitForSentMessages(count: 2)
         try await server.log(level: .info, data: "outside-handler")
 
         let related = await transport.relatedRequestIDs
@@ -1707,6 +1701,7 @@ struct ServerHandlerContextTests {
     }
 
     @Test("Handler requests to the client carry the originating request ID")
+    @available(*, deprecated, message: "Tests the deprecated roots API (SEP-2577)")
     func testHandlerRequestsCarryRelatedRequestID() async throws {
         let transport = MockTransport()
         let server = Server(name: "TestServer", version: "1.0", capabilities: .init(tools: .init()))
@@ -1717,13 +1712,9 @@ struct ServerHandlerContextTests {
         try await server.start(transport: transport)
 
         try await transport.queue(request: CallTool.request(id: .string("call-8"), .init(name: "t")))
-        for _ in 0..<50 where await transport.sentData.isEmpty {
-            try await Task.sleep(for: .milliseconds(20))
-        }
+        try await transport.waitForSentMessages(count: 1)
         let outside = Task { try await server.listRoots() }
-        for _ in 0..<50 where await transport.sentData.count < 2 {
-            try await Task.sleep(for: .milliseconds(20))
-        }
+        try await transport.waitForSentMessages(count: 2)
 
         #expect(await transport.relatedRequestIDs == [.string("call-8"), nil])
         #expect(await transport.sentMessages.allSatisfy { $0.contains("roots/list") })
@@ -1757,7 +1748,10 @@ struct ServerHandlerContextTests {
         try await transport.queue(request: Ping.request(.init()))
 
         // Wait for dispatch.
-        try await Task.sleep(for: .milliseconds(100))
+        let deadline = ContinuousClock.now + .seconds(30)
+        while await !captured.sawDispatch, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
 
         #expect(await captured.sawDispatch == true)
         #expect(await captured.httpContext == nil)

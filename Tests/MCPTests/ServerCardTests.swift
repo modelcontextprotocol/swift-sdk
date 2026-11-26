@@ -369,27 +369,32 @@ struct ServerCardValidatorTests {
 
         @Test("A body larger than the limit is not read to its end")
         func streamedBodyIsCutOff() async throws {
-            // 40 MiB in 64 KiB chunks, about 1.3 s: a loaded machine may let a few
-            // MiB through before the cancellation reaches the mock.
-            let (session, log) = CardURLProtocol.session([url.absoluteString: .stream(chunk: 64 << 10, count: 640)])
-            await #expect { _ = try await ServerCard.fetch(from: url, session: session) } throws: {
-                ($0 as? ServerCardError)?.reason == .tooLarge
-            }
-            let delivered = await log.deliveredWhenStopped()
-            #expect(delivered > ServerCard.maximumSize)
-            #expect(delivered < 20 << 20, "\(delivered) bytes were delivered")
-        }
-
-        @Test("A Content-Length over the limit is refused before the body is read")
-        func contentLength() async throws {
+            // 40 MiB in 64 KiB chunks. Past the limit the mock waits for the
+            // cancellation instead of racing it.
+            let chunk = 64 << 10
             let (session, log) = CardURLProtocol.session([
-                url.absoluteString: .stream(chunk: 64 << 10, count: 160, contentLength: 10 << 20, delay: 0.2)
+                url.absoluteString: .stream(chunk: chunk, count: 640, pauseAfter: ServerCard.maximumSize)
             ])
             await #expect { _ = try await ServerCard.fetch(from: url, session: session) } throws: {
                 ($0 as? ServerCardError)?.reason == .tooLarge
             }
-            // The body starts 0.2 s after the headers; the fetch refuses on the headers.
-            #expect(await log.deliveredWhenStopped() < ServerCard.maximumSize)
+            let delivered = await log.deliveredWhenStopped()
+            #expect(delivered == ServerCard.maximumSize + chunk, "\(delivered) bytes were delivered")
+        }
+
+        @Test("A Content-Length over the limit is refused before the body is read")
+        func contentLength() async throws {
+            let contentLength = 10 << 20
+            let (session, _) = CardURLProtocol.session([
+                url.absoluteString: .stream(chunk: 64 << 10, count: 160, contentLength: contentLength)
+            ])
+            let error = await #expect(throws: ServerCardError.self) {
+                _ = try await ServerCard.fetch(from: url, session: session)
+            }
+            // Refused on the headers: the message gives the Content-Length. A body
+            // read to the limit ends in "more than \(maximumSize) bytes" instead.
+            #expect(error?.reason == .tooLarge)
+            #expect(error?.message == "The card has \(contentLength) bytes, more than \(ServerCard.maximumSize)")
         }
 
         // swift-corelibs-foundation cannot redirect a URLProtocol's request
@@ -499,11 +504,11 @@ struct ServerCardValidatorTests {
 
     /// Serves cards, redirects and long bodies by URL, and records the
     /// requests and the bytes delivered.
-    private final class CardURLProtocol: URLProtocol, @unchecked Sendable {
+    private final class CardURLProtocol: URLProtocol {
         enum Step: Sendable {
             case card
             case redirect(String)
-            case stream(chunk: Int, count: Int, contentLength: Int? = nil, delay: TimeInterval = 0)
+            case stream(chunk: Int, count: Int, contentLength: Int? = nil, pauseAfter: Int? = nil)
         }
 
         final class Log: @unchecked Sendable {
@@ -519,9 +524,9 @@ struct ServerCardValidatorTests {
 
             /// The bytes delivered, once the loading stopped or all chunks went out.
             func deliveredWhenStopped() async -> Int {
-                for _ in 0..<200 {
-                    if lock.withLock({ stopped }) { break }
-                    try? await Task.sleep(for: .milliseconds(10))
+                let deadline = ContinuousClock.now + .seconds(30)
+                while !lock.withLock({ stopped }) && ContinuousClock.now < deadline {
+                    try? await Task.sleep(for: .milliseconds(5))
                 }
                 return lock.withLock { bytes }
             }
@@ -574,23 +579,42 @@ struct ServerCardValidatorTests {
                 client?.urlProtocol(self, wasRedirectedTo: next, redirectResponse: response)
                 // A followed redirect stops this loading; a refused one gets
                 // the 3xx as the response.
+                let loader = SendableURLProtocol(self)
                 DispatchQueue.global().asyncAfter(deadline: .now() + 0.05) {
-                    guard !self.isStopped else { return }
-                    self.client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-                    guard !self.isStopped else { return }
-                    self.client?.urlProtocolDidFinishLoading(self)
+                    loader.value.finish(with: response)
                 }
-            case .stream(let chunk, let count, let contentLength, let delay):
+            case .stream(let chunk, let count, let contentLength, let pauseAfter):
                 respond(url, status: 200, headers: contentLength.map { ["Content-Length": String($0)] } ?? [:])
-                DispatchQueue.global().asyncAfter(deadline: .now() + delay) { self.stream(chunk: chunk, count: count) }
+                let loader = SendableURLProtocol(self)
+                DispatchQueue.global().async {
+                    loader.value.stream(chunk: chunk, count: count, pauseAfter: pauseAfter)
+                }
             }
         }
 
-        private func stream(chunk: Int, count: Int) {
+        private func finish(with response: HTTPURLResponse) {
+            guard !isStopped else { return }
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            guard !isStopped else { return }
+            client?.urlProtocolDidFinishLoading(self)
+        }
+
+        /// Sends `count` chunks. Once more than `pauseAfter` bytes went out, it
+        /// waits up to 30 s for the loading to stop before it sends the rest.
+        private func stream(chunk: Int, count: Int, pauseAfter: Int?) {
+            var sent = 0
+            var paused = false
             for _ in 0..<count {
                 guard !isStopped else { return }
+                if let pauseAfter, sent > pauseAfter, !paused {
+                    paused = true
+                    let deadline = Date().addingTimeInterval(30)
+                    while !isStopped && Date() < deadline { Thread.sleep(forTimeInterval: 0.005) }
+                    guard !isStopped else { return }
+                }
                 client?.urlProtocol(self, didLoad: Data(repeating: 0x20, count: chunk))
                 stateLock.withLock { log }?.delivered(chunk)
+                sent += chunk
                 Thread.sleep(forTimeInterval: 0.002)
             }
             guard !isStopped else { return }

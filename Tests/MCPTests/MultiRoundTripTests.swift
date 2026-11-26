@@ -61,11 +61,6 @@ private func makeRoundTripServer(
     return server
 }
 
-private actor Counter {
-    private(set) var value = 0
-    func increment() { value += 1 }
-}
-
 private actor Recorder<Element: Sendable> {
     private(set) var values: [Element] = []
     func record(_ value: Element) { values.append(value) }
@@ -101,6 +96,7 @@ private func connect(
 }
 
 /// Registers handlers that answer every input request.
+@available(*, deprecated, message: "Uses the deprecated roots and sampling APIs (SEP-2577)")
 private func answerEverything(_ client: Client, elicitations: Counter = Counter()) async {
     await client.withElicitationHandler { _ in
         await elicitations.increment()
@@ -305,6 +301,7 @@ struct RequestStateTests {
 @Suite("Multi Round-Trip Requests")
 struct MultiRoundTripTests {
     @Test("The client fulfills input requests and retries until complete (2026-07-28)")
+    @available(*, deprecated, message: "Uses the deprecated roots and sampling APIs (SEP-2577)")
     func testClientLoop() async throws {
         let calls = Counter()
         let elicitations = Counter()
@@ -390,6 +387,7 @@ struct MultiRoundTripTests {
     @Test(
         "A form elicitation needs form elicitation: a URL-only client gets -32021, an empty declaration is form",
         arguments: [Client.ProtocolMode.automatic, .handshake])
+    @available(*, deprecated, message: "Uses the deprecated roots and sampling APIs (SEP-2577)")
     func testFormElicitationCapability(mode: Client.ProtocolMode) async throws {
         let server = await makeRoundTripServer()
         let urlOnly = try await connect(
@@ -501,6 +499,7 @@ struct MultiRoundTripTests {
     @Test(
         "A data: URL string in a sampling prompt and its result is kept as written",
         arguments: [Client.ProtocolMode.automatic, .handshake])
+    @available(*, deprecated, message: "Tests the deprecated sampling API (SEP-2577)")
     func testDataURLStringsInKnownKinds(mode: Client.ProtocolMode) async throws {
         let server = Server(name: "mrtr", version: "1.0", capabilities: .init(tools: .init()))
         await server.withMethodHandler(CallTool.self) { params in
@@ -525,6 +524,7 @@ struct MultiRoundTripTests {
     }
 
     @Test("A result with content and input requests is a server error")
+    @available(*, deprecated, message: "Uses the deprecated roots and sampling APIs (SEP-2577)")
     func testContentAndInput() async throws {
         let server = await makeRoundTripServer()
         let client = try await connect(server) { await answerEverything($0) }
@@ -540,6 +540,7 @@ struct MultiRoundTripTests {
     @Test(
         "An input-required result with nothing to answer is a server error",
         arguments: [Client.ProtocolMode.automatic, .handshake])
+    @available(*, deprecated, message: "Uses the deprecated roots and sampling APIs (SEP-2577)")
     func testEmptyInputRequests(mode: Client.ProtocolMode) async throws {
         let calls = Counter()
         let server = await makeRoundTripServer(calls: calls)
@@ -575,6 +576,7 @@ struct MultiRoundTripTests {
     }
 
     @Test("For handshake clients the server fulfills input requests itself")
+    @available(*, deprecated, message: "Uses the deprecated roots and sampling APIs (SEP-2577)")
     func testLegacyBridge() async throws {
         let calls = Counter()
         let elicitations = Counter()
@@ -662,6 +664,7 @@ struct MultiRoundTripTests {
     }
 
     @Test("The client refuses a result with more input requests than the limit, before any handler runs")
+    @available(*, deprecated, message: "Uses the deprecated roots and sampling APIs (SEP-2577)")
     func testInputRequestLimit() async throws {
         let server = Server(name: "many", version: "1.0", capabilities: .init(tools: .init()))
         await server.withMethodHandler(CallTool.self) { _ in
@@ -701,14 +704,14 @@ struct MultiRoundTripTests {
         defer { Task { await client.disconnect(); await server.stop() } }
 
         let context = try await client.send(CallTool.request(.init(name: "confirm")))
-        for _ in 0..<400 where await started.value == 0 { try await Task.sleep(for: .milliseconds(5)) }
+        try #require(await eventually { await started.value > 0 })
         try await client.cancelRequest(context.requestID)
         await #expect(throws: (any Error).self) { _ = try await context.value }
-        for _ in 0..<400 where await cancelled.value == 0 { try await Task.sleep(for: .milliseconds(5)) }
-        #expect(await cancelled.value == 1)
+        #expect(await eventually { await cancelled.value == 1 })
     }
 
     @Test("cancelRequest right after send ends the exchange before any round")
+    @available(*, deprecated, message: "Uses the deprecated roots and sampling APIs (SEP-2577)")
     func testCancelBeforeFirstResponse() async throws {
         let server = await makeRoundTripServer()
         let elicitations = Counter()
@@ -740,11 +743,10 @@ struct MultiRoundTripTests {
             }
         }
         let context = try await client.send(CallTool.request(.init(name: "confirm")))
-        for _ in 0..<400 where await started.value == 0 { try await Task.sleep(for: .milliseconds(5)) }
+        try #require(await eventually { await started.value > 0 })
         await client.disconnect()
         await #expect(throws: (any Error).self) { _ = try await context.value }
-        for _ in 0..<400 where await cancelled.value == 0 { try await Task.sleep(for: .milliseconds(5)) }
-        #expect(await cancelled.value == 1)
+        #expect(await eventually { await cancelled.value == 1 })
         await server.stop()
     }
 
@@ -768,6 +770,7 @@ struct MultiRoundTripTests {
     }
 
     @Test("The handshake bridge checks client capabilities without strict mode")
+    @available(*, deprecated, message: "Tests the deprecated sampling API (SEP-2577)")
     func testBridgeChecksCapabilities() async throws {
         let server = await makeRoundTripServer()
         let samplings = Counter()
@@ -825,11 +828,11 @@ struct MultiRoundTripTests {
         defer { Task { await client.disconnect(); await server.stop() } }
 
         let context = try await client.send(CallTool.request(.init(name: "confirm")))
-        for _ in 0..<400 where await started.value == 0 { try await Task.sleep(for: .milliseconds(5)) }
+        try #require(await eventually { await started.value > 0 })
         try await client.cancelRequest(context.requestID)
         try await Task.sleep(for: .milliseconds(50))
         open.yield()
-        for _ in 0..<400 where await cancellations.ids.isEmpty { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(await eventually { await !cancellations.ids.isEmpty })
         #expect(await cancellations.ids.count == 1)
         try await Task.sleep(for: .milliseconds(50))
         #expect(await calls.value == 1)
@@ -847,11 +850,10 @@ struct MultiRoundTripTests {
         try await peer.initialize(capabilities: #"{"elicitation":{}}"#)
 
         try await peer.send(#"{"jsonrpc":"2.0","id":"call","method":"tools/call","params":{"name":"late"}}"#)
-        for _ in 0..<1000 where await progress.started == 0 { try await Task.sleep(for: .milliseconds(5)) }
+        try #require(await eventually { await progress.started > 0 })
         try await peer.send(
             #"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"call"}}"#)
-        for _ in 0..<1000 where await progress.returned == 0 { try await Task.sleep(for: .milliseconds(5)) }
-        #expect(await progress.returned == 1)
+        #expect(await eventually { await progress.returned == 1 })
         try await Task.sleep(for: .milliseconds(100))
         try await peer.sync("after-return")
 
@@ -880,17 +882,17 @@ struct MultiRoundTripTests {
         for trial in 1...trials {
             try await peer.send(
                 #"{"jsonrpc":"2.0","id":"call-\#(trial)","method":"tools/call","params":{"name":"gated"}}"#)
-            for _ in 0..<1000 where await progress.started < trial { try await Task.sleep(for: .milliseconds(5)) }
+            try #require(await eventually { await progress.started >= trial })
             async let cancel: Void = peer.send(
                 #"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"call-\#(trial)"}}"#)
             await progress.release()
             try await cancel
-            for _ in 0..<1000 where await progress.returned < trial { try await Task.sleep(for: .milliseconds(5)) }
+            try #require(await eventually { await progress.returned >= trial })
         }
         try await Task.sleep(for: .milliseconds(100))
         try await peer.sync("after-trials")
 
-        func unanswered() async -> [Value] {
+        @Sendable func unanswered() async -> [Value] {
             let received = await peer.received
             let withdrawn = Set(
                 received.compactMap { message -> Value? in
@@ -904,7 +906,7 @@ struct MultiRoundTripTests {
                 return id
             }
         }
-        for _ in 0..<400 where await !unanswered().isEmpty { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(await eventually { await unanswered().isEmpty })
         #expect(await unanswered() == [], "input requests sent and never withdrawn")
         #expect(await progress.returned == trials)
         await peer.stop()

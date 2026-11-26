@@ -192,7 +192,8 @@ private func connected(
 }
 
 private func eventually(_ condition: @Sendable () async -> Bool) async -> Bool {
-    for _ in 0..<400 {
+    let deadline = ContinuousClock.now + .seconds(30)
+    while ContinuousClock.now < deadline {
         if await condition() { return true }
         try? await Task.sleep(for: .milliseconds(5))
     }
@@ -313,6 +314,7 @@ struct ClientSnippetTests {
     // MARK: Client features
 
     @Test("roots at 2025-11-25: server request and list-changed notification")
+    @available(*, deprecated, message: "Tests the deprecated roots API (SEP-2577)")
     func rootsHandshake() async throws {
         let server = await makeDemoServer(configuration: .init(protocolVersions: Version.handshake))
         let changed = Flag()
@@ -326,6 +328,7 @@ struct ClientSnippetTests {
     }
 
     @Test("a tool that asks for roots")
+    @available(*, deprecated, message: "Uses the deprecated roots API (SEP-2577)")
     func rootsInputRequired() async throws {
         let server = await makeDemoServer()
         let workspace = Workspace()
@@ -337,6 +340,7 @@ struct ClientSnippetTests {
     }
 
     @Test("sampling handler answers the server")
+    @available(*, deprecated, message: "Uses the deprecated sampling API (SEP-2577)")
     func sampling() async throws {
         let server = await makeDemoServer()
         let client = try await connectWithSampling(transport: try await start(server))
@@ -442,6 +446,7 @@ struct ClientSnippetTests {
     // MARK: Logging, cancellation, progress
 
     @Test("log messages reach the handler at 2025-11-25")
+    @available(*, deprecated, message: "Tests the deprecated logging API (SEP-2577)")
     func logging() async throws {
         let (server, client) = try await connected(.handshake)
         let inbox = LogInbox()
@@ -453,6 +458,7 @@ struct ClientSnippetTests {
     }
 
     @Test("setLoggingLevel changes the _meta level at 2026-07-28")
+    @available(*, deprecated, message: "Uses the deprecated logging API (SEP-2577)")
     func loggingStateless() async throws {
         let (server, client) = try await connected(.automatic)
         try await receiveLogs(client, into: LogInbox())
@@ -581,7 +587,7 @@ struct ClientAppSnippetTests {
 
 /// Answers every request with the same Server Card, or 404 for a path other
 /// than /mcp/server-card.
-private final class FixedCardProtocol: URLProtocol, @unchecked Sendable {
+private final class FixedCardProtocol: URLProtocol {
     static let card = ServerCard(
         name: "com.example/weather", version: "1.2.0", description: "Current weather for a city.",
         remotes: [

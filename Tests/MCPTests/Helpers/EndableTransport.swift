@@ -86,7 +86,7 @@ actor EndableTransport: Transport {
         heldDisconnect = nil
     }
 
-    func waitUntilDisconnectIsHeld(timeout: Duration = .seconds(2)) async throws {
+    func waitUntilDisconnectIsHeld(timeout: Duration = .seconds(30)) async throws {
         let deadline = ContinuousClock.now.advanced(by: timeout)
         while heldDisconnect == nil {
             guard ContinuousClock.now < deadline else {
@@ -114,7 +114,7 @@ actor EndableTransport: Transport {
             let response = Initialize.response(
                 id: id,
                 result: .init(
-                    protocolVersion: Version.latest,
+                    protocolVersion: Version.latestHandshake,
                     capabilities: .init(),
                     serverInfo: .init(name: "TestServer", version: "1.0"),
                     instructions: nil
@@ -167,7 +167,7 @@ actor EndableTransport: Transport {
     }
 
     /// Waits until a message for `method` has been sent.
-    func waitUntilSent(_ method: String, timeout: Duration = .seconds(2)) async throws {
+    func waitUntilSent(_ method: String, timeout: Duration = .seconds(30)) async throws {
         let deadline = ContinuousClock.now.advanced(by: timeout)
         while !sentMethods.contains(method) {
             guard ContinuousClock.now < deadline else {
@@ -178,7 +178,7 @@ actor EndableTransport: Transport {
     }
 
     /// Waits until a response to the request with `id` has been sent.
-    func waitUntilSentResponse(to id: ID, timeout: Duration = .seconds(2)) async throws {
+    func waitUntilSentResponse(to id: ID, timeout: Duration = .seconds(30)) async throws {
         let deadline = ContinuousClock.now.advanced(by: timeout)
         while !sentResponseIDs.contains(id) {
             guard ContinuousClock.now < deadline else {

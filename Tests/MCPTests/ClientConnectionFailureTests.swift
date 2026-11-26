@@ -40,7 +40,8 @@ private actor ScriptedTransport: Transport {
 
     /// Waits until `count` messages were sent and returns the last one.
     func message(_ count: Int) async throws -> [String: Value] {
-        for _ in 0..<400 where sent.count < count {
+        let deadline = ContinuousClock.now + .seconds(30)
+        while sent.count < count, ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(5))
         }
         return try #require(sent.dropFirst(count - 1).first)
@@ -141,7 +142,7 @@ struct AutomaticConnectionFailureTests {
         let connecting = Task { try await client.connect(transport: transport) }
         // Ends a connect that would wait for a second initialize answer.
         let watchdog = Task {
-            try await Task.sleep(for: .seconds(2))
+            try await Task.sleep(for: .seconds(30))
             await client.disconnect()
         }
         defer { watchdog.cancel() }
@@ -415,7 +416,7 @@ struct OutgoingMessageTests {
 #if swift(>=6.1)
     /// Never answers `server/discover`, answers `initialize`, and records
     /// when the `server/discover` request is stopped.
-    private final class UnansweredDiscoverProtocol: URLProtocol, @unchecked Sendable {
+    private final class UnansweredDiscoverProtocol: URLProtocol {
         actor State {
             private(set) var discoverStopped = false
             func stopped() { discoverStopped = true }
@@ -450,7 +451,8 @@ struct OutgoingMessageTests {
 
         override func stopLoading() {
             guard isDiscover else { return }
-            Task { await Self.state.stopped() }
+            let state = Self.state
+            Task { await state.stopped() }
         }
 
         private func body() -> Data {
@@ -661,7 +663,7 @@ struct OutgoingMessageTests {
     /// Answers 401 to a request without credentials. With them, hosts ending
     /// in `.silent.test` never answer `server/discover`; others serve
     /// 2026-07-28, and all answer `initialize`.
-    private final class ChallengedDiscoverProtocol: URLProtocol, @unchecked Sendable {
+    private final class ChallengedDiscoverProtocol: URLProtocol {
         final class State: @unchecked Sendable {
             private let lock = NSLock()
             private var authorized: [String: [String]] = [:]
