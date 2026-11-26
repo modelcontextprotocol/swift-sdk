@@ -686,10 +686,12 @@ public actor Client {
     ///   closes before the server answered; `MCPError.internalError("Client
     ///   disconnected")` if ``disconnect()`` or another `connect(transport:)`
     ///   runs while the previous transport disconnects or this one connects;
-    ///   or any error from connecting the transport or opening the protocol
-    ///   connection. A `connect(transport:)` that throws leaves the client
-    ///   disconnected: it disconnects `transport` and stops the receive loop
-    ///   itself, so the caller need not call ``disconnect()``.
+    ///   ``MCPError/unsupportedProtocolVersion(supported:requested:)`` if the
+    ///   server answers `initialize` with a version that is not in
+    ///   ``Version/handshake``; or any error from connecting the transport or
+    ///   opening the protocol connection. A `connect(transport:)` that throws
+    ///   leaves the client disconnected: it disconnects `transport` and stops
+    ///   the receive loop itself, so the caller need not call ``disconnect()``.
     @discardableResult
     public func connect(transport: any Transport) async throws -> ConnectionInfo {
         // Release the previous connection, so that its transport and message
@@ -2064,6 +2066,14 @@ public actor Client {
             ))
 
         let result = try await send(request).value
+
+        // A client that does not support the server's version should
+        // disconnect (2025-11-25 lifecycle, version negotiation).
+        // `connect(transport:)` disconnects when this throws.
+        guard Version.handshake.contains(result.protocolVersion) else {
+            throw MCPError.unsupportedProtocolVersion(
+                supported: Version.handshake, requested: result.protocolVersion)
+        }
 
         self.serverCapabilities = result.capabilities
         await logDeprecationNotices(result.capabilities)

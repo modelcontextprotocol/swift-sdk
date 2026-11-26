@@ -164,6 +164,41 @@ struct AutomaticConnectionFailureTests {
         await client.disconnect()
     }
 
+    @Test("An unsupported version in the fallback initialize result fails the connection")
+    func fallbackRefusesUnsupportedVersion() async throws {
+        let transport = ScriptedTransport()
+        let client = client()
+        let connecting = Task { try await client.connect(transport: transport) }
+        // Ends a connect that would wait for a second initialize answer.
+        let watchdog = Task {
+            try await Task.sleep(for: .seconds(30))
+            await client.disconnect()
+        }
+        defer { watchdog.cancel() }
+
+        let discover = try await transport.message(1)
+        try await transport.reply(
+            to: discover,
+            #""error":{"code":-32022,"message":"Unsupported","data":{"supported":["2025-11-25"]}}"#)
+        let initialize = try await transport.message(2)
+        #expect(initialize["method"] == "initialize")
+        try await transport.reply(
+            to: initialize,
+            #""result":{"protocolVersion":"1999-01-01","capabilities":{},"serverInfo":{"name":"old","version":"0"}}"#)
+
+        await #expect {
+            _ = try await connecting.value
+        } throws: { error in
+            guard case .unsupportedProtocolVersion(let supported, let requested) = error as? MCPError else {
+                return false
+            }
+            return supported == Version.handshake && requested == "1999-01-01"
+        }
+        #expect(await transport.methods == ["server/discover", "initialize"])
+        #expect(await client.negotiatedProtocolVersion == nil)
+        await client.disconnect()
+    }
+
     @Test("A pinned revision is not retried with another on -32022")
     func pinnedRevisionIsNotRetried() async throws {
         let transport = ScriptedTransport()

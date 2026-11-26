@@ -42,6 +42,7 @@ each change that breaks source code.
 | Handlers | Undecodable parameters fail with -32602, not -32603 | Update tests that check the code |
 | Client handlers | Run outside the receive loop; at most 4 server-to-client requests at once; a server `ping` is answered | Remove `Task` wrappers that worked around the old loop, if you like |
 | `Client` connection | Pending requests fail with `connectionClosed` when the transport ends its stream; `connect(transport:)` on a connected client disconnects the previous transport | Handle `connectionClosed` where requests waited forever |
+| `Client` handshake | `connect(transport:)` throws `unsupportedProtocolVersion` when the server answers `initialize` with a version that is not in `Version.handshake` | Update the server, or handle the error |
 | `.stateless(version)` | No retry with another version | Use `.automatic` for negotiation |
 | Sampling with tools | The client refuses tools without `sampling.tools`, and tool messages that break the rules, with -32602; `requestSampling` refuses them before it sends | Declare `sampling.tools` when the sampling handler takes tools |
 | `.none(clientID:)` | A plain client ID is pre-registered: no dynamic registration | Pass `""` to register |
@@ -581,6 +582,11 @@ for such a string, which encodes as a base64 `data:` URL.
   transport first; its pending requests fail with
   `internalError("Client disconnected")`. The previous release replaced the
   transport and left the old message loop running.
+- When the server answers `initialize` with a protocol version that is not in
+  `Version.handshake`, `connect(transport:)` disconnects and throws
+  `unsupportedProtocolVersion`. Its `supported` is `Version.handshake` and its
+  `requested` is the server's version. The client does not send
+  `notifications/initialized`. The previous release used the server's version.
 - Cancelling the task that awaits `RequestContext.value` cancels the request.
 - A request is registered before `send(_:)` returns. `cancelRequest(_:reason:)`
   right after `send` always ends the request; a request cancelled before it
