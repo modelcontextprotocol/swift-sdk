@@ -31,6 +31,7 @@ each change that breaks source code.
 | `HTTPClientAuthorizer` | `authorizationHeader(for:)` became `authorizationHeaders(for:method:)`; new requirement `handleChallenge(statusCode:headers:endpoint:operationKey:sentAuthorization:session:)`, returning `HTTPChallengeResult`, with a default that calls the Bool method | Update custom authorizers |
 | `Client` convenience methods | Return the result type, not a tuple; `startToolCall` replaces the `RequestContext` overload of `callTool`; `initialize()` is removed | Read the result's properties |
 | `Client.connect(transport:)` | Returns `Client.ConnectionInfo`, whose `serverInfo` is optional | Unwrap `serverInfo` |
+| Terminated stateful HTTP session | Requests without the terminated session ID receive 400 instead of 404; only requests for that session receive 404 | Route a new sessionless `initialize` to a new transport and `Server` |
 | `Version.latest` | Renamed `Version.latestHandshake`; the old name is deprecated | Rename |
 | `Tool.Content` | `annotations` and `_meta` default to `nil`; the deprecated short forms are removed | Use `.text(text:)`, `.image(data:mimeType:)`, `.audio(data:mimeType:)` |
 | `HTTPClientTransport` errors | HTTP statuses and OAuth failures are `transportError` with `HTTPStatusError` or `OAuthAuthorizationError`, not `internalError` with a message | Match the typed errors |

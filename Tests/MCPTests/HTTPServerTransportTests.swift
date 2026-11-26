@@ -756,8 +756,8 @@ struct StatefulHTTPServerTransportTests {
 
     // MARK: - Terminated State
 
-    @Test("All methods return 404 when terminated")
-    func testAllMethodsReturn404WhenTerminated() async throws {
+    @Test("A terminated session returns 404 only for its own ID")
+    func testTerminatedSessionStatus() async throws {
         let transport = makeStatefulTransport()
         let sessionID = try await initializeSession(transport: transport)
         await transport.disconnect()
@@ -772,6 +772,26 @@ struct StatefulHTTPServerTransportTests {
 
         let delete = await transport.handleRequest(makeDELETERequest(sessionID: sessionID))
         #expect(delete.statusCode == 404)
+
+        let withoutSession = await transport.handleRequest(
+            makeStatefulPOSTRequest(body: makeInitializeBody()))
+        #expect(withoutSession.statusCode == 400)
+        #expect(withoutSession.headers[HTTPHeaderName.sessionID] == nil)
+
+        let otherSession = await transport.handleRequest(
+            makeStatefulPOSTRequest(body: makeRequestBody(), sessionID: "other-session"))
+        #expect(otherSession.statusCode == 400)
+        #expect(otherSession.headers[HTTPHeaderName.sessionID] == nil)
+    }
+
+    @Test("A transport stopped before initialization returns 400")
+    func testTerminatedBeforeInitialization() async {
+        let transport = makeStatefulTransport()
+        await transport.disconnect()
+
+        let response = await transport.handleRequest(
+            makeStatefulPOSTRequest(body: makeInitializeBody()))
+        #expect(response.statusCode == 400)
     }
 
     // MARK: - Error Cases

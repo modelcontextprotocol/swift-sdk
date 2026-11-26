@@ -1,9 +1,9 @@
 import Foundation
 import Logging
 
-/// A stateful HTTP server transport that manages sessions and uses SSE for streaming responses.
+/// A stateful HTTP server transport for one session, using SSE for streaming responses.
 ///
-/// This transport implements the MCP Streamable HTTP specification with full session management:
+/// This transport implements the MCP Streamable HTTP specification for one session:
 /// - Assigns a session ID during initialization (via `Mcp-Session-Id` header)
 /// - POST requests receive SSE-streamed responses
 /// - GET requests establish a standalone SSE stream for server-initiated messages
@@ -14,15 +14,13 @@ import Logging
 /// ## Usage
 ///
 /// ```swift
-/// let transport = StatefulHTTPServerTransport()  // Uses UUID by default
-///
-/// // Start the MCP server with this transport
+/// // Your HTTP router creates one transport and Server per session.
+/// let transport = StatefulHTTPServerTransport()
 /// try await server.start(transport: transport)
-///
-/// // In your HTTP framework handler:
 /// let response = await transport.handleRequest(httpRequest)
-/// // Convert response to your framework's response type and return it
 /// ```
+/// The router routes later requests by `Mcp-Session-Id` and removes the session after DELETE.
+/// See `docs/protocol.md` and `Examples/http-server` for a complete router.
 ///
 /// ## Framework Integration
 ///
@@ -242,10 +240,14 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
     /// - Others: 405 Method Not Allowed
     public func handleRequest(_ request: HTTPRequest) async -> HTTPResponse {
         if terminated {
+            let isTerminatedSession = sessionID != nil
+                && request.header(HTTPHeaderName.sessionID) == sessionID
             return .error(
-                statusCode: 404,
-                .invalidRequest("Not Found: Session has been terminated"),
-                sessionID: sessionID
+                statusCode: isTerminatedSession ? 404 : 400,
+                .invalidRequest(isTerminatedSession
+                    ? "Not Found: Session has been terminated"
+                    : "Bad Request: No active session"),
+                sessionID: isTerminatedSession ? sessionID : nil
             )
         }
 
