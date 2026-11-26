@@ -181,23 +181,22 @@ struct InMemoryTransportTests {
         try await serverTransport.connect()
 
         // Start receiving
+        let received = Counter()
         let receiveTask = Task {
-            var messageCount = 0
             do {
                 for try await _ in await serverTransport.receive() {
-                    messageCount += 1
+                    await received.increment()
                 }
             } catch {
                 // Expected when disconnected
             }
-            return messageCount
+            return await received.value
         }
 
         // Send a message
         try await clientTransport.send("message".data(using: .utf8)!)
 
-        // Give some time for message to be received
-        try await Task.sleep(for: .milliseconds(100))
+        #expect(await eventually { await received.value >= 1 })
 
         // Disconnect
         await serverTransport.disconnect()

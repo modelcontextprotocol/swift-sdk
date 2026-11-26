@@ -120,11 +120,6 @@ private func textOf(_ block: Sampling.Message.Content.ContentBlock) -> String? {
     return nil
 }
 
-private actor Counter {
-    private(set) var value = 0
-    func increment() { value += 1 }
-}
-
 @available(*, deprecated, message: "Uses the deprecated sampling API (SEP-2577)")
 private func connect(
     _ server: Server, mode: Client.ProtocolMode, capabilities: Client.Capabilities,

@@ -281,9 +281,6 @@ struct RootsTests {
         try await server.start(transport: serverTransport)
         try await client.connect(transport: clientTransport)
 
-        // Wait for initialization to complete
-        try await Task.sleep(for: .milliseconds(100))
-
         // Server requests roots from client - should succeed
         let roots = try await server.listRoots()
 
@@ -315,9 +312,6 @@ struct RootsTests {
         // Start server and client
         try await server.start(transport: serverTransport)
         try await client.connect(transport: clientTransport)
-
-        // Wait for initialization to complete
-        try await Task.sleep(for: .milliseconds(100))
 
         // Server tries to request roots - should fail
         await #expect(throws: MCPError.self) {
@@ -357,9 +351,6 @@ struct RootsTests {
         try await server.start(transport: serverTransport)
         try await client.connect(transport: clientTransport)
 
-        // Wait for initialization to complete
-        try await Task.sleep(for: .milliseconds(100))
-
         // Server requests roots - should succeed in non-strict mode
         let roots = try await server.listRoots()
         #expect(roots == testRoots)
@@ -389,26 +380,20 @@ struct RootsTests {
         )
 
         // Register notification handler on server
-        nonisolated(unsafe) var didReceive = false
+        let didReceive = Flag()
         await server.onNotification(RootsListChangedNotification.self) { _ in
-            didReceive = true
+            await didReceive.set()
         }
 
         // Start server and client
         try await server.start(transport: serverTransport)
         try await client.connect(transport: clientTransport)
 
-        // Wait for initialization
-        try await Task.sleep(for: .milliseconds(100))
-
         // Client sends notification
         try await client.notifyRootsChanged()
 
-        // Wait for notification to be processed
-        try await Task.sleep(for: .milliseconds(100))
-
         // Verify notification was received
-        #expect(didReceive)
+        #expect(await eventually { await didReceive.isSet })
 
         // Cleanup
         await server.stop()
@@ -440,9 +425,6 @@ struct RootsTests {
         // Start server and client
         try await server.start(transport: serverTransport)
         try await client.connect(transport: clientTransport)
-
-        // Wait for initialization
-        try await Task.sleep(for: .milliseconds(100))
 
         // Server requests roots - should fail with method not found
         await #expect(throws: MCPError.self) {
@@ -483,8 +465,6 @@ struct RootsTests {
         // Start server and client
         try await server.start(transport: serverTransport)
         try await client.connect(transport: clientTransport)
-
-        try await Task.sleep(for: .milliseconds(100))
 
         // Make multiple requests
         let roots1 = try await server.listRoots()

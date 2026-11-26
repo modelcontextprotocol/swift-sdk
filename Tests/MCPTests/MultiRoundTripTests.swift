@@ -61,11 +61,6 @@ private func makeRoundTripServer(
     return server
 }
 
-private actor Counter {
-    private(set) var value = 0
-    func increment() { value += 1 }
-}
-
 private actor Recorder<Element: Sendable> {
     private(set) var values: [Element] = []
     func record(_ value: Element) { values.append(value) }
@@ -709,11 +704,10 @@ struct MultiRoundTripTests {
         defer { Task { await client.disconnect(); await server.stop() } }
 
         let context = try await client.send(CallTool.request(.init(name: "confirm")))
-        for _ in 0..<400 where await started.value == 0 { try await Task.sleep(for: .milliseconds(5)) }
+        try #require(await eventually { await started.value > 0 })
         try await client.cancelRequest(context.requestID)
         await #expect(throws: (any Error).self) { _ = try await context.value }
-        for _ in 0..<400 where await cancelled.value == 0 { try await Task.sleep(for: .milliseconds(5)) }
-        #expect(await cancelled.value == 1)
+        #expect(await eventually { await cancelled.value == 1 })
     }
 
     @Test("cancelRequest right after send ends the exchange before any round")
@@ -749,11 +743,10 @@ struct MultiRoundTripTests {
             }
         }
         let context = try await client.send(CallTool.request(.init(name: "confirm")))
-        for _ in 0..<400 where await started.value == 0 { try await Task.sleep(for: .milliseconds(5)) }
+        try #require(await eventually { await started.value > 0 })
         await client.disconnect()
         await #expect(throws: (any Error).self) { _ = try await context.value }
-        for _ in 0..<400 where await cancelled.value == 0 { try await Task.sleep(for: .milliseconds(5)) }
-        #expect(await cancelled.value == 1)
+        #expect(await eventually { await cancelled.value == 1 })
         await server.stop()
     }
 
@@ -835,11 +828,11 @@ struct MultiRoundTripTests {
         defer { Task { await client.disconnect(); await server.stop() } }
 
         let context = try await client.send(CallTool.request(.init(name: "confirm")))
-        for _ in 0..<400 where await started.value == 0 { try await Task.sleep(for: .milliseconds(5)) }
+        try #require(await eventually { await started.value > 0 })
         try await client.cancelRequest(context.requestID)
         try await Task.sleep(for: .milliseconds(50))
         open.yield()
-        for _ in 0..<400 where await cancellations.ids.isEmpty { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(await eventually { await !cancellations.ids.isEmpty })
         #expect(await cancellations.ids.count == 1)
         try await Task.sleep(for: .milliseconds(50))
         #expect(await calls.value == 1)
@@ -857,11 +850,10 @@ struct MultiRoundTripTests {
         try await peer.initialize(capabilities: #"{"elicitation":{}}"#)
 
         try await peer.send(#"{"jsonrpc":"2.0","id":"call","method":"tools/call","params":{"name":"late"}}"#)
-        for _ in 0..<1000 where await progress.started == 0 { try await Task.sleep(for: .milliseconds(5)) }
+        try #require(await eventually { await progress.started > 0 })
         try await peer.send(
             #"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"call"}}"#)
-        for _ in 0..<1000 where await progress.returned == 0 { try await Task.sleep(for: .milliseconds(5)) }
-        #expect(await progress.returned == 1)
+        #expect(await eventually { await progress.returned == 1 })
         try await Task.sleep(for: .milliseconds(100))
         try await peer.sync("after-return")
 
@@ -890,17 +882,17 @@ struct MultiRoundTripTests {
         for trial in 1...trials {
             try await peer.send(
                 #"{"jsonrpc":"2.0","id":"call-\#(trial)","method":"tools/call","params":{"name":"gated"}}"#)
-            for _ in 0..<1000 where await progress.started < trial { try await Task.sleep(for: .milliseconds(5)) }
+            try #require(await eventually { await progress.started >= trial })
             async let cancel: Void = peer.send(
                 #"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"call-\#(trial)"}}"#)
             await progress.release()
             try await cancel
-            for _ in 0..<1000 where await progress.returned < trial { try await Task.sleep(for: .milliseconds(5)) }
+            try #require(await eventually { await progress.returned >= trial })
         }
         try await Task.sleep(for: .milliseconds(100))
         try await peer.sync("after-trials")
 
-        func unanswered() async -> [Value] {
+        @Sendable func unanswered() async -> [Value] {
             let received = await peer.received
             let withdrawn = Set(
                 received.compactMap { message -> Value? in
@@ -914,7 +906,7 @@ struct MultiRoundTripTests {
                 return id
             }
         }
-        for _ in 0..<400 where await !unanswered().isEmpty { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(await eventually { await unanswered().isEmpty })
         #expect(await unanswered() == [], "input requests sent and never withdrawn")
         #expect(await progress.returned == trials)
         await peer.stop()

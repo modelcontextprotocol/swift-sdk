@@ -179,9 +179,7 @@ private actor ToolListing {
 
 /// Waits until the client has sent `count` messages and returns the last one.
 private func sent(_ transport: MockTransport, count: Int) async throws -> [String: Value] {
-    for _ in 0..<200 where await transport.sentData.count < count {
-        try await Task.sleep(for: .milliseconds(5))
-    }
+    try await transport.waitForSentMessages(count: count)
     let data = try #require(await transport.sentData.dropFirst(count - 1).first)
     return try #require(try JSONDecoder().decode(Value.self, from: data).objectValue)
 }

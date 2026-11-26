@@ -192,7 +192,8 @@ private func connected(
 }
 
 private func eventually(_ condition: @Sendable () async -> Bool) async -> Bool {
-    for _ in 0..<400 {
+    let deadline = ContinuousClock.now + .seconds(30)
+    while ContinuousClock.now < deadline {
         if await condition() { return true }
         try? await Task.sleep(for: .milliseconds(5))
     }

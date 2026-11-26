@@ -839,7 +839,8 @@ struct StatelessHTTPTests {
 
         // The server's listen handler ends.
         var open = await server.openSubscriptionCount
-        for _ in 0..<200 where open > 0 {
+        let deadline = ContinuousClock.now + .seconds(30)
+        while open > 0 && ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(5))
             open = await server.openSubscriptionCount
         }

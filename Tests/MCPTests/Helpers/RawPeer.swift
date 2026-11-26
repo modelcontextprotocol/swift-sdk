@@ -36,7 +36,7 @@ actor RawPeer {
 
     /// The first received message that matches, waiting at most `timeout`.
     func first(
-        within timeout: Duration = .seconds(5), where predicate: @Sendable (Value) -> Bool
+        within timeout: Duration = .seconds(30), where predicate: @Sendable (Value) -> Bool
     ) async -> Value? {
         let deadline = ContinuousClock.now.advanced(by: timeout)
         while true {

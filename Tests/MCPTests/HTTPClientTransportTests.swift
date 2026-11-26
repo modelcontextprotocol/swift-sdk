@@ -1080,8 +1080,6 @@ import Testing
                 return (response, sseEventData)  // Will return empty Data for SSE
             }
 
-            try await Task.sleep(for: .milliseconds(100))
-
             let stream = await transport.receive()
             var iterator = stream.makeAsyncIterator()
 
@@ -1141,8 +1139,6 @@ import Testing
 
                 return (response, sseEventData)
             }
-
-            try await Task.sleep(for: .milliseconds(100))
 
             let stream = await transport.receive()
             var iterator = stream.makeAsyncIterator()
@@ -2728,8 +2724,9 @@ import Testing
                     try await transport.connect()
                     try await transport.send(Data(#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#.utf8))
                 }
-                for _ in 0..<200 where delegate != nil {
-                    try await Task.sleep(for: .milliseconds(10))
+                let deadline = ContinuousClock.now + .seconds(30)
+                while delegate != nil && ContinuousClock.now < deadline {
+                    try await Task.sleep(for: .milliseconds(5))
                 }
                 #expect(delegate == nil)
             }

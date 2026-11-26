@@ -30,14 +30,6 @@ private actor Inbox {
     var methods: [String] { received.map(\.method) }
 }
 
-private func eventually(_ condition: @Sendable () async -> Bool) async -> Bool {
-    for _ in 0..<200 {
-        if await condition() { return true }
-        try? await Task.sleep(for: .milliseconds(5))
-    }
-    return await condition()
-}
-
 /// Holds callers of ``wait()`` until ``open()``.
 private actor Gate {
     private(set) var isWaiting = false

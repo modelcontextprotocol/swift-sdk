@@ -40,19 +40,6 @@ private actor RecordingTransport: Transport {
     var methods: [String?] { sent.map { $0.objectValue?["method"]?.stringValue } }
 }
 
-private actor Flag {
-    private(set) var isSet = false
-    func set() { isSet = true }
-}
-
-private func eventually(_ condition: @Sendable () async -> Bool) async -> Bool {
-    for _ in 0..<200 {
-        if await condition() { return true }
-        try? await Task.sleep(for: .milliseconds(10))
-    }
-    return false
-}
-
 @available(*, deprecated, message: "Uses the deprecated sampling and logging APIs (SEP-2577)")
 private func makeServer(configuration: Server.Configuration = .default) async -> Server {
     let server = Server(
@@ -531,12 +518,14 @@ struct ServerToClientLimitTests {
         let (client, serverEnd, incoming) = try await connected()
         var replies = incoming
         let (release, open) = AsyncStream<Void>.makeStream()
+        let running = Flag()
         await client.withRootsHandler {
+            await running.set()
             for await _ in release { break }
             return []
         }
         try await serverEnd.send(Data(#"{"jsonrpc":"2.0","id":"dup","method":"roots/list"}"#.utf8))
-        try await Task.sleep(for: .milliseconds(50))
+        #expect(await eventually { await running.isSet })
         try await serverEnd.send(Data(#"{"jsonrpc":"2.0","id":"dup","method":"roots/list"}"#.utf8))
         let refused = try JSONDecoder().decode(Value.self, from: try #require(await replies.next()))
         #expect(refused.objectValue?["error"]?.objectValue?["code"] == -32600)
@@ -546,12 +535,6 @@ struct ServerToClientLimitTests {
         await client.disconnect()
     }
 }
-
-private actor Counter {
-    private(set) var value = 0
-    func increment() { value += 1 }
-}
-
 
 @Suite("Batches", .timeLimit(.minutes(1)))
 struct BatchTests {

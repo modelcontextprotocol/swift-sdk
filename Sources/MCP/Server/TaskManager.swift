@@ -790,6 +790,13 @@ public actor TaskManager {
         for id in expired { try? await store.remove(id: id) }
     }
 
+    /// Ends the lifetime of the task with `id` now, as its TTL passing
+    /// would. Tests use it to expire a task at a chosen point.
+    func expireNow(_ id: String) async {
+        await expire([id])
+        try? await store.remove(id: id)
+    }
+
     /// Ends the work of tasks whose lifetime ended.
     private func expire(_ ids: [String]) async {
         for id in ids {
