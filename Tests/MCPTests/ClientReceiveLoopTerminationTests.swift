@@ -332,11 +332,15 @@ struct ClientReceiveLoopTerminationTests {
         let client = Client(name: "TestClient", version: "1.0", configuration: .handshake)
 
         // Answers initialize, then reads notifications/initialized and the ping.
-        let server = Task.detached {
-            let initialize = try Self.readLine(from: serverInput)
-            try serverOutput.writeAll(try Self.initializeResponse(to: initialize) + Data("\n".utf8))
-            _ = try Self.readLine(from: serverInput)
-            _ = try Self.readLine(from: serverInput)
+        // Its reads block, so it runs off the cooperative pool: on the pool it
+        // would hold a thread the client needs to send what it waits for.
+        let server = Task {
+            try await offThreadPool {
+                let initialize = try Self.readLine(from: serverInput)
+                try serverOutput.writeAll(try Self.initializeResponse(to: initialize) + Data("\n".utf8))
+                _ = try Self.readLine(from: serverInput)
+                _ = try Self.readLine(from: serverInput)
+            }
         }
 
         try await client.connect(transport: transport)

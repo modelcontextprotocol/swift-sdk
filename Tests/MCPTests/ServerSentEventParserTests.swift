@@ -3,17 +3,8 @@ import Testing
 
 @testable import MCP
 
-/// Runs `work` on a Dispatch thread instead of Swift's cooperative pool.
-///
-/// The tests that feed megabytes to the parser byte by byte take minutes on a
-/// slow simulator. On the pool they hold its few threads, and every other test
-/// running in parallel waits until they finish.
-private func offThreadPool<T: Sendable>(_ work: @escaping @Sendable () throws -> T) async throws -> T {
-    try await withCheckedThrowingContinuation { continuation in
-        DispatchQueue.global().async { continuation.resume(with: Result { try work() }) }
-    }
-}
-
+// The tests that feed megabytes to the parser byte by byte run their parsing
+// through offThreadPool, so they do not hold the cooperative pool's threads.
 @Suite("Server-sent event parser", .serialized)
 struct ServerSentEventParserTests {
     /// Parses `text` and returns the events, then checks that `finish()` returns none.
