@@ -508,6 +508,8 @@ The server's capabilities and extensions are in `serverCapabilities` after `conn
 
 Requests throw `MCPError` for protocol errors, `CancellationError` for cancelled requests, and other errors from the transport or from decoding. `MCPError.code` and `MCPError.data` are the JSON-RPC `code` and `data` members.
 
+If a server result does not decode as the method's `Result`, catch `ResponseDecodingError`. Its `expectedType`, `rawResult` and `underlyingError` show what failed. To accept the server's result without a typed result shape, define a `Method` whose `Result` is `Value` and send that request instead.
+
 %include Examples/Snippets/Client/Notifications.swift errors
 
 | Case | Code | Typical cause for a client |

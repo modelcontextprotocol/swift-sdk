@@ -683,6 +683,47 @@ struct ClientTests {
 
 @Suite("Client undecodable responses", .timeLimit(.minutes(1)))
 struct ClientUndecodableResponseTests {
+    private struct ServerResult: MCP.Method {
+        static let name = "test/malformed-result"
+        typealias Result = Value
+    }
+
+    private struct ExpectedResult: MCP.Method {
+        static let name = ServerResult.name
+
+        struct Result: Codable, Hashable, Sendable {
+            let count: Int
+        }
+    }
+
+    @Test("A malformed result keeps its raw value and decoding error")
+    func malformedResult() async throws {
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+        let server = Server(name: "s", version: "1", capabilities: .init())
+        await server.withMethodHandler(ServerResult.self) { _ in ["count": "not a number"] }
+        try await server.start(transport: serverTransport)
+
+        let client = Client(name: "c", version: "1")
+        try await client.connect(transport: clientTransport)
+        defer { Task { await client.disconnect(); await server.stop() } }
+
+        let context = try await client.send(ExpectedResult.request())
+        do {
+            _ = try await context.value
+            Issue.record("Expected a response decoding error")
+        } catch let error as ResponseDecodingError {
+            #expect(error.expectedType == String(reflecting: ExpectedResult.Result.self))
+            #expect(error.rawResult.objectValue?["count"] == "not a number")
+            #expect(error.rawResult.objectValue?["_meta"] != nil)
+            guard case .typeMismatch(let type, let context) = error.underlyingError as? DecodingError else {
+                Issue.record("Expected an Int decoding error")
+                return
+            }
+            #expect(String(reflecting: type) == String(reflecting: Int.self))
+            #expect(context.codingPath.map(\.stringValue) == ["count"])
+        }
+    }
+
     /// A handshake client connected to `transport`, which answers initialize.
     private func connect(_ transport: MockTransport) async throws -> Client {
         let client = Client(name: "c", version: "1", configuration: .handshake)

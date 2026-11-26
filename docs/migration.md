@@ -30,6 +30,7 @@ each change that breaks source code.
 | Content blocks, `InputRequest`, `InputResponse`, `CreateElicitation.Parameters` | New case `.unknown` for kinds from a later revision | Add it, or a `default`, to `switch` statements |
 | `HTTPClientAuthorizer` | `authorizationHeader(for:)` became `authorizationHeaders(for:method:)`; new requirement `handleChallenge(statusCode:headers:endpoint:operationKey:sentAuthorization:session:)`, returning `HTTPChallengeResult`, with a default that calls the Bool method | Update custom authorizers |
 | `Client` convenience methods | Return the result type, not a tuple; `startToolCall` replaces the `RequestContext` overload of `callTool`; `initialize()` is removed | Read the result's properties |
+| Client result decoding | An undecodable result throws `ResponseDecodingError` with the expected type, raw result and decoding error | Catch this error to inspect a malformed result; use a `Method` with `Result == Value` for raw access |
 | `Client.connect(transport:)` | Returns `Client.ConnectionInfo`, whose `serverInfo` is optional | Unwrap `serverInfo` |
 | `Version.latest` | Renamed `Version.latestHandshake`; the old name is deprecated | Rename |
 | `Tool.Content` | `annotations` and `_meta` default to `nil`; the deprecated short forms are removed | Use `.text(text:)`, `.image(data:mimeType:)`, `.audio(data:mimeType:)` |

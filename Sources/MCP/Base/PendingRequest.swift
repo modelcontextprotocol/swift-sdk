@@ -1,6 +1,16 @@
 import Foundation
 
-/// Error thrown when a type mismatch occurs during response handling
+/// A server response could not be decoded as the result type of a request.
+public struct ResponseDecodingError: Swift.Error, Sendable {
+    /// The result type the request expected.
+    public let expectedType: String
+    /// The result received from the server.
+    public let rawResult: Value
+    /// The error raised while decoding the result.
+    public let underlyingError: any Swift.Error
+}
+
+/// A non-wire response had the wrong type.
 struct TypeMismatchError: Swift.Error {}
 
 /// A pending request with a continuation for the result
@@ -80,11 +90,15 @@ struct AnyPendingRequest: Sendable {
             case .success(let value):
                 // A result decoded from the wire keeps `data:` URL strings;
                 // the typed decode turns those in `Value` fields into `.data`.
-                if let value = value as? Value,
-                    let data = try? JSONEncoder().encode(value),
-                    let decoded = try? JSONDecoder().decode(T.self, from: data)
-                {
-                    return deliver(.success(decoded))
+                if let value = value as? Value {
+                    do {
+                        let data = try JSONEncoder().encode(value)
+                        return deliver(.success(try JSONDecoder().decode(T.self, from: data)))
+                    } catch {
+                        return deliver(.failure(ResponseDecodingError(
+                            expectedType: String(reflecting: T.self), rawResult: value,
+                            underlyingError: error)))
+                    }
                 } else if let typedValue = value as? T {
                     return deliver(.success(typedValue))
                 } else {
