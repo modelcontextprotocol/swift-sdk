@@ -408,6 +408,18 @@ package enum JSONRPCMessageKind: Decodable {
         self = decoded
     }
 
+    /// The error for data that could not be classified as a JSON-RPC message.
+    static func classificationError(for data: Data) -> MCPError {
+        // JSON-RPC 2.0 §5.1 reserves -32700 for invalid JSON. Scalars and arrays
+        // are valid JSON, but are not single messages on the HTTP transport.
+        do {
+            _ = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
+            return .invalidRequest("Invalid JSON-RPC message")
+        } catch {
+            return .parseError("Invalid JSON-RPC message")
+        }
+    }
+
     /// Classifies a JSON-RPC object.
     ///
     /// A message with a string `method` is a request when it has an `id`
@@ -433,6 +445,11 @@ package enum JSONRPCMessageKind: Decodable {
                 self = .invalid(method: method, id: nil, reason: reason)
             }
         } else if container.contains(.result) || container.contains(.error), let id {
+            // JSON-RPC 2.0 §5 requires the version on responses too.
+            guard (try? container.decode(String.self, forKey: .jsonrpc)) == "2.0" else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .jsonrpc, in: container, debugDescription: InvalidRequestReason.jsonrpc)
+            }
             self = .response(id: id.description)
         } else {
             throw DecodingError.dataCorrupted(

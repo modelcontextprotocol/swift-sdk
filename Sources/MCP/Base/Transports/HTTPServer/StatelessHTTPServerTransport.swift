@@ -295,7 +295,7 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
             let normalized = try? JSONSerialization.data(withJSONObject: json, options: [.withoutEscapingSlashes]),
             let messageKind = JSONRPCMessageKind(data: normalized)
         else {
-            return .error(statusCode: 400, .parseError("Invalid JSON-RPC message"))
+            return .error(statusCode: 400, JSONRPCMessageKind.classificationError(for: body))
         }
 
         // One probe for the id and the `_meta` version.

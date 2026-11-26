@@ -505,7 +505,6 @@ public actor Server {
                 for try await data in stream {
                     if Task.isCancelled { break }  // Check cancellation inside loop
 
-                    var requestID: ID?
                     do {
                         // Attempt to decode as batch first, then as individual response, request, or notification
                         if let batch = try? decoder.decode(Server.Batch.self, from: data) {
@@ -557,6 +556,7 @@ public actor Server {
                             try await handleMessage(message)
                         } else {
                             // Try to extract request ID from raw JSON if possible
+                            var requestID: ID?
                             if let json = try? decoder.decode(
                                 [String: Value].self, from: data),
                                 let idValue = json["id"]
@@ -567,7 +567,12 @@ public actor Server {
                                     requestID = .number(intValue)
                                 }
                             }
-                            throw MCPError.parseError("Invalid message format")
+                            let error = JSONRPCMessageKind.classificationError(for: data)
+                            if let requestID {
+                                try? await send(AnyMethod.response(id: requestID, error: error))
+                            } else {
+                                await sendUnattributedError(error)
+                            }
                         }
                     } catch let error where MCPError.isResourceTemporarilyUnavailable(error) {
                         // Resource temporarily unavailable, retry after a short delay
@@ -578,9 +583,7 @@ public actor Server {
                             "Error processing message", metadata: ["error": "\(error)"])
                         let mcpError =
                             error as? MCPError ?? MCPError.internalError(error.localizedDescription)
-                        if let requestID {
-                            try? await send(AnyMethod.response(id: requestID, error: mcpError))
-                        } else if case .parseError = mcpError {
+                        if case .parseError = mcpError {
                             // A message that could not be read: `"id": null`.
                             await sendUnattributedError(mcpError)
                         }
@@ -2976,7 +2979,7 @@ extension Server.Batch: Decodable {
 
 extension Server.Batch.Item: Decodable {
     private enum CodingKeys: String, CodingKey {
-        case id
+        case id, result, error
     }
 
     /// Classifies an item as ``JSONRPCMessageKind`` does for a single
@@ -3016,9 +3019,10 @@ extension Server.Batch.Item: Decodable {
                 self = .invalid(id: nil, reason: format)
             }
         case nil:
-            // No string `method`, and no `result` or `error` with a valid
-            // `id`, such as `{"jsonrpc": "2.0", "id": 7}`.
-            self = .invalid(id: id, reason: format)
+            // An unreadable response still names this server's request,
+            // even when its version prevents classification as a response.
+            let isResponse = container.contains(.result) || container.contains(.error)
+            self = .invalid(id: isResponse ? nil : id, reason: format)
         }
     }
 }
