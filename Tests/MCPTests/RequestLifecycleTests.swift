@@ -608,6 +608,23 @@ struct BatchTests {
     }
 }
 
+private let invalidStreamMessages: [(String, Int, Value)] = [
+    (#"{"jsonrpc":"2.0","bogus":true}"#, -32600, .null),
+    (#"{"not_a_valid_request":true}"#, -32600, .null),
+    (#"{"jsonrpc":"2.0","id":7}"#, -32600, 7),
+    (#"{"id":5,"result":{}}"#, -32600, 5),
+    (#"{"jsonrpc":"1.0","id":5,"error":{"code":-32603,"message":"failed"}}"#, -32600, 5),
+    ("{}", -32600, .null),
+    ("null", -32600, .null),
+    ("true", -32600, .null),
+    ("42", -32600, .null),
+    (#""text""#, -32600, .null),
+    ("not valid json{", -32700, .null),
+    (#"{"jsonrpc":"2.0","id":7"#, -32700, .null),
+    ("[1,", -32700, .null),
+    ("true false", -32700, .null),
+]
+
 @Suite("Server replies", .timeLimit(.minutes(1)))
 struct ServerReplyTests {
     /// Sends raw lines to a started server; returns what it sent back
@@ -673,13 +690,27 @@ struct ServerReplyTests {
         await server.stop()
     }
 
-    @Test("A message that cannot be read is answered with a null id")
-    func unreadableMessage() async throws {
+    @Test("Invalid stream messages distinguish syntax from message errors", arguments: invalidStreamMessages.indices)
+    func unreadableMessage(_ index: Int) async throws {
+        let (body, expectedCode, expectedID) = invalidStreamMessages[index]
         let server = await makeServer()
-        let replies = try await exchange(server, [#"{"jsonrpc":"2.0","bogus":true}"#])
+        let (clientEnd, serverEnd) = await InMemoryTransport.createConnectedPair()
+        let peer = RawPeer(clientEnd)
+        try await server.start(transport: serverEnd)
+        try await peer.start()
+        try await peer.send(body)
+        // Valid notifications and responses must still get no reply.
+        try await peer.send(#"{"jsonrpc":"2.0","method":"notifications/vendor"}"#)
+        try await peer.send(#"{"jsonrpc":"2.0","id":"response","result":{}}"#)
+        try await peer.sync("sentinel")
+        let replies = await peer.received.filter { $0.objectValue?["id"] != "sentinel" }
+        await peer.stop()
+        await server.stop()
+
         #expect(replies.count == 1)
-        #expect(replies.first?.objectValue?["id"] == .null)
-        #expect(replies.first?.objectValue?["error"]?.objectValue?["code"] == -32700)
+        expectWire(
+            try #require(replies.first),
+            matches: ["jsonrpc": "2.0", "id": expectedID, "error": ["code": .int(expectedCode)]])
     }
 
     @Test("An empty batch is answered with a null id")

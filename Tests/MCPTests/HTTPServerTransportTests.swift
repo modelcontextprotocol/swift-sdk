@@ -137,6 +137,12 @@ private let invalidMessageBodies: [(String, Int)] = [
     (#"{"jsonrpc":"2.0","id":7}"#, -32600),
     (#"{"jsonrpc":"2.0","id":"request"}"#, -32600),
     (#"{"jsonrpc":"2.0","method":42}"#, -32600),
+    (#"{"id":1,"result":{}}"#, -32600),
+    (#"{"jsonrpc":"1.0","id":1,"result":{}}"#, -32600),
+    (#"{"jsonrpc":null,"id":1,"result":{}}"#, -32600),
+    (#"{"jsonrpc":2.0,"id":1,"result":{}}"#, -32600),
+    (#"{"id":"r","error":{"code":-32603,"message":"failed"}}"#, -32600),
+    (#"{"jsonrpc":"1.0","id":"r","error":{"code":-32603,"message":"failed"}}"#, -32600),
     ("{}", -32600),
     ("[]", -32600),
     ("[1,2,3]", -32600),
@@ -152,6 +158,11 @@ private let invalidMessageBodies: [(String, Int)] = [
     ("[1,", -32700),
     ("true false", -32700),
     (" \n\t", -32700),
+]
+
+private let validResponseBodies = [
+    #"{"jsonrpc":"2.0","id":1,"result":{}}"#,
+    #"{"jsonrpc":"2.0","id":"r","error":{"code":-32603,"message":"failed"}}"#,
 ]
 
 /// Drains an SSE stream, collecting raw SSE chunks.
@@ -855,6 +866,19 @@ struct StatefulHTTPServerTransportTests {
         expectWire(json, matches: ["jsonrpc": "2.0", "id": .null, "error": ["code": .int(expectedCode)]])
     }
 
+    @Test("Valid JSON-RPC responses are still accepted", arguments: validResponseBodies)
+    func testValidResponseAccepted(_ body: String) async throws {
+        let transport = makeStatefulTransport()
+        let sessionID = try await initializeSession(transport: transport)
+        let response = await transport.handleRequest(
+            makeStatefulPOSTRequest(body: Data(body.utf8), sessionID: sessionID))
+        await transport.disconnect()
+
+        #expect(response.statusCode == 202)
+        #expect(response.bodyData == nil)
+        #expect(response.headers[HTTPHeaderName.sessionID] == sessionID)
+    }
+
     // MARK: - OAuth Bearer Validation
 
     @Test("Bearer auth validator returns 401 with challenge when authorization is missing")
@@ -1464,6 +1488,18 @@ struct StatelessHTTPServerTransportTests {
         let data = try #require(response.bodyData)
         let json = try JSONDecoder().decode(Value.self, from: data)
         expectWire(json, matches: ["jsonrpc": "2.0", "id": .null, "error": ["code": .int(expectedCode)]])
+    }
+
+    @Test("Valid JSON-RPC responses are still accepted", arguments: validResponseBodies)
+    func testValidResponseAccepted(_ body: String) async throws {
+        let transport = makeStatelessTransport()
+        try await transport.connect()
+        let response = await transport.handleRequest(
+            makeStatelessPOSTRequest(body: Data(body.utf8)))
+        await transport.disconnect()
+
+        #expect(response.statusCode == 202)
+        #expect(response.bodyData == nil)
     }
 
     // MARK: - Terminated State

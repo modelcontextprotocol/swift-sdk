@@ -445,6 +445,11 @@ package enum JSONRPCMessageKind: Decodable {
                 self = .invalid(method: method, id: nil, reason: reason)
             }
         } else if container.contains(.result) || container.contains(.error), let id {
+            // JSON-RPC 2.0 §5 requires the version on responses too.
+            guard (try? container.decode(String.self, forKey: .jsonrpc)) == "2.0" else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .jsonrpc, in: container, debugDescription: InvalidRequestReason.jsonrpc)
+            }
             self = .response(id: id.description)
         } else {
             throw DecodingError.dataCorrupted(

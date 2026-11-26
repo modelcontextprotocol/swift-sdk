@@ -151,6 +151,24 @@ struct StreamRequestIDTests {
         #expect(try await replies(to: batch, expected: 0).isEmpty)
     }
 
+    @Test(
+        "An invalid response version in a batch is not attributed to the peer's request",
+        arguments: [
+            #"{"id":5,"result":{}}"#,
+            #"{"jsonrpc":"1.0","id":"r","error":{"code":-32603,"message":"failed"}}"#,
+        ])
+    func batchInvalidResponseVersion(_ response: String) async throws {
+        let batch = "[\(response)," + #"{"jsonrpc":"2.0","id":2,"method":"tools/list"}]"#
+        let replies = try await replies(to: batch)
+        let items = try #require(replies.first?.arrayValue)
+        #expect(items.count == 2)
+        expectWire(
+            try #require(items.first),
+            matches: ["jsonrpc": "2.0", "id": .null, "error": ["code": -32600]])
+        #expect(items.last?.objectValue?["id"] == 2)
+        #expect(items.last?.objectValue?["result"] != nil)
+    }
+
     @Test("A response in a batch answers the server's pending request")
     @available(*, deprecated, message: "listRoots is deprecated by SEP-2577")
     func batchedResponseResumesRequest() async throws {
