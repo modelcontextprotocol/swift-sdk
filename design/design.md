@@ -122,7 +122,7 @@ Message dispatch:
 
 | Side | Requests | Notifications | Responses |
 |---|---|---|---|
-| `Server` | one unstructured `Task` per request; stored in `pendingRequestTasks` for cancellation | handled in the receive loop, in order | resume the pending continuation |
+| `Server` | one unstructured `Task` per request; stored in `pendingRequestTasks` for cancellation; a duplicate in-flight id gets -32600; a cancelled request gets no response | handled in the receive loop, in order | resume the pending continuation |
 | `Client` | one unstructured `Task` per request, at most `maxConcurrentServerRequests` at once (64 more wait, then -32603); a duplicate id gets -32600; at 2026-07-28 -32601; cancelled by `notifications/cancelled` | one at a time, in order, on an inbound queue outside the receive loop | at once, except after the queued progress notifications of the same request; never waiting for requests sent from a notification handler |
 
 Client requests are registered (`ResponseSlot`) before `send(_:)` returns and handed to the

@@ -511,9 +511,7 @@ public actor Server {
                         if let batch = try? decoder.decode(Server.Batch.self, from: data) {
                             // Recorded before the task, as for a single request,
                             // so that a cancellation arriving first is kept.
-                            for case .request(let request) in batch.items {
-                                startingRequests[request.id] = false
-                            }
+                            let admitted = admittingRequests(of: batch)
                             // Answers to this server's requests (JSON-RPC 2.0
                             // §6) resume their callers now, not after the
                             // batch's requests are handled.
@@ -524,7 +522,7 @@ public actor Server {
                             // for the client's answer to a bridged input request.
                             Task {
                                 do {
-                                    try await self.handleBatch(batch, generation: generation)
+                                    try await self.handleBatch(admitted, generation: generation)
                                 } catch {
                                     await self.logger?.error(
                                         "Error processing batch", metadata: ["error": "\(error)"])
@@ -533,8 +531,13 @@ public actor Server {
                         } else if let response = try? decoder.decode(AnyResponse.self, from: data) {
                             await handleResponse(response)
                         } else if let request = try? decoder.decode(AnyRequest.self, from: data) {
+                            guard admit(request.id) else {
+                                try? await send(
+                                    AnyMethod.response(
+                                        id: request.id, error: .invalidRequest(Self.inProgress(request.id))))
+                                continue
+                            }
                             // Handle request in a separate task to avoid blocking the receive loop
-                            startingRequests[request.id] = false
                             let isListen = request.method == SubscriptionsListen.name
                             let handling = Task {
                                 _ = try? await self.handleRequest(
@@ -2468,9 +2471,11 @@ public actor Server {
         }
 
         // Ensure cleanup happens regardless of success or failure. After
-        // `stop()` the entry is gone, or belongs to the next connection.
+        // `stop()` the entry is gone, or belongs to the next connection; after
+        // `notifications/cancelled` it may belong to a request that reused
+        // the id.
         defer {
-            if generation == connectionGeneration {
+            if generation == connectionGeneration, pendingRequestTasks[request.id] == handlerTask {
                 pendingRequestTasks.removeValue(forKey: request.id)
             }
         }
@@ -2488,6 +2493,10 @@ public actor Server {
             }
             // `stop()` ended the connection while the handler ran.
             guard generation == connectionGeneration else { return nil }
+            // The handler returned although it was cancelled: the receiver of
+            // `notifications/cancelled` SHOULD NOT send a response for the
+            // cancelled request (2025-11-25 basic/utilities/cancellation).
+            if handlerTask.isCancelled { return nil }
 
             if sendResponse {
                 try await send(response)
@@ -2883,6 +2892,40 @@ public actor Server {
         self.clientCapabilities = clientCapabilities
         self.protocolVersion = protocolVersion
         self.isInitialized = true
+    }
+
+    /// Records a request received on the connection in `startingRequests`,
+    /// before its task starts, so that a cancellation arriving first is kept.
+    /// Returns `false`, recording nothing, for a request whose id is in
+    /// flight: it is answered with -32600, and the entries of the request
+    /// that has the id, which its cancellation and cleanup use, are kept.
+    ///
+    /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/basic#requests
+    private func admit(_ id: ID) -> Bool {
+        // The request ID MUST NOT have been previously used by the requestor
+        // within the same session (2025-11-25), nor match the ID of a request
+        // not answered yet (2026-07-28).
+        guard startingRequests[id] == nil, pendingRequestTasks[id] == nil, listenRequests[id] == nil else {
+            return false
+        }
+        startingRequests[id] = false
+        return true
+    }
+
+    /// `batch` with its requests admitted in order (``admit(_:)``): a request
+    /// whose id is in flight, or taken by an earlier request of the batch,
+    /// becomes an invalid item, answered with -32600 in the batch's reply.
+    private func admittingRequests(of batch: Batch) -> Batch {
+        Batch(
+            items: batch.items.map { item in
+                guard case .request(let request) = item, !admit(request.id) else { return item }
+                return .invalid(id: request.id, reason: Self.inProgress(request.id))
+            })
+    }
+
+    /// The reason of the -32600 for a request whose id is in flight.
+    private static func inProgress(_ id: ID) -> String {
+        "A request with id \(id) is already in progress"
     }
 
     /// Cancels the handler of the request `id` and stops tracking it. A

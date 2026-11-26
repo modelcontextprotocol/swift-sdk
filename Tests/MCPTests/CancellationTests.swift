@@ -339,6 +339,240 @@ struct CancellationTests {
         await peer.stop()
         await server.stop()
     }
+
+    /// A raw peer, initialized at 2025-11-25, of `server` started on an
+    /// in-memory pair.
+    private func connect(_ server: Server) async throws -> RawPeer {
+        let (clientEnd, serverEnd) = await InMemoryTransport.createConnectedPair()
+        try await server.start(transport: serverEnd)
+        let peer = RawPeer(clientEnd)
+        try await peer.start()
+        try await peer.initialize()
+        return peer
+    }
+
+    /// A `tools/call` request for the tool `name`, at 2026-07-28 when `stateless`.
+    private func call(_ id: String, _ name: String, stateless: Bool = false) -> String {
+        let meta =
+            stateless
+            ? #","_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}"#
+            : ""
+        return #"{"jsonrpc":"2.0","id":"\#(id)","method":"tools/call","params":{"name":"\#(name)"\#(meta)}}"#
+    }
+
+    @Test(
+        "A request whose id is in flight is refused with -32600, and the first is answered",
+        .timeLimit(.minutes(1)), arguments: [false, true])
+    func testDuplicateInFlightIDIsRefused(stateless: Bool) async throws {
+        let server = Server(name: "TestServer", version: "1.0", capabilities: .init(tools: .init()))
+        let gate = BatchGate()
+        await server.withMethodHandler(CallTool.self) { params in
+            await gate.ran(params.name)
+            _ = await eventually { await gate.isOpen }
+            return CallTool.Result(content: [.text(text: params.name, annotations: nil, _meta: nil)])
+        }
+        let peer = try await connect(server)
+
+        try await peer.send(call("x", "first", stateless: stateless))
+        #expect(await eventually { await gate.names == ["first"] })
+        try await peer.send(call("x", "second", stateless: stateless))
+        // The refusal is sent before the receive loop reads the ping.
+        try await peer.sync("after-duplicate")
+        let refusals = await peer.received.filter { $0.objectValue?["id"] == "x" }
+        #expect(refusals.count == 1)
+        let error = refusals.first?.objectValue?["error"]?.objectValue
+        #expect(error?["code"] == -32600)
+        #expect(error?["message"]?.stringValue?.contains("A request with id x is already in progress") == true)
+        #expect(await gate.names == ["first"])
+
+        await gate.open()
+        let answered = await peer.first { $0.objectValue?["id"] == "x" && $0.objectValue?["result"] != nil }
+        let content = answered?.objectValue?["result"]?.objectValue?["content"]?.arrayValue
+        #expect(content?.first?.objectValue?["text"] == "first")
+        try await peer.sync("after-answer")
+        #expect(await peer.received.filter { $0.objectValue?["id"] == "x" }.count == 2)
+        await peer.stop()
+        await server.stop()
+    }
+
+    @Test(
+        "Cancelling a request after a duplicate of its id was refused cancels its handler",
+        .timeLimit(.minutes(1)))
+    func testCancellationAfterRefusedDuplicate() async throws {
+        let server = Server(name: "TestServer", version: "1.0", capabilities: .init(tools: .init()))
+        let started = BatchGate()
+        let cancelled = BatchGate()
+        await server.withMethodHandler(CallTool.self) { params in
+            await started.ran(params.name)
+            do {
+                try await Task.sleep(for: .seconds(30))
+            } catch {
+                await cancelled.ran(params.name)
+                throw error
+            }
+            return CallTool.Result(content: [.text(text: params.name, annotations: nil, _meta: nil)])
+        }
+        let peer = try await connect(server)
+
+        try await peer.send(call("x", "first"))
+        #expect(await eventually { await started.names == ["first"] })
+        try await peer.send(call("x", "second"))
+        try await peer.sync("after-duplicate")
+        try await peer.send(
+            #"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"x"}}"#)
+        #expect(await eventually { await cancelled.names == ["first"] })
+        try await peer.sync("after-cancel")
+        // Only the refusal: the cancelled request is not answered.
+        let replies = await peer.received.filter { $0.objectValue?["id"] == "x" }
+        #expect(replies.count == 1)
+        #expect(replies.first?.objectValue?["error"]?.objectValue?["code"] == -32600)
+        #expect(await started.names == ["first"])
+        await peer.stop()
+        await server.stop()
+    }
+
+    @Test(
+        "A batched request whose id is in flight or repeated in the batch is refused with -32600",
+        .timeLimit(.minutes(1)))
+    func testDuplicateIDsInBatchAreRefused() async throws {
+        let server = Server(name: "TestServer", version: "1.0", capabilities: .init(tools: .init()))
+        let gate = BatchGate()
+        await server.withMethodHandler(CallTool.self) { params in
+            await gate.ran(params.name)
+            if params.name == "first" {
+                _ = await eventually { await gate.isOpen }
+            }
+            return CallTool.Result(content: [.text(text: params.name, annotations: nil, _meta: nil)])
+        }
+        let peer = try await connect(server)
+
+        try await peer.send(call("x", "first"))
+        #expect(await eventually { await gate.names == ["first"] })
+        try await peer.send("[\(call("x", "in-flight")),\(call("y", "other")),\(call("y", "repeated"))]")
+        let batch = try #require(await peer.first { $0.arrayValue != nil }?.arrayValue)
+        let replies = batch.map { reply in
+            let object = reply.objectValue
+            return "\(object?["id"]?.stringValue ?? "-") \(object?["error"]?.objectValue?["code"]?.intValue ?? 0)"
+        }
+        #expect(replies == ["x -32600", "y 0", "y -32600"])
+        #expect(await gate.names == ["first", "other"])
+
+        await gate.open()
+        let answered = await peer.first { $0.objectValue?["id"] == "x" && $0.objectValue?["result"] != nil }
+        #expect(answered != nil)
+        await peer.stop()
+        await server.stop()
+    }
+
+    @Test(
+        "A handler that returns after its request was cancelled sends no response",
+        .timeLimit(.minutes(1)))
+    func testSwallowedCancellationSendsNoResponse() async throws {
+        let server = Server(name: "TestServer", version: "1.0", capabilities: .init(tools: .init()))
+        let started = Flag()
+        let swallowed = Flag()
+        await server.withMethodHandler(CallTool.self) { params in
+            await started.set()
+            do {
+                try await Task.sleep(for: .seconds(30))
+            } catch {
+                // Returns a result although it was cancelled.
+                await swallowed.set()
+            }
+            return CallTool.Result(content: [.text(text: params.name, annotations: nil, _meta: nil)])
+        }
+        let peer = try await connect(server)
+
+        try await peer.send(call("x", "swallow"))
+        #expect(await eventually { await started.isSet })
+        try await peer.send(
+            #"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"x"}}"#)
+        #expect(await eventually { await swallowed.isSet })
+        // The handler's result would be sent before the answer to this ping.
+        try await peer.sync("after-cancel")
+        #expect(await peer.received.contains { $0.objectValue?["id"] == "x" } == false)
+        await peer.stop()
+        await server.stop()
+    }
+
+    @Test(
+        "A batched handler that returns after its request was cancelled adds no reply",
+        .timeLimit(.minutes(1)))
+    func testSwallowedCancellationInBatchAddsNoReply() async throws {
+        let server = Server(name: "TestServer", version: "1.0", capabilities: .init(tools: .init()))
+        let gate = BatchGate()
+        await server.withMethodHandler(CallTool.self) { params in
+            await gate.ran(params.name)
+            if params.name == "swallow" {
+                do {
+                    try await Task.sleep(for: .seconds(30))
+                } catch {
+                    // Returns a result although it was cancelled.
+                }
+            }
+            return CallTool.Result(content: [.text(text: params.name, annotations: nil, _meta: nil)])
+        }
+        let peer = try await connect(server)
+
+        try await peer.send("[\(call("a", "swallow")),\(call("b", "other"))]")
+        #expect(await eventually { await gate.names == ["swallow"] })
+        try await peer.send(
+            #"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"a"}}"#)
+
+        let batch = await peer.first { $0.arrayValue != nil }
+        let ids = batch?.arrayValue?.compactMap { $0.objectValue?["id"]?.stringValue }
+        #expect(ids == ["b"])
+        await peer.stop()
+        await server.stop()
+    }
+
+    @Test(
+        "A request that reuses the id of a cancelled request still running can be cancelled",
+        .timeLimit(.minutes(1)))
+    func testReusedIDOfCancelledRequestCanBeCancelled() async throws {
+        let server = Server(name: "TestServer", version: "1.0", capabilities: .init(tools: .init()))
+        let gate = BatchGate()
+        let cancelled = BatchGate()
+        let firstReturned = Flag()
+        await server.withMethodHandler(CallTool.self) { params in
+            await gate.ran(params.name)
+            do {
+                try await Task.sleep(for: .seconds(30))
+            } catch {
+                await cancelled.ran(params.name)
+                if params.name == "first" {
+                    // Keeps running after its cancellation until the gate opens.
+                    _ = await eventually { await gate.isOpen }
+                    await firstReturned.set()
+                    return CallTool.Result(content: [])
+                }
+                throw error
+            }
+            return CallTool.Result(content: [])
+        }
+        let peer = try await connect(server)
+
+        try await peer.send(call("x", "first"))
+        #expect(await eventually { await gate.names == ["first"] })
+        try await peer.send(
+            #"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"x"}}"#)
+        #expect(await eventually { await cancelled.names == ["first"] })
+
+        // The client may use the id again: the request is no longer in flight.
+        try await peer.send(call("x", "second"))
+        #expect(await eventually { await gate.names == ["first", "second"] })
+        // The first request ends; its cleanup leaves the second's entry.
+        await gate.open()
+        #expect(await eventually { await firstReturned.isSet })
+        try await peer.sync("after-first")
+        try await peer.send(
+            #"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"x"}}"#)
+        #expect(await eventually { await cancelled.names == ["first", "second"] })
+        try await peer.sync("after-second")
+        #expect(await peer.received.contains { $0.objectValue?["id"] == "x" } == false)
+        await peer.stop()
+        await server.stop()
+    }
 }
 
 private actor BatchGate {
