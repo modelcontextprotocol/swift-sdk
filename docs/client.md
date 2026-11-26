@@ -239,6 +239,8 @@ if let structured = result.structuredContent {
 }
 ```
 
+A string in `structuredContent`, or in another `Value` field of a result, that is a whole `data:` URL arrives as `.data(mimeType:_:)`, as for [tool arguments](server.md#calling-tools). Read it with `dataValue`. When you encode the `Value` again, as above, it becomes a base64 `data:` URL: `data:,hi` becomes `data:text/plain;base64,aGk=`.
+
 ### Header parameters
 
 At 2026-07-28 over Streamable HTTP, a tool can ask for some arguments to be mirrored into HTTP headers (SEP-2243), so that gateways can route without parsing the body. The input schema marks the argument with `"x-mcp-header": "<Name>"`. The client handles this itself:

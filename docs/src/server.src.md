@@ -78,6 +78,8 @@ A tool is a function the client's model can call. A server lists its tools in a 
 
 There is one handler per method. A server with several tools switches on `params.name`. `params.arguments` is a `[String: Value]?`; read it with `stringValue`, `intValue`, `doubleValue`, `numberValue` (an integer or a double, as `Double`), `boolValue`, `arrayValue` and `objectValue`.
 
+A string argument that is a whole `data:` URL, such as `data:image/png;base64,iVBORw0K...`, arrives as `.data(mimeType:_:)`, not as `.string`. Its `stringValue` is `nil`. Read the MIME type and the bytes with `dataValue`. The URL must start with `data:` in lowercase. Before the `,`, it can have only a media type, an optional `;charset=` and an optional `;base64`. Its payload must decode. Other strings stay `.string`. To get a `data:` URL again, call `Data.dataURLEncoded(mimeType:)`. It returns the base64 form, not always the spelling the client sent: `data:,hi` becomes `data:text/plain;base64,aGk=`.
+
 %include Examples/Snippets/Server/Tools.swift tools-call
 
 ### Tool result content

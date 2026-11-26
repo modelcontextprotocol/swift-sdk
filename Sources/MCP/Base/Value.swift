@@ -17,6 +17,17 @@ public enum Value: Hashable, Sendable {
     /// A JSON string.
     case string(String)
     /// Binary data, encoded as a `data:` URL string with its MIME type, if any.
+    ///
+    /// A plain decode gives this case for a string that is a whole `data:`
+    /// URL. ``Value/init(from:)`` gives the rules. The SDK's own message
+    /// paths keep strings as written. The typed decode of a handler's
+    /// parameters or of a request's result is a plain decode, so a tool
+    /// argument or `structuredContent` can hold this case.
+    ///
+    /// This case encodes as `data:<mimeType>;base64,<payload>`, with
+    /// `text/plain` for a `nil` MIME type. The spelling of the decoded
+    /// string is not kept: `data:,hi` encodes as
+    /// `data:text/plain;base64,aGk=`.
     case data(mimeType: String? = nil, Data)
     /// A JSON array.
     case array([Value])
@@ -172,6 +183,29 @@ extension Value {
 }
 
 extension Value: Codable {
+    /// Creates a value from a decoder.
+    ///
+    /// The decoder tries `null`, `Bool`, `Int`, `Double`, `String`, an array
+    /// and an object, in this order. A string becomes
+    /// ``Value/data(mimeType:_:)`` when all of these are true:
+    ///
+    /// - The whole string is a `data:` URL (RFC 2397). It starts with
+    ///   `data:` in lowercase, with no space before it.
+    /// - Before the `,`, it has only a media type, then an optional
+    ///   `;charset=<value>`, then an optional `;base64`.
+    /// - The payload decodes: it is valid base64, or its `%XX` escapes are
+    ///   well-formed.
+    ///
+    /// Other strings stay ``Value/string(_:)``, for example `DATA:,hi`, a
+    /// `data:` URL with a `;name=` parameter, or text with a `data:` URL
+    /// after its start.
+    ///
+    /// The SDK's own message paths keep strings as written: the message
+    /// decoders of `Client` and `Server`, type-erased requests and
+    /// responses, and handler results. The typed decode of a handler's
+    /// parameters, and of a result before a request returns it, is a plain
+    /// decode. Thus a `Value` field, such as a tool argument or
+    /// `structuredContent`, can hold `.data`.
     public init(from decoder: Decoder) throws {
         let container = try decoder.singleValueContainer()
 
