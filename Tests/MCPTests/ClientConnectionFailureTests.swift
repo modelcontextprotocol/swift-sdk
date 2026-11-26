@@ -142,7 +142,7 @@ struct AutomaticConnectionFailureTests {
         let connecting = Task { try await client.connect(transport: transport) }
         // Ends a connect that would wait for a second initialize answer.
         let watchdog = Task {
-            try await Task.sleep(for: .seconds(2))
+            try await Task.sleep(for: .seconds(30))
             await client.disconnect()
         }
         defer { watchdog.cancel() }

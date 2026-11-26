@@ -627,25 +627,35 @@ struct BatchTests {
 
 @Suite("Server replies", .timeLimit(.minutes(1)))
 struct ServerReplyTests {
-    /// Sends raw lines to a started server; returns what it sent back
-    /// within a short time.
+    private actor Inbox {
+        var values: [Value] = []
+        func add(_ value: Value) { values.append(value) }
+    }
+
+    /// Sends raw lines to a started server; returns what it sent back once
+    /// a reply arrived and a short time after.
     private func exchange(_ server: Server, _ lines: [String]) async throws -> [Value] {
         let (clientEnd, serverEnd) = await InMemoryTransport.createConnectedPair()
         try await server.start(transport: serverEnd)
         try await clientEnd.connect()
         let replies = await clientEnd.receive()
-        let collected = Task { () -> [Value] in
-            var values: [Value] = []
+        let inbox = Inbox()
+        let collected = Task {
             for try await data in replies {
-                values.append(try JSONDecoder().decode(Value.self, from: data))
+                await inbox.add(try JSONDecoder().decode(Value.self, from: data))
             }
-            return values
         }
         for line in lines { try await clientEnd.send(Data(line.utf8)) }
+        let deadline = ContinuousClock.now + .seconds(30)
+        while await inbox.values.isEmpty, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        // Time for a reply that should not come.
         try await Task.sleep(for: .milliseconds(200))
         await clientEnd.disconnect()
         await server.stop()
-        return (try? await collected.value) ?? []
+        _ = await collected.result
+        return await inbox.values
     }
 
     @Test("A strict server ignores a notification before initialize")

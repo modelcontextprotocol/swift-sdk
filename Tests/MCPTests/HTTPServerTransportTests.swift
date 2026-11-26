@@ -1759,7 +1759,10 @@ struct ServerHandlerContextTests {
         try await transport.queue(request: Ping.request(.init()))
 
         // Wait for dispatch.
-        try await Task.sleep(for: .milliseconds(100))
+        let deadline = ContinuousClock.now + .seconds(30)
+        while await !captured.sawDispatch, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
 
         #expect(await captured.sawDispatch == true)
         #expect(await captured.httpContext == nil)

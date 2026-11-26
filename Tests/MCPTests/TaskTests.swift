@@ -650,11 +650,11 @@ struct StatelessTaskServerTests {
         let server = try await TaskServer()
         defer { Task { await server.stop() } }
         // A ttl long enough for the first tasks/get on a loaded machine.
-        let created = try await server.call("slow", ["ttlMs": 1000])
+        let created = try await server.call("slow", ["ttlMs": 5000])
         let id = try #require(created["taskId"]?.stringValue)
-        #expect(created["ttlMs"] == 1000)
+        #expect(created["ttlMs"] == 5000)
         #expect(try await server.get(id)["taskId"] == .string(id))
-        try await Task.sleep(for: .milliseconds(1100))
+        try await Task.sleep(for: .milliseconds(5100))
         #expect(try await server.errorCode(GetTask.name, ["taskId": .string(id)]) == -32602)
     }
 

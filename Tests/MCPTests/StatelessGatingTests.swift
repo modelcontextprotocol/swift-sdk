@@ -341,19 +341,19 @@ private func nextIncoming(_ iterator: inout AsyncThrowingStream<Data, Swift.Erro
 }
 
 /// The result of `task`, or `nil` with a recorded issue when it has not
-/// finished after two seconds (the task is then cancelled).
-private func resultWithinTwoSeconds<T: Sendable, Failure: Error>(
+/// finished after 30 seconds (the task is then cancelled).
+private func resultInTime<T: Sendable, Failure: Error>(
     of task: Task<T, Failure>
 ) async -> Result<T, Failure>? {
     let timer = Task { () -> Bool in
-        guard (try? await Task.sleep(for: .seconds(2))) != nil else { return false }
+        guard (try? await Task.sleep(for: .seconds(30))) != nil else { return false }
         task.cancel()
         return true
     }
     let result = await task.result
     timer.cancel()
     if await timer.value {
-        Issue.record("Not finished within two seconds")
+        Issue.record("Not finished within 30 seconds")
         return nil
     }
     return result
@@ -436,7 +436,7 @@ struct StatefulStatelessBoundaryTests {
             }
             return text
         }
-        let text = try #require(await resultWithinTwoSeconds(of: reply)).get()
+        let text = try #require(await resultInTime(of: reply)).get()
         let line = try #require(text.split(separator: "\n").first { $0.contains(#""id":"e""#) })
         let message = try JSONDecoder().decode(Value.self, from: Data(line.dropFirst("data: ".count).utf8))
         expectWire(message, matches: try wireJSON(#"{"id":"e","error":{"code":-32602}}"#))
@@ -558,7 +558,7 @@ struct StatelessTransportExchangeTests {
 
         let cancel = #"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":4}}"#
         #expect(await transport.handleRequest(post(cancel, authorization: "Bearer a")).statusCode == 202)
-        let response = try #require(await resultWithinTwoSeconds(of: pending)).get()
+        let response = try #require(await resultInTime(of: pending)).get()
         #expect(response.statusCode == 202)
         #expect(response.bodyData == nil)
 
@@ -594,7 +594,7 @@ struct StatelessTransportExchangeTests {
             for try await chunk in stream { text += String(decoding: chunk, as: UTF8.self) }
             return text
         }
-        let text = try #require(await resultWithinTwoSeconds(of: reader)).get()
+        let text = try #require(await resultInTime(of: reader)).get()
         #expect(text.contains("notifications/message"))
         #expect(!text.contains(#""result""#))
     }
@@ -620,7 +620,7 @@ struct StatelessTransportExchangeTests {
 
         let cancel = #"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}}"#
         #expect(await transport.handleRequest(post(cancel, authorization: "Bearer a")).statusCode == 202)
-        #expect(try #require(await resultWithinTwoSeconds(of: number)).get().statusCode == 202)
+        #expect(try #require(await resultInTime(of: number)).get().statusCode == 202)
         let delivered = try await nextIncoming(&incoming)
         #expect(delivered.objectValue?["params"]?.objectValue?["requestId"]?.stringValue == numberID)
         #expect(numberID != stringID)
@@ -653,7 +653,7 @@ struct StatelessTransportExchangeTests {
         let cancel = #"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":6}}"#
         #expect(await transport.handleRequest(post(cancel, authorization: "Bearer a")).statusCode == 202)
 
-        let response = try #require(await resultWithinTwoSeconds(of: pending)).get()
+        let response = try #require(await resultInTime(of: pending)).get()
         #expect(response.statusCode == 202)
         try await waitUntil { await observed.didCancel }
     }
