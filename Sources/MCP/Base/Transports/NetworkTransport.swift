@@ -528,7 +528,11 @@ import Logging
                     contentContext: .defaultMessage,
                     isComplete: true,
                     completion: .contentProcessed { [weak self] error in
-                        guard let self = self else { return }
+                        guard let self = self else {
+                            continuation.resume(
+                                throwing: MCPError.internalError("Transport deallocated"))
+                            return
+                        }
 
                         Task { @MainActor in
                             if !sendContinuationResumed.flag {
