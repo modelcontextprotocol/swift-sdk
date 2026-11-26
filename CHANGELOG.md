@@ -166,6 +166,9 @@ Behavior that can break working code ([docs/migration.md](docs/migration.md#beha
 - A response the client cannot decode (an error `code` that is a string, no `jsonrpc`) fails the
   request it names with `internalError("The server sent an invalid response")` instead of leaving
   it to wait for its timeout, and the warning logs a sanitized prefix, not the whole message.
+- Concurrent `StdioTransport.send(_:)` calls write their messages one at a time, in the order
+  they were called. A send that waited for room in a full pipe let another send write into the
+  middle of its message (#263).
 - From `main` after 0.12.1: `Data.parseDataURL(_:)` reads `;base64` from the header only and
   decodes any percent-escaped byte (#309, #310); `client_secret_basic` percent-encodes the client
   credentials (RFC 6749 §2.3.1, #300); PKCE verifier characters are uniformly distributed (#303);
