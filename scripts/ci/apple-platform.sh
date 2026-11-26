@@ -96,6 +96,25 @@ if [[ -z "$DESTINATION_ID" ]]; then
 fi
 TEST_DESTINATION="platform=$TEST_PLATFORM,${VARIANT:+variant=$VARIANT,}id=$DESTINATION_ID"
 
-ci_step "xcodebuild test ($TEST_DESTINATION)"
+# A simulator's first boot migrates its data and starts its daemons for
+# minutes, on the cores the tests run on, and every test then takes many times
+# longer. CI runner images ship simulators that never booted. Boot it before
+# building for it, so that work overlaps the build, and test once it booted.
+# Mac Catalyst tests on this Mac.
+if [[ "$PLATFORM" != macCatalyst ]]; then
+    ci_step "xcrun simctl boot $DESTINATION_ID"
+    # An already booted simulator fails here; bootstatus below reports real failures.
+    xcrun simctl boot "$DESTINATION_ID" || true
+fi
+
+ci_step "xcodebuild build-for-testing ($TEST_DESTINATION)"
+"${XCODEBUILD[@]}" build-for-testing -destination "$TEST_DESTINATION"
+
+if [[ "$PLATFORM" != macCatalyst ]]; then
+    ci_step "xcrun simctl bootstatus $DESTINATION_ID"
+    xcrun simctl bootstatus "$DESTINATION_ID" -b
+fi
+
+ci_step "xcodebuild test-without-building ($TEST_DESTINATION)"
 rm -rf "$OUT/Tests.xcresult"
-"${XCODEBUILD[@]}" test -destination "$TEST_DESTINATION" -resultBundlePath "$OUT/Tests.xcresult"
+"${XCODEBUILD[@]}" test-without-building -destination "$TEST_DESTINATION" -resultBundlePath "$OUT/Tests.xcresult"
