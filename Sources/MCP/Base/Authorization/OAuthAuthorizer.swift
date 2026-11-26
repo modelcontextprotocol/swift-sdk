@@ -656,7 +656,8 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
                 authentication: configuration.authentication,
                 session: session
             )
-            storeTokenResponse(decoded, requestedScopes: requestedScopes)
+            storeTokenResponse(
+                decoded, requestedScopes: requestedScopes, fallbackRefreshToken: refreshToken)
             return true
         } catch let error as OAuthAuthorizationError {
             if case .tokenRequestFailed(let statusCode, _) = error,
@@ -701,7 +702,8 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
 
     private func storeTokenResponse(
         _ decoded: OAuthTokenResponse,
-        requestedScopes: Set<String>?
+        requestedScopes: Set<String>?,
+        fallbackRefreshToken: String? = nil
     ) {
         let scopeSet: Set<String>
         if let scope = decoded.scope {
@@ -716,7 +718,7 @@ public final class OAuthAuthorizer: HTTPClientAuthorizer, @unchecked Sendable {
             expiresAt: expiresAt,
             scopes: scopeSet,
             authorizationServer: selectedAuthorizationServer,
-            refreshToken: decoded.refreshToken,
+            refreshToken: decoded.refreshToken ?? fallbackRefreshToken,
             clientID: nonEmptyClientID()
         ))
     }
