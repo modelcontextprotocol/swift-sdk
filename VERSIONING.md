@@ -50,7 +50,7 @@ Held for a major:
   `Server.init(requestStateProtection:)`, cache hints, validation pipelines.
 - Dropping a protocol revision from `Version.handshake`, `Version.stateless` or
   `Version.supported`.
-- Raising a platform minimum or the Swift tools version of a manifest.
+- Raising a platform minimum ([Platforms](#platforms)) or the Swift tools version of a manifest.
 - Moving a dependency to a new major version or adding a dependency to the `MCP` target
   ([DEPENDENCY_POLICY.md](DEPENDENCY_POLICY.md)).
 
@@ -65,6 +65,23 @@ Allowed in a minor:
 - Deprecations.
 
 Allowed in a patch: bug fixes that change no public API.
+
+## Platforms
+
+The SDK supports the three newest macOS releases and the iOS, Mac Catalyst, tvOS, watchOS and
+visionOS releases of the same year as the oldest of them. For 1.x that is macOS 15, Mac Catalyst
+18, iOS 18, tvOS 18, watchOS 11 and visionOS 2, the minimums in `Package.swift`. Linux needs a
+Swift 6.1 or later toolchain with glibc or the static musl SDK. 0.12 is the last release line for
+macOS 13 and 14 and their matching releases (iOS 16 and 17, for example).
+
+The minimums hold for the whole major version: a minor or patch release does not raise them,
+even after a newer macOS ships. A later raise follows the same rule, in a major release only:
+
+- It moves every Apple platform together, to the releases of one year, at most to the oldest of
+  the three newest macOS releases when the major ships.
+- It removes the `@available` and `#available` checks that the new minimums make redundant.
+- `CHANGELOG.md` lists it under breaking changes, and [docs/migration.md](docs/migration.md)
+  names the last release line that supports the dropped platforms.
 
 ## Enums and open types
 
