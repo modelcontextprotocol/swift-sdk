@@ -120,8 +120,9 @@ Other known gaps are listed under "Open questions" in each design note.
 ## SEP coverage
 
 One row for each SEP in the [official SEP index](https://modelcontextprotocol.io/seps) (44 SEPs,
-read on 2026-10-28), and for the SEPs that the specification changelogs cite but the index does
-not list (835, 837, 1932, 1933, 2352). Status values:
+read on 2026-10-28), for the SEPs that the specification changelogs cite but the index does not
+list (835, 837, 1932, 1933, 2352), and for the SEPs in the 2026-07-28 specification that neither
+lists (2350, 2351). Status values:
 
 - Implemented: the SDK does what the SEP asks of an SDK.
 - Partial: the SDK does part of it; the column after the status gives the gap.
@@ -170,6 +171,8 @@ A change that implements a SEP updates its row.
 | 2243 | HTTP header standardization | Standards | Implemented | [2026-07-28 core](#2026-07-28-core) |
 | 2260 | Server requests belong to a client request | Standards | Implemented | Met at 2026-07-28, which has no server-to-client requests: a request to the client throws -32600, in a handler and outside one. At 2025-11-25 and earlier, which allow them, a sampling or elicitation request sent while the server handles no client request is sent, with one warning for each method. The client answers such requests. [Requests to the client](docs/server.md#requests-to-the-client) |
 | 2322 | Multi round-trip requests | Standards | Implemented | [2026-07-28 core](#2026-07-28-core) |
+| 2350 | Client-side scope accumulation in step-up authorization | Not in the index | Implemented | `OAuthAuthorizer`: a step-up on `403 insufficient_scope` requests the union of the token's scopes and the challenge's scopes, so the client keeps the scopes it has. [auth.md](design/auth.md) |
+| 2351 | RFC 8414 well-known URI suffix | Not in the index | Implemented | `DefaultOAuthMetadataDiscovery.authorizationServerMetadataURLs(for:)`: the default `oauth-authorization-server` suffix (RFC 8414 §3.1), inserted before the issuer path, then the OpenID Connect URLs. [auth.md](design/auth.md#discovery-order) |
 | 2352 | Client credentials bound to their authorization server | Not in the index | Implemented | [Authorization](#authorization) |
 | 2468 | `iss` in authorization responses | Standards | Implemented | [Authorization](#authorization) |
 | 2484 | Conformance tests for Final SEPs | Process | Not applicable | Asks something of SEP authors. The SDK runs those tests: every leg runs `--suite all`. |
