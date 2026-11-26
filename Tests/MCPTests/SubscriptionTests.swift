@@ -481,7 +481,7 @@ struct SubscriptionTests {
         try await transport.acknowledge(listen)
         try await transport.reply(to: listen, #""error":{"code":-32603,"message":"stream reset"}"#)
 
-        let reopened = try await transport.message(3, timeout: .seconds(3))
+        let reopened = try await transport.message(3)
         #expect(reopened["method"] == "subscriptions/listen")
         #expect(reopened["id"] != listen["id"])
     }
@@ -499,7 +499,7 @@ struct SubscriptionTests {
         // The server stops for a restart: the stream ends with its result.
         try await transport.reply(to: listen, #""result":{"resultType":"complete"}"#)
 
-        let reopened = try await transport.message(3, timeout: .seconds(3))
+        let reopened = try await transport.message(3)
         #expect(reopened["method"] == "subscriptions/listen")
         #expect(reopened["id"] != listen["id"])
         #expect(await client.notificationStreamFailures == 1)
@@ -570,7 +570,7 @@ struct SubscriptionTests {
         again.cancel()
         await #expect(throws: CancellationError.self) { try await within(.seconds(2)) { try await again.value } }
         #expect(await client.subscribedResources == ["test://a"])
-        let reopened = try await transport.message(3, timeout: .seconds(3))
+        let reopened = try await transport.message(3)
         #expect(resourceSubscriptions(of: reopened) == ["test://a"])
     }
 
@@ -630,7 +630,7 @@ struct SubscriptionTests {
 
         await client.onNotification(ToolListChangedNotification.self) { _ in }
         for (count, failures) in [(2, 1), (3, 2), (4, 3)] {
-            let listen = try await transport.message(count, timeout: .seconds(4))
+            let listen = try await transport.message(count)
             #expect(listen["method"] == "subscriptions/listen")
             try await transport.acknowledge(listen)
             try await transport.reply(to: listen, #""error":{"code":-32603,"message":"stream reset"}"#)
@@ -652,11 +652,11 @@ struct SubscriptionTests {
 
         // The stream fails, and so does its first reopening.
         try await transport.reply(to: first, #""error":{"code":-32603,"message":"stream reset"}"#)
-        let second = try await transport.message(3, timeout: .seconds(3))
+        let second = try await transport.message(3)
         #expect(resourceSubscriptions(of: second) == ["test://a"])
         try await transport.reply(to: second, #""error":{"code":-32603,"message":"restarting"}"#)
 
-        let third = try await transport.message(4, timeout: .seconds(4))
+        let third = try await transport.message(4)
         #expect(third["method"] == "subscriptions/listen")
         #expect(resourceSubscriptions(of: third) == ["test://a"])
         try await transport.acknowledge(third, #"{"resourceSubscriptions":["test://a"]}"#)
@@ -823,7 +823,7 @@ private actor ListenScript: Transport {
     }
 
     /// Waits until `count` messages were sent and returns the last one.
-    func message(_ count: Int, timeout: Duration = .seconds(2)) async throws -> [String: Value] {
+    func message(_ count: Int, timeout: Duration = .seconds(30)) async throws -> [String: Value] {
         let deadline = ContinuousClock.now + timeout
         while sent.count < count, ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(5))

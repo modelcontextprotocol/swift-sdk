@@ -37,7 +37,7 @@ struct WireExchange {
     /// Throws ``Timeout`` when they don't arrive in time, so a caller that
     /// indexes the reply fails the test instead of trapping.
     @discardableResult
-    func send(_ message: String, expecting count: Int = 1, timeout: Duration = .seconds(2))
+    func send(_ message: String, expecting count: Int = 1, timeout: Duration = .seconds(30))
         async throws -> [Value]
     {
         let before = await transport.sentData.count

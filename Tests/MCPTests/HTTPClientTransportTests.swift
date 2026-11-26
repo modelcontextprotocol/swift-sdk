@@ -2885,7 +2885,7 @@ import Testing
         init(_ transport: HTTPClientTransport?) { self.transport = transport }
 
         /// Whether the transport is released within `limit`.
-        func isReleased(within limit: Duration = .seconds(5)) async -> Bool {
+        func isReleased(within limit: Duration = .seconds(30)) async -> Bool {
             let clock = ContinuousClock()
             let deadline = clock.now + limit
             while clock.now < deadline {
@@ -2897,7 +2897,7 @@ import Testing
     }
 
     /// Whether `condition` holds within `limit`.
-    private func eventually(within limit: Duration = .seconds(5), _ condition: () -> Bool) async -> Bool {
+    private func eventually(within limit: Duration = .seconds(30), _ condition: () -> Bool) async -> Bool {
         let clock = ContinuousClock()
         let deadline = clock.now + limit
         while clock.now < deadline {

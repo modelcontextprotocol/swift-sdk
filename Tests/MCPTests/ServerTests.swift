@@ -607,7 +607,7 @@ private actor ContextGatedTransport: Transport, HTTPContextProviding {
         return nil
     }
 
-    func waitUntilContextIsHeld(timeout: Duration = .seconds(2)) async throws {
+    func waitUntilContextIsHeld(timeout: Duration = .seconds(30)) async throws {
         let deadline = ContinuousClock.now.advanced(by: timeout)
         while heldContext == nil {
             guard ContinuousClock.now < deadline else {

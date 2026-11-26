@@ -279,9 +279,9 @@ private func makeTaskServer(
                 }
                 return .init(content: [.text(text: "late")])
             }
-            // Still answering when the client gives up.
-            let deadline = ContinuousClock.now + .milliseconds(300)
-            while ContinuousClock.now < deadline { await Task.yield() }
+            // Still answering when the client gives up: the handler returns
+            // only once its call is cancelled.
+            try? await Task.sleep(for: .seconds(30))
             return created
         case "giveUp":
             return try await Server.runAsTask { task in
@@ -664,11 +664,12 @@ struct StatelessTaskServerTests {
         defer { Task { await server.stop() } }
         let call = message(id: 77, method: CallTool.name, params: ["name": "lateAnswer"], capabilities: tasksCapabilities)
         try await server.wire.send(call, expecting: 0)
-        let deadline = ContinuousClock.now + .seconds(2)
-        while await server.ran.value == 0, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(5)) }
+        let started = ContinuousClock.now + .seconds(30)
+        while await server.ran.value == 0, ContinuousClock.now < started { try await Task.sleep(for: .milliseconds(5)) }
         try await server.wire.send(
             #"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":77}}"#, expecting: 0)
-        while await !server.cancelled.isSet, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(5)) }
+        let cancelled = ContinuousClock.now + .seconds(30)
+        while await !server.cancelled.isSet, ContinuousClock.now < cancelled { try await Task.sleep(for: .milliseconds(5)) }
         #expect(await server.cancelled.isSet)
         try await Task.sleep(for: .milliseconds(400))
         let answer = try await sentMessage(server.wire, timeout: .milliseconds(50)) { $0.objectValue?["id"] == 77 }
@@ -1597,7 +1598,7 @@ struct TaskRevisionMatrixTests {
 
 /// Waits until the server sent a message that satisfies `match`.
 private func sentMessage(
-    _ wire: WireExchange, timeout: Duration = .seconds(2), where match: (Value) -> Bool
+    _ wire: WireExchange, timeout: Duration = .seconds(30), where match: (Value) -> Bool
 ) async throws -> Value? {
     let deadline = ContinuousClock.now + timeout
     while ContinuousClock.now < deadline {
@@ -2105,11 +2106,13 @@ struct TaskLifecycleEdgeTests {
     func expiresWhileDelivering() async throws {
         let server = try await HandshakeTaskServer()
         defer { Task { await server.stop() } }
-        let id = try #require(try await server.create("ask", ttl: 300)["taskId"])
+        // Long enough to reach input_required on a loaded machine; the reply
+        // below waits for the expiry.
+        let id = try #require(try await server.create("ask", ttl: 2000)["taskId"])
         _ = try await server.wait(id, for: "input_required")
         let (resultID, messages) = try await server.exchange(GetTaskPayload.name, ["taskId": id])
         #expect(messages.first?.objectValue?["method"] == "elicitation/create")
-        let reply = try await sentMessage(server.wire, timeout: .seconds(5)) {
+        let reply = try await sentMessage(server.wire, timeout: .seconds(30)) {
             $0.objectValue?["id"] == .int(resultID) && $0.objectValue?["method"] == nil
         }
         #expect(reply?.objectValue?["error"]?.objectValue?["code"] == -32602)

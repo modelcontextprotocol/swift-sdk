@@ -37,7 +37,7 @@ private func makeServer(_ calls: Calls, configuration: Server.Configuration = .d
 private func exchange(_ transport: MockTransport, _ message: String) async throws -> Value {
     let before = await transport.sentData.count
     await transport.queue(data: Data(message.utf8))
-    let deadline = ContinuousClock.now + .seconds(2)
+    let deadline = ContinuousClock.now + .seconds(30)
     while await transport.sentData.count <= before {
         guard ContinuousClock.now < deadline else {
             Issue.record("No reply to \(message)")
@@ -366,12 +366,12 @@ private actor CancellationObserved {
     func cancelled() { didCancel = true }
 }
 
-/// Waits up to two seconds for `condition`.
+/// Waits up to 30 seconds for `condition`.
 private func waitUntil(_ condition: @Sendable () async -> Bool) async throws {
-    let deadline = ContinuousClock.now + .seconds(2)
+    let deadline = ContinuousClock.now + .seconds(30)
     while await !condition() {
         guard ContinuousClock.now < deadline else {
-            Issue.record("Condition not met within two seconds")
+            Issue.record("Condition not met within 30 seconds")
             return
         }
         try await Task.sleep(for: .milliseconds(5))

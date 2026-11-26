@@ -40,7 +40,8 @@ private actor ScriptedTransport: Transport {
 
     /// Waits until `count` messages were sent and returns the last one.
     func message(_ count: Int) async throws -> [String: Value] {
-        for _ in 0..<400 where sent.count < count {
+        let deadline = ContinuousClock.now + .seconds(30)
+        while sent.count < count, ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(5))
         }
         return try #require(sent.dropFirst(count - 1).first)

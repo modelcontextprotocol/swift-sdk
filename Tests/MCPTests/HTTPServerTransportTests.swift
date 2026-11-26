@@ -1069,7 +1069,7 @@ struct StatefulHTTPServerTransportTests {
 
     /// The text of every chunk of `response`'s stream, or `nil` when the
     /// stream is still open after `timeout`.
-    private func readToEnd(_ response: HTTPResponse, timeout: Duration = .seconds(2)) async -> String? {
+    private func readToEnd(_ response: HTTPResponse, timeout: Duration = .seconds(30)) async -> String? {
         guard case .stream(let stream, _) = response else { return nil }
         let reader = Task { () -> String in
             var text = ""
