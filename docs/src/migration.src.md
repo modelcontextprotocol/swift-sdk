@@ -51,7 +51,7 @@ each change that breaks source code.
 | HTTP transports | New error bodies, status codes and streaming | See below |
 | `HTTPClientTransport` | Default per-host connection limit 64; POST streams resume per stream; SSE on Linux | Raise `httpMaximumConnectionsPerHost` in custom configurations |
 | Package | Requires Swift 6.1 tools; depends on swift-crypto and Yams, no longer on eventsource; swift-docc-plugin `from: "1.4.0"` instead of its `main` branch | Use Xcode 16.3 or later; resolve packages again |
-| Platforms | Minimums raised to macOS 15, Mac Catalyst 18, iOS 18, tvOS 18, watchOS 11, visionOS 2 | Raise your package's minimums, or stay on 0.12 for macOS 13 and 14 |
+| Platforms | Minimums raised to macOS 15, Mac Catalyst 18, iOS 18, tvOS 18, watchOS 11, visionOS 2 | Raise your deployment targets, or stay on 0.12 to keep older ones |
 
 ## Breaking changes
 
@@ -381,8 +381,11 @@ target whose minimum is lower than that of a product it uses:
 // Before
 platforms: [.macOS(.v13), .iOS(.v16)],
 // After
-platforms: [.macOS(.v15), .iOS(.v18)],
+platforms: [.macOS("15.0"), .iOS("18.0")],
 ```
+
+The string form works with every manifest tools version; the `.v15` and `.v18`
+constants need `swift-tools-version: 6.0` or later.
 
 An app that still supports macOS 13 or 14, or the matching iOS, Mac Catalyst,
 tvOS, watchOS or visionOS releases, stays on 0.12:

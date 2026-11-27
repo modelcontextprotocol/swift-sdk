@@ -32,7 +32,8 @@ is 100% for clients and servers at 2025-11-25 and 2026-07-28; see
 
 - Swift 6.1 or later (Xcode 16.3 or later).
 - macOS 15, iOS 18, Mac Catalyst 18, watchOS 11, tvOS 18, visionOS 2, or Linux
-  with glibc or musl. On macOS 13 or 14, stay on 0.12
+  with glibc or musl. For older deployment targets (macOS 13 or 14; iOS, Mac
+  Catalyst or tvOS 16 or 17; watchOS 9 or 10; visionOS 1), stay on 0.12
   ([platform policy](VERSIONING.md#platforms)).
 
 ## Installation
