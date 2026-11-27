@@ -580,13 +580,10 @@ struct ClientTests {
                 ))
         }
 
-        await #expect {
+        await #expect(
+            throws: MCPError.internalError("Server's protocol version is not supported: \(version)")
+        ) {
             try await client.connect(transport: transport)
-        } throws: { error in
-            guard case .unsupportedProtocolVersion(let supported, let requested) = error as? MCPError else {
-                return false
-            }
-            return supported == Version.handshake && requested == version
         }
         try await responder.value
 

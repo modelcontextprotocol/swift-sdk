@@ -186,13 +186,10 @@ struct AutomaticConnectionFailureTests {
             to: initialize,
             #""result":{"protocolVersion":"1999-01-01","capabilities":{},"serverInfo":{"name":"old","version":"0"}}"#)
 
-        await #expect {
+        await #expect(
+            throws: MCPError.internalError("Server's protocol version is not supported: 1999-01-01")
+        ) {
             _ = try await connecting.value
-        } throws: { error in
-            guard case .unsupportedProtocolVersion(let supported, let requested) = error as? MCPError else {
-                return false
-            }
-            return supported == Version.handshake && requested == "1999-01-01"
         }
         #expect(await transport.methods == ["server/discover", "initialize"])
         #expect(await client.negotiatedProtocolVersion == nil)
