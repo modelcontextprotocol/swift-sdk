@@ -36,6 +36,12 @@ fixes merged to `main` after it (up to `234e412`), with before and after code:
 
 Behavior that can break working code ([docs/migration.md](docs/migration.md#behavior-changes)):
 
+- A -32042 error whose data cannot be represented by `urlElicitationRequired` now decodes as
+  `serverError` and keeps its data, including other keys and undecodable elicitation items.
+- An undecodable direct peer result now throws `ResponseDecodingError` with the expected type,
+  raw result and underlying decoding error instead of an empty internal type mismatch error.
+  Task result methods also throw it instead of a bare decoding error or a generic missing-result
+  error. This local error is separate from `MCPError`.
 - After an established session ends and validation passes, its transport returns 400 without a
   session ID and 404 with any session ID.
 - `MCPError` decoding: -32000 and -32001 decode as `serverError`, -32602 with `data.uri` as
