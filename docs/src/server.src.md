@@ -659,7 +659,7 @@ The server answers with the requested version if it is a handshake revision in `
 
 Call `stop()` when the process should exit, for example from a signal handler or a [Swift Service Lifecycle](https://github.com/swift-server/swift-service-lifecycle) `Service`. `stop()` calls `closeSubscriptions()` first. To end listen streams without stopping the server, for example before a rolling restart, call `closeSubscriptions()`.
 
-The SDK does not depend on Swift Service Lifecycle: add the `swift-service-lifecycle` package to your application. On a signal in `gracefulShutdownSignals`, a `ServiceGroup` starts a graceful shutdown and does not cancel its services. The service below stops the server on graceful shutdown and on cancellation. It returns when the transport closes. By default, the group then fails with "A service has finished unexpectedly". To exit without an error, the example sets `successTerminationBehavior` to `.gracefullyShutdownGroup`:
+The SDK does not depend on Swift Service Lifecycle: add the `swift-service-lifecycle` package to your application, and the `ServiceLifecycle` product and swift-log's `Logging` product to its target. On a signal in `gracefulShutdownSignals`, a `ServiceGroup` starts a graceful shutdown and does not cancel its services. The service below stops the server on graceful shutdown and on cancellation. It returns when the transport closes. By default, the group then fails with "A service has finished unexpectedly". To exit without an error, the example sets `successTerminationBehavior` to `.gracefullyShutdownGroup`:
 
 ```swift
 import Logging
