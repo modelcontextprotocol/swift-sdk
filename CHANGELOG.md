@@ -147,6 +147,10 @@ Behavior that can break working code ([docs/migration.md](docs/migration.md#beha
   Bearer challenge, as for no credentials, instead of 400 without one; a malformed Bearer header
   and `.malformedRequest` get 400 with `WWW-Authenticate: Bearer error="invalid_request"` and
   `resource_metadata` (RFC 6750 §3.1).
+- `OriginValidator.localhost()` and `localhost(port: 80)` accept a loopback `Host` or `http://`
+  `Origin` without a port, which means the scheme's default port, 80 for `http` (RFC 9110
+  §4.2.1); before, both refused it with 421 or 403. `localhost(port:)` with another port still
+  refuses a value without a port, and every port refuses `https://localhost`.
 - A `subscriptions/listen` stream the server ends (`closeSubscriptions()`, `stop()`) is followed,
   after its result, by `notifications/cancelled` for the listen request on stdio and other
   message-stream transports, as cancellation.mdx requires; `stop()` sends both before it

@@ -306,7 +306,7 @@ public struct OriginValidator: HTTPRequestValidator {
     /// Pass `nil` to allow any port, including none. Port 80 also accepts a request with no port.
     public static func localhost(port: Int? = nil) -> OriginValidator {
         let portPattern = port.map { String($0) } ?? "*"
-        // A request without a port uses the scheme's default (RFC 9110, section 7.2): 80 for `http`.
+        // A request without a port uses the scheme's default (RFC 9110 §4.2.1): 80 for `http`.
         let withoutPort = port == 80 ? ["127.0.0.1", "localhost", "[::1]"] : []
         return OriginValidator(
             allowedHosts: [
@@ -377,7 +377,7 @@ public struct OriginValidator: HTTPRequestValidator {
         }
 
         let prefix = String(pattern.dropLast(2))
-        // A value without a port uses the scheme's default port (RFC 9110, section 7.2),
+        // A value without a port uses the scheme's default port (RFC 9110 §4.2.1),
         // which the wildcard covers.
         if value == prefix { return true }
         guard value.hasPrefix(prefix + ":") else { return false }
