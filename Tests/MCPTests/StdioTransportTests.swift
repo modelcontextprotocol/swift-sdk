@@ -206,9 +206,15 @@ struct StdioTransportTests {
 
         let disconnected = await outcome(within: .seconds(30)) { await transport.disconnect() }
         #expect(!disconnected.didTimeOut)
-        for send in sends {
+        // Nothing reads, so no frame finishes: the first send stops mid-frame and the
+        // others never start writing.
+        for (index, send) in sends.enumerated() {
             let result = await outcome(within: .seconds(30)) { try await send.value }
-            #expect(result.error != nil, "Expected the unsent frame to fail on disconnect")
+            guard case .transportError(let underlying) = result.mcpError else {
+                Issue.record("Expected send \(index) to fail with a transport error, got \(result)")
+                continue
+            }
+            #expect(underlying as? Errno == Errno(rawValue: ENOTCONN), "Send \(index)")
         }
         #expect(await transport.activeSends == 0)
     }
