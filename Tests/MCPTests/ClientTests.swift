@@ -683,6 +683,90 @@ struct ClientTests {
 
 @Suite("Client undecodable responses", .timeLimit(.minutes(1)))
 struct ClientUndecodableResponseTests {
+    private struct ServerResult: MCP.Method {
+        static let name = "test/malformed-result"
+        typealias Result = Value
+    }
+
+    private struct ExpectedResult: MCP.Method {
+        static let name = ServerResult.name
+
+        struct Result: Codable, Hashable, Sendable {
+            let count: Int
+        }
+    }
+
+    @Test("A malformed result keeps its raw value and decoding error")
+    func malformedResult() async throws {
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+        let server = Server(name: "s", version: "1", capabilities: .init())
+        await server.withMethodHandler(ServerResult.self) { _ in ["count": "not a number"] }
+        try await server.start(transport: serverTransport)
+
+        let client = Client(name: "c", version: "1")
+        try await client.connect(transport: clientTransport)
+        defer { Task { await client.disconnect(); await server.stop() } }
+
+        let context = try await client.send(ExpectedResult.request())
+        do {
+            _ = try await context.value
+            Issue.record("Expected a response decoding error")
+        } catch let error as ResponseDecodingError {
+            #expect(error.expectedType == String(reflecting: ExpectedResult.Result.self))
+            #expect(error.rawResult.objectValue?["count"] == "not a number")
+            #expect(error.rawResult.objectValue?["_meta"] != nil)
+            #expect(error.description.contains(error.expectedType))
+            #expect(error.localizedDescription.contains(error.expectedType))
+            #expect(error.description.contains("count: Expected to decode Int"))
+            #expect(error.localizedDescription.contains("count: Expected to decode Int"))
+            #expect(!error.description.contains("DecodingError.Context"))
+            #expect(!error.description.contains("not a number"))
+            #expect(!String(describing: error).contains("not a number"))
+            #expect(!error.localizedDescription.contains("not a number"))
+            guard case .typeMismatch(let type, let context) = error.underlyingError as? DecodingError else {
+                Issue.record("Expected an Int decoding error")
+                return
+            }
+            #expect(String(reflecting: type) == String(reflecting: Int.self))
+            #expect(context.codingPath.map(\.stringValue) == ["count"])
+        }
+    }
+
+    @Test("A response decoding error built by a caller keeps its fields")
+    func responseDecodingErrorInit() {
+        struct Underlying: Swift.Error, CustomStringConvertible {
+            var description: String { "bad shape" }
+        }
+        let error = ResponseDecodingError(
+            expectedType: "Example.Result", rawResult: ["secret": "value"], underlyingError: Underlying())
+        #expect(error.expectedType == "Example.Result")
+        #expect(error.rawResult == ["secret": "value"])
+        #expect(error.underlyingError is Underlying)
+        #expect(error.localizedDescription == "Could not decode the result as Example.Result: bad shape")
+        #expect(!String(describing: error).contains("secret"))
+    }
+
+    @Test("A response decoding error prints a decoding error as its path and reason")
+    func responseDecodingErrorSummary() {
+        struct Key: CodingKey {
+            let stringValue: String
+            let intValue: Int?
+            init(stringValue: String) { (self.stringValue, self.intValue) = (stringValue, nil) }
+            init(intValue: Int) { (self.stringValue, self.intValue) = ("Index \(intValue)", intValue) }
+        }
+        func summary(_ underlying: DecodingError) -> String {
+            ResponseDecodingError(expectedType: "R", rawResult: .null, underlyingError: underlying).description
+        }
+        let nested = DecodingError.Context(
+            codingPath: [Key(stringValue: "content"), Key(intValue: 0), Key(stringValue: "text")],
+            debugDescription: "Expected to decode String but found a number instead.")
+        #expect(
+            summary(.typeMismatch(String.self, nested))
+                == "Could not decode the result as R: content[0].text: Expected to decode String but found a number instead.")
+        let root = DecodingError.Context(codingPath: [], debugDescription: "The given data was not valid JSON.")
+        #expect(summary(.dataCorrupted(root)) == "Could not decode the result as R: The given data was not valid JSON.")
+    }
+
     /// A handshake client connected to `transport`, which answers initialize.
     private func connect(_ transport: MockTransport) async throws -> Client {
         let client = Client(name: "c", version: "1", configuration: .handshake)
