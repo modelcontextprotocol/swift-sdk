@@ -162,7 +162,8 @@ private func drainSSEStream(
 /// Spawns a background task to consume the receive stream and send the init response.
 private func initializeSession(
     transport: StatefulHTTPServerTransport,
-    sessionID: String? = nil
+    sessionID: String? = nil,
+    authorization: String? = nil
 ) async throws -> String {
     try await transport.connect()
 
@@ -199,7 +200,7 @@ private func initializeSession(
     }
 
     let response = await transport.handleRequest(
-        makeStatefulPOSTRequest(body: initBody)
+        makeStatefulPOSTRequest(body: initBody, authorization: authorization)
     )
 
     // Extract session ID
@@ -766,6 +767,7 @@ struct StatefulHTTPServerTransportTests {
             makeStatefulPOSTRequest(body: makeRequestBody(), sessionID: sessionID)
         )
         #expect(post.statusCode == 404)
+        #expect(post.headers[HTTPHeaderName.sessionID] == sessionID)
 
         let get = await transport.handleRequest(makeGETRequest(sessionID: sessionID))
         #expect(get.statusCode == 404)
@@ -780,8 +782,54 @@ struct StatefulHTTPServerTransportTests {
 
         let otherSession = await transport.handleRequest(
             makeStatefulPOSTRequest(body: makeRequestBody(), sessionID: "other-session"))
-        #expect(otherSession.statusCode == 400)
+        #expect(otherSession.statusCode == 404)
         #expect(otherSession.headers[HTTPHeaderName.sessionID] == nil)
+    }
+
+    @Test("A terminated session validates Origin and Host before session status")
+    func testTerminatedSessionRejectsOriginAndHost() async throws {
+        let transport = StatefulHTTPServerTransport()
+        let sessionID = try await initializeSession(transport: transport)
+        await transport.disconnect()
+
+        for candidate: String? in [nil, sessionID, "other-session"] {
+            let post = makeStatefulPOSTRequest(body: makeRequestBody(), sessionID: candidate)
+            var headers = post.headers
+            headers[HTTPHeaderName.origin] = "https://other.example"
+            let response = await transport.handleRequest(
+                HTTPRequest(method: "POST", headers: headers, body: post.body))
+            #expect(response.statusCode == 403)
+            #expect(response.headers[HTTPHeaderName.sessionID] == nil)
+        }
+
+        let post = makeStatefulPOSTRequest(body: makeRequestBody(), sessionID: sessionID)
+        var headers = post.headers
+        headers[HTTPHeaderName.host] = "other.example"
+        let response = await transport.handleRequest(
+            HTTPRequest(method: "POST", headers: headers, body: post.body))
+        #expect(response.statusCode == 421)
+        #expect(response.headers[HTTPHeaderName.sessionID] == nil)
+    }
+
+    @Test("A terminated session validates Bearer authorization before session status")
+    func testTerminatedSessionRequiresAuthorization() async throws {
+        let transport = makeAuthenticatedStatefulTransport { _, _, _ in .valid(BearerTokenInfo()) }
+        let sessionID = try await initializeSession(transport: transport, authorization: "Bearer valid")
+        await transport.disconnect()
+
+        for candidate in [sessionID, "other-session"] {
+            let rejected = await transport.handleRequest(
+                makeStatefulPOSTRequest(body: makeRequestBody(), sessionID: candidate))
+            #expect(rejected.statusCode == 401)
+            #expect(rejected.headers[HTTPHeaderName.wwwAuthenticate]?.contains("Bearer ") == true)
+            #expect(rejected.headers[HTTPHeaderName.sessionID] == nil)
+        }
+
+        let stale = await transport.handleRequest(
+            makeStatefulPOSTRequest(
+                body: makeRequestBody(), sessionID: "other-session", authorization: "Bearer valid"))
+        #expect(stale.statusCode == 404)
+        #expect(stale.headers[HTTPHeaderName.sessionID] == nil)
     }
 
     @Test("A transport stopped before initialization returns 400")
@@ -792,6 +840,11 @@ struct StatefulHTTPServerTransportTests {
         let response = await transport.handleRequest(
             makeStatefulPOSTRequest(body: makeInitializeBody()))
         #expect(response.statusCode == 400)
+
+        let withSession = await transport.handleRequest(
+            makeStatefulPOSTRequest(body: makeRequestBody(), sessionID: "unknown"))
+        #expect(withSession.statusCode == 400)
+        #expect(withSession.headers[HTTPHeaderName.sessionID] == nil)
     }
 
     // MARK: - Error Cases
