@@ -21,8 +21,9 @@ public enum Value: Hashable, Sendable {
     /// A plain decode gives this case for a string that is a whole `data:`
     /// URL. ``Value/init(from:)`` gives the rules. The SDK's own message
     /// paths keep strings as written. The typed decode of a handler's
-    /// parameters or of a request's result is a plain decode, so a tool
-    /// argument or `structuredContent` can hold this case.
+    /// parameters or of a request's result is a plain decode, and so is
+    /// ``Value/init(_:)``, so a tool argument or `structuredContent` can hold
+    /// this case.
     ///
     /// This case encodes as `data:<mimeType>;base64,<payload>`, with
     /// `text/plain` for a `nil` MIME type. The spelling of the decoded
@@ -35,6 +36,10 @@ public enum Value: Hashable, Sendable {
     case object([String: Value])
 
     /// Create a `Value` from an `Encodable` value.
+    ///
+    /// This is a plain decode of the JSON that `value` encodes to: a string
+    /// that is a whole `data:` URL becomes ``Value/data(mimeType:_:)``. See
+    /// ``Value/init(from:)`` for the rules.
     /// - Parameter value: The encodable value
     /// - Returns: A value
     public init<T: Encodable>(_ value: T) throws {
@@ -204,8 +209,11 @@ extension Value: Codable {
     /// decoders of `Client` and `Server`, type-erased requests and
     /// responses, and handler results. The typed decode of a handler's
     /// parameters, and of a result before a request returns it, is a plain
-    /// decode. Thus a `Value` field, such as a tool argument or
-    /// `structuredContent`, can hold `.data`.
+    /// decode, and so is ``Value/init(_:)``, which
+    /// `CallTool.Result(content:structuredContent:isError:_meta:)` uses for
+    /// a `Codable` output. Thus a `Value` field, such as a tool argument or
+    /// `structuredContent`, can hold `.data`, and a `data:` URL string in a
+    /// `Codable` output is sent in its base64 form.
     public init(from decoder: Decoder) throws {
         let container = try decoder.singleValueContainer()
 

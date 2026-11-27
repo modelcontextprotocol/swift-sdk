@@ -100,7 +100,7 @@ The factories with a `metadata:` label, such as `.text(_:metadata:)`, are deprec
 
 ### Structured content
 
-A tool with an `outputSchema` returns its data in `structuredContent`. `CallTool.Result(content:structuredContent:isError:_meta:)` takes any `Codable` value and throws if it cannot be encoded. Send the same data as text too, for clients that read only `content`.
+A tool with an `outputSchema` returns its data in `structuredContent`. `CallTool.Result(content:structuredContent:isError:_meta:)` takes any `Codable` value and throws if it cannot be encoded. It converts the value with `Value(_:)`, so a string field that is a whole `data:` URL is sent in base64 form: `data:,hi` becomes `data:text/plain;base64,aGk=`. Send the same data as text too, for clients that read only `content`.
 
 %include Examples/Snippets/Server/Tools.swift tools-structured
 
