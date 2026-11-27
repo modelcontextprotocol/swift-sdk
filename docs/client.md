@@ -143,7 +143,7 @@ let stdio = StdioTransport(
 let http = HTTPClientTransport(endpoint: URL(string: "http://localhost:8080/mcp")!)
 ```
 
-`StdioTransport()` without arguments uses the current process's standard input and output. Tests use `InMemoryTransport.createConnectedPair()`. See [protocol.md](protocol.md) for transports and authorization, and [testing.md](testing.md) for in-memory tests.
+`StdioTransport()` without arguments uses the current process's standard input and output. An app on iOS, tvOS, watchOS or visionOS cannot launch a process, so it cannot start a local stdio server. On these platforms, use `HTTPClientTransport` to connect to a remote server. Use an `https` URL: App Transport Security blocks plain `http` to a remote server, unless the app's `Info.plist` adds an exception. Tests use `InMemoryTransport.createConnectedPair()`. See [protocol.md](protocol.md) for transports and authorization, and [testing.md](testing.md) for in-memory tests.
 
 ### Strict mode
 
