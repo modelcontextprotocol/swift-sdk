@@ -606,6 +606,49 @@ struct BatchTests {
         await client.disconnect()
         await server.stop()
     }
+
+    @Test("A batch whose send fails rejects withBatch and the returned tasks")
+    func sendFailure() async throws {
+        let transport = MockTransport()
+        let client = Client(name: "c", version: "1", configuration: .handshake)
+
+        let initTask = Task {
+            try await transport.waitForSentMessages()
+            if let lastMessage = await transport.sentMessages.last,
+                let data = lastMessage.data(using: .utf8),
+                let request = try? JSONDecoder().decode(Request<Initialize>.self, from: data)
+            {
+                let response = Initialize.response(
+                    id: request.id,
+                    result: .init(
+                        protocolVersion: Version.latestHandshake,
+                        capabilities: .init(),
+                        serverInfo: .init(name: "TestServer", version: "1.0"),
+                        instructions: nil
+                    )
+                )
+                try await transport.queue(response: response)
+            }
+        }
+
+        try await client.connect(transport: transport)
+        initTask.cancel()
+
+        await transport.setFailSend(true)
+
+        nonisolated(unsafe) var first: Task<Ping.Result, Error>?
+        nonisolated(unsafe) var second: Task<Ping.Result, Error>?
+        await #expect(throws: MCPError.self) {
+            try await client.withBatch { batch in
+                first = try await batch.addRequest(Ping.request())
+                second = try await batch.addRequest(Ping.request())
+            }
+        }
+
+        await #expect(throws: MCPError.self) { _ = try await #require(first).value }
+        await #expect(throws: MCPError.self) { _ = try await #require(second).value }
+        await client.disconnect()
+    }
 }
 
 @Suite("Server replies", .timeLimit(.minutes(1)))
