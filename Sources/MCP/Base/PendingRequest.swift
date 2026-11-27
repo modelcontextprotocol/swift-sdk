@@ -9,6 +9,13 @@ public struct ResponseDecodingError: LocalizedError, Sendable, CustomStringConve
     /// The error raised while decoding the result.
     public let underlyingError: any Swift.Error
 
+    /// Creates the error for a result that did not decode as `expectedType`.
+    public init(expectedType: String, rawResult: Value, underlyingError: any Swift.Error) {
+        self.expectedType = expectedType
+        self.rawResult = rawResult
+        self.underlyingError = underlyingError
+    }
+
     /// A summary that does not include the result or decoding error text.
     public var description: String { "Could not decode the result as \(expectedType)" }
 

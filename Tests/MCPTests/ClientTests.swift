@@ -729,6 +729,18 @@ struct ClientUndecodableResponseTests {
         }
     }
 
+    @Test("A response decoding error built by a caller keeps its fields")
+    func responseDecodingErrorInit() {
+        struct Underlying: Swift.Error {}
+        let error = ResponseDecodingError(
+            expectedType: "Example.Result", rawResult: ["secret": "value"], underlyingError: Underlying())
+        #expect(error.expectedType == "Example.Result")
+        #expect(error.rawResult == ["secret": "value"])
+        #expect(error.underlyingError is Underlying)
+        #expect(error.localizedDescription == "Could not decode the result as Example.Result")
+        #expect(!String(describing: error).contains("secret"))
+    }
+
     /// A handshake client connected to `transport`, which answers initialize.
     private func connect(_ transport: MockTransport) async throws -> Client {
         let client = Client(name: "c", version: "1", configuration: .handshake)
