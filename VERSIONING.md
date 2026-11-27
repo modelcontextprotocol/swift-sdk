@@ -22,7 +22,8 @@ Covered:
 
 - Every `public` declaration of the `MCP` module: names, signatures, protocol requirements,
   enum cases, and documented behavior.
-- Wire behavior for each negotiated revision: what the SDK sends and what it accepts.
+- Wire behavior for each negotiated revision: what the SDK sends and what it accepts. For
+  extensions, see [Extensions](#extensions).
 - Defaults: configuration defaults, default handlers, default validators.
 - Supported platforms, the Swift tools versions of the manifests, and the major versions of
   dependencies.
@@ -124,6 +125,26 @@ type.
 
 1.0.0 follows that rule: it serves 2026-07-28, adds it to `Version.supported`, and
 makes `ProtocolMode.automatic` the client default ([docs/migration.md](docs/migration.md)).
+
+## Extensions
+
+Extensions are opt-in: code that does not enable one is not affected by it. The Swift API of an
+extension is covered like the rest of the `MCP` module. Its wire behavior depends on the
+extension's stage in the
+[extension lifecycle](https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/seps/3392-extension-lifecycle.md)
+(SEP-3392), which the directory of its specification shows:
+
+| Stage | Wire behavior |
+|---|---|
+| Stable | Covered like the core protocol: fixed for each protocol revision. |
+| Beta | Follows the extension's specification as the SDK implements it. A minor release may change it to follow a newer version of that specification, breaking changes included, and its release notes say what changed. |
+
+When a Beta wire change needs a new Swift API, the old one is deprecated, not removed
+([Deprecation](#deprecation)).
+
+At 1.0.0, MCP Apps (`io.modelcontextprotocol/ui`) is Stable. The Tasks extension
+(`io.modelcontextprotocol/tasks`), Skills (`io.modelcontextprotocol/skills`) and Server Cards are
+Beta. The release notes say when an extension changes stage.
 
 ## Support window for older revisions
 

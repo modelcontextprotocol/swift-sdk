@@ -110,6 +110,10 @@ The SEPs marked Planned in [SEP coverage](#sep-coverage), and:
   `ui/notifications/*`, the view's `tools/call` with visibility enforced, sampling through the
   host, size and display modes, and app-provided tools. It needs a `WKWebView` transport (Apple
   platforms only) and, for web hosts, the sandbox proxy ([design/apps.md](design/apps.md)).
+- The Events extension (SEP-3415, `io.modelcontextprotocol/events`, Beta): `events/list`, and
+  poll, push and webhook delivery, on the server and the client. Tracked in
+  [#376](https://github.com/modelcontextprotocol/swift-sdk/issues/376). The goal is 1.0.0 if it
+  is ready in time, 1.1.0 otherwise.
 
 The conformance harness exercises extensions only in the default leg, as scenarios that do not
 count toward a tier; their failing checks would be entries in
@@ -184,6 +188,7 @@ A change that implements a SEP updates its row.
 | 2640 | Skills | Extensions | Implemented | [Skills](#skills) |
 | 2663 | Tasks extension | Extensions | Implemented | [Tasks](#tasks) |
 | 3398 | Release cycle updates (Accepted) | Process | Not applicable | Process. |
+| 3415 | Events | Extensions | Planned | [#376](https://github.com/modelcontextprotocol/swift-sdk/issues/376): the goal is 1.0.0 if it is ready in time, 1.1.0 otherwise ([Planned](#planned)) |
 
 ## Conformance
 
