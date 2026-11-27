@@ -197,6 +197,41 @@ struct MCPErrorWireTests {
         expectWire(encoded, matches: ["code": -32042, "message": "Sign in", "data": data])
     }
 
+    @Test("URL elicitation metadata stays available through the error code")
+    func testURLElicitationWithMetadata() throws {
+        let item: Value = [
+            "mode": "url", "elicitationId": "e1", "url": "https://example.com/connect",
+            "message": "Continue", "_meta": [:],
+        ]
+        for data: Value in [
+            ["elicitations": .array([item])],
+            ["elicitations": .array([item]), "_meta": ["source": "test"]],
+        ] {
+            let error = try decode(MCPError.self, [
+                "code": -32042, "message": "Sign in", "data": try json(data),
+            ])
+            #expect(error == .serverError(code: -32042, message: "Sign in", data: data))
+            #expect(error.errorCode == .urlElicitationRequired)
+            #expect(error.recoverySuggestion == "Visit https://example.com/connect to complete the required authentication or input")
+            let encoded = try JSONDecoder().decode(Value.self, from: JSONEncoder().encode(error))
+            expectWire(encoded, matches: ["code": -32042, "message": "Sign in", "data": data])
+        }
+    }
+
+    @Test("-32042 with form mode is not treated as a URL elicitation")
+    func testURLElicitationWithFormMode() throws {
+        let item: Value = ["mode": "form", "elicitationId": "e1",
+                           "url": "https://example.com", "message": "Continue"]
+        let data: Value = ["elicitations": .array([item])]
+        let error = try decode(MCPError.self, [
+            "code": -32042, "message": "Sign in", "data": try json(data),
+        ])
+        #expect(error == .serverError(code: -32042, message: "Sign in", data: data))
+        #expect(error.recoverySuggestion == "Complete the required URL-based elicitation")
+        let encoded = try JSONDecoder().decode(Value.self, from: JSONEncoder().encode(error))
+        expectWire(encoded, matches: ["code": -32042, "message": "Sign in", "data": data])
+    }
+
     @Test(
         "Errors round-trip with and without a detail",
         arguments: [

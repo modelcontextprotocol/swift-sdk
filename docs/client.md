@@ -439,7 +439,7 @@ The result's `action` is `.accept`, `.decline` or `.cancel`. Only a form `.accep
 
 ### URL elicitation required
 
-On 2025-11-25 connections, a server can refuse a request until the user completes URL elicitations. It answers with `urlElicitationRequired` (-32042), whose `data.elicitations` lists `URLElicitationInfo` values (`elicitationId`, `url`, `message`). If the received data contains malformed elicitations or other fields, it decodes as `serverError` so the data remains available. The SDK neither opens the URLs nor retries.
+On 2025-11-25 connections, a server can refuse a request until the user completes URL elicitations. It answers with -32042 and `data.elicitations`. The SDK decodes data that fits `URLElicitationInfo` (`elicitationId`, `url`, `message`) as `urlElicitationRequired`. If an item has `_meta` or the data has other fields, it decodes as `serverError` so those fields remain available. Match `errorCode` to handle both cases. The SDK neither opens the URLs nor retries.
 
 ```swift
 var pending: [URLElicitationInfo] = []
@@ -450,13 +450,20 @@ await client.onNotification(ElicitationCompleteNotification.self) { message in
 do {
     let content = try await client.callTool(name: "connect-calendar").content
     print(content)
-} catch MCPError.urlElicitationRequired(let message, let elicitations) {
-    print(message)
-    for elicitation in elicitations {
+} catch let error as MCPError where error.errorCode == .urlElicitationRequired {
+    print(error.localizedDescription)
+    for item in error.data?.objectValue?["elicitations"]?.arrayValue ?? [] {
+        guard let fields = item.objectValue,
+            fields["mode"]?.stringValue == "url",
+            let id = fields["elicitationId"]?.stringValue,
+            let url = fields["url"]?.stringValue,
+            let message = fields["message"]?.stringValue
+        else { continue }
+        let elicitation = URLElicitationInfo(elicitationId: id, url: url, message: message)
         // Ask the user, then open elicitation.url in a browser.
         print(elicitation.elicitationId, elicitation.url)
+        pending.append(elicitation)
     }
-    pending = elicitations
 }
 ```
 
@@ -963,6 +970,17 @@ func describe(_ error: Error) -> String {
     guard let error = error as? MCPError else {
         return "not an MCP error: \(error)"  // for example CancellationError
     }
+    if error.errorCode == .urlElicitationRequired {
+        let urls = error.data?.objectValue?["elicitations"]?.arrayValue?.compactMap { item in
+            guard let fields = item.objectValue,
+                fields["mode"]?.stringValue == "url",
+                fields["elicitationId"]?.stringValue != nil,
+                fields["message"]?.stringValue != nil
+            else { return nil }
+            return fields["url"]?.stringValue
+        } ?? []
+        return "open \(urls) first"
+    }
     switch error {
     case .resourceNotFound(let uri, _):
         return "no resource at \(uri)"
@@ -970,8 +988,6 @@ func describe(_ error: Error) -> String {
         return "\(requested ?? "-") not served; the server serves \(supported)"
     case .missingRequiredClientCapabilities(let required, _):
         return "declare these capabilities: \(required)"
-    case .urlElicitationRequired(_, let elicitations):
-        return "open \(elicitations.map(\.url)) first"
     case .headerMismatch(let detail):
         return "HTTP headers do not match the body: \(detail ?? "")"
     case .connectionClosed, .transportError:
@@ -995,7 +1011,7 @@ func describe(_ error: Error) -> String {
 | `missingRequiredClientCapabilities` | -32021 | The request needs capabilities the client did not declare (`data.requiredCapabilities`). |
 | `unsupportedProtocolVersion(supported:requested:)` | -32022 | The server does not serve the requested version (`data.supported`). |
 | `urlElicitationRequired(message:elicitations:)` | -32042 | Complete the listed URL elicitations, then retry (2025-11-25 only). |
-| `serverError(code:message:data:)` | any | Unknown codes, -32000 and -32001 received from a server, or a known code whose data cannot fit its typed case. |
+| `serverError(code:message:data:)` | any | Unknown codes, -32000 and -32001 received from a server, -32021 with unreadable capabilities, or -32042 whose data cannot fit the typed case. |
 | `connectionClosed`, `transportError` | -32000, -32001 | Local transport failures; never decoded from the wire. |
 
 See [troubleshooting.md](troubleshooting.md) for causes and fixes.

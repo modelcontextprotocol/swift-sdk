@@ -17,7 +17,7 @@ each change that breaks source code.
 |---|---|---|
 | `MCPError` | New cases; `serverError` has a third associated value | Update exhaustive `switch` statements and `serverError` patterns |
 | `MCPError` decoding | -32000 and -32001 decode as `serverError`; -32602 with `data.uri` as `resourceNotFound`; without `data.detail`, the standard cases drop their own message text | Match the new cases |
-| -32042 error decoding | If the data cannot be represented entirely by `urlElicitationRequired`, decodes as `serverError` and keeps `data` | Handle `serverError(code:message:data:)` for malformed or extended URL elicitation errors |
+| -32042 error decoding | If the data cannot be represented entirely by `urlElicitationRequired`, decodes as `serverError` and keeps `data` | Match `errorCode == .urlElicitationRequired` to handle both cases |
 | `HTTPResponse` | `.data` and `.error` have new associated values | Update patterns |
 | `Client.Capabilities.experimental` | `[String: String]?` became `[String: Value]?` | Pass `Value`s |
 | `OAuthAuthorizationError` | A struct with a `code`, not an enum; eight new codes | Read details from properties instead of binding associated values |
