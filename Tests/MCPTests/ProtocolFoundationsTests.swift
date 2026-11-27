@@ -124,6 +124,77 @@ struct MCPErrorWireTests {
             message: "Sign in",
             elicitations: [.init(elicitationId: "e1", url: "https://example.com", message: "m")])
         #expect(try decode(MCPError.self, json(error)) == error)
+
+        let empty = try decode(
+            MCPError.self, ["code": -32042, "message": "Sign in", "data": ["elicitations": [Any]()]])
+        #expect(empty == .urlElicitationRequired(message: "Sign in", elicitations: []))
+    }
+
+    @Test("-32042 without an elicitations array keeps its data")
+    func testURLElicitationWithoutArray() throws {
+        let bare = try decode(MCPError.self, ["code": -32042, "message": "Sign in"])
+        #expect(bare == .serverError(code: -32042, message: "Sign in"))
+
+        let challenges: Value = ["challenges": ["scheme": "Bearer"]]
+        let withoutElicitations = try decode(
+            MCPError.self,
+            ["code": -32042, "message": "Sign in", "data": ["challenges": ["scheme": "Bearer"]]])
+        #expect(withoutElicitations == .serverError(
+            code: -32042, message: "Sign in", data: challenges))
+
+        let invalidArray: Value = ["elicitations": "unexpected", "challenges": ["scheme": "Bearer"]]
+        let malformed = try decode(
+            MCPError.self,
+            ["code": -32042, "message": "Sign in",
+             "data": ["elicitations": "unexpected", "challenges": ["scheme": "Bearer"]]])
+        #expect(malformed == .serverError(code: -32042, message: "Sign in", data: invalidArray))
+
+        let encoded = try JSONDecoder().decode(Value.self, from: JSONEncoder().encode(malformed))
+        expectWire(encoded, matches: [
+            "code": -32042, "message": "Sign in", "data": invalidArray,
+        ])
+    }
+
+    @Test("-32042 with an undecodable elicitation keeps its data")
+    func testURLElicitationWithInvalidItem() throws {
+        let valid: Value = ["mode": "url", "elicitationId": "e1",
+                            "url": "https://example.com", "message": "Continue"]
+        let invalid: Value = ["elicitationId": "e2", "url": "https://example.com"]
+        for items in [[Value.int(42)], [valid, invalid]] {
+            let data: Value = ["elicitations": .array(items)]
+            let error = try decode(MCPError.self, [
+                "code": -32042, "message": "Sign in", "data": try json(data),
+            ])
+            #expect(error == .serverError(code: -32042, message: "Sign in", data: data))
+            let encoded = try JSONDecoder().decode(Value.self, from: JSONEncoder().encode(error))
+            expectWire(encoded, matches: ["code": -32042, "message": "Sign in", "data": data])
+        }
+    }
+
+    @Test("-32042 with other data beside valid elicitations keeps its data")
+    func testURLElicitationWithAdditionalData() throws {
+        let item: Value = ["mode": "url", "elicitationId": "e1",
+                           "url": "https://example.com", "message": "Continue"]
+        let data: Value = ["elicitations": .array([item]), "challenges": ["scheme": "Bearer"]]
+        let error = try decode(MCPError.self, [
+            "code": -32042, "message": "Sign in", "data": try json(data),
+        ])
+        #expect(error == .serverError(code: -32042, message: "Sign in", data: data))
+        let encoded = try JSONDecoder().decode(Value.self, from: JSONEncoder().encode(error))
+        expectWire(encoded, matches: ["code": -32042, "message": "Sign in", "data": data])
+    }
+
+    @Test("-32042 with an extra elicitation field keeps its data")
+    func testURLElicitationWithAdditionalItemField() throws {
+        let item: Value = ["mode": "url", "elicitationId": "e1", "url": "https://example.com",
+                           "message": "Continue", "extra": "value"]
+        let data: Value = ["elicitations": .array([item])]
+        let error = try decode(MCPError.self, [
+            "code": -32042, "message": "Sign in", "data": try json(data),
+        ])
+        #expect(error == .serverError(code: -32042, message: "Sign in", data: data))
+        let encoded = try JSONDecoder().decode(Value.self, from: JSONEncoder().encode(error))
+        expectWire(encoded, matches: ["code": -32042, "message": "Sign in", "data": data])
     }
 
     @Test(
