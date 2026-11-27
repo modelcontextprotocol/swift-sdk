@@ -19,6 +19,7 @@ each change that breaks source code.
 |---|---|---|
 | `MCPError` | New cases; `serverError` has a third associated value | Update exhaustive `switch` statements and `serverError` patterns |
 | `MCPError` decoding | -32000 and -32001 decode as `serverError`; -32602 with `data.uri` as `resourceNotFound`; without `data.detail`, the standard cases drop their own message text | Match the new cases |
+| -32042 error decoding | If the data cannot be represented entirely by `urlElicitationRequired`, decodes as `serverError` and keeps `data` | Handle `serverError(code:message:data:)` for malformed or extended URL elicitation errors |
 | `HTTPResponse` | `.data` and `.error` have new associated values | Update patterns |
 | `Client.Capabilities.experimental` | `[String: String]?` became `[String: Value]?` | Pass `Value`s |
 | `OAuthAuthorizationError` | A struct with a `code`, not an enum; eight new codes | Read details from properties instead of binding associated values |
@@ -30,6 +31,7 @@ each change that breaks source code.
 | Content blocks, `InputRequest`, `InputResponse`, `CreateElicitation.Parameters` | New case `.unknown` for kinds from a later revision | Add it, or a `default`, to `switch` statements |
 | `HTTPClientAuthorizer` | `authorizationHeader(for:)` became `authorizationHeaders(for:method:)`; new requirement `handleChallenge(statusCode:headers:endpoint:operationKey:sentAuthorization:session:)`, returning `HTTPChallengeResult`, with a default that calls the Bool method | Update custom authorizers |
 | `Client` convenience methods | Return the result type, not a tuple; `startToolCall` replaces the `RequestContext` overload of `callTool`; `initialize()` is removed | Read the result's properties |
+| Peer result decoding | An undecodable result, including a server-to-client or task result, throws `ResponseDecodingError` with the expected type, raw result and decoding error. It is separate from `MCPError` | Catch this error to inspect a malformed result; use a `Method` with `Result == Value` for raw access |
 | `Client.connect(transport:)` | Returns `Client.ConnectionInfo`, whose `serverInfo` is optional | Unwrap `serverInfo` |
 | `Version.latest` | Renamed `Version.latestHandshake`; the old name is deprecated | Rename |
 | `Tool.Content` | `annotations` and `_meta` default to `nil`; the deprecated short forms are removed | Use `.text(text:)`, `.image(data:mimeType:)`, `.audio(data:mimeType:)` |
@@ -60,7 +62,7 @@ each change that breaks source code.
 
 | Case | Code | `data` |
 |---|---|---|
-| `serverError(code:message:data:)` | any other code | as sent |
+| `serverError(code:message:data:)` | any code | as sent |
 | `resourceNotFound(uri:message:)` | -32602 | `{"uri": ...}` |
 | `headerMismatch(_:)` | -32020 | `{"detail": ...}` |
 | `missingRequiredClientCapabilities(_:message:)` | -32021 | `{"requiredCapabilities": ...}` |
