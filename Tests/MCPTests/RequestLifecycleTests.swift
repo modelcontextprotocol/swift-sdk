@@ -612,41 +612,41 @@ struct BatchTests {
         let transport = MockTransport()
         let client = Client(name: "c", version: "1", configuration: .handshake)
 
-        let initTask = Task {
+        let answer = Task {
             try await transport.waitForSentMessages()
-            if let lastMessage = await transport.sentMessages.last,
-                let data = lastMessage.data(using: .utf8),
-                let request = try? JSONDecoder().decode(Request<Initialize>.self, from: data)
-            {
-                let response = Initialize.response(
+            let data = try #require(await transport.sentMessages.last?.data(using: .utf8))
+            let request = try JSONDecoder().decode(Request<Initialize>.self, from: data)
+            try await transport.queue(
+                response: Initialize.response(
                     id: request.id,
                     result: .init(
-                        protocolVersion: Version.latestHandshake,
-                        capabilities: .init(),
-                        serverInfo: .init(name: "TestServer", version: "1.0"),
-                        instructions: nil
-                    )
-                )
-                try await transport.queue(response: response)
-            }
+                        protocolVersion: Version.latestHandshake, capabilities: .init(),
+                        serverInfo: .init(name: "s", version: "1"), instructions: nil)))
         }
 
         try await client.connect(transport: transport)
-        initTask.cancel()
+        try await answer.value
 
         await transport.setFailSend(true)
 
-        nonisolated(unsafe) var first: Task<Ping.Result, Error>?
-        nonisolated(unsafe) var second: Task<Ping.Result, Error>?
+        nonisolated(unsafe) var added: [Task<Ping.Result, Error>] = []
         await #expect(throws: MCPError.self) {
             try await client.withBatch { batch in
-                first = try await batch.addRequest(Ping.request())
-                second = try await batch.addRequest(Ping.request())
+                added.append(try await batch.addRequest(Ping.request()))
+                added.append(try await batch.addRequest(Ping.request()))
             }
         }
 
-        await #expect(throws: MCPError.self) { _ = try await #require(first).value }
-        await #expect(throws: MCPError.self) { _ = try await #require(second).value }
+        #expect(added.count == 2)
+        for task in added {
+            // A request that is never failed does not respond to cancellation.
+            let result = await outcome(within: .seconds(5)) { try await task.value }
+            #expect(!result.didTimeOut, "A request of a batch whose send failed never completed")
+            guard case .transportError = result.mcpError else {
+                Issue.record("Expected the send's transport error, got \(result)")
+                continue
+            }
+        }
         await client.disconnect()
     }
 }
