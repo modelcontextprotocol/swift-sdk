@@ -717,6 +717,9 @@ struct ClientUndecodableResponseTests {
             #expect(error.rawResult.objectValue?["_meta"] != nil)
             #expect(error.description.contains(error.expectedType))
             #expect(error.localizedDescription.contains(error.expectedType))
+            #expect(error.description.contains("count: Expected to decode Int"))
+            #expect(error.localizedDescription.contains("count: Expected to decode Int"))
+            #expect(!error.description.contains("DecodingError.Context"))
             #expect(!error.description.contains("not a number"))
             #expect(!String(describing: error).contains("not a number"))
             #expect(!error.localizedDescription.contains("not a number"))
@@ -731,14 +734,37 @@ struct ClientUndecodableResponseTests {
 
     @Test("A response decoding error built by a caller keeps its fields")
     func responseDecodingErrorInit() {
-        struct Underlying: Swift.Error {}
+        struct Underlying: Swift.Error, CustomStringConvertible {
+            var description: String { "bad shape" }
+        }
         let error = ResponseDecodingError(
             expectedType: "Example.Result", rawResult: ["secret": "value"], underlyingError: Underlying())
         #expect(error.expectedType == "Example.Result")
         #expect(error.rawResult == ["secret": "value"])
         #expect(error.underlyingError is Underlying)
-        #expect(error.localizedDescription == "Could not decode the result as Example.Result")
+        #expect(error.localizedDescription == "Could not decode the result as Example.Result: bad shape")
         #expect(!String(describing: error).contains("secret"))
+    }
+
+    @Test("A response decoding error prints a decoding error as its path and reason")
+    func responseDecodingErrorSummary() {
+        struct Key: CodingKey {
+            let stringValue: String
+            let intValue: Int?
+            init(stringValue: String) { (self.stringValue, self.intValue) = (stringValue, nil) }
+            init(intValue: Int) { (self.stringValue, self.intValue) = ("Index \(intValue)", intValue) }
+        }
+        func summary(_ underlying: DecodingError) -> String {
+            ResponseDecodingError(expectedType: "R", rawResult: .null, underlyingError: underlying).description
+        }
+        let nested = DecodingError.Context(
+            codingPath: [Key(stringValue: "content"), Key(intValue: 0), Key(stringValue: "text")],
+            debugDescription: "Expected to decode String but found a number instead.")
+        #expect(
+            summary(.typeMismatch(String.self, nested))
+                == "Could not decode the result as R: content[0].text: Expected to decode String but found a number instead.")
+        let root = DecodingError.Context(codingPath: [], debugDescription: "The given data was not valid JSON.")
+        #expect(summary(.dataCorrupted(root)) == "Could not decode the result as R: The given data was not valid JSON.")
     }
 
     /// A handshake client connected to `transport`, which answers initialize.

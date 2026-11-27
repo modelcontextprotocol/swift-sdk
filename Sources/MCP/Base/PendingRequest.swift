@@ -16,11 +16,36 @@ public struct ResponseDecodingError: LocalizedError, Sendable, CustomStringConve
         self.underlyingError = underlyingError
     }
 
-    /// A summary that does not include the result or decoding error text.
-    public var description: String { "Could not decode the result as \(expectedType)" }
+    /// The expected type and the decoding error, without the result.
+    public var description: String {
+        "Could not decode the result as \(expectedType): \(Self.summary(of: underlyingError))"
+    }
 
     /// The same summary for `localizedDescription`.
     public var errorDescription: String? { description }
+
+    /// A `DecodingError` as its coding path and debug description, such as
+    /// `content[0].text: Expected to decode String but found a number instead.`;
+    /// any other error as it prints.
+    private static func summary(of error: any Swift.Error) -> String {
+        guard let error = error as? DecodingError else { return "\(error)" }
+        let context: DecodingError.Context
+        switch error {
+        case .typeMismatch(_, let c), .valueNotFound(_, let c), .keyNotFound(_, let c), .dataCorrupted(let c):
+            context = c
+        @unknown default:
+            return "\(error)"
+        }
+        var path = ""
+        for key in context.codingPath {
+            if let index = key.intValue {
+                path += "[\(index)]"
+            } else {
+                path += path.isEmpty ? key.stringValue : ".\(key.stringValue)"
+            }
+        }
+        return path.isEmpty ? context.debugDescription : "\(path): \(context.debugDescription)"
+    }
 }
 
 /// Decodes a wire result and retains the raw value when decoding fails.
