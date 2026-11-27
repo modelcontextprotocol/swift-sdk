@@ -45,6 +45,33 @@ struct Base64DataTests {
         #expect(!Data.isDataURL(string: ""))
     }
 
+    @Test(
+        "A media type that is not type/subtype makes no data URL (RFC 2397 §3)",
+        arguments: [
+            "data: 3 rows, 2 columns",
+            "data:text,hi",
+            "data:text/,hi",
+            "data:/plain,hi",
+            "data:text/plain extra,hi",
+            "data:text/plain;charset=,hi",
+            "data:text/plain;charset=utf 8,hi",
+        ])
+    func testMediaTypeMustBeTypeSlashSubtype(string: String) throws {
+        #expect(!Data.isDataURL(string: string))
+        #expect(Data.parseDataURL(string) == nil)
+        let json = try JSONEncoder().encode(string)
+        #expect(try JSONDecoder().decode(Value.self, from: json) == .string(string))
+    }
+
+    @Test("Media types with token characters stay data URLs")
+    func testMediaTypeTokenCharacters() {
+        #expect(Data.parseDataURL("data:image/svg+xml;base64,PHN2Zy8+")?.mimeType == "image/svg+xml")
+        #expect(
+            Data.parseDataURL("data:application/vnd.example-v1+json,%7B%7D")?.mimeType
+                == "application/vnd.example-v1+json")
+        #expect(Data.parseDataURL("data:TEXT/PLAIN,hi")?.data == Data("hi".utf8))
+    }
+
     @Test("Parse data URL with plain text")
     func testParseDataURLPlainText() {
         // Example from RFC 2397

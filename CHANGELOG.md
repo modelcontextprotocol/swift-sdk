@@ -166,6 +166,9 @@ Behavior that can break working code ([docs/migration.md](docs/migration.md#beha
 - A response the client cannot decode (an error `code` that is a string, no `jsonrpc`) fails the
   request it names with `internalError("The server sent an invalid response")` instead of leaving
   it to wait for its timeout, and the warning logs a sanitized prefix, not the whole message.
+- `Data.isDataURL(string:)` and `Data.parseDataURL(_:)` accept only an empty or `type/subtype`
+  media type made of RFC 2045 tokens (RFC 2397 §3), so text such as `data: 3 rows, 2 columns`
+  decodes as `Value.string`, not `.data`.
 - From `main` after 0.12.1: `Data.parseDataURL(_:)` reads `;base64` from the header only and
   decodes any percent-escaped byte (#309, #310); `client_secret_basic` percent-encodes the client
   credentials (RFC 6749 §2.3.1, #300); PKCE verifier characters are uniformly distributed (#303);

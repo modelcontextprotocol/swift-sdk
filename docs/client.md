@@ -239,7 +239,7 @@ if let structured = result.structuredContent {
 }
 ```
 
-A string in `structuredContent`, or in another `Value` field of a result, that is a whole `data:` URL arrives as `.data(mimeType:_:)`, as for [tool arguments](server.md#calling-tools). Read it with `dataValue`. When you encode the `Value` again, as above, it becomes a base64 `data:` URL: `data:,hi` becomes `data:text/plain;base64,aGk=`.
+A string in `structuredContent`, in another `Value` field of a result, or in the `data` of an `MCPError` from the server, that is a whole `data:` URL arrives as `.data(mimeType:_:)`. The rules are the same as for [tool arguments](server.md#calling-tools). Read it with `dataValue`. When you encode the `Value` again, as above, it becomes a base64 `data:` URL: `data:,hi` becomes `data:text/plain;base64,aGk=`.
 
 ### Header parameters
 
