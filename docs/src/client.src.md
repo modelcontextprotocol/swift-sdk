@@ -238,7 +238,7 @@ The result's `action` is `.accept`, `.decline` or `.cancel`. Only a form `.accep
 
 ### URL elicitation required
 
-On 2025-11-25 connections, a server can refuse a request until the user completes URL elicitations. It answers with -32042 and `data.elicitations`. The SDK decodes data that fits `URLElicitationInfo` (`elicitationId`, `url`, `message`) as `urlElicitationRequired`. If an item has `_meta` or the data has other fields, it decodes as `serverError` so those fields remain available. Match `errorCode` to handle both cases. The SDK neither opens the URLs nor retries.
+On 2025-11-25 connections, a server can refuse a request until the user completes URL elicitations. It answers with -32042 and `data.elicitations`. The SDK decodes it as `urlElicitationRequired` only when `data` contains an `elicitations` array and no other fields, and every item has `mode: "url"` and exactly the fields represented by `URLElicitationInfo` (`mode`, `elicitationId`, `url`, `message`). Otherwise, including missing fields or extra fields such as `_meta` or `task`, it decodes as `serverError` so the data remains available. Match `errorCode` to handle both cases. The SDK neither opens the URLs nor retries.
 
 %include Examples/Snippets/Client/Features.swift url-elicitation-required
 
