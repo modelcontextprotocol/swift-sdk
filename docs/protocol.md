@@ -314,7 +314,7 @@ To add headers to every request (an API key, a user agent), pass `requestModifie
 | POST request | SSE stream that carries related notifications and requests, then the response. |
 | POST notification or response | 202 Accepted. |
 | GET | The standalone SSE stream for messages not tied to a request. One per session (409 for a second). With `Last-Event-ID` it replays stored events of that stream. |
-| DELETE | Ends the session; later requests get 404. |
+| DELETE | Ends the session; later validated requests with a session ID get 404, and those without one get 400. |
 
 Requests whose `MCP-Protocol-Version` is a stateless revision get 400 with -32022 and `data.supported` set to the handshake revisions, so a client in `.automatic` mode falls back to `initialize`.
 
@@ -370,8 +370,8 @@ Validation errors:
 
 | Status | Cause |
 |---|---|
-| 400 | Empty or invalid JSON-RPC body; missing `Mcp-Session-Id`; request before `initialize`; second `initialize`; unsupported `MCP-Protocol-Version` (-32022); a stateless request (-32022). |
-| 404 | Unknown session ID; session ended. |
+| 400 | Empty or invalid JSON-RPC body; missing `Mcp-Session-Id`, including after termination; request before `initialize`; second `initialize`; unsupported `MCP-Protocol-Version` (-32022); a stateless request (-32022). |
+| 404 | Unknown or expired session ID, including any ID sent after the session ended. A transport stopped before a session existed answers 400, as before `initialize`. |
 | 403, 421 | `Origin` or `Host` not allowed by `OriginValidator`. |
 | 406 | POST `Accept` lacks `application/json` or `text/event-stream`; GET `Accept` lacks `text/event-stream`. |
 | 415 | `Content-Type` is not `application/json`. |

@@ -1,9 +1,9 @@
 import Foundation
 import Logging
 
-/// A stateful HTTP server transport that manages sessions and uses SSE for streaming responses.
+/// A stateful HTTP server transport for one session, using SSE for streaming responses.
 ///
-/// This transport implements the MCP Streamable HTTP specification with full session management:
+/// This transport implements the MCP Streamable HTTP specification for one session:
 /// - Assigns a session ID during initialization (via `Mcp-Session-Id` header)
 /// - POST requests receive SSE-streamed responses
 /// - GET requests establish a standalone SSE stream for server-initiated messages
@@ -14,15 +14,13 @@ import Logging
 /// ## Usage
 ///
 /// ```swift
-/// let transport = StatefulHTTPServerTransport()  // Uses UUID by default
-///
-/// // Start the MCP server with this transport
+/// // Your HTTP router creates one transport and Server per session.
+/// let transport = StatefulHTTPServerTransport()
 /// try await server.start(transport: transport)
-///
-/// // In your HTTP framework handler:
 /// let response = await transport.handleRequest(httpRequest)
-/// // Convert response to your framework's response type and return it
 /// ```
+/// The router routes later requests by `Mcp-Session-Id` and removes the session after DELETE.
+/// See `docs/protocol.md` and `Examples/http-server` for a complete router.
 ///
 /// ## Framework Integration
 ///
@@ -175,7 +173,9 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
     }
 
     /// Terminates the session: closes every SSE stream and the incoming
-    /// stream, and drops stored events; later requests get 404.
+    /// stream, and drops stored events. After validation, later requests
+    /// without a session ID get 400; if a session existed, requests with any
+    /// session ID get 404.
     public func disconnect() async {
         terminate()
     }
@@ -242,10 +242,22 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
     /// - Others: 405 Method Not Allowed
     public func handleRequest(_ request: HTTPRequest) async -> HTTPResponse {
         if terminated {
+            let context = HTTPValidationContext(
+                httpMethod: request.method.uppercased(), sessionID: sessionID,
+                supportedProtocolVersions: Set(Version.handshake))
+            if let response = validationPipeline.validate(request, context: context) {
+                return withoutSessionHeader(response)
+            }
+
+            let requestedSessionID = request.header(HTTPHeaderName.sessionID)
+            let isTerminatedSession = sessionID != nil && requestedSessionID == sessionID
+            let hasEndedSession = sessionID != nil && requestedSessionID != nil
             return .error(
-                statusCode: 404,
-                .invalidRequest("Not Found: Session has been terminated"),
-                sessionID: sessionID
+                statusCode: hasEndedSession ? 404 : 400,
+                .invalidRequest(hasEndedSession
+                    ? "Not Found: Session has been terminated"
+                    : "Bad Request: No active session"),
+                sessionID: isTerminatedSession ? sessionID : nil
             )
         }
 
@@ -764,6 +776,25 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
         return headers
     }
 
+    private func withoutSessionHeader(_ response: HTTPResponse) -> HTTPResponse {
+        func filtered(_ headers: [String: String]) -> [String: String] {
+            headers.filter { $0.key.caseInsensitiveCompare(HTTPHeaderName.sessionID) != .orderedSame }
+        }
+
+        switch response {
+        case .accepted(let headers):
+            return .accepted(headers: filtered(headers))
+        case .ok(let headers):
+            return .ok(headers: filtered(headers))
+        case .data(let data, let statusCode, let headers):
+            return .data(data, statusCode: statusCode, headers: filtered(headers))
+        case .stream(let stream, let headers):
+            return .stream(stream, headers: filtered(headers))
+        case .error(let statusCode, let error, let id, _, let extraHeaders):
+            return .error(statusCode: statusCode, error, id: id, extraHeaders: filtered(extraHeaders))
+        }
+    }
+
     private func isValidSessionID(_ id: String) -> Bool {
         guard !id.isEmpty else { return false }
         return id.utf8.allSatisfy { $0 >= 0x21 && $0 <= 0x7E }
@@ -794,7 +825,8 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
     // MARK: - Termination
 
     /// Terminates the session, closing all active streams.
-    /// After termination, all requests receive 404 Not Found.
+    /// After validation, requests without a session ID get 400; if a session
+    /// existed, requests with any session ID get 404.
     private func terminate() {
         guard !terminated else { return }
         terminated = true
