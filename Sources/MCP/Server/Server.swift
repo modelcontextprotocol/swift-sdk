@@ -532,9 +532,15 @@ public actor Server {
                             await handleResponse(response)
                         } else if let request = try? decoder.decode(AnyRequest.self, from: data) {
                             guard admit(request.id) else {
-                                try? await send(
-                                    AnyMethod.response(
-                                        id: request.id, error: .invalidRequest(Self.inProgress(request.id))))
+                                do {
+                                    try await send(
+                                        AnyMethod.response(
+                                            id: request.id, error: .invalidRequest(Self.inProgress(request.id))))
+                                } catch {
+                                    await logger?.error(
+                                        "Failed to send error response",
+                                        metadata: ["id": "\(request.id)", "error": "\(error)"])
+                                }
                                 continue
                             }
                             // Handle request in a separate task to avoid blocking the receive loop
@@ -2897,14 +2903,16 @@ public actor Server {
     /// Records a request received on the connection in `startingRequests`,
     /// before its task starts, so that a cancellation arriving first is kept.
     /// Returns `false`, recording nothing, for a request whose id is in
-    /// flight: it is answered with -32600, and the entries of the request
-    /// that has the id, which its cancellation and cleanup use, are kept.
+    /// flight, not answered yet: it is answered with -32600, and the entries
+    /// of the request that has the id, which its cancellation and cleanup
+    /// use, are kept.
     ///
-    /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/basic#requests
+    /// - SeeAlso: https://modelcontextprotocol.io/specification/2026-07-28/basic#requests
     private func admit(_ id: ID) -> Bool {
-        // The request ID MUST NOT have been previously used by the requestor
-        // within the same session (2025-11-25), nor match the ID of a request
-        // not answered yet (2026-07-28).
+        // The request ID MUST NOT match the ID of any other request the
+        // sender has issued and not yet received a response for (2026-07-28
+        // basic, Requests). 2025-11-25 forbids any reuse within the session;
+        // only the reuse of an id in flight is refused, under either revision.
         guard startingRequests[id] == nil, pendingRequestTasks[id] == nil, listenRequests[id] == nil else {
             return false
         }

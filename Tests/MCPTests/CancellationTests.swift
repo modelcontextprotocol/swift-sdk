@@ -396,6 +396,39 @@ struct CancellationTests {
     }
 
     @Test(
+        "A refusal of an id in flight that cannot be sent is logged, and the next message is handled",
+        .timeLimit(.minutes(1)))
+    func testFailedRefusalIsLogged() async throws {
+        let server = Server(name: "TestServer", version: "1.0", capabilities: .init(tools: .init()))
+        let gate = BatchGate()
+        await server.withMethodHandler(CallTool.self) { params in
+            await gate.ran(params.name)
+            _ = await eventually { await gate.isOpen }
+            return CallTool.Result(content: [.text(text: params.name, annotations: nil, _meta: nil)])
+        }
+        let transport = ControlledSendTransport(failing: { $0.contains("already in progress") })
+        try await server.start(transport: transport)
+        var events = transport.events.makeAsyncIterator()
+
+        await transport.deliver(call("x", "first"))
+        #expect(await eventually { await gate.names == ["first"] })
+        await transport.deliver(call("x", "second"))
+        await transport.deliver(#"{"jsonrpc":"2.0","id":"after","method":"ping"}"#)
+
+        // The receive loop sends the refusal before it reads the ping.
+        var seen: [String] = []
+        while let event = await events.next() {
+            seen.append(event)
+            if event.hasPrefix("sent "), event.contains(#""id":"after""#) { break }
+        }
+        #expect(seen.contains { $0.hasPrefix("failed ") && $0.contains("already in progress") })
+        #expect(seen.contains("log Failed to send error response"))
+        #expect(await gate.names == ["first"])
+        await gate.open()
+        await server.stop()
+    }
+
+    @Test(
         "Cancelling a request after a duplicate of its id was refused cancels its handler",
         .timeLimit(.minutes(1)))
     func testCancellationAfterRefusedDuplicate() async throws {
@@ -632,6 +665,65 @@ private actor GatedContextTransport: Transport, HTTPContextProviding {
         eventSink.yield("context \(id)")
         await withCheckedContinuation { gate = $0 }
         return nil
+    }
+}
+
+/// A transport that reports every message the server sends, or fails to
+/// send, and every message it logs as events. A send that `failing` matches
+/// throws. The first send that `holdingFirst` matches is reported, as if it
+/// reached the client, and then waits in `send` until the test releases it.
+private actor ControlledSendTransport: Transport {
+    nonisolated let logger: Logger
+    nonisolated let events: AsyncStream<String>
+    private nonisolated let eventSink: AsyncStream<String>.Continuation
+    private let incoming: AsyncThrowingStream<Data, Swift.Error>
+    private let incomingSink: AsyncThrowingStream<Data, Swift.Error>.Continuation
+    private var holding: (@Sendable (String) -> Bool)?
+    private let failing: @Sendable (String) -> Bool
+    private var held: [CheckedContinuation<Void, Never>] = []
+    private var released = false
+
+    init(
+        holdingFirst holding: (@Sendable (String) -> Bool)? = nil,
+        failing: @escaping @Sendable (String) -> Bool = { _ in false }
+    ) {
+        let (events, eventSink) = AsyncStream<String>.makeStream()
+        self.events = events
+        self.eventSink = eventSink
+        logger = Logger(label: "mcp.test.controlled-send") { _ in EventLogHandler(sink: eventSink) }
+        (incoming, incomingSink) = AsyncThrowingStream<Data, Swift.Error>.makeStream()
+        self.holding = holding
+        self.failing = failing
+    }
+
+    func connect() async throws {}
+
+    func disconnect() async {
+        incomingSink.finish()
+        release()
+    }
+
+    func send(_ data: Data) async throws {
+        let message = String(decoding: data, as: UTF8.self)
+        if failing(message) {
+            eventSink.yield("failed " + message)
+            throw MCPError.internalError("Send failed")
+        }
+        eventSink.yield("sent " + message)
+        if !released, let holding, holding(message) {
+            self.holding = nil
+            await withCheckedContinuation { held.append($0) }
+        }
+    }
+
+    func receive() -> AsyncThrowingStream<Data, Swift.Error> { incoming }
+
+    func deliver(_ data: String) { incomingSink.yield(Data(data.utf8)) }
+
+    func release() {
+        released = true
+        for send in held { send.resume() }
+        held = []
     }
 }
 
