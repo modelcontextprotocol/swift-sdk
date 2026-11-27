@@ -242,7 +242,7 @@ Validation errors:
 | Status | Cause |
 |---|---|
 | 400 | Empty or invalid JSON-RPC body; missing `Mcp-Session-Id`, including after termination; request before `initialize`; second `initialize`; unsupported `MCP-Protocol-Version` (-32022); a stateless request (-32022). |
-| 404 | Unknown or expired session ID, including any ID sent to a terminated transport. |
+| 404 | Unknown or expired session ID, including any ID sent after the session ended. A transport stopped before a session existed answers 400, as before `initialize`. |
 | 403, 421 | `Origin` or `Host` not allowed by `OriginValidator`. |
 | 406 | POST `Accept` lacks `application/json` or `text/event-stream`; GET `Accept` lacks `text/event-stream`. |
 | 415 | `Content-Type` is not `application/json`. |

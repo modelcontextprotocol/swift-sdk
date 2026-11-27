@@ -273,10 +273,10 @@ Server transports:
 |---|---|---|
 | 400 | both | Empty body or invalid JSON-RPC; an unsupported `MCP-Protocol-Version` header (-32022). |
 | 400 | stateless | At 2026-07-28, JSON-RPC errors -32600, -32602, -32020, -32021 and -32022. |
-| 400 | stateful | No session yet (`Session not initialized`), a missing `Mcp-Session-Id`, a second `initialize` on the session, an unknown `Last-Event-ID`, a stateless request (-32022). |
+| 400 | stateful | No session yet (`Session not initialized`), a missing `Mcp-Session-Id` (also after the session ended), a second `initialize` on the session, an unknown `Last-Event-ID`, a stateless request (-32022). |
 | 403 | both | An `Origin` header that the `OriginValidator` does not allow. |
 | 404 | stateless | At 2026-07-28, -32601; any request after the transport stopped. |
-| 404 | stateful | An unknown or expired `Mcp-Session-Id`; any request after the session ended. |
+| 404 | stateful | An unknown or expired `Mcp-Session-Id`, including any ID sent after the session ended. |
 | 405 | stateless | Any method other than POST. The `Allow` header is `POST`. |
 | 405 | stateful | Any method other than GET, POST and DELETE. |
 | 406 | both | An `Accept` header without `application/json` (stateless), or without both `application/json` and `text/event-stream` (stateful POST). |
