@@ -155,6 +155,48 @@ struct MCPErrorWireTests {
         ])
     }
 
+    @Test("-32042 with an undecodable elicitation keeps its data")
+    func testURLElicitationWithInvalidItem() throws {
+        let valid: Value = ["mode": "url", "elicitationId": "e1",
+                            "url": "https://example.com", "message": "Continue"]
+        let invalid: Value = ["elicitationId": "e2", "url": "https://example.com"]
+        for items in [[Value.int(42)], [valid, invalid]] {
+            let data: Value = ["elicitations": .array(items)]
+            let error = try decode(MCPError.self, [
+                "code": -32042, "message": "Sign in", "data": try json(data),
+            ])
+            #expect(error == .serverError(code: -32042, message: "Sign in", data: data))
+            let encoded = try JSONDecoder().decode(Value.self, from: JSONEncoder().encode(error))
+            expectWire(encoded, matches: ["code": -32042, "message": "Sign in", "data": data])
+        }
+    }
+
+    @Test("-32042 with other data beside valid elicitations keeps its data")
+    func testURLElicitationWithAdditionalData() throws {
+        let item: Value = ["mode": "url", "elicitationId": "e1",
+                           "url": "https://example.com", "message": "Continue"]
+        let data: Value = ["elicitations": .array([item]), "challenges": ["scheme": "Bearer"]]
+        let error = try decode(MCPError.self, [
+            "code": -32042, "message": "Sign in", "data": try json(data),
+        ])
+        #expect(error == .serverError(code: -32042, message: "Sign in", data: data))
+        let encoded = try JSONDecoder().decode(Value.self, from: JSONEncoder().encode(error))
+        expectWire(encoded, matches: ["code": -32042, "message": "Sign in", "data": data])
+    }
+
+    @Test("-32042 with an extra elicitation field keeps its data")
+    func testURLElicitationWithAdditionalItemField() throws {
+        let item: Value = ["mode": "url", "elicitationId": "e1", "url": "https://example.com",
+                           "message": "Continue", "extra": "value"]
+        let data: Value = ["elicitations": .array([item])]
+        let error = try decode(MCPError.self, [
+            "code": -32042, "message": "Sign in", "data": try json(data),
+        ])
+        #expect(error == .serverError(code: -32042, message: "Sign in", data: data))
+        let encoded = try JSONDecoder().decode(Value.self, from: JSONEncoder().encode(error))
+        expectWire(encoded, matches: ["code": -32042, "message": "Sign in", "data": data])
+    }
+
     @Test(
         "Errors round-trip with and without a detail",
         arguments: [

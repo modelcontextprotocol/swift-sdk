@@ -43,8 +43,8 @@ will change in a later major version.
   the wire, -32000 and -32001 are `serverError(code:message:data:)`.
 
 - `serverError(code:message:data:)` is the case for every code without its
-  own case, including errors from clients. Its `localizedDescription` starts
-  with `Server error:`.
+  own case, including errors from clients, and for known codes whose data
+  cannot fit their typed case. Its `localizedDescription` starts with `Server error:`.
 
 - `resourceNotFound` and `invalidParams` share -32602. Decoding picks
   `resourceNotFound` when `data` has a `uri` and no `detail`.

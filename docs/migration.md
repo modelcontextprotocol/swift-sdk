@@ -19,7 +19,7 @@ each change that breaks source code.
 |---|---|---|
 | `MCPError` | New cases; `serverError` has a third associated value | Update exhaustive `switch` statements and `serverError` patterns |
 | `MCPError` decoding | -32000 and -32001 decode as `serverError`; -32602 with `data.uri` as `resourceNotFound`; without `data.detail`, the standard cases drop their own message text | Match the new cases |
-| -32042 error decoding | Without a `data.elicitations` array, decodes as `serverError` and keeps `data` instead of an empty `urlElicitationRequired` | Handle `serverError(code:message:data:)` for malformed URL elicitation errors |
+| -32042 error decoding | If the data cannot be represented entirely by `urlElicitationRequired`, decodes as `serverError` and keeps `data` | Handle `serverError(code:message:data:)` for malformed or extended URL elicitation errors |
 | `HTTPResponse` | `.data` and `.error` have new associated values | Update patterns |
 | `Client.Capabilities.experimental` | `[String: String]?` became `[String: Value]?` | Pass `Value`s |
 | `OAuthAuthorizationError` | A struct with a `code`, not an enum; eight new codes | Read details from properties instead of binding associated values |
@@ -60,7 +60,7 @@ each change that breaks source code.
 
 | Case | Code | `data` |
 |---|---|---|
-| `serverError(code:message:data:)` | any other code | as sent |
+| `serverError(code:message:data:)` | any code | as sent |
 | `resourceNotFound(uri:message:)` | -32602 | `{"uri": ...}` |
 | `headerMismatch(_:)` | -32020 | `{"detail": ...}` |
 | `missingRequiredClientCapabilities(_:message:)` | -32021 | `{"requiredCapabilities": ...}` |
