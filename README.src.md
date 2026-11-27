@@ -22,11 +22,11 @@ At 2026-07-28 the SDK supports server discovery, SEP-2243 request headers,
 `subscriptions/listen` notification streams, multi round-trip requests with
 sealed `requestState`, result caching hints, and the tasks extension; tasks
 also work at 2025-11-25. Servers serve skills (SEP-2640), and clients load them
-verified, at every revision. Servers also serve the views of
-[MCP Apps](docs/server.md#mcp-apps) (SEP-1865, `io.modelcontextprotocol/ui`)
-and [Server Cards](docs/server.md#server-cards) (SEP-2127); clients read the
-views, and fetch and check the cards. The View-Host bridge of MCP Apps is not
-implemented. The conformance tier score
+verified, at every revision. Servers also serve
+[Server Cards](docs/server.md#server-cards) (SEP-2127) and the views of
+[MCP Apps](docs/server.md#mcp-apps) (SEP-1865, `io.modelcontextprotocol/ui`);
+clients fetch and check the cards, and read the views. The View-Host bridge of
+MCP Apps is not implemented. The conformance tier score
 is 100% for clients and servers at 2025-11-25 and 2026-07-28; see
 [ROADMAP.md](ROADMAP.md).
 
