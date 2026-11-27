@@ -338,6 +338,34 @@ import Testing
             await transport.disconnect()
         }
 
+        @Test("A send whose completion reports an error throws it")
+        func testSendCompletionErrorThrows() async throws {
+            let mockConnection = MockNetworkConnection()
+            let transport = NetworkTransport(
+                mockConnection,
+                heartbeatConfig: .disabled,
+                reconnectionConfig: .disabled
+            )
+            try await transport.connect()
+
+            mockConnection.holdSendCompletions()
+            let sent = Task {
+                await outcome(within: .seconds(30)) {
+                    try await transport.send(Data(#"{"key":"value"}"#.utf8))
+                }
+            }
+            #expect(await eventually { mockConnection.heldSendCount == 1 })
+
+            let error = NWError.posix(.ECONNRESET)
+            mockConnection.completeHeldSends(error: error)
+
+            let result = await sent.value
+            #expect(!result.didTimeOut, "send never finished")
+            #expect(result.mcpError == .internalError("Send error: \(error)"))
+
+            await transport.disconnect()
+        }
+
         @Test("A send pending when the transport is disconnected and released throws")
         func testPendingSendAfterTransportReleased() async throws {
             let mockConnection = MockNetworkConnection()
@@ -364,11 +392,12 @@ import Testing
             }
 
             // Cancelling a connection fails its pending sends with ECANCELED.
-            mockConnection.completeHeldSends(error: .posix(.ECANCELED))
+            let error = NWError.posix(.ECANCELED)
+            mockConnection.completeHeldSends(error: error)
 
             let result = await sent.value
             #expect(!result.didTimeOut, "send never finished")
-            #expect(result.mcpError != nil)
+            #expect(result.mcpError == .internalError("Send error: \(error)"))
 
             let deadline = ContinuousClock.now + .seconds(30)
             while weakTransport != nil && ContinuousClock.now < deadline {
