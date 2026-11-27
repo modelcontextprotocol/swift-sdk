@@ -238,7 +238,7 @@ The result's `action` is `.accept`, `.decline` or `.cancel`. Only a form `.accep
 
 ### URL elicitation required
 
-On 2025-11-25 connections, a server can refuse a request until the user completes URL elicitations. It answers with `urlElicitationRequired` (-32042), whose `data.elicitations` lists `URLElicitationInfo` values (`elicitationId`, `url`, `message`). If the received data contains malformed elicitations or other fields, it decodes as `serverError` so the data remains available. The SDK neither opens the URLs nor retries.
+On 2025-11-25 connections, a server can refuse a request until the user completes URL elicitations. It answers with -32042 and `data.elicitations`. The SDK decodes it as `urlElicitationRequired` only when `data` contains an `elicitations` array and no other fields, and every item has `mode: "url"` and exactly the fields represented by `URLElicitationInfo` (`mode`, `elicitationId`, `url`, `message`). Otherwise, including missing fields or extra fields such as `_meta` or `task`, it decodes as `serverError` so the data remains available. Match `errorCode` to handle both cases. The SDK neither opens the URLs nor retries.
 
 %include Examples/Snippets/Client/Features.swift url-elicitation-required
 
@@ -524,7 +524,7 @@ If a peer result does not decode as the expected type, catch `ResponseDecodingEr
 | `missingRequiredClientCapabilities` | -32021 | The request needs capabilities the client did not declare (`data.requiredCapabilities`). |
 | `unsupportedProtocolVersion(supported:requested:)` | -32022 | The server does not serve the requested version (`data.supported`). |
 | `urlElicitationRequired(message:elicitations:)` | -32042 | Complete the listed URL elicitations, then retry (2025-11-25 only). |
-| `serverError(code:message:data:)` | any | Unknown codes, -32000 and -32001 received from a server, or a known code whose data cannot fit its typed case. |
+| `serverError(code:message:data:)` | any | Unknown codes, -32000 and -32001 received from a server, -32021 with unreadable capabilities, or -32042 whose data cannot fit the typed case. |
 | `connectionClosed`, `transportError` | -32000, -32001 | Local transport failures; never decoded from the wire. |
 
 See [troubleshooting.md](troubleshooting.md) for causes and fixes.

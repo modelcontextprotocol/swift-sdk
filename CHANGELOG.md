@@ -37,7 +37,8 @@ fixes merged to `main` after it (up to `234e412`), with before and after code:
 Behavior that can break working code ([docs/migration.md](docs/migration.md#behavior-changes)):
 
 - A -32042 error whose data cannot be represented by `urlElicitationRequired` now decodes as
-  `serverError` and keeps its data, including other keys and undecodable elicitation items.
+  `serverError` and keeps its data, including metadata, other keys and undecodable elicitation
+  items. Match `errorCode` to handle either case.
 - An undecodable direct peer result now throws `ResponseDecodingError` with the expected type,
   raw result and underlying decoding error instead of an empty internal type mismatch error.
   Task result methods also throw it instead of a bare decoding error or a generic missing-result

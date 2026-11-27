@@ -1099,7 +1099,7 @@ Every JSON-RPC error the SDK sends or receives is an `MCPError`. `code` is the J
 | `missingRequiredClientCapabilities(_:message:)` | -32021 | `{"requiredCapabilities"}` | An input-required result needs a client capability the request did not declare; a tool that requires tasks, a task method or a listen stream naming tasks from a client without the tasks extension. |
 | `unsupportedProtocolVersion(supported:requested:)` | -32022 | `{"supported", "requested"}` | Version not served; stateless request to the stateful transport. |
 | `urlElicitationRequired(message:elicitations:)` | -32042 | `{"elicitations"}` | The user must complete URL elicitations first (2025-11-25 only). |
-| `serverError(code:message:data:)` | any code | as sent | Implementation-defined codes, -32000 and -32001 from a peer, or a known code whose data cannot fit its typed case. |
+| `serverError(code:message:data:)` | any code | as sent | Implementation-defined codes, -32000 and -32001 from a peer, -32021 with unreadable capabilities, or -32042 when its data cannot fit the typed case. |
 | `connectionClosed` | -32000 | none | Local only: the transport closed. |
 | `transportError(_:)` | -32001 | `{"error"}` | Local only: an I/O error. |
 

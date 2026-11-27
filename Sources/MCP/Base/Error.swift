@@ -30,9 +30,9 @@ public struct URLElicitationInfo: Codable, Hashable, Sendable {
 ///
 /// The cases are frozen for 1.x. An error whose code has no case of its own,
 /// including a code a later revision adds, is a ``serverError(code:message:data:)``.
-/// A received -32042 also uses `serverError` when its data cannot be represented
-/// by ``urlElicitationRequired(message:elicitations:)``; ``errorCode`` and the
-/// constants of ``Code`` identify it.
+/// A received -32021 with unreadable capabilities or -32042 with data that
+/// cannot fit ``urlElicitationRequired(message:elicitations:)`` also uses
+/// `serverError`; ``errorCode`` and the constants of ``Code`` identify it.
 public enum MCPError: Swift.Error, Sendable {
     // Standard JSON-RPC 2.0 errors (-32700 to -32603). The string, if any,
     // is sent as `data.detail`.
@@ -48,8 +48,8 @@ public enum MCPError: Swift.Error, Sendable {
     /// The receiver failed to handle the request: -32603.
     case internalError(String?)
 
-    /// An implementation-defined error, or a received error whose data cannot
-    /// be represented by its typed case.
+    /// An implementation-defined error, a received -32021 with unreadable
+    /// capabilities, or a received -32042 whose data cannot fit its typed case.
     case serverError(code: Int, message: String, data: Value? = nil)
 
     // MCP specific errors
@@ -220,6 +220,17 @@ extension MCPError: LocalizedError {
         case .urlElicitationRequired(_, let elicitations):
             if let first = elicitations.first {
                 return "Visit \(first.url) to complete the required authentication or input"
+            }
+            return "Complete the required URL-based elicitation"
+        case .serverError(let code, _, let data) where code == -32042:
+            let first = data?.objectValue?["elicitations"]?.arrayValue?.first {
+                $0.objectValue?["mode"]?.stringValue == "url"
+                    && $0.objectValue?["elicitationId"]?.stringValue != nil
+                    && $0.objectValue?["url"]?.stringValue != nil
+                    && $0.objectValue?["message"]?.stringValue != nil
+            }
+            if let url = first?.objectValue?["url"]?.stringValue {
+                return "Visit \(url) to complete the required authentication or input"
             }
             return "Complete the required URL-based elicitation"
         case .connectionClosed:
@@ -396,6 +407,7 @@ extension MCPError: Codable {
                 let original = try? encoder.encode(items),
                 let elicitations = try? JSONDecoder().decode(
                     [URLElicitationInfo].self, from: original),
+                elicitations.allSatisfy({ $0.mode == "url" }),
                 let roundTrip = try? encoder.encode(elicitations),
                 roundTrip == original
             {
