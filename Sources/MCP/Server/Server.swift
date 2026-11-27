@@ -548,8 +548,8 @@ public actor Server {
                             let handling = Task {
                                 _ = try? await self.handleRequest(
                                     request, sendResponse: true, generation: generation)
-                                if isListen { self.listenRequests[request.id] = nil }
                             }
+                            // Before the task runs; handleRequest removes it.
                             if isListen { listenRequests[request.id] = handling }
                         } else if case .invalid(_, let id, let reason) = try? decoder.decode(
                             JSONRPCMessageKind.self, from: data)
@@ -2194,17 +2194,25 @@ public actor Server {
     private func handleRequest(
         _ request: Request<AnyMethod>, sendResponse: Bool = true, generation: Int
     ) async throws -> Response<AnyMethod>? {
-        // Received on a connection that `stop()` ended, whose state is gone.
-        guard generation == connectionGeneration else { return nil }
+        // While the request is tracked, a request that reuses its id is
+        // refused (`admit(_:)`): in `startingRequests` until its handler task
+        // is registered, so that a cancellation arriving first is kept, then
+        // in `pendingRequestTasks`, and, for a listen stream the receive loop
+        // started, in `listenRequests`. Tracking stops before the response is
+        // sent: a client that has the response may reuse the id. After
+        // `stop()` the entries of `startingRequests` and `pendingRequestTasks`
+        // are gone, or belong to the next connection.
+        let isListenStream = sendResponse && request.method == SubscriptionsListen.name
+        // Each return before the handler task is registered calls this once.
+        func untrackStarting() {
+            if isListenStream { listenRequests[request.id] = nil }
+            if generation == connectionGeneration { startingRequests.removeValue(forKey: request.id) }
+        }
 
-        // Until the handler task is registered, a cancellation of this
-        // request is recorded in `startingRequests`. After `stop()` the
-        // entry is gone, or belongs to the next connection.
-        var registered = false
-        defer {
-            if !registered, generation == connectionGeneration {
-                startingRequests.removeValue(forKey: request.id)
-            }
+        // Received on a connection that `stop()` ended, whose state is gone.
+        guard generation == connectionGeneration else {
+            untrackStarting()
+            return nil
         }
 
         await logger?.trace(
@@ -2217,6 +2225,7 @@ public actor Server {
         // Replies with an error without running a handler; not once `stop()`
         // ended the connection.
         func reject(_ error: MCPError) async throws -> Response<AnyMethod>? {
+            untrackStarting()
             guard generation == connectionGeneration else { return nil }
             let response = AnyMethod.response(id: request.id, error: error)
             if sendResponse {
@@ -2233,6 +2242,9 @@ public actor Server {
             try StatelessRequests.checkProgressToken(request._meta)
         } catch let error as MCPError {
             return try await reject(error)
+        } catch {
+            untrackStarting()
+            throw error
         }
 
         switch era {
@@ -2316,7 +2328,10 @@ public actor Server {
         let httpContext = await (connection as? any HTTPContextProviding)?
             .httpRequestContext(for: request.id)
         // `stop()` may have run meanwhile, and a new connection may have started.
-        guard generation == connectionGeneration else { return nil }
+        guard generation == connectionGeneration else {
+            untrackStarting()
+            return nil
+        }
         var dispatchContext: HandlerContext
         switch era {
         case .handshake where isSessionless:
@@ -2470,21 +2485,24 @@ public actor Server {
 
         // Store the handler task for potential cancellation
         pendingRequestTasks[request.id] = handlerTask
-        registered = true
         if startingRequests.removeValue(forKey: request.id) == true {
             // `notifications/cancelled` arrived before the task was registered.
             handlerTask.cancel()
         }
 
-        // Ensure cleanup happens regardless of success or failure. After
-        // `stop()` the entry is gone, or belongs to the next connection; after
-        // `notifications/cancelled` it may belong to a request that reused
-        // the id.
-        defer {
+        // Stops tracking the request, once, before its response is sent or
+        // when it returns. After `notifications/cancelled` the task's entry
+        // may belong to a request that reused the id.
+        var isTracked = true
+        func release() {
+            guard isTracked else { return }
+            isTracked = false
+            if isListenStream { listenRequests[request.id] = nil }
             if generation == connectionGeneration, pendingRequestTasks[request.id] == handlerTask {
                 pendingRequestTasks.removeValue(forKey: request.id)
             }
         }
+        defer { release() }
 
         do {
             let response = try await handlerTask.value
@@ -2505,10 +2523,16 @@ public actor Server {
             if handlerTask.isCancelled { return nil }
 
             if sendResponse {
+                // The teardown of a stream the server closed names the id: it
+                // stays in flight until then, and a cancellation that arrives
+                // meanwhile still skips the teardown.
+                var tearsDown = false
+                if request.method == SubscriptionsListen.name, case .success = response.result {
+                    tearsDown = true
+                }
+                if !tearsDown { release() }
                 try await send(response)
-                if request.method == SubscriptionsListen.name, case .success = response.result,
-                    !handlerTask.isCancelled
-                {
+                if tearsDown, !handlerTask.isCancelled {
                     await sendListenTeardown(request.id)
                 }
                 return nil
@@ -2525,6 +2549,7 @@ public actor Server {
             let response = AnyMethod.response(id: request.id, error: mcpError)
 
             if sendResponse {
+                release()
                 try await send(response)
                 return nil
             }

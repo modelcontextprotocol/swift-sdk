@@ -169,8 +169,9 @@ Behavior that can break working code ([docs/migration.md](docs/migration.md#beha
 - `Server` answers a request whose `id` is already in flight with -32600 and runs no handler for
   it, also for a batch item, including a second item of one batch with the same `id`. Before, the
   duplicate replaced the first request's entry, so `notifications/cancelled` stopped the wrong
-  handler and the first could no longer be cancelled. A handler that catches the cancellation and
-  returns sends no response, and adds no reply to its batch (#270).
+  handler and the first could no longer be cancelled. The `id` is free again once its response is
+  sent. A handler that catches the cancellation and returns sends no response, and adds no reply
+  to its batch (#270).
 - From `main` after 0.12.1: `Data.parseDataURL(_:)` reads `;base64` from the header only and
   decodes any percent-escaped byte (#309, #310); `client_secret_basic` percent-encodes the client
   credentials (RFC 6749 §2.3.1, #300); PKCE verifier characters are uniformly distributed (#303);

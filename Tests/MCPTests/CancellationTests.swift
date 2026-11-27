@@ -429,6 +429,41 @@ struct CancellationTests {
     }
 
     @Test(
+        "A request may reuse an id once its response is sent, while the server still sends it",
+        .timeLimit(.minutes(1)),
+        arguments: [
+            // Answered by its handler.
+            #"{"jsonrpc":"2.0","id":"x","method":"ping"}"#,
+            // Refused before a handler runs.
+            #"{"jsonrpc":"2.0","id":"x","method":"unknown/method"}"#,
+            // A listen stream refused before it opens: no teardown follows.
+            #"{"jsonrpc":"2.0","id":"x","method":"subscriptions/listen","params":{"notifications":{}}}"#,
+        ])
+    func testIDIsFreeOnceItsResponseIsSent(first: String) async throws {
+        let server = Server(name: "TestServer", version: "1.0")
+        // The first reply for "x" reaches the client, and the server's send
+        // of it does not return until the reuse was handled.
+        let transport = ControlledSendTransport(holdingFirst: { $0.contains(#""id":"x""#) })
+        try await server.start(transport: transport)
+        var events = transport.events.makeAsyncIterator()
+
+        await transport.deliver(first)
+        while let event = await events.next(), !(event.hasPrefix("sent ") && event.contains(#""id":"x""#)) {}
+        await transport.deliver(#"{"jsonrpc":"2.0","id":"x","method":"ping"}"#)
+
+        var reply: Value?
+        while let event = await events.next() {
+            guard event.hasPrefix("sent "), event.contains(#""id":"x""#) else { continue }
+            reply = try JSONDecoder().decode(Value.self, from: Data(event.dropFirst("sent ".count).utf8))
+            break
+        }
+        #expect(reply?.objectValue?["error"] == nil)
+        #expect(reply?.objectValue?["result"] != nil)
+        await transport.release()
+        await server.stop()
+    }
+
+    @Test(
         "Cancelling a request after a duplicate of its id was refused cancels its handler",
         .timeLimit(.minutes(1)))
     func testCancellationAfterRefusedDuplicate() async throws {
