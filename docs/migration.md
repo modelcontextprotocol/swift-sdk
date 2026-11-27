@@ -48,6 +48,7 @@ each change that breaks source code.
 | Sampling with tools | The client refuses tools without `sampling.tools`, and tool messages that break the rules, with -32602; `requestSampling` refuses them before it sends | Declare `sampling.tools` when the sampling handler takes tools |
 | `.none(clientID:)` | A plain client ID is pre-registered: no dynamic registration | Pass `""` to register |
 | `StatelessHTTPServerTransport` with an `initializeHook` | Handshake requests other than `initialize` are refused with -32600 unless a `statelessRequestHook` is set | Set a `statelessRequestHook` |
+| Terminated stateful HTTP session | After a session ends and validation passes, requests without a session ID receive 400 instead of 404; requests with any session ID receive 404 | Route a new sessionless `initialize` to a new transport and `Server` |
 | `data:` URL strings | Arrive as sent instead of rewritten as base64 `data:` URLs | Nothing |
 | HTTP transports | New error bodies, status codes and streaming | See below |
 | `HTTPClientTransport` | Default per-host connection limit 64; POST streams resume per stream; SSE on Linux | Raise `httpMaximumConnectionsPerHost` in custom configurations |
@@ -623,6 +624,11 @@ The specification's rules for sampling with tools (SEP-1577) are checked:
 - A request whose header names a stateless revision is answered with HTTP 400
   and -32022, listing `Version.handshake`, with the request id.
 - Error bodies include the error's `data`.
+- After its session ends, the transport runs the validation pipeline, then
+  answers a request without `Mcp-Session-Id` with 400 and a request with any
+  session ID with 404, echoing the ID only when it is the ended session's.
+  The previous release answered every request with 404, before validation.
+  Route a new sessionless `initialize` to a new transport and `Server`.
 
 `StatelessHTTPServerTransport` was rewritten:
 

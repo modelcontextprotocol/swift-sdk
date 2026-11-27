@@ -606,6 +606,49 @@ struct BatchTests {
         await client.disconnect()
         await server.stop()
     }
+
+    @Test("A batch whose send fails rejects withBatch and the returned tasks")
+    func sendFailure() async throws {
+        let transport = MockTransport()
+        let client = Client(name: "c", version: "1", configuration: .handshake)
+
+        let answer = Task {
+            try await transport.waitForSentMessages()
+            let data = try #require(await transport.sentMessages.last?.data(using: .utf8))
+            let request = try JSONDecoder().decode(Request<Initialize>.self, from: data)
+            try await transport.queue(
+                response: Initialize.response(
+                    id: request.id,
+                    result: .init(
+                        protocolVersion: Version.latestHandshake, capabilities: .init(),
+                        serverInfo: .init(name: "s", version: "1"), instructions: nil)))
+        }
+
+        try await client.connect(transport: transport)
+        try await answer.value
+
+        await transport.setFailSend(true)
+
+        nonisolated(unsafe) var added: [Task<Ping.Result, Error>] = []
+        await #expect(throws: MCPError.self) {
+            try await client.withBatch { batch in
+                added.append(try await batch.addRequest(Ping.request()))
+                added.append(try await batch.addRequest(Ping.request()))
+            }
+        }
+
+        #expect(added.count == 2)
+        for task in added {
+            // A request that is never failed does not respond to cancellation.
+            let result = await outcome(within: .seconds(5)) { try await task.value }
+            #expect(!result.didTimeOut, "A request of a batch whose send failed never completed")
+            guard case .transportError = result.mcpError else {
+                Issue.record("Expected the send's transport error, got \(result)")
+                continue
+            }
+        }
+        await client.disconnect()
+    }
 }
 
 @Suite("Server replies", .timeLimit(.minutes(1)))
