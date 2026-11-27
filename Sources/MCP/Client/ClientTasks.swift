@@ -66,8 +66,9 @@ public struct TaskHandle: Sendable {
     ///
     /// - Returns: The result of the tool call, which may report a tool error
     ///   (`isError`).
-    /// - Throws: The ``MCPError`` the task failed with, or
-    ///   ``TaskCancelledError`` when it was cancelled.
+    /// - Throws: The ``MCPError`` the task failed with,
+    ///   ``TaskCancelledError`` when it was cancelled, or
+    ///   ``ResponseDecodingError`` when the result does not decode.
     public func result() async throws -> CallTool.Result {
         try await client.drive(self)
     }
@@ -104,11 +105,12 @@ extension Client {
     /// (`tasks/result`, 2025-11-25). The server sends the task's input
     /// requests while it waits; the client's handlers answer them.
     ///
-    /// - Throws: The error the tool call failed with.
+    /// - Throws: The error the tool call failed with, or
+    ///   ``ResponseDecodingError`` when its result does not decode.
     public func taskResult(_ id: String) async throws -> CallTool.Result {
         try validateTasks(GetTaskPayload.name)
         let payload = try await send(GetTaskPayload.request(.init(taskId: id))).value
-        return try CallTool.Result(decoding: payload)
+        return try decodeResponseResult(payload, as: CallTool.Result.self)
     }
 
     /// Lists the client's tasks, one page at a time (`tasks/list`,
@@ -192,7 +194,7 @@ extension Client {
             }
             switch snapshot.status {
             case .completed:
-                guard let result = snapshot.callToolResult else {
+                guard let result = try snapshot.decodedCallToolResult() else {
                     throw MCPError.internalError("Task \(handle.id) completed without a tool result")
                 }
                 return result

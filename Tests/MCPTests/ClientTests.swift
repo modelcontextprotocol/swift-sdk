@@ -715,6 +715,11 @@ struct ClientUndecodableResponseTests {
             #expect(error.expectedType == String(reflecting: ExpectedResult.Result.self))
             #expect(error.rawResult.objectValue?["count"] == "not a number")
             #expect(error.rawResult.objectValue?["_meta"] != nil)
+            #expect(error.description.contains(error.expectedType))
+            #expect(error.localizedDescription.contains(error.expectedType))
+            #expect(!error.description.contains("not a number"))
+            #expect(!String(describing: error).contains("not a number"))
+            #expect(!error.localizedDescription.contains("not a number"))
             guard case .typeMismatch(let type, let context) = error.underlyingError as? DecodingError else {
                 Issue.record("Expected an Int decoding error")
                 return

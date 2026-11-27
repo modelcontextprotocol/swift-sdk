@@ -1,13 +1,29 @@
 import Foundation
 
-/// A server response could not be decoded as the result type of a request.
-public struct ResponseDecodingError: Swift.Error, Sendable {
+/// A peer response could not be decoded as the result type of a request.
+public struct ResponseDecodingError: LocalizedError, Sendable, CustomStringConvertible {
     /// The result type the request expected.
     public let expectedType: String
-    /// The result received from the server.
+    /// The result received from the peer.
     public let rawResult: Value
     /// The error raised while decoding the result.
     public let underlyingError: any Swift.Error
+
+    /// A summary that does not include the result or decoding error text.
+    public var description: String { "Could not decode the result as \(expectedType)" }
+
+    /// The same summary for `localizedDescription`.
+    public var errorDescription: String? { description }
+}
+
+/// Decodes a wire result and retains the raw value when decoding fails.
+func decodeResponseResult<T: Decodable>(_ value: Value, as type: T.Type = T.self) throws -> T {
+    do {
+        return try T(decoding: value)
+    } catch {
+        throw ResponseDecodingError(
+            expectedType: String(reflecting: type), rawResult: value, underlyingError: error)
+    }
 }
 
 /// A non-wire response had the wrong type.
@@ -92,12 +108,9 @@ struct AnyPendingRequest: Sendable {
                 // the typed decode turns those in `Value` fields into `.data`.
                 if let value = value as? Value {
                     do {
-                        let data = try JSONEncoder().encode(value)
-                        return deliver(.success(try JSONDecoder().decode(T.self, from: data)))
+                        return deliver(.success(try decodeResponseResult(value, as: T.self)))
                     } catch {
-                        return deliver(.failure(ResponseDecodingError(
-                            expectedType: String(reflecting: T.self), rawResult: value,
-                            underlyingError: error)))
+                        return deliver(.failure(error))
                     }
                 } else if let typedValue = value as? T {
                     return deliver(.success(typedValue))

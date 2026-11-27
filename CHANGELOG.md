@@ -36,8 +36,10 @@ fixes merged to `main` after it (up to `234e412`), with before and after code:
 
 Behavior that can break working code ([docs/migration.md](docs/migration.md#behavior-changes)):
 
-- An undecodable client result now throws `ResponseDecodingError` with the expected type, raw
-  result and underlying decoding error instead of an empty internal type mismatch error.
+- An undecodable direct peer result now throws `ResponseDecodingError` with the expected type,
+  raw result and underlying decoding error instead of an empty internal type mismatch error.
+  Task result methods also throw it instead of a bare decoding error or a generic missing-result
+  error. This local error is separate from `MCPError`.
 - `MCPError` decoding: -32000 and -32001 decode as `serverError`, -32602 with `data.uri` as
   `resourceNotFound`, and the standard cases without `data.detail` drop their own message text
   ([details](docs/migration.md#mcperror-decoding)).
