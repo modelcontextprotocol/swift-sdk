@@ -52,7 +52,7 @@ Behavior that can break working code ([docs/migration.md](docs/migration.md#beha
   transport to reconnect.
 - `Client.connect(transport:)` disconnects and throws `unsupportedProtocolVersion` when the
   server answers `initialize` with a version that is not in `Version.handshake`. The client used
-  that version before (#316).
+  that version before.
 
 ### Features
 
