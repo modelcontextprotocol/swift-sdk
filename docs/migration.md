@@ -19,6 +19,7 @@ each change that breaks source code.
 |---|---|---|
 | `MCPError` | New cases; `serverError` has a third associated value | Update exhaustive `switch` statements and `serverError` patterns |
 | `MCPError` decoding | -32000 and -32001 decode as `serverError`; -32602 with `data.uri` as `resourceNotFound`; without `data.detail`, the standard cases drop their own message text | Match the new cases |
+| -32042 error decoding | If the data cannot be represented entirely by `urlElicitationRequired`, decodes as `serverError` and keeps `data` | Match `errorCode == .urlElicitationRequired` to handle both cases |
 | `HTTPResponse` | `.data` and `.error` have new associated values | Update patterns |
 | `Client.Capabilities.experimental` | `[String: String]?` became `[String: Value]?` | Pass `Value`s |
 | `OAuthAuthorizationError` | A struct with a `code`, not an enum; eight new codes | Read details from properties instead of binding associated values |
@@ -30,6 +31,7 @@ each change that breaks source code.
 | Content blocks, `InputRequest`, `InputResponse`, `CreateElicitation.Parameters` | New case `.unknown` for kinds from a later revision | Add it, or a `default`, to `switch` statements |
 | `HTTPClientAuthorizer` | `authorizationHeader(for:)` became `authorizationHeaders(for:method:)`; new requirement `handleChallenge(statusCode:headers:endpoint:operationKey:sentAuthorization:session:)`, returning `HTTPChallengeResult`, with a default that calls the Bool method | Update custom authorizers |
 | `Client` convenience methods | Return the result type, not a tuple; `startToolCall` replaces the `RequestContext` overload of `callTool`; `initialize()` is removed | Read the result's properties |
+| Peer result decoding | An undecodable result, including a server-to-client or task result, throws `ResponseDecodingError` with the expected type, raw result and decoding error. It is separate from `MCPError` | Catch this error to inspect a malformed result; use a `Method` with `Result == Value` for raw access |
 | `Client.connect(transport:)` | Returns `Client.ConnectionInfo`, whose `serverInfo` is optional | Unwrap `serverInfo` |
 | `Version.latest` | Renamed `Version.latestHandshake`; the old name is deprecated | Rename |
 | `Tool.Content` | `annotations` and `_meta` default to `nil`; the deprecated short forms are removed | Use `.text(text:)`, `.image(data:mimeType:)`, `.audio(data:mimeType:)` |
@@ -46,6 +48,7 @@ each change that breaks source code.
 | Sampling with tools | The client refuses tools without `sampling.tools`, and tool messages that break the rules, with -32602; `requestSampling` refuses them before it sends | Declare `sampling.tools` when the sampling handler takes tools |
 | `.none(clientID:)` | A plain client ID is pre-registered: no dynamic registration | Pass `""` to register |
 | `StatelessHTTPServerTransport` with an `initializeHook` | Handshake requests other than `initialize` are refused with -32600 unless a `statelessRequestHook` is set | Set a `statelessRequestHook` |
+| Terminated stateful HTTP session | After a session ends and validation passes, requests without a session ID receive 400 instead of 404; requests with any session ID receive 404 | Route a new sessionless `initialize` to a new transport and `Server` |
 | `data:` URL strings | Arrive as sent instead of rewritten as base64 `data:` URLs; prose such as `data: 3 rows, 2 columns` is no longer a `data:` URL | Nothing |
 | HTTP transports | New error bodies, status codes and streaming | See below |
 | `HTTPClientTransport` | Default per-host connection limit 64; POST streams resume per stream; SSE on Linux | Raise `httpMaximumConnectionsPerHost` in custom configurations |
@@ -59,7 +62,7 @@ each change that breaks source code.
 
 | Case | Code | `data` |
 |---|---|---|
-| `serverError(code:message:data:)` | any other code | as sent |
+| `serverError(code:message:data:)` | any code | as sent |
 | `resourceNotFound(uri:message:)` | -32602 | `{"uri": ...}` |
 | `headerMismatch(_:)` | -32020 | `{"detail": ...}` |
 | `missingRequiredClientCapabilities(_:message:)` | -32021 | `{"requiredCapabilities": ...}` |
@@ -628,6 +631,11 @@ The specification's rules for sampling with tools (SEP-1577) are checked:
 - A request whose header names a stateless revision is answered with HTTP 400
   and -32022, listing `Version.handshake`, with the request id.
 - Error bodies include the error's `data`.
+- After its session ends, the transport runs the validation pipeline, then
+  answers a request without `Mcp-Session-Id` with 400 and a request with any
+  session ID with 404, echoing the ID only when it is the ended session's.
+  The previous release answered every request with 404, before validation.
+  Route a new sessionless `initialize` to a new transport and `Server`.
 
 `StatelessHTTPServerTransport` was rewritten:
 

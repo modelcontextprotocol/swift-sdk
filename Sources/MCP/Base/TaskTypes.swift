@@ -210,8 +210,13 @@ public struct TaskSnapshot: Hashable, Sendable {
 
     /// ``result`` as a tool call result; `nil` when absent or of another shape.
     public var callToolResult: CallTool.Result? {
+        try? decodedCallToolResult()
+    }
+
+    /// Decodes a present tool result, preserving failures for task callers.
+    func decodedCallToolResult() throws -> CallTool.Result? {
         guard let result else { return nil }
-        return try? CallTool.Result(decoding: result)
+        return try decodeResponseResult(result, as: CallTool.Result.self)
     }
 
     /// ``createdAt`` as a date; `nil` when it is not an ISO 8601 timestamp.

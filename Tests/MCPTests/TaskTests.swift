@@ -25,6 +25,64 @@ private func record(
         createdAt: created, ttlMs: ttlMs, pollIntervalMs: 500)
 }
 
+@Suite("Task result decoding")
+struct TaskResultDecodingTests {
+    private let malformed: Value = ["content": "private tool output"]
+
+    @Test("tasks/result retains an undecodable result")
+    func handshakeResult() async throws {
+        let server = Server(name: "s", version: "1", capabilities: .init())
+        let malformed = self.malformed
+        await server.withMethodHandler(GetTaskPayload.self) { _ in malformed }
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+        try await server.start(transport: serverTransport)
+        let client = Client(name: "c", version: "1", configuration: .handshake)
+        try await client.connect(transport: clientTransport)
+        defer { Task { await client.disconnect(); await server.stop() } }
+
+        do {
+            _ = try await client.taskResult("t1")
+            Issue.record("Expected a response decoding error")
+        } catch let error as ResponseDecodingError {
+            #expect(error.expectedType == String(reflecting: CallTool.Result.self))
+            #expect(error.rawResult == malformed)
+            #expect(error.underlyingError is DecodingError)
+            #expect(!error.description.contains("private tool output"))
+        }
+    }
+
+    @Test("A completed 2026-07-28 task retains an undecodable result")
+    func statelessResult() async throws {
+        let server = Server(name: "s", version: "1", capabilities: .init())
+        await server.withTasks()
+        let malformed = self.malformed
+        await server.withMethodHandler(GetTask.self) { params in
+            TaskSnapshot(
+                taskId: params.taskId, status: .completed, createdAt: "now", lastUpdatedAt: "now",
+                result: malformed)
+        }
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+        try await server.start(transport: serverTransport)
+        let client = Client(
+            name: "c", version: "1",
+            configuration: .init(
+                protocolMode: .stateless(Version.v2026_07_28),
+                tasks: .init(minimumPollInterval: .milliseconds(5))))
+        try await client.connect(transport: clientTransport)
+        defer { Task { await client.disconnect(); await server.stop() } }
+
+        do {
+            _ = try await client.task(id: "t1").result()
+            Issue.record("Expected a response decoding error")
+        } catch let error as ResponseDecodingError {
+            #expect(error.expectedType == String(reflecting: CallTool.Result.self))
+            #expect(error.rawResult == malformed)
+            #expect(error.underlyingError is DecodingError)
+            #expect(!error.localizedDescription.contains("private tool output"))
+        }
+    }
+}
+
 @Suite("Task wire types")
 struct TaskWireTests {
     @Test("A 2026-07-28 task uses ttlMs and pollIntervalMs; ttlMs is null without a limit")
