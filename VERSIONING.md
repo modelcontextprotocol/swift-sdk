@@ -154,7 +154,8 @@ SEP-3392 asks a Beta extension that makes a breaking change to add or increment 
 string in its settings object, so that a peer can refuse a revision it does not know. The SDK
 neither sends nor checks `revision`: two peers that enable a Beta extension from different
 revisions of its specification, for example two applications on different 1.x minor releases, are
-not detected, and may misread each other's data.
+not detected, and may misread each other's data. Checking it is
+[planned](ROADMAP.md#planned).
 
 At 1.0.0, the extensions the SDK implements are at these stages:
 
