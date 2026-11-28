@@ -24,7 +24,11 @@ At 2026-07-28 the SDK supports server discovery, SEP-2243 request headers,
 `subscriptions/listen` notification streams, multi round-trip requests with
 sealed `requestState`, result caching hints, and the tasks extension; tasks
 also work at 2025-11-25. Servers serve skills (SEP-2640), and clients load them
-verified, at every revision. The conformance tier score
+verified, at every revision. Servers also serve
+[Server Cards](docs/server.md#server-cards) (SEP-2127) and the views of
+[MCP Apps](docs/server.md#mcp-apps) (SEP-1865, `io.modelcontextprotocol/ui`);
+clients fetch and check the cards, and read the views. The View-Host bridge of
+MCP Apps is not implemented. The conformance tier score
 is 100% for clients and servers at 2025-11-25 and 2026-07-28; see
 [ROADMAP.md](ROADMAP.md).
 
@@ -120,9 +124,10 @@ The [documentation index](docs/README.md) lists every feature. Start with:
 - [Base protocol](docs/protocol.md): lifecycle, transports, notification
   streams, authorization, security, utilities.
 - [Server features](docs/server.md): tools, prompts, resources, notifications,
-  multi round-trip requests, tasks, skills, caching, logging, handler context.
+  multi round-trip requests, tasks, skills, Server Cards, MCP Apps, caching,
+  logging, handler context.
 - [Client features](docs/client.md): tools, roots, sampling, elicitation,
-  tasks, skills, subscriptions, cancellation, errors.
+  tasks, skills, Server Cards, MCP Apps, subscriptions, cancellation, errors.
 - [Testing](docs/testing.md) and [troubleshooting](docs/troubleshooting.md).
 - [Migration guide](docs/migration.md) and [rough edges](docs/rough_edges.md).
 
