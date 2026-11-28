@@ -46,7 +46,7 @@ Held for a major:
   compiling.
 - Changing documented behavior so that working code stops working.
 - Changing wire behavior for a revision that already shipped: messages sent, validation applied,
-  error codes returned.
+  error codes returned. A Beta extension is the exception ([Extensions](#extensions)).
 - Changing a default: `Client.Configuration.protocolMode`, `Server.Configuration.protocolVersions`,
   `Server.init(requestStateProtection:)`, cache hints, validation pipelines.
 - Dropping a protocol revision from `Version.handshake`, `Version.stateless` or
@@ -63,6 +63,8 @@ Allowed in a minor:
 - Support for a new protocol revision that leaves the defaults unchanged.
 - Bug fixes that make the SDK match its documentation or the specification. When such a fix
   changes wire behavior that clients may rely on, it is called out in the release notes.
+- A wire change to a Beta extension that follows its specification, with release notes
+  ([Extensions](#extensions)).
 - Deprecations.
 
 Allowed in a patch: bug fixes that change no public API.
@@ -132,19 +134,40 @@ Extensions are opt-in: code that does not enable one is not affected by it. The 
 extension is covered like the rest of the `MCP` module. Its wire behavior depends on the
 extension's stage in the
 [extension lifecycle](https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/seps/3392-extension-lifecycle.md)
-(SEP-3392), which the directory of its specification shows:
+(SEP-3392). The stage is the one the
+[extensions page](https://modelcontextprotocol.io/extensions/overview) lists: until every
+repository moves to the stage directories, a specification may still sit elsewhere (`ext-tasks`
+publishes `specification/2026-07-28/` and `specification/draft/` for a Beta extension).
 
 | Stage | Wire behavior |
 |---|---|
 | Stable | Covered like the core protocol: fixed for each protocol revision. |
 | Beta | Follows the extension's specification as the SDK implements it. A minor release may change it to follow a newer version of that specification, breaking changes included, and its release notes say what changed. |
+| Experimental | The SDK implements none. Taking one in needs a change to this policy. |
+| Promoted to Core in revision R | At R and later, core protocol behavior. At earlier revisions the extension's final revision applies, which no longer changes, so it is covered like Stable. |
+| Archived | The SDK keeps its API working, deprecated, until the next major release. |
 
 When a Beta wire change needs a new Swift API, the old one is deprecated, not removed
 ([Deprecation](#deprecation)).
 
-At 1.0.0, MCP Apps (`io.modelcontextprotocol/ui`) is Stable. The Tasks extension
-(`io.modelcontextprotocol/tasks`), Skills (`io.modelcontextprotocol/skills`) and Server Cards are
-Beta. The release notes say when an extension changes stage.
+SEP-3392 asks a Beta extension that makes a breaking change to add or increment a `revision`
+string in its settings object, so that a peer can refuse a revision it does not know. The SDK
+neither sends nor checks `revision`: two peers that enable a Beta extension from different
+revisions of its specification, for example two applications on different 1.x minor releases, are
+not detected, and may misread each other's data.
+
+At 1.0.0, the extensions the SDK implements are at these stages:
+
+| Extension | Stage |
+|---|---|
+| MCP Apps (`io.modelcontextprotocol/ui`) | Stable |
+| OAuth Client Credentials and Enterprise-Managed Authorization (`ext-auth`) | Stable |
+| Tasks (`io.modelcontextprotocol/tasks`, SEP-2663) | Beta, to Core |
+| Skills (`io.modelcontextprotocol/skills`) | Beta |
+| Server Cards | Beta |
+
+The tasks of the 2025-11-25 revision (SEP-1686) are core protocol, not the Tasks extension. The
+release notes say when an extension changes stage.
 
 ## Support window for older revisions
 
