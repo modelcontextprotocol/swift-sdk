@@ -247,4 +247,25 @@ struct StdioTransportTests {
 
         await transport.disconnect()
     }
+
+    // A server that exits before answering `initialize` closes its output.
+    // `connect` must fail with `connectionClosed`, not hang with the message
+    // loop spinning on the finished stream (issue #256).
+    @Test("A server that closes at once fails connect", .timeLimit(.minutes(1)))
+    func testServerClosingBeforeInitializeFailsConnect() async throws {
+        let (input, writer) = try FileDescriptor.pipe()
+        let (reader, output) = try FileDescriptor.pipe()
+        try writer.close()
+        let transport = StdioTransport(input: input, output: output, logger: nil)
+        let client = Client(name: "TestClient", version: "1.0")
+
+        let started = ContinuousClock.now
+        await #expect(throws: MCPError.connectionClosed) {
+            try await client.connect(transport: transport)
+        }
+        #expect(ContinuousClock.now - started < .seconds(5))
+
+        await client.disconnect()
+        try reader.close()
+    }
 }

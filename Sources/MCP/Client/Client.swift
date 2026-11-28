@@ -244,6 +244,12 @@ public actor Client {
                             )
                         }
                     }
+                    // The stream ended: the server closed its output or exited.
+                    // Transports hand back the same finished stream, so asking
+                    // again would spin at 100% CPU (issue #256). Fail what is
+                    // still waiting, such as `initialize`, and stop.
+                    await self.failPendingRequests(MCPError.connectionClosed)
+                    break
                 } catch let error where MCPError.isResourceTemporarilyUnavailable(error) {
                     try? await Task.sleep(for: .milliseconds(10))
                     continue
@@ -280,6 +286,15 @@ public actor Client {
 
         // Automatically initialize after connecting
         return try await _initialize()
+    }
+
+    /// Resumes every waiting request with `error` and forgets them.
+    private func failPendingRequests(_ error: MCPError) {
+        let pending = pendingRequests
+        pendingRequests = [:]
+        for (_, request) in pending {
+            request.resume(throwing: error)
+        }
     }
 
     /// Disconnect the client and cancel all pending requests
