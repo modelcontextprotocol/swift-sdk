@@ -59,6 +59,9 @@ Behavior that can break working code ([docs/migration.md](docs/migration.md#beha
   (`authorizationServerIssuerMismatch`) instead of being used.
 - `HTTPClientTransport.connect()` after `disconnect()` throws `internalError`: create a new
   transport to reconnect.
+- `Client.connect(transport:)` disconnects and throws `internalError` when the server answers
+  `initialize` with a version that is not in `Version.handshake`. The client used that version
+  before.
 
 ### Features
 

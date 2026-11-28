@@ -53,7 +53,7 @@ if result.capabilities.tools != nil {
 | Mode | First request | Result |
 |---|---|---|
 | `.automatic` (default) | `server/discover` at `Version.stateless[0]` (2026-07-28) | 2026-07-28 when the server serves it; otherwise falls back to `initialize`. |
-| `.handshake` | `initialize` with `Version.latestHandshake` (2025-11-25), then `notifications/initialized` | The version the server returns. |
+| `.handshake` | `initialize` with `Version.latestHandshake` (2025-11-25), then `notifications/initialized` | The version the server returns, if it is in `Version.handshake`; otherwise an error. |
 | `.stateless(version)` | `server/discover` at `version` | `version`, or an error. Never retries with another version and never falls back. |
 
 `.automatic` falls back to `initialize` when:
@@ -178,6 +178,7 @@ A connected client must be disconnected. Its receive loop and inbound queue keep
 | Error | Cause |
 |---|---|
 | `unsupportedProtocolVersion` (-32022) | `.stateless(version)` and the server does not serve `version`. `data.supported` lists what it serves. |
+| `internalError("Server's protocol version is not supported: <version>")` | The server answered `initialize` with a version that is not in `Version.handshake`, with `.handshake` or after the `.automatic` fallback. The client does not send `notifications/initialized` and disconnects. |
 | `internalError("Client connection not initialized")` | A method was called before `connect` or after `disconnect`. |
 | `transportError`, `connectionClosed`, `internalError` of an HTTP status | The transport failed. `.automatic` rethrows the error of `server/discover` unless it is an HTTP 400, 404 or 405 refusal. |
 
