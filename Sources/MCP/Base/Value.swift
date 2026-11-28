@@ -221,7 +221,7 @@ extension Value: Codable {
     ///   elicitation's `content`, a multi round-trip answer and the `input`
     ///   of a sampling tool use can hold `.data`.
     /// - The `data` of a decoded ``MCPError``.
-    /// - ``Value/init(_:)`` for a value that is not a `Value`.
+    /// - ``Value/init(_:)-(T)`` for a value that is not a `Value`.
     ///   `CallTool.Result(content:structuredContent:isError:_meta:)` uses it
     ///   for a `Codable` output, so a `data:` URL string in that output is
     ///   sent in its base64 form.

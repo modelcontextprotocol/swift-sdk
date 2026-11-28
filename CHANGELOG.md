@@ -94,6 +94,15 @@ Behavior that can break working code ([docs/migration.md](docs/migration.md#beha
   2026-07-28 a request to the client throws -32600, also from code that handles no request.
 - Tool names (SEP-986): `Tool.isValidName(_:)`; server and client log a warning once for each
   listed name that does not have the format of the specification.
+- Foundation Models, on macOS 26, iOS 26, visionOS 26 and watchOS 27 and later
+  ([#135](https://github.com/modelcontextprotocol/swift-sdk/issues/135),
+  [#169](https://github.com/modelcontextprotocol/swift-sdk/issues/169)): `Tool` initializers
+  that take `Generable` argument and output types or a `FoundationModels.Tool`,
+  `CallTool.Parameters.arguments(as:)`, `CallTool.Result(_:)` and `call(_:)` on a
+  `FoundationModels.Tool` on the server; `Client.languageModelTools(approval:)`,
+  `Client.LanguageModelTool` and `GenerationSchema(jsonSchema:name:)` on the client; conversions
+  between `Value` and `GeneratedContent`. The framework is weak-linked: the deployment targets do
+  not change.
 - Server Cards (SEP-2127): `ServerCard`, `ServerCardValidator`, which serves a card at
   `<endpoint>/server-card`, and `ServerCard.fetch`, which reads one.
 - MCP Apps (SEP-1865): `Server.withAppResources` serves `ui://` views, `Tool.ui` and

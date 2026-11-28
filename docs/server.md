@@ -285,6 +285,110 @@ What the SDK does at 2026-07-28:
 - The check fails closed: a call with `Mcp-Param-*` headers gets -32020 when the tool is not in the listing or the listing cannot be read (the handler throws, or there are more than 100 pages), and a call with arguments or `Mcp-Param-*` headers to a tool dropped for an invalid annotation gets -32020. A call with neither has nothing to check and runs.
 - `StatelessHTTPServerTransport` checks `Mcp-Method` and `Mcp-Name` against the body and also answers -32020.
 
+### Tools from Foundation Models
+
+On macOS 26, iOS 26, visionOS 26 and watchOS 27 and later, a tool's schemas, arguments and results can be [Foundation Models](https://developer.apple.com/documentation/foundationmodels) `Generable` types instead of `Value`s. The API exists only where the framework does: it compiles out on Linux and with SDKs that do not have the framework, and it is unavailable on tvOS. An app that also runs on older systems keeps running there, because the framework is weak-linked; check with `if #available(macOS 26, iOS 26, visionOS 26, watchOS 27, *)` before using it.
+
+A file that imports both `MCP` and `FoundationModels` sees two types named `Tool`: write `MCP.Tool` and `FoundationModels.Tool`.
+
+```swift
+@available(macOS 26.0, iOS 26.0, visionOS 26.0, watchOS 27.0, *)
+@Generable(description: "A city and the number of days to forecast")
+struct ForecastQuery {
+    @Guide(description: "City name")
+    var city: String
+    @Guide(description: "Days ahead", .range(1...7))
+    var days: Int
+}
+
+@available(macOS 26.0, iOS 26.0, visionOS 26.0, watchOS 27.0, *)
+@Generable
+struct DailyForecast {
+    var city: String
+    var highs: [Double]
+}
+
+@available(macOS 26.0, iOS 26.0, visionOS 26.0, watchOS 27.0, *)
+func registerGenerableTool(on server: Server) async throws {
+    let forecast = try MCP.Tool(
+        name: "get_daily_forecast",
+        description: "Daily highs for a city",
+        arguments: ForecastQuery.self,
+        output: DailyForecast.self)
+
+    await server.withMethodHandler(ListTools.self) { _ in
+        ListTools.Result(tools: [forecast])
+    }
+    await server.withMethodHandler(CallTool.self) { params in
+        switch params.name {
+        case forecast.name:
+            // Arguments that do not match answer -32602. Check @Guide
+            // bounds in the handler: decoding checks types, not guides.
+            let query = try params.arguments(as: ForecastQuery.self)
+            guard (1...7).contains(query.days) else {
+                return CallTool.Result(
+                    content: [.text(text: "days must be between 1 and 7")],
+                    isError: true)
+            }
+            let highs = (1...query.days).map { 18 + Double($0) }
+            // structuredContent, and its JSON as text.
+            return try CallTool.Result(DailyForecast(city: query.city, highs: highs))
+        default:
+            throw MCPError.invalidParams("Unknown tool: \(params.name)")
+        }
+    }
+}
+```
+
+| API | What it does |
+| --- | --- |
+| `MCP.Tool(name:title:description:arguments:annotations:icons:_meta:execution:)` | `inputSchema` is the generation schema of `arguments`, as JSON Schema. With `output:`, `outputSchema` too. Throws `GenerationSchema.JSONSchemaError` when a schema is not an object, as MCP requires: a `@Generable` enum or a `String` cannot be the arguments. |
+| `params.arguments(as:)` | Decodes the call's arguments into a `@Generable` type. Arguments that do not match, integers outside IEEE-754 exact `Double` precision (`±2^53`), and non-finite numbers throw `MCPError.invalidParams`, so the client gets -32602. An integer literal too large for `Int` (above `2^31` on 32-bit watchOS) is already a rounded `Double` when it arrives. |
+| `try CallTool.Result(_:isError:_meta:)` | A structure becomes `structuredContent` (omitting null-valued object properties so it matches `outputSchema`), with its JSON as text; a string becomes text. Throws `EncodingError` on non-finite numbers (`NaN` or `Infinity`). |
+
+The schema is the one Foundation Models generates: `@Guide` descriptions and bounds become `description`, `minimum`, `maximum`, `enum`, `pattern`, `minItems` and `maxItems`; nested types are under `$defs`; properties are in declaration order in `x-order`. As for any tool, the SDK does not validate remote arguments against `@Guide` constraints: decoding checks the structure and property types, so check ranges, counts and patterns in the handler.
+
+An existing `FoundationModels.Tool` can be served unchanged. `MCP.Tool(_:title:annotations:icons:_meta:execution:)` takes its name, description and parameters, and an output schema when its `Output` is a `Generable` object. `call(_:)` serves a `tools/call` with it:
+
+```swift
+@available(macOS 26.0, iOS 26.0, visionOS 26.0, watchOS 27.0, *)
+struct UVIndexTool: FoundationModels.Tool {
+    let name = "get_uv_index"
+    let description = "Today's UV index for a city"
+
+    @Generable
+    struct Arguments {
+        @Guide(description: "City name")
+        var city: String
+    }
+
+    func call(arguments: Arguments) async throws -> String {
+        "The UV index in \(arguments.city) is 5."
+    }
+}
+
+@available(macOS 26.0, iOS 26.0, visionOS 26.0, watchOS 27.0, *)
+func registerUVIndexTool(on server: Server) async throws {
+    let uvIndex = UVIndexTool()
+    // The same tool serves a local LanguageModelSession and MCP clients.
+    let definition = try MCP.Tool(uvIndex, annotations: .init(readOnlyHint: true))
+
+    await server.withMethodHandler(ListTools.self) { _ in
+        ListTools.Result(tools: [definition])
+    }
+    await server.withMethodHandler(CallTool.self) { params in
+        guard params.name == uvIndex.name else {
+            throw MCPError.invalidParams("Unknown tool: \(params.name)")
+        }
+        return try await uvIndex.call(params)
+    }
+}
+```
+
+`call(_:)` returns an error the tool throws as a result with `isError: true`, so that the model can correct its call. The text is the error's `errorDescription` when it conforms to `LocalizedError`, and `The tool failed.` otherwise, because the bridged `localizedDescription` of other errors names your module and types; conform the error to `LocalizedError` (or catch errors in the tool) to send a specific message. It throws `MCPError` and `CancellationError` unchanged; decoding failures on incoming arguments still answer -32602.
+
+[`Examples/foundation-models/main.swift`](../Examples/foundation-models/main.swift) (`FoundationModelsExample`) is a runnable checklist app that runs three `FoundationModels.Tool` types locally inside a `LanguageModelSession` and exports the same tools over a stdio MCP `Server` (`--mcp`) so external MCP clients such as OpenCode can call them against the same store.
+
 ## Prompts
 
 A prompt is a message template the user selects in the client. Every prompt has a name and a list of string arguments. Declare the `prompts` capability, list prompts in a `prompts/list` handler and expand them in a `prompts/get` handler.

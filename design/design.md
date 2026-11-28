@@ -17,6 +17,7 @@ Feature notes go deeper on single topics:
 | [skills.md](skills.md) | The skills extension (SEP-2640): frontmatter, catalogs, serving and verified loading |
 | [server_cards.md](server_cards.md) | Server Cards (SEP-2127): the document, serving, fetching and checks |
 | [apps.md](apps.md) | MCP Apps (SEP-1865): views, tool and resource metadata, the Content Security Policy |
+| [foundation_models.md](foundation_models.md) | Foundation Models: `Generable` tool schemas and handlers (#135), `LanguageModelSession` client tools (#169) |
 | [auth.md](auth.md) | OAuth client architecture |
 | [linux.md](linux.md) | Linux status and what differs there by design |
 | [threat_model.md](threat_model.md) | Trust boundaries, defenses and their limits |
@@ -68,7 +69,7 @@ Non-goals:
 | `MCPConformanceClient` | executable | `conformance/everything-client` | `mcp-everything-client` |
 | `QuickStartSnippets`, `ServerSnippets`, `ClientSnippets`, `ProtocolSnippets`, `GuidesSnippets` | library targets | `Examples/Snippets/*` | none |
 | `SnippetTests` | tests | `Examples/Tests` | none |
-| `HelloServer`, `HelloClient`, `HTTPServerExample` | executables | `Examples/hello-server`, `Examples/hello-client`, `Examples/http-server` | none |
+| `HelloServer`, `HelloClient`, `HTTPServerExample`, `FoundationModelsExample` | executables | `Examples/hello-server`, `Examples/hello-client`, `Examples/http-server`, `Examples/foundation-models` | none |
 
 `Package.swift` uses swift-tools-version 6.1, the minimum Swift for 1.x.
 
@@ -89,6 +90,7 @@ The fixtures and examples build with the package, so `swift build` compiles ever
 | `Base/Utilities/` | Cancellation, progress, ping, `Metadata`, `RequestContext` |
 | `Client/` | `Client` actor; client feature types (roots, sampling, elicitation) |
 | `Server/` | `Server` actor; server feature method types (tools, resources, prompts, completion, logging); `StatelessRequests`; `RequestState` |
+| `FoundationModels/` | Optional bridge to Apple's FoundationModels framework (`canImport(FoundationModels)`): `Generable` tool schemas, arguments and results, `GenerationSchema(jsonSchema:name:)`, `Client.LanguageModelTool` |
 
 A method type lives with the side that serves it. `CallTool` is in `Server/Tools.swift` and
 `CreateSamplingMessage` is in `Client/Sampling.swift`, though both sides use both.
