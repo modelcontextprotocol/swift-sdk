@@ -528,43 +528,11 @@ import Logging
                     contentContext: .defaultMessage,
                     isComplete: true,
                     completion: .contentProcessed { [weak self] error in
-                        guard let self = self else { return }
-
-                        Task { @MainActor in
+                        Task { @MainActor [weak self] in
                             if !sendContinuationResumed.flag {
                                 sendContinuationResumed.flag = true
                                 if let error = error {
-                                    self.logger.error("Send error: \(error)")
-
-                                    // Check if we should attempt to reconnect on send failure
-                                    let isStopping = await self.isStopping  // Await actor-isolated property
-                                    if !isStopping && self.reconnectionConfig.enabled {
-                                        let isConnected = await self.isConnected
-                                        if isConnected {
-                                            if error.isConnectionLost {
-                                                self.logger.warning(
-                                                    "Connection appears broken, will attempt to reconnect..."
-                                                )
-
-                                                // Schedule connection restart
-                                                Task { [weak self] in  // Operate on self's executor
-                                                    guard let self = self else { return }
-
-                                                    await self.setIsConnected(false)
-
-                                                    try? await Task.sleep(for: .milliseconds(500))
-
-                                                    let currentIsStopping = await self.isStopping
-                                                    if !currentIsStopping {
-                                                        // Cancel the connection, then attempt to reconnect fully.
-                                                        self.connection.cancel()
-                                                        try? await self.connect()
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-
+                                    await self?.handleSendFailure(error)
                                     continuation.resume(
                                         throwing: MCPError.internalError("Send error: \(error)"))
                                 } else {
@@ -573,6 +541,33 @@ import Logging
                             }
                         }
                     })
+            }
+        }
+
+        /// Logs a failed send, and schedules a reconnection when it shows the connection was lost
+        private func handleSendFailure(_ error: NWError) {
+            logger.error("Send error: \(error)")
+
+            // Check if we should attempt to reconnect on send failure
+            guard !isStopping && reconnectionConfig.enabled && isConnected && error.isConnectionLost
+            else { return }
+
+            logger.warning("Connection appears broken, will attempt to reconnect...")
+
+            // Schedule connection restart
+            Task { [weak self] in
+                guard let self = self else { return }
+
+                await self.setIsConnected(false)
+
+                try? await Task.sleep(for: .milliseconds(500))
+
+                let currentIsStopping = await self.isStopping
+                if !currentIsStopping {
+                    // Cancel the connection, then attempt to reconnect fully.
+                    self.connection.cancel()
+                    try? await self.connect()
+                }
             }
         }
 

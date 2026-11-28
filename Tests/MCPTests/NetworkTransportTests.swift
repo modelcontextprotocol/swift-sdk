@@ -21,6 +21,10 @@ import Testing
         private var dataToReceive: [Data] = []
         private var sentData: [Data] = []
 
+        /// Send completions held until `completeHeldSends(error:)`, while `holdsSendCompletions`
+        private var holdsSendCompletions = false
+        private var heldSendCompletions: [@Sendable (NWError?) -> Void] = []
+
         /// The state update handler
         public var stateUpdateHandler: ((@Sendable (NWConnection.State) -> Void))? {
             get { lock.withLock { _stateUpdateHandler } }
@@ -50,13 +54,17 @@ import Testing
             isComplete: Bool,
             completion: NWConnection.SendCompletion
         ) {
-            let error = lock.withLock {
+            let (error, holds) = lock.withLock {
                 if let content = content { sentData.append(content) }
-                return mockError
+                return (mockError, holdsSendCompletions)
             }
 
             switch completion {
             case .contentProcessed(let handler):
+                if holds {
+                    lock.withLock { heldSendCompletions.append(handler) }
+                    return
+                }
                 handler(error as? NWError)
             default:
                 break
@@ -164,6 +172,25 @@ import Testing
         /// Clear sent data buffer
         func clearSentData() {
             lock.withLock { sentData.removeAll() }
+        }
+
+        /// Hold the completions of later sends until `completeHeldSends(error:)`
+        func holdSendCompletions() {
+            lock.withLock { holdsSendCompletions = true }
+        }
+
+        /// The number of send completions held
+        var heldSendCount: Int {
+            lock.withLock { heldSendCompletions.count }
+        }
+
+        /// Call the held send completions with `error`
+        func completeHeldSends(error: NWError?) {
+            let handlers = lock.withLock {
+                defer { heldSendCompletions.removeAll() }
+                return heldSendCompletions
+            }
+            for handler in handlers { handler(error) }
         }
     }
 
@@ -309,6 +336,74 @@ import Testing
             }
 
             await transport.disconnect()
+        }
+
+        @Test("A send whose completion reports an error throws it")
+        func testSendCompletionErrorThrows() async throws {
+            let mockConnection = MockNetworkConnection()
+            let transport = NetworkTransport(
+                mockConnection,
+                heartbeatConfig: .disabled,
+                reconnectionConfig: .disabled
+            )
+            try await transport.connect()
+
+            mockConnection.holdSendCompletions()
+            let sent = Task {
+                await outcome(within: .seconds(30)) {
+                    try await transport.send(Data(#"{"key":"value"}"#.utf8))
+                }
+            }
+            #expect(await eventually { mockConnection.heldSendCount == 1 })
+
+            let error = NWError.posix(.ECONNRESET)
+            mockConnection.completeHeldSends(error: error)
+
+            let result = await sent.value
+            #expect(!result.didTimeOut, "send never finished")
+            #expect(result.mcpError == .internalError("Send error: \(error)"))
+
+            await transport.disconnect()
+        }
+
+        @Test("A send pending when the transport is disconnected and released throws")
+        func testPendingSendAfterTransportReleased() async throws {
+            let mockConnection = MockNetworkConnection()
+            weak var weakTransport: NetworkTransport?
+            let sent: Task<Outcome<Void>, Never>
+
+            do {
+                let transport = NetworkTransport(
+                    mockConnection,
+                    heartbeatConfig: .disabled,
+                    reconnectionConfig: .disabled
+                )
+                weakTransport = transport
+                try await transport.connect()
+
+                mockConnection.holdSendCompletions()
+                sent = Task {
+                    await outcome(within: .seconds(30)) {
+                        try await transport.send(Data(#"{"key":"value"}"#.utf8))
+                    }
+                }
+                #expect(await eventually { mockConnection.heldSendCount == 1 })
+                await transport.disconnect()
+            }
+
+            // Cancelling a connection fails its pending sends with ECANCELED.
+            let error = NWError.posix(.ECANCELED)
+            mockConnection.completeHeldSends(error: error)
+
+            let result = await sent.value
+            #expect(!result.didTimeOut, "send never finished")
+            #expect(result.mcpError == .internalError("Send error: \(error)"))
+
+            let deadline = ContinuousClock.now + .seconds(30)
+            while weakTransport != nil && ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            #expect(weakTransport == nil, "Transport was not released")
         }
 
         @Test("Receive Message")
