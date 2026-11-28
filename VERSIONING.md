@@ -99,9 +99,9 @@ Every public enum is one of three kinds, and its documentation says which:
 
 | Kind | Types |
 |---|---|
-| Frozen | `ID`, `ProgressToken`, `Value`, `LogLevel`, `Prompt.Message.Role`, `Sampling.Message.Role`, `Resource.Annotations.Audience`, `CreateElicitation.Result.Action`, `Sampling.ContextInclusion`, `Elicitation.RequestSchema.SchemaType`, `Icon.Theme`, `CompletionReference`, `Sampling.Message.Content`, `OAuthConfiguration.ApplicationType`, `OAuthConfiguration.PrivateKeyJWTAssertionError`, `OAuthConfiguration.EnterpriseIdentityProvider.Endpoint`, `Client.ProtocolMode`, `HTTPResponse`, `AcceptHeaderValidator.Mode` |
-| `unknown` case | `Tool.Content`, `Prompt.Message.Content`, `Sampling.Message.Content.ContentBlock`, `Sampling.ToolResultContent.ContentBlock`, `InputRequest`, `InputResponse`, `CreateElicitation.Parameters`; `MCPError`, where `serverError(code:message:data:)` plays that role |
-| Open | `OAuthAuthorizationError` and its `Code`, `MCPError.Code`, `OAuthConfiguration.GrantType`, `OAuthConfiguration.TokenEndpointAuthentication`, `OAuthConfiguration.PrivateKeyJWTSigningAlgorithm`, `BearerTokenValidationResult`, `Elicitation.Mode`, `CreateSamplingMessage.ToolChoice.Mode`, `ResultType`, `CacheScope` |
+| Frozen | `ID`, `ProgressToken`, `Value`, `LogLevel`, `Prompt.Message.Role`, `Sampling.Message.Role`, `Resource.Annotations.Audience`, `CreateElicitation.Result.Action`, `Sampling.ContextInclusion`, `Elicitation.RequestSchema.SchemaType`, `Icon.Theme`, `CompletionReference`, `Sampling.Message.Content`, `OAuthConfiguration.ApplicationType`, `OAuthConfiguration.PrivateKeyJWTAssertionError`, `OAuthConfiguration.EnterpriseIdentityProvider.Endpoint`, `Client.ProtocolMode`, `HTTPResponse`, `AcceptHeaderValidator.Mode`, `ServerCard.FetchResult` |
+| `unknown` case | `Tool.Content`, `Prompt.Message.Content`, `Sampling.Message.Content.ContentBlock`, `Sampling.ToolResultContent.ContentBlock`, `InputRequest`, `InputResponse`, `CreateElicitation.Parameters`; `MCPError`, where `serverError(code:message:data:)` plays that role; `Skill.Resources`, where `unrecognized(_:)` plays that role |
+| Open | `OAuthAuthorizationError` and its `Code`, `MCPError.Code`, `OAuthConfiguration.GrantType`, `OAuthConfiguration.TokenEndpointAuthentication`, `OAuthConfiguration.PrivateKeyJWTSigningAlgorithm`, `BearerTokenValidationResult`, `Elicitation.Mode`, `CreateSamplingMessage.ToolChoice.Mode`, `ResultType`, `CacheScope`, `TaskStatus`, `TaskSupport`, `ServerCard.Remote.TransportType`, `ServerCard.Input.Format` |
 
 How a type is classified:
 

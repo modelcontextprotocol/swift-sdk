@@ -78,15 +78,17 @@ public struct Skill: Hashable, Codable, Sendable {
 
     /// The files of a skill.
     ///
-    /// Frozen: no case is added in 1.x.
+    /// No other case is added in 1.x: a form from a later revision of the
+    /// extension is ``unrecognized(_:)``.
     public enum Resources: Hashable, Sendable {
         /// Every file of the skill, `SKILL.md` included, each once, with its
         /// digest and size.
         case manifest([SkillResource])
         /// The skill's content is generated; it has no digests to verify.
         case dynamic
-        /// A value that is neither: the entry is invalid and a host does not
-        /// load it. Kept so that one bad entry does not fail a listing.
+        /// A value that is neither: an invalid entry, or a form from a later
+        /// revision of the extension. A host does not load it. Kept so that
+        /// one such entry does not fail a listing.
         case unrecognized(Value)
     }
 
