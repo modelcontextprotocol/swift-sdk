@@ -1422,6 +1422,44 @@ The server answers with the requested version if it is a handshake revision in `
 
 ### Shutdown
 
-Call `stop()` when the process should exit, for example from a signal handler or a [Swift Service Lifecycle](https://github.com/swift-server/swift-service-lifecycle) `Service`. The snippet above stops the server when its task is cancelled, which is what a `ServiceGroup` does on SIGTERM. `stop()` calls `closeSubscriptions()` first. To end listen streams without stopping the server, for example before a rolling restart, call `closeSubscriptions()`.
+Call `stop()` when the process should exit, for example from a signal handler or a [Swift Service Lifecycle](https://github.com/swift-server/swift-service-lifecycle) `Service`. `stop()` calls `closeSubscriptions()` first. To end listen streams without stopping the server, for example before a rolling restart, call `closeSubscriptions()`.
+
+The SDK does not depend on Swift Service Lifecycle: add the `swift-service-lifecycle` package to your application, and the `ServiceLifecycle` product and swift-log's `Logging` product to its target. On a signal in `gracefulShutdownSignals`, a `ServiceGroup` starts a graceful shutdown and does not cancel its services. The service below stops the server on graceful shutdown and on cancellation. It returns when the transport closes. By default, the group then fails with "A service has finished unexpectedly". To exit without an error, the example sets `successTerminationBehavior` to `.gracefullyShutdownGroup`:
+
+```swift
+import Logging
+import MCP
+import ServiceLifecycle
+
+struct MCPService: Service {
+    let server: Server
+
+    func run() async throws {
+        try await server.start(transport: StdioTransport())
+        // Returns when the transport closes, or after `stop()`.
+        await withTaskCancellationOrGracefulShutdownHandler {
+            await server.waitUntilCompleted()
+        } onCancelOrGracefulShutdown: {
+            Task { await server.stop() }
+        }
+    }
+}
+
+let server = Server(name: "MyServer", version: "1.0.0", capabilities: .init(tools: .init()))
+// Register your handlers here.
+let service = ServiceGroupConfiguration.ServiceConfiguration(
+    service: MCPService(server: server),
+    // When the client closes the connection, exit without an error.
+    successTerminationBehavior: .gracefullyShutdownGroup
+)
+let serviceGroup = ServiceGroup(
+    configuration: ServiceGroupConfiguration(
+        services: [service],
+        gracefulShutdownSignals: [.sigterm, .sigint],
+        logger: Logger(label: "my-server")
+    )
+)
+try await serviceGroup.run()
+```
 
 See [testing.md](testing.md) for running a server against a client in-process, and [troubleshooting.md](troubleshooting.md) for common errors.
