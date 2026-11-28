@@ -43,7 +43,7 @@ This guide covers the `Client` actor: connecting at either protocol era, calling
 | Mode | First request | Result |
 |---|---|---|
 | `.automatic` (default) | `server/discover` at `Version.stateless[0]` (2026-07-28) | 2026-07-28 when the server serves it; otherwise falls back to `initialize`. |
-| `.handshake` | `initialize` with `Version.latestHandshake` (2025-11-25), then `notifications/initialized` | The version the server returns. |
+| `.handshake` | `initialize` with `Version.latestHandshake` (2025-11-25), then `notifications/initialized` | The version the server returns, if it is in `Version.handshake`; otherwise an error. |
 | `.stateless(version)` | `server/discover` at `version` | `version`, or an error. Never retries with another version and never falls back. |
 
 `.automatic` falls back to `initialize` when:
@@ -95,7 +95,7 @@ When `isStateless` is `true`:
 
 %include Examples/Snippets/Client/Client.swift transports
 
-`StdioTransport()` without arguments uses the current process's standard input and output. Tests use `InMemoryTransport.createConnectedPair()`. See [protocol.md](protocol.md) for transports and authorization, and [testing.md](testing.md) for in-memory tests.
+`StdioTransport()` without arguments uses the current process's standard input and output. An app on iOS, tvOS, watchOS or visionOS cannot launch a process, so it cannot start a local stdio server. On these platforms, use `HTTPClientTransport` to connect to a remote server. Use an `https` URL: App Transport Security blocks plain `http` to a remote server, unless the app's `Info.plist` adds an exception. Tests use `InMemoryTransport.createConnectedPair()`. See [protocol.md](protocol.md) for transports and authorization, and [testing.md](testing.md) for in-memory tests.
 
 ### Strict mode
 
@@ -116,6 +116,7 @@ A connected client must be disconnected. Its receive loop and inbound queue keep
 | Error | Cause |
 |---|---|
 | `unsupportedProtocolVersion` (-32022) | `.stateless(version)` and the server does not serve `version`. `data.supported` lists what it serves. |
+| `internalError("Server's protocol version is not supported: <version>")` | The server answered `initialize` with a version that is not in `Version.handshake`, with `.handshake` or after the `.automatic` fallback. The client does not send `notifications/initialized` and disconnects. |
 | `internalError("Client connection not initialized")` | A method was called before `connect` or after `disconnect`. |
 | `transportError`, `connectionClosed`, `internalError` of an HTTP status | The transport failed. `.automatic` rethrows the error of `server/discover` unless it is an HTTP 400, 404 or 405 refusal. |
 
@@ -238,7 +239,7 @@ The result's `action` is `.accept`, `.decline` or `.cancel`. Only a form `.accep
 
 ### URL elicitation required
 
-A server can refuse a request until the user completes URL elicitations. It answers with `urlElicitationRequired` (-32042), whose `data.elicitations` lists `URLElicitationInfo` values (`elicitationId`, `url`, `message`). The SDK neither opens the URLs nor retries.
+On 2025-11-25 connections, a server can refuse a request until the user completes URL elicitations. It answers with -32042 and `data.elicitations`. The SDK decodes it as `urlElicitationRequired` only when `data` contains an `elicitations` array and no other fields, and every item has `mode: "url"` and exactly the fields represented by `URLElicitationInfo` (`mode`, `elicitationId`, `url`, `message`). Otherwise, including missing fields or extra fields such as `_meta` or `task`, it decodes as `serverError` so the data remains available. Match `errorCode` to handle both cases. The SDK neither opens the URLs nor retries.
 
 %include Examples/Snippets/Client/Features.swift url-elicitation-required
 
@@ -508,6 +509,8 @@ The server's capabilities and extensions are in `serverCapabilities` after `conn
 
 Requests throw `MCPError` for protocol errors, `CancellationError` for cancelled requests, and other errors from the transport or from decoding. `MCPError.code` and `MCPError.data` are the JSON-RPC `code` and `data` members.
 
+If a peer result does not decode as the expected type, catch `ResponseDecodingError`. This is a local decoding error, separate from `MCPError`. It applies to client requests, server-to-client requests, `Client.taskResult(_:)`, and `TaskHandle.result()`. Its `expectedType`, `rawResult` and `underlyingError` show what failed; its printed description leaves out the raw result. `TaskSnapshot.callToolResult` keeps its optional behavior and returns `nil` for a malformed result. For a direct method request, define a `Method` whose `Result` is `Value` to accept the raw result instead.
+
 %include Examples/Snippets/Client/Notifications.swift errors
 
 | Case | Code | Typical cause for a client |
@@ -521,8 +524,8 @@ Requests throw `MCPError` for protocol errors, `CancellationError` for cancelled
 | `headerMismatch` | -32020 | `Mcp-*` headers do not match the body. See [Header parameters](#header-parameters). |
 | `missingRequiredClientCapabilities` | -32021 | The request needs capabilities the client did not declare (`data.requiredCapabilities`). |
 | `unsupportedProtocolVersion(supported:requested:)` | -32022 | The server does not serve the requested version (`data.supported`). |
-| `urlElicitationRequired(message:elicitations:)` | -32042 | Complete the listed URL elicitations, then retry. |
-| `serverError(code:message:data:)` | other | Any other code, including -32000 and -32001 received from a server. |
+| `urlElicitationRequired(message:elicitations:)` | -32042 | Complete the listed URL elicitations, then retry (2025-11-25 only). |
+| `serverError(code:message:data:)` | any | Unknown codes, -32000 and -32001 received from a server, -32021 with unreadable capabilities, or -32042 whose data cannot fit the typed case. |
 | `connectionClosed`, `transportError` | -32000, -32001 | Local transport failures; never decoded from the wire. |
 
 See [troubleshooting.md](troubleshooting.md) for causes and fixes.

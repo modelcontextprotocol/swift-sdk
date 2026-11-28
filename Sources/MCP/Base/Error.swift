@@ -29,8 +29,10 @@ public struct URLElicitationInfo: Codable, Hashable, Sendable {
 /// A model context protocol error.
 ///
 /// The cases are frozen for 1.x. An error whose code has no case of its own,
-/// including a code a later revision adds, is a ``serverError(code:message:data:)``;
-/// ``errorCode`` and the constants of ``Code`` identify it.
+/// including a code a later revision adds, is a ``serverError(code:message:data:)``.
+/// A received -32021 with unreadable capabilities or -32042 with data that
+/// cannot fit ``urlElicitationRequired(message:elicitations:)`` also uses
+/// `serverError`; ``errorCode`` and the constants of ``Code`` identify it.
 public enum MCPError: Swift.Error, Sendable {
     // Standard JSON-RPC 2.0 errors (-32700 to -32603). The string, if any,
     // is sent as `data.detail`.
@@ -46,7 +48,8 @@ public enum MCPError: Swift.Error, Sendable {
     /// The receiver failed to handle the request: -32603.
     case internalError(String?)
 
-    /// An error with an implementation-defined or unrecognized code.
+    /// An implementation-defined error, a received -32021 with unreadable
+    /// capabilities, or a received -32042 whose data cannot fit its typed case.
     case serverError(code: Int, message: String, data: Value? = nil)
 
     // MCP specific errors
@@ -60,6 +63,8 @@ public enum MCPError: Swift.Error, Sendable {
     /// The server does not serve the requested protocol version: -32022.
     case unsupportedProtocolVersion(supported: [String], requested: String? = nil)
     /// The server needs the user to complete URL elicitations first: -32042.
+    /// A received -32042 with unrepresentable data decodes as `serverError`
+    /// with its data available.
     case urlElicitationRequired(message: String, elicitations: [URLElicitationInfo])
 
     // Transport specific errors
@@ -215,6 +220,17 @@ extension MCPError: LocalizedError {
         case .urlElicitationRequired(_, let elicitations):
             if let first = elicitations.first {
                 return "Visit \(first.url) to complete the required authentication or input"
+            }
+            return "Complete the required URL-based elicitation"
+        case .serverError(let code, _, let data) where code == -32042:
+            let first = data?.objectValue?["elicitations"]?.arrayValue?.first {
+                $0.objectValue?["mode"]?.stringValue == "url"
+                    && $0.objectValue?["elicitationId"]?.stringValue != nil
+                    && $0.objectValue?["url"]?.stringValue != nil
+                    && $0.objectValue?["message"]?.stringValue != nil
+            }
+            if let url = first?.objectValue?["url"]?.stringValue {
+                return "Visit \(url) to complete the required authentication or input"
             }
             return "Complete the required URL-based elicitation"
         case .connectionClosed:
@@ -384,15 +400,21 @@ extension MCPError: Codable {
             self = .unsupportedProtocolVersion(
                 supported: supported, requested: fields?["requested"]?.stringValue)
         case -32042:
-            var elicitations: [URLElicitationInfo] = []
-            for item in fields?["elicitations"]?.arrayValue ?? [] {
-                if let info = try? JSONDecoder().decode(
-                    URLElicitationInfo.self, from: JSONEncoder().encode(item))
-                {
-                    elicitations.append(info)
-                }
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = .sortedKeys
+            if let fields, fields.count == 1,
+                let items = fields["elicitations"]?.arrayValue,
+                let original = try? encoder.encode(items),
+                let elicitations = try? JSONDecoder().decode(
+                    [URLElicitationInfo].self, from: original),
+                elicitations.allSatisfy({ $0.mode == "url" }),
+                let roundTrip = try? encoder.encode(elicitations),
+                roundTrip == original
+            {
+                self = .urlElicitationRequired(message: message, elicitations: elicitations)
+            } else {
+                self = .serverError(code: code, message: message, data: serverData)
             }
-            self = .urlElicitationRequired(message: message, elicitations: elicitations)
         default:
             // -32000 and -32001 are used by the SDK for local transport errors
             // only; on the wire they are implementation-defined server errors.

@@ -120,13 +120,20 @@ func callAfterURLElicitation(_ client: Client) async throws -> [URLElicitationIn
     do {
         let content = try await client.callTool(name: "connect-calendar").content
         print(content)
-    } catch MCPError.urlElicitationRequired(let message, let elicitations) {
-        print(message)
-        for elicitation in elicitations {
+    } catch let error as MCPError where error.errorCode == .urlElicitationRequired {
+        print(error.localizedDescription)
+        for item in error.data?.objectValue?["elicitations"]?.arrayValue ?? [] {
+            guard let fields = item.objectValue,
+                fields["mode"]?.stringValue == "url",
+                let id = fields["elicitationId"]?.stringValue,
+                let url = fields["url"]?.stringValue,
+                let message = fields["message"]?.stringValue
+            else { continue }
+            let elicitation = URLElicitationInfo(elicitationId: id, url: url, message: message)
             // Ask the user, then open elicitation.url in a browser.
             print(elicitation.elicitationId, elicitation.url)
+            pending.append(elicitation)
         }
-        pending = elicitations
     }
     // endsnippet
     return pending

@@ -363,6 +363,24 @@ struct ClientSnippetTests {
         await server.stop()
     }
 
+    @Test("URL elicitation snippet handles metadata without losing the URL")
+    func elicitationWithMetadata() async throws {
+        let server = await makeDemoServer(configuration: .init(protocolVersions: Version.handshake))
+        let data: Value = ["elicitations": [[
+            "mode": "url", "elicitationId": "calendar", "url": "https://example.com/connect",
+            "message": "Sign in", "_meta": [:],
+        ]]]
+        await server.withMethodHandler(CallTool.self) { _ in
+            throw MCPError.serverError(code: -32042, message: "Connect your calendar", data: data)
+        }
+        let client = try await connectWithElicitation(transport: try await start(server))
+        #expect(try await callAfterURLElicitation(client).map(\.url) == ["https://example.com/connect"])
+        #expect(describe(MCPError.serverError(code: -32042, message: "Connect your calendar", data: data))
+                == "open [\"https://example.com/connect\"] first")
+        await client.disconnect()
+        await server.stop()
+    }
+
     // MARK: Multi round-trip
 
     @Test("the automatic loop uses the same handlers at both eras", arguments: bothEras)

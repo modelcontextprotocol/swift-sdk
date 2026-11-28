@@ -302,20 +302,23 @@ public struct OriginValidator: HTTPRequestValidator {
     }
 
     /// Protection for localhost-bound servers.
-    /// Allows requests from `localhost`, `127.0.0.1`, and `[::1]` with the specified port.
+    /// Allows requests from `localhost`, `127.0.0.1`, and `[::1]` on the given port.
+    /// Pass `nil` to allow any port, including none. Port 80 also accepts a request with no port.
     public static func localhost(port: Int? = nil) -> OriginValidator {
         let portPattern = port.map { String($0) } ?? "*"
+        // A request without a port uses the scheme's default (RFC 9110 §4.2.1): 80 for `http`.
+        let withoutPort = port == 80 ? ["127.0.0.1", "localhost", "[::1]"] : []
         return OriginValidator(
             allowedHosts: [
                 "127.0.0.1:\(portPattern)",
                 "localhost:\(portPattern)",
                 "[::1]:\(portPattern)",
-            ],
+            ] + withoutPort,
             allowedOrigins: [
                 "http://127.0.0.1:\(portPattern)",
                 "http://localhost:\(portPattern)",
                 "http://[::1]:\(portPattern)",
-            ]
+            ] + withoutPort.map { "http://\($0)" }
         )
     }
 
@@ -365,8 +368,8 @@ public struct OriginValidator: HTTPRequestValidator {
     /// Matches a value against a pattern that may contain a port wildcard `:*`.
     ///
     /// Examples:
-    /// - `"localhost:*"` matches `"localhost:8080"`, `"localhost:3000"`
-    /// - `"http://localhost:*"` matches `"http://localhost:8080"`
+    /// - `"localhost:*"` matches `"localhost:8080"`, `"localhost:3000"`, and `"localhost"`
+    /// - `"http://localhost:*"` matches `"http://localhost:8080"` and `"http://localhost"`
     /// - `"localhost:8080"` matches only `"localhost:8080"` exactly
     private func matchesPattern(_ value: String, pattern: String) -> Bool {
         guard pattern.hasSuffix(":*") else {
@@ -374,6 +377,9 @@ public struct OriginValidator: HTTPRequestValidator {
         }
 
         let prefix = String(pattern.dropLast(2))
+        // A value without a port uses the scheme's default port (RFC 9110 §4.2.1),
+        // which the wildcard covers.
+        if value == prefix { return true }
         guard value.hasPrefix(prefix + ":") else { return false }
 
         let portPart = value.dropFirst(prefix.count + 1)

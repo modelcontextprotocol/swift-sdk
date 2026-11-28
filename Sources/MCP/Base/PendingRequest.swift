@@ -1,6 +1,64 @@
 import Foundation
 
-/// Error thrown when a type mismatch occurs during response handling
+/// A peer response could not be decoded as the result type of a request.
+public struct ResponseDecodingError: LocalizedError, Sendable, CustomStringConvertible {
+    /// The result type the request expected.
+    public let expectedType: String
+    /// The result received from the peer.
+    public let rawResult: Value
+    /// The error raised while decoding the result.
+    public let underlyingError: any Swift.Error
+
+    /// Creates the error for a result that did not decode as `expectedType`.
+    public init(expectedType: String, rawResult: Value, underlyingError: any Swift.Error) {
+        self.expectedType = expectedType
+        self.rawResult = rawResult
+        self.underlyingError = underlyingError
+    }
+
+    /// The expected type and the decoding error, without the result.
+    public var description: String {
+        "Could not decode the result as \(expectedType): \(Self.summary(of: underlyingError))"
+    }
+
+    /// The same summary for `localizedDescription`.
+    public var errorDescription: String? { description }
+
+    /// A `DecodingError` as its coding path and debug description, such as
+    /// `content[0].text: Expected to decode String but found a number instead.`;
+    /// any other error as it prints.
+    private static func summary(of error: any Swift.Error) -> String {
+        guard let error = error as? DecodingError else { return "\(error)" }
+        let context: DecodingError.Context
+        switch error {
+        case .typeMismatch(_, let c), .valueNotFound(_, let c), .keyNotFound(_, let c), .dataCorrupted(let c):
+            context = c
+        @unknown default:
+            return "\(error)"
+        }
+        var path = ""
+        for key in context.codingPath {
+            if let index = key.intValue {
+                path += "[\(index)]"
+            } else {
+                path += path.isEmpty ? key.stringValue : ".\(key.stringValue)"
+            }
+        }
+        return path.isEmpty ? context.debugDescription : "\(path): \(context.debugDescription)"
+    }
+}
+
+/// Decodes a wire result and retains the raw value when decoding fails.
+func decodeResponseResult<T: Decodable>(_ value: Value, as type: T.Type = T.self) throws -> T {
+    do {
+        return try T(decoding: value)
+    } catch {
+        throw ResponseDecodingError(
+            expectedType: String(reflecting: type), rawResult: value, underlyingError: error)
+    }
+}
+
+/// A non-wire response had the wrong type.
 struct TypeMismatchError: Swift.Error {}
 
 /// A pending request with a continuation for the result
@@ -80,11 +138,12 @@ struct AnyPendingRequest: Sendable {
             case .success(let value):
                 // A result decoded from the wire keeps `data:` URL strings;
                 // the typed decode turns those in `Value` fields into `.data`.
-                if let value = value as? Value,
-                    let data = try? JSONEncoder().encode(value),
-                    let decoded = try? JSONDecoder().decode(T.self, from: data)
-                {
-                    return deliver(.success(decoded))
+                if let value = value as? Value {
+                    do {
+                        return deliver(.success(try decodeResponseResult(value, as: T.self)))
+                    } catch {
+                        return deliver(.failure(error))
+                    }
                 } else if let typedValue = value as? T {
                     return deliver(.success(typedValue))
                 } else {

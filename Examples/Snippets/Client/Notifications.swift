@@ -190,6 +190,17 @@ func describe(_ error: Error) -> String {
     guard let error = error as? MCPError else {
         return "not an MCP error: \(error)"  // for example CancellationError
     }
+    if error.errorCode == .urlElicitationRequired {
+        let urls = error.data?.objectValue?["elicitations"]?.arrayValue?.compactMap { item in
+            guard let fields = item.objectValue,
+                fields["mode"]?.stringValue == "url",
+                fields["elicitationId"]?.stringValue != nil,
+                fields["message"]?.stringValue != nil
+            else { return nil }
+            return fields["url"]?.stringValue
+        } ?? []
+        return "open \(urls) first"
+    }
     switch error {
     case .resourceNotFound(let uri, _):
         return "no resource at \(uri)"
@@ -197,8 +208,6 @@ func describe(_ error: Error) -> String {
         return "\(requested ?? "-") not served; the server serves \(supported)"
     case .missingRequiredClientCapabilities(let required, _):
         return "declare these capabilities: \(required)"
-    case .urlElicitationRequired(_, let elicitations):
-        return "open \(elicitations.map(\.url)) first"
     case .headerMismatch(let detail):
         return "HTTP headers do not match the body: \(detail ?? "")"
     case .connectionClosed, .transportError:

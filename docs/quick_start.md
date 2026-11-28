@@ -9,9 +9,10 @@ from a compiled example in [`Examples/`](../Examples).
 ## Installation
 
 The package requires Swift 6.1 or later (Xcode 16.3 or later). The minimum
-platforms are macOS 13, iOS 16, Mac Catalyst 16,
-watchOS 9, tvOS 16 and visionOS 1. On Linux, the stdio transport needs glibc
-or musl.
+platforms are macOS 15, iOS 18, Mac Catalyst 18,
+watchOS 11, tvOS 18 and visionOS 2; for older deployment targets, stay on
+0.12 ([platform policy](../VERSIONING.md#platforms)). On Linux, the stdio
+transport needs glibc or musl.
 
 Add the package and the `MCP` product to `Package.swift`. Releases follow
 Semantic Versioning ([VERSIONING.md](../VERSIONING.md)): depend on a release
