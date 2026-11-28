@@ -5,8 +5,20 @@
 # Usage: scripts/ci/api-breakage.sh [<baseline>]
 #
 #   <baseline>  A git ref to compare with, or `none` to skip. Default: the
-#               newest release tag `X.Y.Z` (X >= 1) that is an ancestor of
-#               HEAD. Without one the job passes and says so.
+#               newest release tag `X.Y.Z` (X >= 1) for the target branch.
+#               Without one the job passes and says so.
+#
+# The target branch is the pull request's base branch (GITHUB_BASE_REF), else
+# the pushed branch (GITHUB_REF_NAME), else the checked-out branch;
+# API_BREAKAGE_BRANCH overrides all three. A release branch `release-X.Y`
+# compares with the newest release of X.Y or an earlier minor version: its own
+# newest patch, or before X.Y.0 the newest release of the version before it.
+# Any other branch, `main` included, compares with the newest release. Tags
+# are looked up on every branch, because releases are tagged on their release
+# branch (VERSIONING.md#release-branches). Release candidates (`X.Y.Z-rc.N`)
+# are skipped. For a local run of a branch that goes to a release branch:
+#
+#   API_BREAKAGE_BRANCH=release-1.0 scripts/ci/api-breakage.sh
 #
 # The default baseline is the newest release whatever major version HEAD
 # develops: a pull request that starts the next major version sets the job's
@@ -37,12 +49,35 @@ if [[ -z "$baseline" ]]; then
     else
         git fetch --quiet --tags 2>/dev/null || true
     fi
-    baseline="$(git tag --merged HEAD --list '[0-9]*.[0-9]*.[0-9]*' --sort=-version:refname \
-        | grep -E '^[1-9][0-9]*\.[0-9]+\.[0-9]+$' | head -1 || true)"
+    branch="${API_BREAKAGE_BRANCH:-${GITHUB_BASE_REF:-${GITHUB_REF_NAME:-}}}"
+    if [[ -z "$branch" ]]; then
+        branch="$(git symbolic-ref --quiet --short HEAD || true)"
+    fi
+    # Release tags only: a release candidate `X.Y.Z-rc.N` is never a baseline.
+    # A release branch `release-X.Y` skips the releases of later minor versions.
+    scope="" line_major="" line_minor=""
+    if [[ "$branch" =~ ^release-([0-9]+)\.([0-9]+)$ ]]; then
+        line_major="${BASH_REMATCH[1]}" line_minor="${BASH_REMATCH[2]}"
+        scope=" up to $line_major.$line_minor"
+    fi
+    baseline=""
+    while read -r tag; do
+        [[ "$tag" =~ ^([1-9][0-9]*)\.([0-9]+)\.[0-9]+$ ]] || continue
+        if [[ -n "$line_major" ]]; then
+            major="${BASH_REMATCH[1]}" minor="${BASH_REMATCH[2]}"
+            if (( major > line_major || (major == line_major && minor > line_minor) )); then
+                continue
+            fi
+        fi
+        baseline="$tag"
+        break
+    done < <(git tag --list '[0-9]*.[0-9]*.[0-9]*' --sort=-version:refname)
     if [[ -z "$baseline" ]]; then
-        echo "api-breakage: no release tag X.Y.Z (X >= 1) before HEAD; nothing to compare with"
+        echo "api-breakage: no release tag X.Y.Z (X >= 1)$scope" \
+            "(branch ${branch:-unknown}); nothing to compare with"
         exit 0
     fi
+    echo "api-breakage: branch ${branch:-unknown}: the newest release$scope is $baseline"
 fi
 if [[ "$baseline" == none ]]; then
     echo "api-breakage: skipped"

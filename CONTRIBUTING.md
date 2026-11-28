@@ -97,8 +97,8 @@ Rules:
 
 - Entries should only go down. A pull request that adds entries explains why.
 - The fixtures use the public API only. Do not special-case a scenario in a fixture; fix the SDK.
-- CI runs every leg and tier score, on macOS and Linux, on pushes and pull requests to `main`
-  (see [CI and Linux](#ci-and-linux)).
+- CI runs every leg and tier score, on macOS and Linux, on pushes and pull requests to `main` and
+  the release branches (see [CI and Linux](#ci-and-linux)).
 
 ## Interop
 
@@ -292,6 +292,8 @@ One type label per issue:
 
 - Link the issue. Nontrivial changes without an issue start with one (see
   [Before You Start](#before-you-start)).
+- Target `main`. A fix that a released version needs is then cherry-picked onto its
+  `release-X.Y` branch ([Release branches](VERSIONING.md#release-branches)).
 - Keep the change to one topic. Do not mix refactoring with behavior changes.
 - Required before review:
   - `swift build` and `swift test` pass.

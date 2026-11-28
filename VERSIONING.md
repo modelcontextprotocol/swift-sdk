@@ -16,6 +16,27 @@ Depend on the package with `.upToNextMajor(from: "1.0.0")`. Before 1.0 the minor
 the role of the major number; [docs/migration.md](docs/migration.md) lists the changes from
 0.12.1 to 1.0.0.
 
+## Release branches
+
+Each minor version has one branch, `release-MAJOR.MINOR`, and its releases are tags on that
+branch: `release-1.0` carries `1.0.0`, `1.0.1`, `1.0.2`. A patch release needs no branch of its
+own. [Kubernetes](https://github.com/kubernetes/kubernetes) works the same way.
+
+- `main` develops the next minor or major version.
+- `release-X.Y` is cut from `main` for `X.Y.0`. After that it takes bug fixes only, released as
+  patch versions.
+- Before a release, its branch can tag release candidates `X.Y.Z-rc.N` for testing:
+  `1.2.0-rc.1`, `1.2.0-rc.2`, then `1.2.0`. SwiftPM leaves a release candidate out of a range such
+  as `.upToNextMajor(from: "1.0.0")`, so only a package that names it (`exact: "1.2.0-rc.1"`)
+  gets it. A release candidate is not a release: what it adds can still change before `X.Y.Z`.
+- A fix lands on `main` first. It is then cherry-picked (`git cherry-pick -x`) onto each release
+  branch that ships it, in a pull request into that branch. A fix for code that only a release
+  branch has goes straight to that branch, and its pull request says why.
+- Releases are tagged on their release branch, `X.Y.0` included. The `api-breakage` job compares
+  `release-X.Y` with the newest release of `X.Y` or an earlier minor version, and every other
+  branch, `main` included, with the newest release. It never compares with a release candidate.
+- CI runs on pull requests into, and pushes to, `main` and every `release-*` branch.
+
 ## The public API
 
 Covered:

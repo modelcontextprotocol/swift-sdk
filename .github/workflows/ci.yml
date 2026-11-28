@@ -5,9 +5,9 @@ name: CI
 
 on:
   push:
-    branches: ["main", "rel/**"]
+    branches: ["main", "release-*"]
   pull_request:
-    branches: ["main", "rel/**"]
+    branches: ["main", "release-*"]
 
 # Actions are pinned by commit; the comment names the release.
 permissions:
