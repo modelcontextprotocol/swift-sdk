@@ -44,6 +44,12 @@ let examples: [Target] =
             ],
             path: "Examples/http-server"
         ),
+        .executableTarget(
+            name: "FoundationModelsExample",
+            dependencies: ["MCP"],
+            path: "Examples/foundation-models",
+            exclude: ["README.md"]
+        ),
     ]
 
 let package = Package(

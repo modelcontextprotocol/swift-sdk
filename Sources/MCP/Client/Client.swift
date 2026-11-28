@@ -441,7 +441,7 @@ public actor Client {
     /// The connection to the server
     private var connection: (any Transport)?
     /// The logger for the client
-    private var logger: Logger? {
+    var logger: Logger? {
         get async {
             await connection?.logger
         }

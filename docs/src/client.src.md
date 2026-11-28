@@ -159,6 +159,34 @@ Errors:
 - `headerMismatch` (-32020): the server found a missing or different `Mcp-Param-*` header. The usual cause is calling a tool the client has not listed on this connection, so it has no recorded annotations. Call `listTools()` before calling tools with annotated arguments.
 - `Tool.headerParameters()` throws `MCPRequestHeaders.InvalidAnnotation` for an invalid annotation. At 2025-11-25 such tools are not dropped, so expect the error there.
 
+### Tools in a Foundation Models session
+
+On macOS 26, iOS 26, visionOS 26 and watchOS 27 and later, `languageModelTools(approval:)` gives the server's tools to a [Foundation Models](https://developer.apple.com/documentation/foundationmodels) `LanguageModelSession` (note that `SystemLanguageModel` itself is unavailable on watchOS). The bridge is unavailable on tvOS, and compiles out where the framework does not exist. In a file that imports both modules, write `MCP.Tool` and `FoundationModels.Tool`.
+
+%include Examples/Snippets/Client/FoundationModels.swift language-model-tools
+
+`languageModelTools(approval:)` lists every page of tools (stopping on an empty or repeated cursor, or after 100 pages) and wraps each in a `Client.LanguageModelTool`:
+
+- Tools for views only (MCP Apps, `isVisibleToModel == false`) are left out, and `LanguageModelTool.init` rejects them if called directly.
+- A tool whose input schema cannot be converted is left out, with a warning in the log. The method throws only when the tools cannot be listed.
+- Pass an `approval` closure to confirm model-initiated calls with the user or host policy (inspecting `tool.annotations` such as `destructiveHint` and `openWorldHint`) before `tools/call` is sent, especially when connecting to untrusted servers. Returning `false` reports to the model that the call was not approved.
+- When the model calls an approved tool, omitted properties that the schema marks as both `required` and nullable are filled with `null`, `tools/call` is sent, and the result is returned as text: the text blocks and text resources, or the JSON of `structuredContent` when there are none, and a line such as `[image: image/png]` for other content. A result with `isError` is prefixed with `"Error: "` so the model can see that the call failed and correct it. A protocol or transport error is thrown, and the session reports it as a `LanguageModelSession.ToolCallError`.
+
+`GenerationSchema(jsonSchema:name:)` converts the input schema. A generation schema cannot express all of JSON Schema, so the conversion loosens constraints it cannot represent rather than narrowing them, and the model may generate a value the server then refuses:
+
+| JSON Schema | In the generation schema |
+| --- | --- |
+| `properties`, `required`, `description` | Kept, in the deduplicated order of `x-order` when present. A property that is not required, or that may be `null`, is optional (and backfilled as `null` when required and omitted). |
+| `enum` and `const` of strings, `minimum`, `maximum`, `minItems`, `maxItems` | Kept within safe generation bounds (`±(2^53 - 1)` for integers, `±9e18` for numbers, `maxItems <= 10,000`; larger upper bounds are dropped). Exclusive bounds of integers move by one; those of numbers are kept as inclusive. `items: false` caps the array at `prefixItems.count` (or `0`). |
+| `anyOf`, `oneOf`, a list of types | A choice, merging any sibling object `properties` and `required`. `null` among them makes the property optional. |
+| Local JSON Pointer `$ref` (`#` or `#/...`); `allOf` with one schema | Followed. |
+| A non-root map (an object without `properties`, unless `additionalProperties` is `false`), a subschema with no typing keyword, `true` | Any non-null JSON value. An empty or `additionalProperties: true` root object becomes an object with no properties. |
+| `pattern`, `format`, `minLength`, `maxLength`, `not`, `if`/`then`/`else`, and other keywords | Ignored (`pattern` is dropped because ECMA-262 anchors and character classes fail guided generation across the session). |
+
+It throws `GenerationSchema.JSONSchemaError`, with the JSON Pointer of the subschema, when the root, or a choice of a root `anyOf` or `oneOf` (nested choices included), does not resolve to an object or is a schema-valued map (or requires `minProperties > 0` without `properties`), when the schema exceeds nesting (32) or size (1,024 subschemas) limits, or when a subschema is `false`, is malformed, has `allOf` without exactly one schema, has an unknown `type`, accepts only `null`, has contradictory bounds (`minimum > maximum` or `minItems > maxItems`) or `minItems > 1,000`, has a recursive reference that does not target an object or choice, or has a `$ref` outside the document. To fail instead of leaving a tool out, create each `Client.LanguageModelTool` yourself:
+
+%include Examples/Snippets/Client/FoundationModels.swift language-model-tool-strict
+
 ## Prompts, resources and completions
 
 Prompts: `listPrompts(cursor:)` and `getPrompt(name:arguments:)`. Prompt arguments are strings.

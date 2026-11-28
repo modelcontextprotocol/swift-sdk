@@ -39,6 +39,9 @@ is 100% for clients and servers at 2025-11-25 and 2026-07-28; see
   with glibc or musl. For older deployment targets (macOS 13 or 14; iOS, Mac
   Catalyst or tvOS 16 or 17; watchOS 9 or 10; visionOS 1), stay on 0.12
   ([platform policy](VERSIONING.md#platforms)).
+- The Foundation Models integration ([server](docs/server.md#tools-from-foundation-models),
+  [client](docs/client.md#tools-in-a-foundation-models-session)) needs macOS 26, iOS 26,
+  visionOS 26 or watchOS 27 at run time, and an SDK with the framework to build.
 
 ## Installation
 
@@ -142,6 +145,7 @@ code block in the docs:
 |---|---|
 | `HelloServer`, `HelloClient` | A stdio server with one tool, and a client that starts it as a subprocess |
 | `HTTPServerExample` | One HTTP endpoint for both eras: stateful sessions and stateless requests |
+| `FoundationModelsExample` | Shared `FoundationModels.Tool` actions run locally in a `LanguageModelSession` and exported over stdio to MCP clients such as OpenCode |
 | `*Snippets`, `SnippetTests` | The doc snippets, compiled and tested with the package |
 
 ## Repository layout
