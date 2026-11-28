@@ -1,27 +1,26 @@
 import Foundation
 import Logging
 
-/// A stateful HTTP server transport that manages sessions and uses SSE for streaming responses.
+/// A stateful HTTP server transport for one session, using SSE for streaming responses.
 ///
-/// This transport implements the MCP Streamable HTTP specification with full session management:
+/// This transport implements the MCP Streamable HTTP specification for one session:
 /// - Assigns a session ID during initialization (via `Mcp-Session-Id` header)
 /// - POST requests receive SSE-streamed responses
 /// - GET requests establish a standalone SSE stream for server-initiated messages
+///   that are not related to an in-flight request
 /// - DELETE requests terminate the session
 /// - Built-in event store for resumability (reconnection with `Last-Event-ID`)
 ///
 /// ## Usage
 ///
 /// ```swift
-/// let transport = StatefulHTTPServerTransport()  // Uses UUID by default
-///
-/// // Start the MCP server with this transport
+/// // Your HTTP router creates one transport and Server per session.
+/// let transport = StatefulHTTPServerTransport()
 /// try await server.start(transport: transport)
-///
-/// // In your HTTP framework handler:
 /// let response = await transport.handleRequest(httpRequest)
-/// // Convert response to your framework's response type and return it
 /// ```
+/// The router routes later requests by `Mcp-Session-Id` and removes the session after DELETE.
+/// See `docs/protocol.md` and `Examples/http-server` for a complete router.
 ///
 /// ## Framework Integration
 ///
@@ -30,6 +29,7 @@ import Logging
 /// For SSE responses, the `.stream` case provides an `AsyncThrowingStream<Data, Error>`
 /// to pipe to the client.
 public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
+    /// The logger of the transport; a no-op logger unless one was passed to `init`.
     public nonisolated let logger: Logger
 
     // MARK: - Dependencies
@@ -41,6 +41,9 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
     // MARK: - State
 
     private var sessionID: String?
+    /// The JSON-RPC id of the `initialize` request that created the session,
+    /// until it is answered.
+    private var initializeRequestID: String?
     private var terminated = false
     private var started = false
 
@@ -55,9 +58,14 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
     private var requestSSEContinuations: [String: AsyncThrowingStream<Data, Swift.Error>.Continuation] = [:]
 
     /// Maps request ID → originating HTTP request, surfaced to handlers via
-    /// ``Server/currentHTTPContext``. Cleared when the response is routed,
+    /// `Server.currentHandlerContext?.httpContext`. Cleared when the response is routed,
     /// the stream is closed, or the session terminates.
     private var httpRequestContexts: [String: HTTPRequest] = [:]
+
+    /// IDs of client requests that have not been answered yet. Messages
+    /// related to one of these are stored on its stream even while the
+    /// stream is disconnected, so a resuming client receives them.
+    private var openRequestIDs: Set<String> = []
 
     // MARK: - Standalone GET SSE stream
 
@@ -68,16 +76,36 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
     /// Internal identifier for the standalone GET stream in the event store.
     private let standaloneStreamID = "_GET_stream"
 
+    /// The generation of each registered SSE stream, by stream ID. A stream
+    /// the client disconnects unregisters itself only while it is still the
+    /// current one for its ID, so it never removes a stream that replaced it.
+    private var streamGenerations: [String: Int] = [:]
+    private var streamGenerationCounter = 0
+
     // MARK: - Event Store (Resumability)
 
+    /// A message kept for `Last-Event-ID` replay. Its event ID is
+    /// `<streamID>_<counter>`; priming events get an ID but are not stored.
     private struct StoredEvent {
         let streamID: String
-        let eventID: String
-        let message: Data?
+        let counter: Int
+        let message: Data
     }
 
+    /// Stored events, oldest first, from `storedEventsHead`.
     private var storedEvents: [StoredEvent] = []
+    private var storedEventsHead = 0
+    private var storedBytes = 0
+    /// Stored events per stream.
+    private var storedEventCounts: [String: Int] = [:]
+    /// The newest event dropped from each stream that still has events or
+    /// is open. A resumption from before it cannot be served.
+    private var evictedThrough: [String: Int] = [:]
     private var eventCounter: Int = 0
+    /// The most events kept for replay; older events are dropped first.
+    private let eventStoreCapacity: Int
+    /// The most bytes of messages kept for replay.
+    private let eventStoreByteCapacity: Int
 
     // MARK: - Init
 
@@ -92,13 +120,25 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
     ///     protocol version, and session validation.
     ///   - retryInterval: Retry interval in milliseconds for SSE priming events.
     ///     Controls how long clients wait before attempting to reconnect.
+    ///   - eventStoreCapacity: The most SSE events kept for `Last-Event-ID`
+    ///     replay in this session. When it, or `eventStoreByteCapacity`, is
+    ///     reached, the oldest event is dropped; a client that resumes a
+    ///     stream from before one of its dropped events gets HTTP 400.
+    ///     Defaults to 1000; values below 1 are treated as 1.
+    ///   - eventStoreByteCapacity: The most bytes of messages kept for
+    ///     replay in this session. Defaults to 16 MiB. The newest event is
+    ///     always kept.
     ///   - logger: Optional logger. If `nil`, a no-op logger is used.
     public init(
         sessionIDGenerator: any SessionIDGenerator = UUIDSessionIDGenerator(),
         validationPipeline: (any HTTPRequestValidationPipeline)? = nil,
         retryInterval: Int? = nil,
+        eventStoreCapacity: Int = 1000,
+        eventStoreByteCapacity: Int = 16 << 20,
         logger: Logger? = nil
     ) {
+        self.eventStoreCapacity = max(1, eventStoreCapacity)
+        self.eventStoreByteCapacity = max(1, eventStoreByteCapacity)
         self.sessionIDGenerator = sessionIDGenerator
         self.validationPipeline = validationPipeline ?? StandardValidationPipeline(validators: [
             OriginValidator.localhost(),
@@ -120,6 +160,10 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
 
     // MARK: - Transport Conformance
 
+    /// Marks the transport started; it opens no socket, since the framework
+    /// adapter delivers requests through ``handleRequest(_:)``.
+    ///
+    /// - Throws: ``MCPError/internalError(_:)`` when already started.
     public func connect() async throws {
         guard !started else {
             throw MCPError.internalError("Transport already started")
@@ -128,6 +172,10 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
         logger.debug("Stateful HTTP server transport started")
     }
 
+    /// Terminates the session: closes every SSE stream and the incoming
+    /// stream, and drops stored events. After validation, later requests
+    /// without a session ID get 400; if a session existed, requests with any
+    /// session ID get 404.
     public func disconnect() async {
         terminate()
     }
@@ -137,6 +185,15 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
     /// - Responses are routed to the SSE stream matching the response's JSON-RPC ID.
     /// - Notifications and server-initiated requests are routed to the standalone GET stream.
     public func send(_ data: Data) async throws {
+        try await send(data, relatedRequestID: nil)
+    }
+
+    /// Routes outgoing server messages to the appropriate client connection.
+    ///
+    /// Notifications and server-initiated requests related to a request that
+    /// has not been answered yet go to that request's SSE stream; others go
+    /// to the standalone GET stream.
+    public func send(_ data: Data, relatedRequestID: ID?) async throws {
         guard !terminated else {
             throw MCPError.connectionClosed
         }
@@ -149,11 +206,27 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
         switch kind {
         case .response(let id):
             routeResponse(data, requestID: id)
+            if id == initializeRequestID {
+                initializeRequestID = nil
+                // A refused `initialize` (for example by the server's
+                // initialize hook) leaves no session behind.
+                if JSONRPCMessageFields.errorCode(in: data) != nil {
+                    logger.info("Initialization failed; session dropped", metadata: ["sessionID": "\(sessionID ?? "none")"])
+                    sessionID = nil
+                }
+            }
         case .notification, .request:
-            routeServerInitiatedMessage(data)
+            if let related = relatedRequestID?.description, openRequestIDs.contains(related) {
+                routeToRequestStream(data, requestID: related)
+            } else {
+                routeServerInitiatedMessage(data)
+            }
+        case .invalid(let method, _, _):
+            logger.warning("Invalid outgoing message dropped", metadata: ["method": "\(method)"])
         }
     }
 
+    /// The JSON-RPC messages that clients POST to the session.
     public func receive() -> AsyncThrowingStream<Data, Swift.Error> {
         incomingStream
     }
@@ -169,10 +242,22 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
     /// - Others: 405 Method Not Allowed
     public func handleRequest(_ request: HTTPRequest) async -> HTTPResponse {
         if terminated {
+            let context = HTTPValidationContext(
+                httpMethod: request.method.uppercased(), sessionID: sessionID,
+                supportedProtocolVersions: Set(Version.handshake))
+            if let response = validationPipeline.validate(request, context: context) {
+                return withoutSessionHeader(response)
+            }
+
+            let requestedSessionID = request.header(HTTPHeaderName.sessionID)
+            let isTerminatedSession = sessionID != nil && requestedSessionID == sessionID
+            let hasEndedSession = sessionID != nil && requestedSessionID != nil
             return .error(
-                statusCode: 404,
-                .invalidRequest("Not Found: Session has been terminated"),
-                sessionID: sessionID
+                statusCode: hasEndedSession ? 404 : 400,
+                .invalidRequest(hasEndedSession
+                    ? "Not Found: Session has been terminated"
+                    : "Bad Request: No active session"),
+                sessionID: isTerminatedSession ? sessionID : nil
             )
         }
 
@@ -184,6 +269,17 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
         case "DELETE":
             return handleDelete(request)
         default:
+            // Validators that answer a request themselves, such as
+            // ServerCardValidator for a CORS preflight or a HEAD (200 or
+            // 304), run for every method.
+            let context = HTTPValidationContext(
+                httpMethod: request.method.uppercased(), sessionID: sessionID,
+                supportedProtocolVersions: Set(Version.handshake))
+            if let response = validationPipeline.validate(request, context: context),
+                (200..<300).contains(response.statusCode) || response.statusCode == 304
+            {
+                return response
+            }
             return .error(
                 statusCode: 405,
                 .invalidRequest("Method Not Allowed"),
@@ -213,12 +309,41 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
             )
         }
 
+        // Requests at 2026-07-28 and later carry no session; this transport
+        // serves handshake revisions only, whether the stateless version is
+        // in the header or only in `_meta`. They pass the validators that do
+        // not depend on a session (origin, media types, authentication), then
+        // get -32022, whose data lets the client fall back to `initialize`.
+        // Validators see the handshake revisions, the ones this transport
+        // serves, so the context does not change with `Version.supported`.
+        if case .request(let id, _) = messageKind, !messageKind.isInitializeRequest,
+            let version = request.statelessProtocolVersion
+                ?? JSONRPCMessageFields.metaProtocolVersion(in: body).flatMap({
+                    Version.handshake.contains($0) ? nil : $0
+                })
+        {
+            let sessionless = HTTPValidationContext(
+                httpMethod: "POST", sessionID: nil, isInitializationRequest: true,
+                supportedProtocolVersions: Set(Version.handshake))
+            if let errorResponse = validationPipeline.validate(request, context: sessionless) {
+                return errorResponse
+            }
+            // Echo the session ID only to a client that already holds it.
+            let knownSession = request.header(HTTPHeaderName.sessionID) == sessionID ? sessionID : nil
+            return .error(
+                statusCode: 400,
+                .unsupportedProtocolVersion(supported: Version.handshake, requested: version),
+                id: JSONRPCMessageFields.id(in: body) ?? .string(id),
+                sessionID: knownSession
+            )
+        }
+
         // Build validation context
         let context = HTTPValidationContext(
             httpMethod: "POST",
             sessionID: sessionID,
             isInitializationRequest: messageKind.isInitializeRequest,
-            supportedProtocolVersions: Version.supported
+            supportedProtocolVersions: Set(Version.handshake)
         )
 
         // Run validation pipeline
@@ -233,13 +358,29 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
 
         // Handle by message type
         switch messageKind {
-        case .notification, .response:
+        case .notification(let method):
+            if method == CancelledNotification.name,
+                let cancelled = JSONRPCMessageKind.cancelledRequestID(in: body)
+            {
+                releaseCancelledRequest(cancelled)
+            }
+            incomingContinuation.yield(body)
+            return .accepted(headers: sessionHeaders())
+
+        case .response:
             // Yield to server and return 202 Accepted
             incomingContinuation.yield(body)
             return .accepted(headers: sessionHeaders())
 
         case .request(let id, _):
             return handleJSONRPCRequest(body, requestID: id, request: request)
+
+        case .invalid(_, let id, let reason):
+            // JSON-RPC 2.0 §5: a request whose `id` cannot be read is
+            // answered with -32600 and `"id": null`, not treated as a
+            // notification.
+            return .error(
+                statusCode: 400, .invalidRequest(reason), id: id, sessionID: sessionID)
         }
     }
 
@@ -278,14 +419,16 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
         }
 
         // For the initialize request, use SSE streaming like any other request
+        initializeRequestID = requestID
         return handleJSONRPCRequest(body, requestID: requestID, request: request)
     }
 
     private func handleJSONRPCRequest(_ body: Data, requestID: String, request: HTTPRequest) -> HTTPResponse {
         // Create SSE stream for this request
         let (sseStream, sseContinuation) = AsyncThrowingStream<Data, Swift.Error>.makeStream()
-        requestSSEContinuations[requestID] = sseContinuation
+        register(sseContinuation, streamID: requestID)
         httpRequestContexts[requestID] = request
+        openRequestIDs.insert(requestID)
 
         // Extract protocol version for priming event decision
         let protocolVersion = extractProtocolVersion(from: body, request: request)
@@ -317,7 +460,7 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
             httpMethod: "GET",
             sessionID: sessionID,
             isInitializationRequest: false,
-            supportedProtocolVersions: Version.supported
+            supportedProtocolVersions: Set(Version.handshake)
         )
 
         // Run validation pipeline
@@ -341,10 +484,10 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
 
         // Create standalone SSE stream
         let (sseStream, sseContinuation) = AsyncThrowingStream<Data, Swift.Error>.makeStream()
-        standaloneSSEContinuation = sseContinuation
+        register(sseContinuation, streamID: standaloneStreamID)
 
         // Extract protocol version for priming event
-        let protocolVersion = request.header(HTTPHeaderName.protocolVersion) ?? Version.latest
+        let protocolVersion = request.header(HTTPHeaderName.protocolVersion) ?? Version.latestHandshake
 
         // Send priming event
         sendPrimingEvent(
@@ -370,7 +513,7 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
             httpMethod: "DELETE",
             sessionID: sessionID,
             isInitializationRequest: false,
-            supportedProtocolVersions: Version.supported
+            supportedProtocolVersions: Set(Version.handshake)
         )
 
         if let errorResponse = validationPipeline.validate(request, context: context) {
@@ -380,6 +523,55 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
         terminate()
 
         return .ok(headers: sessionHeaders())
+    }
+
+    // MARK: - Stream Registration
+
+    /// Registers `continuation` as the current stream for `streamID` and
+    /// unregisters it when the client disconnects. A stream it replaces is
+    /// finished: nothing is sent on it any more.
+    private func register(
+        _ continuation: AsyncThrowingStream<Data, Swift.Error>.Continuation, streamID: String
+    ) {
+        streamGenerationCounter += 1
+        let generation = streamGenerationCounter
+        streamGenerations[streamID] = generation
+        let replaced: AsyncThrowingStream<Data, Swift.Error>.Continuation?
+        if streamID == standaloneStreamID {
+            replaced = standaloneSSEContinuation
+            standaloneSSEContinuation = continuation
+        } else {
+            replaced = requestSSEContinuations.updateValue(continuation, forKey: streamID)
+        }
+        replaced?.finish()
+        continuation.onTermination = { [weak self] termination in
+            guard case .cancelled = termination else { return }
+            Task { await self?.streamDisconnected(streamID, generation: generation) }
+        }
+    }
+
+    /// Forgets a stream the client disconnected. Messages for it are still
+    /// stored, so a client that resumes receives them.
+    private func streamDisconnected(_ streamID: String, generation: Int) {
+        guard streamGenerations[streamID] == generation else { return }
+        streamGenerations[streamID] = nil
+        if streamID == standaloneStreamID {
+            standaloneSSEContinuation = nil
+        } else {
+            requestSSEContinuations[streamID] = nil
+        }
+        logger.debug("SSE stream disconnected", metadata: ["streamID": "\(streamID)"])
+    }
+
+    /// Releases a request the client cancelled (`notifications/cancelled`).
+    /// The server sends no response for it, so nothing else would.
+    private func releaseCancelledRequest(_ requestID: String) {
+        guard openRequestIDs.remove(requestID) != nil else { return }
+        httpRequestContexts.removeValue(forKey: requestID)
+        streamGenerations[requestID] = nil
+        requestSSEContinuations.removeValue(forKey: requestID)?.finish()
+        if storedEventCounts[requestID] == nil { evictedThrough[requestID] = nil }
+        logger.debug("Released a cancelled request", metadata: ["requestID": "\(requestID)"])
     }
 
     // MARK: - Message Routing
@@ -406,8 +598,11 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
     /// Used for final responses to client requests.
     private func routeResponse(_ data: Data, requestID: String) {
         routeToRequestStream(data, requestID: requestID)
+        openRequestIDs.remove(requestID)
 
         // Response means the request is complete — close the stream
+        streamGenerations[requestID] = nil
+        if storedEventCounts[requestID] == nil { evictedThrough[requestID] = nil }
         if let continuation = requestSSEContinuations[requestID] {
             continuation.finish()
             requestSSEContinuations.removeValue(forKey: requestID)
@@ -446,15 +641,21 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
             sseContinuation.yield(sseEvent.formatted())
         }
 
-        // Re-register the stream for future messages
-        if replay.streamID == standaloneStreamID {
-            standaloneSSEContinuation = sseContinuation
-        } else {
-            requestSSEContinuations[replay.streamID] = sseContinuation
+        // A request stream whose request is answered or cancelled has
+        // nothing more to send: replay it and close it.
+        if replay.streamID != standaloneStreamID, !openRequestIDs.contains(replay.streamID) {
+            sseContinuation.finish()
+            var headers = sessionHeaders()
+            headers[HTTPHeaderName.contentType] = ContentType.sse
+            headers[HTTPHeaderName.cacheControl] = "no-cache, no-transform"
+            return .stream(sseStream, headers: headers)
         }
 
+        // Re-register the stream for future messages
+        register(sseContinuation, streamID: replay.streamID)
+
         // Send a new priming event so the client can resume again if disconnected
-        let protocolVersion = request.header(HTTPHeaderName.protocolVersion) ?? Version.latest
+        let protocolVersion = request.header(HTTPHeaderName.protocolVersion) ?? Version.latestHandshake
         sendPrimingEvent(
             streamID: replay.streamID,
             continuation: sseContinuation,
@@ -471,22 +672,69 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
 
     // MARK: - Internal Event Store
 
-    private func storeEvent(streamID: String, message: Data?) -> String {
-        eventCounter += 1
-        let eventID = "\(streamID)_\(eventCounter)"
-        storedEvents.append(StoredEvent(streamID: streamID, eventID: eventID, message: message))
-        return eventID
+    /// The IDs of the events kept for replay, oldest first (for tests).
+    var storedEventIDs: [String] {
+        storedEvents[storedEventsHead...].map { "\($0.streamID)_\($0.counter)" }
     }
 
-    private func replayEventsAfter(_ lastEventID: String) -> (streamID: String, events: [(eventID: String, message: Data)])? {
-        guard let index = storedEvents.firstIndex(where: { $0.eventID == lastEventID }) else {
-            return nil
+    /// Stores `message` for replay on `streamID` and returns its event ID.
+    private func storeEvent(streamID: String, message: Data) -> String {
+        eventCounter += 1
+        storedEvents.append(StoredEvent(streamID: streamID, counter: eventCounter, message: message))
+        storedBytes += message.count
+        storedEventCounts[streamID, default: 0] += 1
+        while storedEvents.count - storedEventsHead > 1,
+            storedEvents.count - storedEventsHead > eventStoreCapacity || storedBytes > eventStoreByteCapacity
+        {
+            evictOldestEvent()
         }
-        let streamID = storedEvents[index].streamID
-        let eventsToReplay = storedEvents[(index + 1)...]
-            .filter { $0.streamID == streamID && $0.message != nil }
-            .map { (eventID: $0.eventID, message: $0.message!) }
-        return (streamID, eventsToReplay)
+        return "\(streamID)_\(eventCounter)"
+    }
+
+    /// A new event ID on `streamID` for an event that is not stored.
+    private func unstoredEventID(streamID: String) -> String {
+        eventCounter += 1
+        return "\(streamID)_\(eventCounter)"
+    }
+
+    private func evictOldestEvent() {
+        let event = storedEvents[storedEventsHead]
+        storedEventsHead += 1
+        storedBytes -= event.message.count
+        let remaining = (storedEventCounts[event.streamID] ?? 1) - 1
+        if remaining > 0 || isOpenStream(event.streamID) {
+            storedEventCounts[event.streamID] = remaining > 0 ? remaining : nil
+            evictedThrough[event.streamID] = event.counter
+        } else {
+            // Nothing of this stream is left to replay.
+            storedEventCounts[event.streamID] = nil
+            evictedThrough[event.streamID] = nil
+        }
+        // Compact once the dropped prefix is large.
+        if storedEventsHead > 256, storedEventsHead * 2 > storedEvents.count {
+            storedEvents.removeFirst(storedEventsHead)
+            storedEventsHead = 0
+        }
+    }
+
+    private func isOpenStream(_ streamID: String) -> Bool {
+        streamID == standaloneStreamID || openRequestIDs.contains(streamID)
+    }
+
+    /// The stream of `lastEventID` and its stored events after it, or `nil`
+    /// when the stream is unknown or an event after it was dropped.
+    private func replayEventsAfter(_ lastEventID: String) -> (streamID: String, events: [(eventID: String, message: Data)])? {
+        guard let separator = lastEventID.lastIndex(of: "_"),
+            let counter = Int(lastEventID[lastEventID.index(after: separator)...]),
+            counter <= eventCounter
+        else { return nil }
+        let streamID = String(lastEventID[..<separator])
+        guard isOpenStream(streamID) || storedEventCounts[streamID] != nil else { return nil }
+        if let evicted = evictedThrough[streamID], evicted > counter { return nil }
+        let events = storedEvents[storedEventsHead...]
+            .filter { $0.streamID == streamID && $0.counter > counter }
+            .map { (eventID: "\($0.streamID)_\($0.counter)", message: $0.message) }
+        return (streamID, events)
     }
 
     // MARK: - SSE Helpers
@@ -496,10 +744,9 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
         continuation: AsyncThrowingStream<Data, Swift.Error>.Continuation,
         protocolVersion: String
     ) {
-        // Priming events with empty data are only safe for clients >= 2025-03-26
-        guard protocolVersion >= "2025-03-26" else { return }
+        guard Version.profile(for: protocolVersion).allowsPrimingEvents else { return }
 
-        let primingEventID = storeEvent(streamID: streamID, message: nil)
+        let primingEventID = unstoredEventID(streamID: streamID)
         let primingEvent = SSEEvent.priming(id: primingEventID, retry: retryInterval)
         continuation.yield(primingEvent.formatted())
     }
@@ -511,10 +758,12 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
            let params = json["params"] as? [String: Any],
            let version = params["protocolVersion"] as? String
         {
-            return version
+            // The revision the session is negotiated to, but a client asking
+            // for an older one than any served keeps its own.
+            return min(version, Version.negotiate(clientRequestedVersion: version))
         }
         // For other requests, use the header
-        return request.header(HTTPHeaderName.protocolVersion) ?? Version.latest
+        return request.header(HTTPHeaderName.protocolVersion) ?? Version.latestHandshake
     }
 
     // MARK: - Session Helpers
@@ -525,6 +774,25 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
             headers[HTTPHeaderName.sessionID] = sessionID
         }
         return headers
+    }
+
+    private func withoutSessionHeader(_ response: HTTPResponse) -> HTTPResponse {
+        func filtered(_ headers: [String: String]) -> [String: String] {
+            headers.filter { $0.key.caseInsensitiveCompare(HTTPHeaderName.sessionID) != .orderedSame }
+        }
+
+        switch response {
+        case .accepted(let headers):
+            return .accepted(headers: filtered(headers))
+        case .ok(let headers):
+            return .ok(headers: filtered(headers))
+        case .data(let data, let statusCode, let headers):
+            return .data(data, statusCode: statusCode, headers: filtered(headers))
+        case .stream(let stream, let headers):
+            return .stream(stream, headers: filtered(headers))
+        case .error(let statusCode, let error, let id, _, let extraHeaders):
+            return .error(statusCode: statusCode, error, id: id, extraHeaders: filtered(extraHeaders))
+        }
     }
 
     private func isValidSessionID(_ id: String) -> Bool {
@@ -540,6 +808,7 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
     /// when eventually sent, will be stored and replayed to the reconnected stream.
     package func closeSSEStream(forRequestID requestID: String) {
         guard let continuation = requestSSEContinuations[requestID] else { return }
+        streamGenerations[requestID] = nil
         continuation.finish()
         requestSSEContinuations.removeValue(forKey: requestID)
         httpRequestContexts.removeValue(forKey: requestID)
@@ -547,6 +816,8 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
 
     // MARK: - HTTPContextProviding
 
+    /// The HTTP request that carried the JSON-RPC request `id`, until its
+    /// response is routed, its stream closes or the session terminates.
     public func httpRequestContext(for id: ID) -> HTTPRequest? {
         httpRequestContexts[id.description]
     }
@@ -554,7 +825,8 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
     // MARK: - Termination
 
     /// Terminates the session, closing all active streams.
-    /// After termination, all requests receive 404 Not Found.
+    /// After validation, requests without a session ID get 400; if a session
+    /// existed, requests with any session ID get 404.
     private func terminate() {
         guard !terminated else { return }
         terminated = true
@@ -567,6 +839,8 @@ public actor StatefulHTTPServerTransport: Transport, HTTPContextProviding {
         }
         requestSSEContinuations.removeAll()
         httpRequestContexts.removeAll()
+        openRequestIDs.removeAll()
+        streamGenerations.removeAll()
 
         // Close standalone GET stream
         standaloneSSEContinuation?.finish()

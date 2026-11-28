@@ -9,10 +9,11 @@ struct HTTPAuthenticationChallengeError: Error {
     let headers: [String: String]
 }
 
-/// Parsed representation of a `WWW-Authenticate: Bearer` challenge header.
+/// Parsed representation of a `WWW-Authenticate` challenge (`Bearer`, or
+/// `DPoP` per RFC 9449 §7.1).
 ///
 /// Servers return this challenge in `401 Unauthorized` and `403 Forbidden` responses
-/// to indicate that a Bearer token is required or that the presented token lacks
+/// to indicate that a token is required or that the presented token lacks
 /// sufficient scope.
 ///
 /// The ``OAuthWWWAuthenticateParsing`` protocol produces instances of this type.
@@ -60,11 +61,17 @@ struct OAuthProtectedResourceMetadata: Decodable, Sendable, Equatable {
     let resource: String?
     let authorizationServers: [URL]
     let scopesSupported: [String]?
+    /// Whether the resource accepts only DPoP-bound tokens (RFC 9449 §5.2).
+    var dpopBoundAccessTokensRequired: Bool? = nil
+    /// Whether this was synthesized because the server publishes no
+    /// metadata: the authorization server is the server's origin.
+    var isFallback = false
 
     enum CodingKeys: String, CodingKey {
         case resource
         case authorizationServers = "authorization_servers"
         case scopesSupported = "scopes_supported"
+        case dpopBoundAccessTokensRequired = "dpop_bound_access_tokens_required"
     }
 }
 
@@ -77,6 +84,10 @@ struct OAuthAuthorizationServerMetadata: Decodable, Sendable, Equatable {
     let codeChallengeMethodsSupported: [String]?
     let tokenEndpointAuthMethodsSupported: [String]?
     let clientIDMetadataDocumentSupported: Bool?
+    /// Whether authorization responses carry `iss` (RFC 9207).
+    var authorizationResponseIssParameterSupported: Bool? = nil
+    /// The JWS algorithms the server accepts in DPoP proofs (RFC 9449 §5.1).
+    var dpopSigningAlgValuesSupported: [String]? = nil
 
     enum CodingKeys: String, CodingKey {
         case issuer
@@ -86,6 +97,41 @@ struct OAuthAuthorizationServerMetadata: Decodable, Sendable, Equatable {
         case codeChallengeMethodsSupported = "code_challenge_methods_supported"
         case tokenEndpointAuthMethodsSupported = "token_endpoint_auth_methods_supported"
         case clientIDMetadataDocumentSupported = "client_id_metadata_document_supported"
+        case authorizationResponseIssParameterSupported = "authorization_response_iss_parameter_supported"
+        case dpopSigningAlgValuesSupported = "dpop_signing_alg_values_supported"
+    }
+
+    /// The endpoints a 2025-03-26 server without metadata serves at its root:
+    /// `/authorize`, `/token` and `/register`.
+    static func defaultEndpoints(issuer: URL) -> OAuthAuthorizationServerMetadata {
+        OAuthAuthorizationServerMetadata(
+            issuer: issuer,
+            authorizationEndpoint: issuer.appendingPathComponent("authorize"),
+            tokenEndpoint: issuer.appendingPathComponent("token"),
+            registrationEndpoint: issuer.appendingPathComponent("register"),
+            codeChallengeMethodsSupported: [OAuthCodeChallengeMethod.s256],
+            tokenEndpointAuthMethodsSupported: nil,
+            clientIDMetadataDocumentSupported: nil)
+    }
+}
+
+/// Issuer identifier comparison (RFC 8414 §3.3, RFC 9207 §2.4).
+enum OAuthIssuer {
+    /// Simple string comparison, except that a root issuer with and without
+    /// its trailing slash (`https://as.example` and `https://as.example/`)
+    /// name the same server.
+    static func matches(_ lhs: String, _ rhs: String) -> Bool {
+        if lhs == rhs { return true }
+        let (shorter, longer) = lhs.count < rhs.count ? (lhs, rhs) : (rhs, lhs)
+        // The shorter one must be a bare origin. Its parts are checked rather
+        // than the origin rebuilt from them, so the result does not depend on
+        // how a Foundation version spells an IPv6 host.
+        guard longer == shorter + "/",
+            let components = URLComponents(string: shorter), components.scheme != nil,
+            components.host?.isEmpty == false, components.user == nil, components.password == nil,
+            components.path.isEmpty, components.query == nil, components.fragment == nil
+        else { return false }
+        return true
     }
 }
 
@@ -105,6 +151,19 @@ struct OAuthTokenResponse: Decodable, Sendable, Equatable {
     }
 }
 
+extension OAuthTokenResponse {
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        accessToken = try container.decode(String.self, forKey: .accessToken)
+        // `token_type` is compared case-insensitively; whitespace is dropped once here.
+        tokenType = try container.decode(String.self, forKey: .tokenType)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        expiresIn = try container.decodeIfPresent(Int.self, forKey: .expiresIn)
+        scope = try container.decodeIfPresent(String.self, forKey: .scope)
+        refreshToken = try container.decodeIfPresent(String.self, forKey: .refreshToken)
+    }
+}
+
 struct OAuthTokenErrorResponse: Decodable {
     let error: String
 }
@@ -117,7 +176,7 @@ public struct OAuthAccessToken: Sendable, Codable {
     /// The raw bearer token string for use in the `Authorization` header.
     public let value: String
 
-    /// The token type returned by the authorization server (should be `"Bearer"`).
+    /// The token type returned by the authorization server: `"Bearer"` or `"DPoP"`.
     public let tokenType: String
 
     /// The UTC date after which the token is considered expired, or `nil` if no expiry was specified.
@@ -143,6 +202,10 @@ public struct OAuthAccessToken: Sendable, Codable {
     /// before registration completes).
     public let clientID: String?
 
+    /// The JWK thumbprint of the key a DPoP-bound token is bound to
+    /// (RFC 7638), or `nil` for a Bearer token.
+    public let keyThumbprint: String?
+
     /// Creates a new access token record.
     public init(
         value: String,
@@ -151,7 +214,8 @@ public struct OAuthAccessToken: Sendable, Codable {
         scopes: Set<String>,
         authorizationServer: URL?,
         refreshToken: String?,
-        clientID: String? = nil
+        clientID: String? = nil,
+        keyThumbprint: String? = nil
     ) {
         self.value = value
         self.tokenType = tokenType
@@ -160,6 +224,12 @@ public struct OAuthAccessToken: Sendable, Codable {
         self.authorizationServer = authorizationServer
         self.refreshToken = refreshToken
         self.clientID = clientID
+        self.keyThumbprint = keyThumbprint
+    }
+
+    /// Whether the token is DPoP-bound (`token_type` `DPoP`).
+    public var isDPoPBound: Bool {
+        tokenType.caseInsensitiveCompare(OAuthTokenType.dpop) == .orderedSame
     }
 
     /// Returns `true` if the token has expired or will expire within the skew window.
@@ -195,6 +265,7 @@ public struct BearerTokenInfo: Sendable, Equatable {
     /// `nil` means no expiry information is available and the expiry check is skipped.
     public let expiresAt: Date?
 
+    /// Creates token information.
     public init(
         audience: [String]? = nil,
         scopes: Set<String>? = nil,
@@ -245,6 +316,7 @@ public struct OAuthProtectedResourceServerMetadata: Codable, Sendable {
         case scopesSupported = "scopes_supported"
     }
 
+    /// Creates protected resource metadata.
     public init(
         resource: String,
         authorizationServers: [URL],

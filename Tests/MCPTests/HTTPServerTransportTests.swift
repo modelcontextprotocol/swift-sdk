@@ -10,13 +10,13 @@ private struct FixedSessionIDGenerator: SessionIDGenerator {
     func generateSessionID() -> String { sessionID }
 }
 
-private func makeInitializeBody(id: String = "1") -> Data {
+private func makeInitializeBody(id: String = "1", protocolVersion: String = "2025-11-25") -> Data {
     let json: [String: Any] = [
         "jsonrpc": "2.0",
         "id": id,
         "method": "initialize",
         "params": [
-            "protocolVersion": "2025-11-25",
+            "protocolVersion": protocolVersion,
             "capabilities": [:] as [String: Any],
             "clientInfo": ["name": "test", "version": "1.0"],
         ] as [String: Any],
@@ -162,7 +162,8 @@ private func drainSSEStream(
 /// Spawns a background task to consume the receive stream and send the init response.
 private func initializeSession(
     transport: StatefulHTTPServerTransport,
-    sessionID: String? = nil
+    sessionID: String? = nil,
+    authorization: String? = nil
 ) async throws -> String {
     try await transport.connect()
 
@@ -199,7 +200,7 @@ private func initializeSession(
     }
 
     let response = await transport.handleRequest(
-        makeStatefulPOSTRequest(body: initBody)
+        makeStatefulPOSTRequest(body: initBody, authorization: authorization)
     )
 
     // Extract session ID
@@ -284,6 +285,36 @@ struct StatefulHTTPServerTransportTests {
         if case .stream(let stream, _) = response {
             Task { for try await _ in stream {} }
         }
+        await transport.disconnect()
+    }
+
+    @Test(
+        "Initialize primes its stream by the negotiated revision",
+        arguments: [
+            ("2026-07-28", true), ("2025-11-25", true), ("2025-03-26", true),
+            ("2024-11-05", false), ("2024-01-01", false),
+        ])
+    func testInitializePriming(requested: String, primed: Bool) async throws {
+        let transport = makeStatefulTransport()
+        try await transport.connect()
+        let response = await transport.handleRequest(
+            makeStatefulPOSTRequest(body: makeInitializeBody(protocolVersion: requested)))
+        guard case .stream(let stream, _) = response else {
+            Issue.record("Expected .stream response, got \(response)")
+            return
+        }
+        // Nothing answers the request, so the only possible chunk is the priming event.
+        let reader = Task { () -> String? in
+            for try await chunk in stream { return String(decoding: chunk, as: UTF8.self) }
+            return nil
+        }
+        let timer = Task {
+            try await Task.sleep(for: .milliseconds(300))
+            reader.cancel()
+        }
+        let first = try? await reader.value
+        timer.cancel()
+        #expect((first?.hasPrefix("id:") ?? false) == primed, "first chunk: \(first ?? "none")")
         await transport.disconnect()
     }
 
@@ -383,9 +414,6 @@ struct StatefulHTTPServerTransportTests {
             return nil
         }
 
-        // Small delay to let receive() start
-        try await Task.sleep(for: .milliseconds(50))
-
         _ = await transport.handleRequest(
             makeStatefulPOSTRequest(body: notificationBody, sessionID: sessionID)
         )
@@ -452,9 +480,6 @@ struct StatefulHTTPServerTransportTests {
             return chunks
         }
 
-        // Give stream time to start
-        try await Task.sleep(for: .milliseconds(50))
-
         // Consume the request from receive and send the response
         let responseBody = makeResponseBody(id: requestID)
         try await transport.send(responseBody)
@@ -520,8 +545,6 @@ struct StatefulHTTPServerTransportTests {
             return chunks
         }
 
-        try await Task.sleep(for: .milliseconds(50))
-
         // Send a notification (server-initiated)
         let notification: [String: Any] = [
             "jsonrpc": "2.0",
@@ -537,6 +560,146 @@ struct StatefulHTTPServerTransportTests {
         // JSONSerialization may escape "/" as "\/" in some configurations
         #expect(allText.contains("notifications/test") || allText.contains("notifications\\/test"))
 
+        await transport.disconnect()
+    }
+
+    @Test("Related notification is routed to the request's SSE stream")
+    func testRelatedNotificationRoutedToRequestStream() async throws {
+        let transport = makeStatefulTransport()
+        let sessionID = try await initializeSession(transport: transport)
+
+        let getResponse = await transport.handleRequest(makeGETRequest(sessionID: sessionID))
+        guard case .stream(let getStream, _) = getResponse else {
+            Issue.record("Expected .stream response for GET")
+            return
+        }
+        let getTask = Task {
+            var text = ""
+            for try await chunk in getStream { text += String(decoding: chunk, as: UTF8.self) }
+            return text
+        }
+
+        let requestID = "related-1"
+        let postResponse = await transport.handleRequest(
+            makeStatefulPOSTRequest(
+                body: makeRequestBody(id: requestID, method: "tools/call"),
+                sessionID: sessionID
+            )
+        )
+        guard case .stream(let postStream, _) = postResponse else {
+            Issue.record("Expected .stream response for POST")
+            return
+        }
+        let postTask = Task {
+            var text = ""
+            for try await chunk in postStream { text += String(decoding: chunk, as: UTF8.self) }
+            return text
+        }
+
+        let notification = try JSONSerialization.data(withJSONObject: [
+            "jsonrpc": "2.0", "method": "notifications/progress",
+            "params": ["progressToken": "t", "progress": 1] as [String: Any],
+        ])
+        try await transport.send(notification, relatedRequestID: .string(requestID))
+        let serverRequest = try JSONSerialization.data(withJSONObject: [
+            "jsonrpc": "2.0", "id": "srv-1", "method": "elicitation/create",
+            "params": [:] as [String: Any],
+        ])
+        try await transport.send(serverRequest, relatedRequestID: .string(requestID))
+        try await transport.send(makeResponseBody(id: requestID))
+
+        let postText = try await postTask.value
+        #expect(postText.contains("notifications") && postText.contains("progress"))
+        #expect(postText.contains("srv-1"))
+        #expect(postText.contains(requestID))
+
+        await transport.disconnect()
+        let getText = try await getTask.value
+        #expect(!getText.contains("progress"))
+        #expect(!getText.contains("srv-1"))
+    }
+
+    @Test("Message related to an answered request goes to the GET stream")
+    func testRelatedMessageAfterResponseRoutedToGetStream() async throws {
+        let transport = makeStatefulTransport()
+        let sessionID = try await initializeSession(transport: transport)
+
+        let requestID = "answered-1"
+        let postResponse = await transport.handleRequest(
+            makeStatefulPOSTRequest(body: makeRequestBody(id: requestID), sessionID: sessionID)
+        )
+        if case .stream(let stream, _) = postResponse {
+            _ = Task { for try await _ in stream {} }
+        }
+        try await transport.send(makeResponseBody(id: requestID))
+
+        let getResponse = await transport.handleRequest(makeGETRequest(sessionID: sessionID))
+        guard case .stream(let getStream, _) = getResponse else {
+            Issue.record("Expected .stream response for GET")
+            return
+        }
+        let getTask = Task {
+            var text = ""
+            for try await chunk in getStream {
+                text += String(decoding: chunk, as: UTF8.self)
+                if text.contains("late") { break }
+            }
+            return text
+        }
+
+        let notification = try JSONSerialization.data(withJSONObject: [
+            "jsonrpc": "2.0", "method": "notifications/message",
+            "params": ["level": "info", "data": "late"] as [String: Any],
+        ])
+        try await transport.send(notification, relatedRequestID: .string(requestID))
+
+        #expect(try await getTask.value.contains("late"))
+        await transport.disconnect()
+    }
+
+    @Test("Related message is replayed after the request stream is closed")
+    func testRelatedMessageReplayedAfterStreamClosed() async throws {
+        let transport = makeStatefulTransport()
+        let sessionID = try await initializeSession(transport: transport)
+
+        let requestID = "resume-1"
+        let postResponse = await transport.handleRequest(
+            makeStatefulPOSTRequest(body: makeRequestBody(id: requestID), sessionID: sessionID)
+        )
+        guard case .stream(let postStream, _) = postResponse else {
+            Issue.record("Expected .stream response for POST")
+            return
+        }
+        var primingID: String?
+        for try await chunk in postStream {
+            let text = String(decoding: chunk, as: UTF8.self)
+            if let line = text.split(separator: "\n").first(where: { $0.hasPrefix("id:") }) {
+                primingID = line.dropFirst(3).trimmingCharacters(in: .whitespaces)
+            }
+            break
+        }
+        await transport.closeSSEStream(forRequestID: requestID)
+
+        let notification = try JSONSerialization.data(withJSONObject: [
+            "jsonrpc": "2.0", "method": "notifications/message",
+            "params": ["level": "info", "data": "while-disconnected"] as [String: Any],
+        ])
+        try await transport.send(notification, relatedRequestID: .string(requestID))
+        try await transport.send(makeResponseBody(id: requestID))
+
+        let resumed = await transport.handleRequest(
+            makeGETRequest(sessionID: sessionID, lastEventID: primingID)
+        )
+        guard case .stream(let resumedStream, _) = resumed else {
+            Issue.record("Expected .stream response for resume")
+            return
+        }
+        var text = ""
+        for try await chunk in resumedStream {
+            text += String(decoding: chunk, as: UTF8.self)
+            if text.contains(requestID) { break }
+        }
+        #expect(text.contains("while-disconnected"))
         await transport.disconnect()
     }
 
@@ -594,8 +757,8 @@ struct StatefulHTTPServerTransportTests {
 
     // MARK: - Terminated State
 
-    @Test("All methods return 404 when terminated")
-    func testAllMethodsReturn404WhenTerminated() async throws {
+    @Test("A terminated session returns 404 only for its own ID")
+    func testTerminatedSessionStatus() async throws {
         let transport = makeStatefulTransport()
         let sessionID = try await initializeSession(transport: transport)
         await transport.disconnect()
@@ -604,12 +767,84 @@ struct StatefulHTTPServerTransportTests {
             makeStatefulPOSTRequest(body: makeRequestBody(), sessionID: sessionID)
         )
         #expect(post.statusCode == 404)
+        #expect(post.headers[HTTPHeaderName.sessionID] == sessionID)
 
         let get = await transport.handleRequest(makeGETRequest(sessionID: sessionID))
         #expect(get.statusCode == 404)
 
         let delete = await transport.handleRequest(makeDELETERequest(sessionID: sessionID))
         #expect(delete.statusCode == 404)
+
+        let withoutSession = await transport.handleRequest(
+            makeStatefulPOSTRequest(body: makeInitializeBody()))
+        #expect(withoutSession.statusCode == 400)
+        #expect(withoutSession.headers[HTTPHeaderName.sessionID] == nil)
+
+        let otherSession = await transport.handleRequest(
+            makeStatefulPOSTRequest(body: makeRequestBody(), sessionID: "other-session"))
+        #expect(otherSession.statusCode == 404)
+        #expect(otherSession.headers[HTTPHeaderName.sessionID] == nil)
+    }
+
+    @Test("A terminated session validates Origin and Host before session status")
+    func testTerminatedSessionRejectsOriginAndHost() async throws {
+        let transport = StatefulHTTPServerTransport()
+        let sessionID = try await initializeSession(transport: transport)
+        await transport.disconnect()
+
+        for candidate: String? in [nil, sessionID, "other-session"] {
+            let post = makeStatefulPOSTRequest(body: makeRequestBody(), sessionID: candidate)
+            var headers = post.headers
+            headers[HTTPHeaderName.origin] = "https://other.example"
+            let response = await transport.handleRequest(
+                HTTPRequest(method: "POST", headers: headers, body: post.body))
+            #expect(response.statusCode == 403)
+            #expect(response.headers[HTTPHeaderName.sessionID] == nil)
+        }
+
+        let post = makeStatefulPOSTRequest(body: makeRequestBody(), sessionID: sessionID)
+        var headers = post.headers
+        headers[HTTPHeaderName.host] = "other.example"
+        let response = await transport.handleRequest(
+            HTTPRequest(method: "POST", headers: headers, body: post.body))
+        #expect(response.statusCode == 421)
+        #expect(response.headers[HTTPHeaderName.sessionID] == nil)
+    }
+
+    @Test("A terminated session validates Bearer authorization before session status")
+    func testTerminatedSessionRequiresAuthorization() async throws {
+        let transport = makeAuthenticatedStatefulTransport { _, _, _ in .valid(BearerTokenInfo()) }
+        let sessionID = try await initializeSession(transport: transport, authorization: "Bearer valid")
+        await transport.disconnect()
+
+        for candidate in [sessionID, "other-session"] {
+            let rejected = await transport.handleRequest(
+                makeStatefulPOSTRequest(body: makeRequestBody(), sessionID: candidate))
+            #expect(rejected.statusCode == 401)
+            #expect(rejected.headers[HTTPHeaderName.wwwAuthenticate]?.contains("Bearer ") == true)
+            #expect(rejected.headers[HTTPHeaderName.sessionID] == nil)
+        }
+
+        let stale = await transport.handleRequest(
+            makeStatefulPOSTRequest(
+                body: makeRequestBody(), sessionID: "other-session", authorization: "Bearer valid"))
+        #expect(stale.statusCode == 404)
+        #expect(stale.headers[HTTPHeaderName.sessionID] == nil)
+    }
+
+    @Test("A transport stopped before initialization returns 400")
+    func testTerminatedBeforeInitialization() async {
+        let transport = makeStatefulTransport()
+        await transport.disconnect()
+
+        let response = await transport.handleRequest(
+            makeStatefulPOSTRequest(body: makeInitializeBody()))
+        #expect(response.statusCode == 400)
+
+        let withSession = await transport.handleRequest(
+            makeStatefulPOSTRequest(body: makeRequestBody(), sessionID: "unknown"))
+        #expect(withSession.statusCode == 400)
+        #expect(withSession.headers[HTTPHeaderName.sessionID] == nil)
     }
 
     // MARK: - Error Cases
@@ -684,20 +919,69 @@ struct StatefulHTTPServerTransportTests {
         await transport.disconnect()
     }
 
-    @Test("Bearer auth validator returns 400 when authorization header is malformed")
-    func testBearerAuthValidatorMalformedAuthorizationReturns400() async throws {
+    @Test("Bearer auth validator returns 401 with a challenge for another scheme")
+    func testBearerAuthValidatorOtherSchemeReturns401() async throws {
+        let transport = makeAuthenticatedStatefulTransport { _, _, _ in .valid(BearerTokenInfo()) }
+        try await transport.connect()
+
+        for authorization in ["Basic dGVzdA==", "Basic", ""] {
+            let response = await transport.handleRequest(
+                makeStatefulPOSTRequest(
+                    body: makeInitializeBody(),
+                    authorization: authorization
+                )
+            )
+
+            // RFC 6750 §3.1: no Bearer credentials, so no error code.
+            #expect(response.statusCode == 401, "\(authorization)")
+            let challenge = response.headers[HTTPHeaderName.wwwAuthenticate]
+            #expect(
+                challenge?.contains("resource_metadata=\"\(authResourceMetadataURL.absoluteString)\"") == true)
+            #expect(challenge?.contains("error=") == false)
+        }
+
+        await transport.disconnect()
+    }
+
+    @Test(
+        "Bearer auth validator returns 400 with an invalid_request challenge for a malformed Bearer header",
+        arguments: ["Bearer", "Bearer ", "Bearer a b", "Bearer a, Bearer b"])
+    func testBearerAuthValidatorMalformedAuthorizationReturns400(_ authorization: String) async throws {
         let transport = makeAuthenticatedStatefulTransport { _, _, _ in .valid(BearerTokenInfo()) }
         try await transport.connect()
 
         let response = await transport.handleRequest(
             makeStatefulPOSTRequest(
                 body: makeInitializeBody(),
-                authorization: "Basic dGVzdA=="
+                authorization: authorization
             )
         )
 
         #expect(response.statusCode == 400)
-        #expect(response.headers[HTTPHeaderName.wwwAuthenticate] == nil)
+        let challenge = response.headers[HTTPHeaderName.wwwAuthenticate]
+        #expect(challenge?.hasPrefix("Bearer ") == true)
+        #expect(challenge?.contains("error=\"invalid_request\"") == true)
+        #expect(
+            challenge?.contains("resource_metadata=\"\(authResourceMetadataURL.absoluteString)\"") == true)
+
+        await transport.disconnect()
+    }
+
+    @Test("Bearer auth validator answers .malformedRequest with an invalid_request challenge")
+    func testBearerAuthValidatorMalformedRequestResultReturns400() async throws {
+        let transport = makeAuthenticatedStatefulTransport { _, _, _ in
+            .malformedRequest(errorDescription: "Unsupported token format")
+        }
+        try await transport.connect()
+
+        let response = await transport.handleRequest(
+            makeStatefulPOSTRequest(body: makeInitializeBody(), authorization: "Bearer token")
+        )
+
+        #expect(response.statusCode == 400)
+        let challenge = response.headers[HTTPHeaderName.wwwAuthenticate]
+        #expect(challenge?.contains("error=\"invalid_request\"") == true)
+        #expect(challenge?.contains("error_description=\"Unsupported token format\"") == true)
 
         await transport.disconnect()
     }
@@ -813,8 +1097,6 @@ struct StatefulHTTPServerTransportTests {
             }
         }
 
-        try await Task.sleep(for: .milliseconds(50))
-
         // Send the response to create a stored event
         try await transport.send(makeResponseBody(id: requestID))
 
@@ -843,6 +1125,197 @@ struct StatefulHTTPServerTransportTests {
             }
         }
 
+        await transport.disconnect()
+    }
+
+    // MARK: - Stream cleanup
+
+    /// The text of every chunk of `response`'s stream, or `nil` when the
+    /// stream is still open after `timeout`.
+    private func readToEnd(_ response: HTTPResponse, timeout: Duration = .seconds(30)) async -> String? {
+        guard case .stream(let stream, _) = response else { return nil }
+        let reader = Task { () -> String in
+            var text = ""
+            for try await chunk in stream { text += String(decoding: chunk, as: UTF8.self) }
+            return text
+        }
+        let timer = Task {
+            try await Task.sleep(for: timeout)
+            reader.cancel()
+        }
+        defer { timer.cancel() }
+        let text = try? await reader.value
+        return reader.isCancelled ? nil : text
+    }
+
+    private func primingEventID(_ chunk: Data) -> String? {
+        String(decoding: chunk, as: UTF8.self).split(separator: "\n")
+            .first(where: { $0.hasPrefix("id:") })
+            .map { $0.dropFirst(3).trimmingCharacters(in: .whitespaces) }
+    }
+
+    @Test("A GET stream the client disconnected can be opened again")
+    func testDisconnectedGetStreamCanReopen() async throws {
+        let transport = makeStatefulTransport()
+        let sessionID = try await initializeSession(transport: transport)
+
+        let first = await transport.handleRequest(makeGETRequest(sessionID: sessionID))
+        guard case .stream(let stream, _) = first else {
+            Issue.record("Expected .stream response for GET")
+            return
+        }
+        let primed = ChunkCollector()
+        let reader = Task { for try await chunk in stream { await primed.append(chunk) } }
+        #expect(await eventually { await !primed.getChunks().isEmpty })
+        reader.cancel()
+
+        var status = 0
+        let deadline = ContinuousClock.now + .seconds(30)
+        while ContinuousClock.now < deadline {
+            let next = await transport.handleRequest(makeGETRequest(sessionID: sessionID))
+            status = next.statusCode
+            if status == 200 {
+                if case .stream(let reopened, _) = next { _ = Task { for try await _ in reopened {} } }
+                break
+            }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(status == 200)
+        await transport.disconnect()
+    }
+
+    @Test("notifications/cancelled closes the request's stream and releases it")
+    func testCancelledRequestIsReleased() async throws {
+        let transport = makeStatefulTransport()
+        let sessionID = try await initializeSession(transport: transport)
+
+        let requestID = "cancel-1"
+        let post = await transport.handleRequest(
+            makeStatefulPOSTRequest(body: makeRequestBody(id: requestID), sessionID: sessionID))
+        #expect(await transport.httpRequestContext(for: .string(requestID)) != nil)
+
+        let cancel = try JSONSerialization.data(withJSONObject: [
+            "jsonrpc": "2.0", "method": "notifications/cancelled",
+            "params": ["requestId": requestID] as [String: Any],
+        ])
+        let accepted = await transport.handleRequest(
+            makeStatefulPOSTRequest(body: cancel, sessionID: sessionID))
+        #expect(accepted.statusCode == 202)
+
+        #expect(await readToEnd(post) != nil)
+        #expect(await transport.httpRequestContext(for: .string(requestID)) == nil)
+
+        // Later related messages go to the GET stream.
+        let get = await transport.handleRequest(makeGETRequest(sessionID: sessionID))
+        guard case .stream(let getStream, _) = get else {
+            Issue.record("Expected .stream response for GET")
+            return
+        }
+        let getTask = Task {
+            var text = ""
+            for try await chunk in getStream {
+                text += String(decoding: chunk, as: UTF8.self)
+                if text.contains("after-cancel") { break }
+            }
+            return text
+        }
+        let notification = try JSONSerialization.data(withJSONObject: [
+            "jsonrpc": "2.0", "method": "notifications/message",
+            "params": ["level": "info", "data": "after-cancel"] as [String: Any],
+        ])
+        try await transport.send(notification, relatedRequestID: .string(requestID))
+        #expect(try await getTask.value.contains("after-cancel"))
+        await transport.disconnect()
+    }
+
+    @Test("Resuming an answered request's stream replays it and ends")
+    func testResumeOfAnsweredStreamEnds() async throws {
+        let transport = makeStatefulTransport()
+        let sessionID = try await initializeSession(transport: transport)
+
+        let requestID = "answered-2"
+        let post = await transport.handleRequest(
+            makeStatefulPOSTRequest(body: makeRequestBody(id: requestID), sessionID: sessionID))
+        guard case .stream(let postStream, _) = post else {
+            Issue.record("Expected .stream response for POST")
+            return
+        }
+        var primingID: String?
+        for try await chunk in postStream {
+            primingID = primingEventID(chunk)
+            break
+        }
+        try await transport.send(makeResponseBody(id: requestID))
+
+        let resumed = await transport.handleRequest(
+            makeGETRequest(sessionID: sessionID, lastEventID: primingID))
+        #expect(resumed.statusCode == 200)
+        let text = await readToEnd(resumed)
+        #expect(text?.contains(requestID) == true)
+        await transport.disconnect()
+    }
+
+    @Test("Resuming a request's stream finishes the stream it replaces", .timeLimit(.minutes(1)))
+    func testResumeFinishesReplacedStream() async throws {
+        let transport = makeStatefulTransport()
+        let sessionID = try await initializeSession(transport: transport)
+
+        let requestID = "replaced-1"
+        let post = await transport.handleRequest(
+            makeStatefulPOSTRequest(body: makeRequestBody(id: requestID), sessionID: sessionID))
+        guard case .stream(let postStream, _) = post else {
+            Issue.record("Expected .stream response for POST")
+            return
+        }
+        var iterator = postStream.makeAsyncIterator()
+        let primingID = try await iterator.next().flatMap(primingEventID)
+
+        let resumed = await transport.handleRequest(
+            makeGETRequest(sessionID: sessionID, lastEventID: primingID))
+        #expect(resumed.statusCode == 200)
+        #expect(try await iterator.next() == nil)
+
+        try await transport.send(makeResponseBody(id: requestID))
+        #expect(await readToEnd(resumed)?.contains(requestID) == true)
+        await transport.disconnect()
+    }
+
+    @Test("The replay store keeps the newest events only")
+    func testEventStoreCapacity() async throws {
+        let transport = StatefulHTTPServerTransport(
+            validationPipeline: StandardValidationPipeline(validators: []), eventStoreCapacity: 2)
+        let sessionID = try await initializeSession(transport: transport)
+
+        // No GET stream is open: each message is stored for replay.
+        let notification = makeNotificationBody(method: "notifications/tools/list_changed")
+        try await transport.send(notification)
+        let first = try #require(await transport.storedEventIDs.last)
+        try await transport.send(notification)
+        try await transport.send(notification)
+        let eventIDs = await transport.storedEventIDs
+        #expect(eventIDs.count == 2)
+        #expect(!eventIDs.contains(first))
+
+        // Resuming from before a dropped event fails; from the dropped
+        // event itself, nothing after it is lost.
+        let separator = try #require(first.lastIndex(of: "_"))
+        let prefix = first[..<separator]
+        let stale = await transport.handleRequest(
+            makeGETRequest(sessionID: sessionID, lastEventID: "\(prefix)_0"))
+        #expect(stale.statusCode == 400)
+        let fromDropped = await transport.handleRequest(
+            makeGETRequest(sessionID: sessionID, lastEventID: first))
+        #expect(fromDropped.statusCode == 200)
+
+        // The oldest kept event can; the newer one is replayed.
+        let resumed = await transport.handleRequest(
+            makeGETRequest(sessionID: sessionID, lastEventID: eventIDs[0]))
+        #expect(resumed.statusCode == 200)
+        if case .stream(let stream, _) = resumed {
+            var iterator = stream.makeAsyncIterator()
+            let replayed = String(decoding: try #require(try await iterator.next()), as: UTF8.self)
+            #expect(replayed.contains("id: \(eventIDs[1])"))
+        }
         await transport.disconnect()
     }
 }
@@ -904,16 +1377,17 @@ struct StatelessHTTPServerTransportTests {
             )
         }
 
-        // Give handleRequest time to register the waiter
-        try await Task.sleep(for: .milliseconds(50))
-
-        // Consume the request from receive and send the response
-        try await transport.send(responseBody)
+        // The server sees the request under an internal id; answer with it.
+        let internalID = try await nextServerRequestID(transport)
+        #expect(internalID != "42")
+        try await transport.send(makeResponseBody(id: internalID))
 
         let httpResponse = await handleTask.value
         #expect(httpResponse.statusCode == 200)
-        #expect(httpResponse.bodyData == responseBody)
+        let body = try JSONSerialization.jsonObject(with: #require(httpResponse.bodyData)) as? [String: Any]
+        #expect(body?["id"] as? String == "42")
         #expect(httpResponse.headers[HTTPHeaderName.contentType] == ContentType.json)
+        _ = responseBody
 
         await transport.disconnect()
     }
@@ -944,8 +1418,6 @@ struct StatelessHTTPServerTransportTests {
             var iterator = stream.makeAsyncIterator()
             return try await iterator.next()
         }
-
-        try await Task.sleep(for: .milliseconds(50))
 
         _ = await transport.handleRequest(
             makeStatelessPOSTRequest(body: notificationBody)
@@ -1042,15 +1514,52 @@ struct StatelessHTTPServerTransportTests {
             )
         }
 
-        try await Task.sleep(for: .milliseconds(50))
+        _ = try await nextServerRequestID(transport)
 
         // Disconnect while request is pending
         await transport.disconnect()
 
         let response = await handleTask.value
-        // Should return error (500 or similar) since waiter was cancelled
-        #expect(response.statusCode == 500)
+        // The server never answered: 503 Service Unavailable.
+        #expect(response.statusCode == 503)
     }
+
+    @Test("A client that goes away before a JSON reply cancels the request")
+    func testCancelledJSONExchangeCancelsRequest() async throws {
+        let transport = makeStatelessTransport()
+        try await transport.connect()
+        let received = Counter()
+        let incoming = Task { () -> [String] in
+            var methods: [String] = []
+            for try await data in await transport.receive() {
+                let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+                methods.append(json?["method"] as? String ?? "")
+                await received.increment()
+                if methods.count == 2 { break }
+            }
+            return methods
+        }
+        let handleTask = Task {
+            await transport.handleRequest(makeStatelessPOSTRequest(body: makeRequestBody(id: "gone")))
+        }
+        #expect(await eventually { await received.value >= 1 })
+        handleTask.cancel()
+
+        // The server sees the request, then its cancellation.
+        #expect(try await incoming.value == ["tools/list", "notifications/cancelled"])
+        #expect(await handleTask.value.statusCode == 503)
+        await transport.disconnect()
+    }
+}
+
+/// Reads the next request the stateless transport handed to the server and
+/// returns the internal JSON-RPC id it was given.
+private func nextServerRequestID(_ transport: StatelessHTTPServerTransport) async throws -> String {
+    for try await data in await transport.receive() {
+        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        if let id = json?["id"] as? String { return id }
+    }
+    throw MCPError.connectionClosed
 }
 
 // MARK: - HTTPContextProviding / Server.currentHandlerContext
@@ -1097,7 +1606,10 @@ struct ServerHandlerContextTests {
 
         // Send the response — transport clears the context alongside the SSE map.
         try await transport.send(makeResponseBody(id: "42"))
-        try await Task.sleep(for: .milliseconds(50))
+        let deadline = ContinuousClock.now + .seconds(30)
+        while await transport.httpRequestContext(for: .string("42")) != nil && ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
 
         let afterResponse = await transport.httpRequestContext(for: .string("42"))
         #expect(afterResponse == nil)
@@ -1149,19 +1661,18 @@ struct ServerHandlerContextTests {
         // handleRequest blocks until a response is sent — run it concurrently.
         let handleTask = Task { await transport.handleRequest(httpRequest) }
 
-        // Give the handler time to register its waiter (and store the context).
-        try await Task.sleep(for: .milliseconds(50))
-
-        let inFlight = await transport.httpRequestContext(for: .string("99"))
+        // The context is keyed by the id the server sees.
+        let internalID = try await nextServerRequestID(transport)
+        let inFlight = await transport.httpRequestContext(for: .string(internalID))
         #expect(inFlight != nil)
         #expect(inFlight?.header("Authorization") == "Bearer stateless-token")
         #expect(inFlight?.path == "/mcp")
 
         // Send the response to unblock the waiter.
-        try await transport.send(makeResponseBody(id: "99"))
+        try await transport.send(makeResponseBody(id: internalID))
         _ = await handleTask.value
 
-        let afterResponse = await transport.httpRequestContext(for: .string("99"))
+        let afterResponse = await transport.httpRequestContext(for: .string(internalID))
         #expect(afterResponse == nil)
 
         await transport.disconnect()
@@ -1202,7 +1713,7 @@ struct ServerHandlerContextTests {
                 path: ctx?.httpContext?.path,
                 id: ctx?.id
             )
-            return CallTool.Result(content: [.text(text: "ok", annotations: nil, _meta: nil)])
+            return CallTool.Result(content: [.text(text: "ok")])
         }
 
         try await server.start(transport: transport)
@@ -1230,7 +1741,59 @@ struct ServerHandlerContextTests {
 
         #expect(await captured.auth == "Bearer server-integration-token")
         #expect(await captured.path == "/mcp")
-        #expect(await captured.id == .string("call-1"))
+        // The stateless transport gives each in-flight request an internal id.
+        #expect(await captured.id != nil)
+        #expect(await captured.id != .string("call-1"))
+        let reply = try JSONSerialization.jsonObject(with: #require(httpResponse.bodyData)) as? [String: Any]
+        #expect(reply?["id"] as? String == "call-1")
+    }
+
+    @Test("Handler notifications carry the originating request ID")
+    @available(*, deprecated, message: "Tests the deprecated logging API (SEP-2577)")
+    func testHandlerNotificationsCarryRelatedRequestID() async throws {
+        let transport = MockTransport()
+        let server = Server(
+            name: "TestServer", version: "1.0",
+            capabilities: .init(logging: .init(), tools: .init())
+        )
+        await server.withMethodHandler(CallTool.self) { [weak server] _ in
+            try await server?.log(level: .info, data: "from-handler")
+            return CallTool.Result(content: [.text(text: "ok")])
+        }
+        try await server.start(transport: transport)
+
+        try await transport.queue(request: CallTool.request(id: .string("call-7"), .init(name: "t")))
+        try await transport.waitForSentMessages(count: 2)
+        try await server.log(level: .info, data: "outside-handler")
+
+        let related = await transport.relatedRequestIDs
+        #expect(related.first == .some(.string("call-7")))
+        #expect(related.last == .some(nil))
+
+        await server.stop()
+    }
+
+    @Test("Handler requests to the client carry the originating request ID")
+    @available(*, deprecated, message: "Tests the deprecated roots API (SEP-2577)")
+    func testHandlerRequestsCarryRelatedRequestID() async throws {
+        let transport = MockTransport()
+        let server = Server(name: "TestServer", version: "1.0", capabilities: .init(tools: .init()))
+        await server.withMethodHandler(CallTool.self) { [weak server] _ in
+            _ = try await server?.listRoots()
+            return CallTool.Result(content: [.text(text: "ok", annotations: nil, _meta: nil)])
+        }
+        try await server.start(transport: transport)
+
+        try await transport.queue(request: CallTool.request(id: .string("call-8"), .init(name: "t")))
+        try await transport.waitForSentMessages(count: 1)
+        let outside = Task { try await server.listRoots() }
+        try await transport.waitForSentMessages(count: 2)
+
+        #expect(await transport.relatedRequestIDs == [.string("call-8"), nil])
+        #expect(await transport.sentMessages.allSatisfy { $0.contains("roots/list") })
+
+        outside.cancel()
+        await server.stop()
     }
 
     @Test("Non-HTTP transport yields nil httpContext")
@@ -1258,7 +1821,10 @@ struct ServerHandlerContextTests {
         try await transport.queue(request: Ping.request(.init()))
 
         // Wait for dispatch.
-        try await Task.sleep(for: .milliseconds(100))
+        let deadline = ContinuousClock.now + .seconds(30)
+        while await !captured.sawDispatch, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
 
         #expect(await captured.sawDispatch == true)
         #expect(await captured.httpContext == nil)
@@ -1267,3 +1833,62 @@ struct ServerHandlerContextTests {
         await transport.disconnect()
     }
 }
+
+@Suite("Stateful replay store")
+struct StatefulReplayStoreTests {
+    @Test("A quiet stream can be resumed after other streams filled the store")
+    func quietStreamSurvives() async throws {
+        let transport = StatefulHTTPServerTransport(
+            validationPipeline: StandardValidationPipeline(validators: []), eventStoreCapacity: 3)
+        let sessionID = try await initializeSession(transport: transport)
+        // Open the GET stream and read its priming event.
+        let get = await transport.handleRequest(makeGETRequest(sessionID: sessionID))
+        guard case .stream(let events, _) = get else {
+            Issue.record("expected a stream")
+            return
+        }
+        var iterator = events.makeAsyncIterator()
+        let priming = String(decoding: try #require(try await iterator.next()), as: UTF8.self)
+        let primingID = try #require(
+            priming.split(separator: "\n").first { $0.hasPrefix("id: ") }.map { String($0.dropFirst(4)) })
+
+        // Traffic of request streams fills the store many times over.
+        for index in 0..<10 {
+            let response = Data(#"{"jsonrpc":"2.0","id":"x\#(index)","result":{}}"#.utf8)
+            try await transport.send(response, relatedRequestID: .string("x\(index)"))
+        }
+        let resumed = await transport.handleRequest(makeGETRequest(sessionID: sessionID, lastEventID: primingID))
+        #expect(resumed.statusCode == 200)
+        await transport.disconnect()
+    }
+
+    @Test("The store keeps at most its byte capacity, and always the newest event")
+    func byteCapacity() async throws {
+        let transport = StatefulHTTPServerTransport(
+            validationPipeline: StandardValidationPipeline(validators: []), eventStoreByteCapacity: 1000)
+        _ = try await initializeSession(transport: transport)
+        let big = String(repeating: "x", count: 400)
+        for _ in 0..<5 {
+            try await transport.send(
+                Data(#"{"jsonrpc":"2.0","method":"notifications/message","params":{"level":"info","data":"\#(big)"}}"#.utf8))
+        }
+        #expect(await transport.storedEventIDs.count == 2)
+        let huge = String(repeating: "y", count: 5000)
+        try await transport.send(
+            Data(#"{"jsonrpc":"2.0","method":"notifications/message","params":{"level":"info","data":"\#(huge)"}}"#.utf8))
+        #expect(await transport.storedEventIDs.count == 1)
+        await transport.disconnect()
+    }
+
+    @Test("A malformed or unknown Last-Event-ID gets 400")
+    func unknownEventID() async throws {
+        let transport = StatefulHTTPServerTransport(validationPipeline: StandardValidationPipeline(validators: []))
+        let sessionID = try await initializeSession(transport: transport)
+        for lastEventID in ["garbage", "nope_1", "_GET_stream_99999"] {
+            let response = await transport.handleRequest(makeGETRequest(sessionID: sessionID, lastEventID: lastEventID))
+            #expect(response.statusCode == 400, "\(lastEventID)")
+        }
+        await transport.disconnect()
+    }
+}
+

@@ -351,7 +351,7 @@ struct ProgressTests {
     @Test("Client notification updates should fire when server sends them")
     func testClientNotificationUpdates() async throws {
         let pair = await InMemoryTransport.createConnectedPair()
-        let client = Client(name: "testClient", version: "1")
+        let client = Client(name: "testClient", version: "1", configuration: .handshake)
         let token = ProgressToken.unique()
 
         var progresses: [Double] = []
@@ -364,7 +364,7 @@ struct ProgressTests {
         }
 
         let server = Server(name: "testServer", version: "1")
-        let expectedToolCallResult = CallTool.Result(content: [.text(text: "success", annotations: nil, _meta: nil)])
+        let expectedToolCallResult = CallTool.Result(content: [.text(text: "success")])
         await server.withMethodHandler(CallTool.self) { params in
             if let token = params._meta?.progressToken {
                 for i in 1...5 {
@@ -375,12 +375,12 @@ struct ProgressTests {
                 }
             }
 
-            return .init(content: [.text(text: "success", annotations: nil, _meta: nil)])
+            return .init(content: [.text(text: "success")])
         }
 
         try await server.start(transport: pair.server)
         try await client.connect(transport: pair.client)
-        let context: RequestContext<CallTool.Result> = try await client.callTool(name: "random", meta: Metadata(progressToken: token))
+        let context = try await client.startToolCall(name: "random", meta: Metadata(progressToken: token))
         let result = try await context.value
 
         #expect(progresses == [20, 40, 60, 80, 100])

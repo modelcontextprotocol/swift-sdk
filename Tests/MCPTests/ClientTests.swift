@@ -8,13 +8,13 @@ struct ClientTests {
     @Test("Client connect and disconnect")
     func testClientConnectAndDisconnect() async throws {
         let transport = MockTransport()
-        let client = Client(name: "TestClient", version: "1.0")
+        let client = Client(name: "TestClient", version: "1.0", configuration: .handshake)
 
         #expect(await transport.isConnected == false)
 
         // Set up a task to handle the initialize response
         let initTask = Task {
-            try await Task.sleep(for: .milliseconds(10))
+            try await transport.waitForSentMessages()
             if let lastMessage = await transport.sentMessages.last,
                 let data = lastMessage.data(using: .utf8),
                 let request = try? JSONDecoder().decode(Request<Initialize>.self, from: data)
@@ -22,7 +22,7 @@ struct ClientTests {
                 let response = Initialize.response(
                     id: request.id,
                     result: .init(
-                        protocolVersion: Version.latest,
+                        protocolVersion: Version.latestHandshake,
                         capabilities: .init(),
                         serverInfo: .init(name: "TestServer", version: "1.0"),
                         instructions: nil
@@ -34,7 +34,7 @@ struct ClientTests {
 
         let result = try await client.connect(transport: transport)
         #expect(await transport.isConnected == true)
-        #expect(result.protocolVersion == Version.latest)
+        #expect(result.protocolVersion == Version.latestHandshake)
         await client.disconnect()
         #expect(await transport.isConnected == false)
         initTask.cancel()
@@ -46,62 +46,53 @@ struct ClientTests {
     )
     func testClientPing() async throws {
         let transport = MockTransport()
-        let client = Client(name: "TestClient", version: "1.0")
+        let client = Client(name: "TestClient", version: "1.0", configuration: .handshake)
 
-        // Queue a response for the initialize request
-        try await Task.sleep(for: .milliseconds(10))  // Wait for request to be sent
-
-        if let lastMessage = await transport.sentMessages.last,
-            let data = lastMessage.data(using: .utf8),
-            let request = try? JSONDecoder().decode(Request<Initialize>.self, from: data)
-        {
-            // Create a valid initialize response
+        // Answer the initialize request once it is sent
+        let initTask = Task {
+            try await transport.waitForSentMessages()
+            let data = try #require(await transport.sentData.first)
+            let request = try JSONDecoder().decode(Request<Initialize>.self, from: data)
             let response = Initialize.response(
                 id: request.id,
                 result: .init(
-                    protocolVersion: Version.latest,
+                    protocolVersion: Version.latestHandshake,
                     capabilities: .init(),
                     serverInfo: .init(name: "TestServer", version: "1.0"),
                     instructions: nil
                 )
             )
-
             try await transport.queue(response: response)
-
-            // Now complete the connect call which will automatically initialize
-            let result = try await client.connect(transport: transport)
-            #expect(result.protocolVersion == Version.latest)
-            #expect(result.serverInfo.name == "TestServer")
-            #expect(result.serverInfo.version == "1.0")
-
-            // Small delay to ensure message loop is started
-            try await Task.sleep(for: .milliseconds(10))
-
-            // Create a task for the ping
-            let pingTask = Task {
-                try await client.ping()
-            }
-
-            // Give it a moment to send the request
-            try await Task.sleep(for: .milliseconds(10))
-
-            #expect(await transport.sentMessages.count == 2)  // Initialize + Ping
-            #expect(await transport.sentMessages.last?.contains(Ping.name) == true)
-
-            // Cancel the ping task
-            pingTask.cancel()
         }
 
-        // Disconnect client to clean up message loop and give time for continuation cleanup
+        let result = try await client.connect(transport: transport)
+        try await initTask.value
+        #expect(result.protocolVersion == Version.latestHandshake)
+        #expect(result.serverInfo?.name == "TestServer")
+        #expect(result.serverInfo?.version == "1.0")
+
+        let pingTask = Task {
+            try await client.ping()
+        }
+
+        // Initialize + Initialized notification + Ping
+        try await transport.waitForSentMessages(count: 3)
+        #expect(await transport.sentMessages.count == 3)
+        let pingData = try #require(await transport.sentData.last)
+        let ping = try JSONDecoder().decode(Request<Ping>.self, from: pingData)
+        #expect(ping.method == Ping.name)
+
+        try await transport.queue(response: Response<Ping>(id: ping.id, result: .init()))
+        try await pingTask.value
+
         await client.disconnect()
-        try await Task.sleep(for: .milliseconds(50))
     }
 
     @Test("Connection failure handling")
     func testClientConnectionFailure() async {
         let transport = MockTransport()
         await transport.setFailConnect(true)
-        let client = Client(name: "TestClient", version: "1.0")
+        let client = Client(name: "TestClient", version: "1.0", configuration: .handshake)
 
         do {
             try await client.connect(transport: transport)
@@ -120,11 +111,11 @@ struct ClientTests {
     @Test("Send failure handling")
     func testClientSendFailure() async throws {
         let transport = MockTransport()
-        let client = Client(name: "TestClient", version: "1.0")
+        let client = Client(name: "TestClient", version: "1.0", configuration: .handshake)
 
         // Set up a task to handle the initialize response
         let initTask = Task {
-            try await Task.sleep(for: .milliseconds(10))
+            try await transport.waitForSentMessages()
             if let lastMessage = await transport.sentMessages.last,
                 let data = lastMessage.data(using: .utf8),
                 let request = try? JSONDecoder().decode(Request<Initialize>.self, from: data)
@@ -132,7 +123,7 @@ struct ClientTests {
                 let response = Initialize.response(
                     id: request.id,
                     result: .init(
-                        protocolVersion: Version.latest,
+                        protocolVersion: Version.latestHandshake,
                         capabilities: .init(),
                         serverInfo: .init(name: "TestServer", version: "1.0"),
                         instructions: nil
@@ -144,7 +135,6 @@ struct ClientTests {
 
         // Connect first without failure
         try await client.connect(transport: transport)
-        try await Task.sleep(for: .milliseconds(10))
         initTask.cancel()
 
         // Now set the transport to fail sends
@@ -169,12 +159,12 @@ struct ClientTests {
     @Test("Strict configuration - capabilities check")
     func testStrictConfiguration() async throws {
         let transport = MockTransport()
-        let config = Client.Configuration.strict
+        let config = Client.Configuration.strictHandshake
         let client = Client(name: "TestClient", version: "1.0", configuration: config)
 
         // Set up a task to handle the initialize response
         let initTask = Task {
-            try await Task.sleep(for: .milliseconds(10))
+            try await transport.waitForSentMessages()
             if let lastMessage = await transport.sentMessages.last,
                 let data = lastMessage.data(using: .utf8),
                 let request = try? JSONDecoder().decode(Request<Initialize>.self, from: data)
@@ -182,7 +172,7 @@ struct ClientTests {
                 let response = Initialize.response(
                     id: request.id,
                     result: .init(
-                        protocolVersion: Version.latest,
+                        protocolVersion: Version.latestHandshake,
                         capabilities: .init(),
                         serverInfo: .init(name: "TestServer", version: "1.0"),
                         instructions: nil
@@ -193,44 +183,36 @@ struct ClientTests {
         }
 
         try await client.connect(transport: transport)
-
-        // Create a task for listPrompts
-        let promptsTask = Task<Void, Swift.Error> {
-            do {
-                _ = try await client.listPrompts()
-                #expect(Bool(false), "Expected listPrompts to fail in strict mode")
-            } catch let error as MCPError {
-                if case MCPError.methodNotFound = error {
-                    #expect(Bool(true))
-                } else {
-                    #expect(Bool(false), "Expected methodNotFound error, got \(error)")
-                }
-            } catch {
-                #expect(Bool(false), "Expected MCP.Error")
-            }
-        }
-
-        // Give it a short time to execute the task
-        try await Task.sleep(for: .milliseconds(50))
-
-        // Cancel the task if it's still running
-        promptsTask.cancel()
         initTask.cancel()
 
-        // Disconnect client
+        do {
+            _ = try await client.listPrompts()
+            #expect(Bool(false), "Expected listPrompts to fail in strict mode")
+        } catch let error as MCPError {
+            if case MCPError.methodNotFound = error {
+                #expect(Bool(true))
+            } else {
+                #expect(Bool(false), "Expected methodNotFound error, got \(error)")
+            }
+        } catch {
+            #expect(Bool(false), "Expected MCP.Error")
+        }
+
+        // Initialize request + Initialized notification; no prompts/list
+        #expect(await transport.sentMessages.count == 2)
+
         await client.disconnect()
-        try await Task.sleep(for: .milliseconds(50))
     }
 
     @Test("Non-strict configuration - capabilities check")
     func testNonStrictConfiguration() async throws {
         let transport = MockTransport()
-        let config = Client.Configuration.default
+        let config = Client.Configuration.handshake
         let client = Client(name: "TestClient", version: "1.0", configuration: config)
 
         // Set up a task to handle the initialize response
         let initTask = Task {
-            try await Task.sleep(for: .milliseconds(10))
+            try await transport.waitForSentMessages()
             if let lastMessage = await transport.sentMessages.last,
                 let data = lastMessage.data(using: .utf8),
                 let request = try? JSONDecoder().decode(Request<Initialize>.self, from: data)
@@ -238,7 +220,7 @@ struct ClientTests {
                 let response = Initialize.response(
                     id: request.id,
                     result: .init(
-                        protocolVersion: Version.latest,
+                        protocolVersion: Version.latestHandshake,
                         capabilities: .init(),
                         serverInfo: .init(name: "TestServer", version: "1.0"),
                         instructions: nil
@@ -249,79 +231,49 @@ struct ClientTests {
         }
 
         try await client.connect(transport: transport)
-
-        // Make sure init task is complete
         initTask.cancel()
 
-        // Wait a bit for any setup to complete
-        try await Task.sleep(for: .milliseconds(10))
-
-        // Send the listPrompts request and immediately provide an error response
+        // A non-strict client sends prompts/list although the server has no prompts capability
         let promptsTask = Task {
-            do {
-                // Start the request
-                try await Task.sleep(for: .seconds(1))
+            try await client.listPrompts()
+        }
 
-                // Get the last sent message and extract the request ID
-                if let lastMessage = await transport.sentMessages.last,
-                    let data = lastMessage.data(using: .utf8),
-                    let decodedRequest = try? JSONDecoder().decode(
-                        Request<ListPrompts>.self, from: data)
-                {
+        // Initialize request + Initialized notification + prompts/list
+        try await transport.waitForSentMessages(count: 3)
+        let data = try #require(await transport.sentData.last)
+        let decodedRequest = try JSONDecoder().decode(Request<ListPrompts>.self, from: data)
+        #expect(decodedRequest.method == ListPrompts.name)
 
-                    // Create an error response with the same ID
-                    let errorResponse = Response<ListPrompts>(
-                        id: decodedRequest.id,
-                        error: MCPError.methodNotFound("Test: Prompts capability not available")
-                    )
-                    try await transport.queue(response: errorResponse)
+        let errorResponse = Response<ListPrompts>(
+            id: decodedRequest.id,
+            error: MCPError.methodNotFound("Test: Prompts capability not available")
+        )
+        try await transport.queue(response: errorResponse)
 
-                    // Try the request now that we have a response queued
-                    do {
-                        _ = try await client.listPrompts()
-                        #expect(Bool(false), "Expected listPrompts to fail in non-strict mode")
-                    } catch let error as MCPError {
-                        if case MCPError.methodNotFound = error {
-                            #expect(Bool(true))
-                        } else {
-                            #expect(Bool(false), "Expected methodNotFound error, got \(error)")
-                        }
-                    } catch {
-                        #expect(Bool(false), "Expected MCP.Error")
-                    }
-                }
-            } catch {
-                // Ignore task cancellation
-                if !(error is CancellationError) {
-                    throw error
-                }
+        do {
+            _ = try await promptsTask.value
+            #expect(Bool(false), "Expected listPrompts to fail in non-strict mode")
+        } catch let error as MCPError {
+            if case MCPError.methodNotFound = error {
+                #expect(Bool(true))
+            } else {
+                #expect(Bool(false), "Expected methodNotFound error, got \(error)")
             }
+        } catch {
+            #expect(Bool(false), "Expected MCP.Error")
         }
 
-        // Wait for the task to complete or timeout
-        let timeoutTask = Task {
-            try await Task.sleep(for: .milliseconds(500))
-            promptsTask.cancel()
-        }
-
-        // Wait for the task to complete
-        _ = await promptsTask.result
-
-        // Cancel the timeout task
-        timeoutTask.cancel()
-
-        // Disconnect client
         await client.disconnect()
     }
 
     @Test("Batch request - success")
     func testBatchRequestSuccess() async throws {
         let transport = MockTransport()
-        let client = Client(name: "TestClient", version: "1.0")
+        let client = Client(name: "TestClient", version: "1.0", configuration: .handshake)
 
         // Set up a task to handle the initialize response
         let initTask = Task {
-            try await Task.sleep(for: .milliseconds(10))
+            try await transport.waitForSentMessages()
             if let lastMessage = await transport.sentMessages.last,
                 let data = lastMessage.data(using: .utf8),
                 let request = try? JSONDecoder().decode(Request<Initialize>.self, from: data)
@@ -329,7 +281,7 @@ struct ClientTests {
                 let response = Initialize.response(
                     id: request.id,
                     result: .init(
-                        protocolVersion: Version.latest,
+                        protocolVersion: Version.latestHandshake,
                         capabilities: .init(),
                         serverInfo: .init(name: "TestServer", version: "1.0"),
                         instructions: nil
@@ -340,7 +292,6 @@ struct ClientTests {
         }
 
         try await client.connect(transport: transport)
-        try await Task.sleep(for: .milliseconds(10))  // Allow connection tasks
         initTask.cancel()
 
         let request1 = Ping.request()
@@ -397,11 +348,11 @@ struct ClientTests {
     @Test("Batch request - mixed success/error")
     func testBatchRequestMixed() async throws {
         let transport = MockTransport()
-        let client = Client(name: "TestClient", version: "1.0")
+        let client = Client(name: "TestClient", version: "1.0", configuration: .handshake)
 
         // Set up a task to handle the initialize response
         let initTask = Task {
-            try await Task.sleep(for: .milliseconds(10))
+            try await transport.waitForSentMessages()
             if let lastMessage = await transport.sentMessages.last,
                 let data = lastMessage.data(using: .utf8),
                 let request = try? JSONDecoder().decode(Request<Initialize>.self, from: data)
@@ -409,7 +360,7 @@ struct ClientTests {
                 let response = Initialize.response(
                     id: request.id,
                     result: .init(
-                        protocolVersion: Version.latest,
+                        protocolVersion: Version.latestHandshake,
                         capabilities: .init(),
                         serverInfo: .init(name: "TestServer", version: "1.0"),
                         instructions: nil
@@ -420,7 +371,6 @@ struct ClientTests {
         }
 
         try await client.connect(transport: transport)
-        try await Task.sleep(for: .milliseconds(10))
         initTask.cancel()
 
         let request1 = Ping.request()  // Success
@@ -477,11 +427,11 @@ struct ClientTests {
     @Test("Batch request - empty")
     func testBatchRequestEmpty() async throws {
         let transport = MockTransport()
-        let client = Client(name: "TestClient", version: "1.0")
+        let client = Client(name: "TestClient", version: "1.0", configuration: .handshake)
 
         // Set up a task to handle the initialize response
         let initTask = Task {
-            try await Task.sleep(for: .milliseconds(10))
+            try await transport.waitForSentMessages()
             if let lastMessage = await transport.sentMessages.last,
                 let data = lastMessage.data(using: .utf8),
                 let request = try? JSONDecoder().decode(Request<Initialize>.self, from: data)
@@ -489,7 +439,7 @@ struct ClientTests {
                 let response = Initialize.response(
                     id: request.id,
                     result: .init(
-                        protocolVersion: Version.latest,
+                        protocolVersion: Version.latestHandshake,
                         capabilities: .init(),
                         serverInfo: .init(name: "TestServer", version: "1.0"),
                         instructions: nil
@@ -500,7 +450,6 @@ struct ClientTests {
         }
 
         try await client.connect(transport: transport)
-        try await Task.sleep(for: .milliseconds(10))
         initTask.cancel()
 
         // Call withBatch but don't add any requests
@@ -517,11 +466,11 @@ struct ClientTests {
     @Test("Notify method sends notifications")
     func testClientNotify() async throws {
         let transport = MockTransport()
-        let client = Client(name: "TestClient", version: "1.0")
+        let client = Client(name: "TestClient", version: "1.0", configuration: .handshake)
 
         // Set up a task to handle the initialize response
         let initTask = Task {
-            try await Task.sleep(for: .milliseconds(10))
+            try await transport.waitForSentMessages()
             if let lastMessage = await transport.sentMessages.last,
                 let data = lastMessage.data(using: .utf8),
                 let request = try? JSONDecoder().decode(Request<Initialize>.self, from: data)
@@ -529,7 +478,7 @@ struct ClientTests {
                 let response = Initialize.response(
                     id: request.id,
                     result: .init(
-                        protocolVersion: Version.latest,
+                        protocolVersion: Version.latestHandshake,
                         capabilities: .init(),
                         serverInfo: .init(name: "TestServer", version: "1.0"),
                         instructions: nil
@@ -540,7 +489,6 @@ struct ClientTests {
         }
 
         try await client.connect(transport: transport)
-        try await Task.sleep(for: .milliseconds(10))
         initTask.cancel()
 
         // Create a test notification
@@ -573,90 +521,87 @@ struct ClientTests {
     @Test("Initialize sends initialized notification")
     func testClientInitializeNotification() async throws {
         let transport = MockTransport()
-        let client = Client(name: "TestClient", version: "1.0")
+        let client = Client(name: "TestClient", version: "1.0", configuration: .handshake)
 
-        // Create a task for initialize
+        // Answer the initialize request once it is sent
         let initTask = Task {
-            // Queue a response for the initialize request
-            try await Task.sleep(for: .milliseconds(10))  // Wait for request to be sent
-
-            if let lastMessage = await transport.sentMessages.last,
-                let data = lastMessage.data(using: .utf8),
-                let request = try? JSONDecoder().decode(Request<Initialize>.self, from: data)
-            {
-
-                // Create a valid initialize response
-                let response = Initialize.response(
-                    id: request.id,
-                    result: .init(
-                        protocolVersion: Version.latest,
-                        capabilities: .init(),
-                        serverInfo: .init(name: "TestServer", version: "1.0"),
-                        instructions: nil
-                    )
+            try await transport.waitForSentMessages()
+            let data = try #require(await transport.sentData.first)
+            let request = try JSONDecoder().decode(Request<Initialize>.self, from: data)
+            let response = Initialize.response(
+                id: request.id,
+                result: .init(
+                    protocolVersion: Version.latestHandshake,
+                    capabilities: .init(),
+                    serverInfo: .init(name: "TestServer", version: "1.0"),
+                    instructions: nil
                 )
-
-                try await transport.queue(response: response)
-
-                // Now complete the initialize call
-                try await client.connect(transport: transport)
-                try await Task.sleep(for: .milliseconds(10))
-
-                // Verify that two messages were sent: initialize request and initialized notification
-                #expect(await transport.sentMessages.count == 2)
-
-                // Check that the second message is the initialized notification
-                let notifications = await transport.sentMessages
-                if notifications.count >= 2 {
-                    let notificationJson = notifications[1]
-                    if let notificationData = notificationJson.data(using: .utf8) {
-                        do {
-                            let decoder = JSONDecoder()
-                            let decodedNotification = try decoder.decode(
-                                Message<InitializedNotification>.self, from: notificationData)
-                            #expect(decodedNotification.method == InitializedNotification.name)
-                        } catch {
-                            #expect(Bool(false), "Failed to decode notification: \(error)")
-                        }
-                    } else {
-                        #expect(Bool(false), "Could not convert notification to data")
-                    }
-                } else {
-                    #expect(
-                        Bool(false), "Expected both initialize request and initialized notification"
-                    )
-                }
-            }
+            )
+            try await transport.queue(response: response)
         }
 
-        // Wait with timeout
-        let timeoutTask = Task {
-            try await Task.sleep(for: .seconds(1))
-            initTask.cancel()
-        }
+        try await client.connect(transport: transport)
+        try await initTask.value
 
-        // Wait for the task to complete
-        do {
-            _ = try await initTask.value
-        } catch is CancellationError {
-            #expect(Bool(false), "Test timed out")
-        } catch {
-            #expect(Bool(false), "Unexpected error: \(error)")
-        }
+        // Verify that two messages were sent: initialize request and initialized notification
+        let sentData = await transport.sentData
+        #expect(sentData.count == 2)
+        try #require(sentData.count >= 2)
 
-        timeoutTask.cancel()
+        let decoder = JSONDecoder()
+        let request = try decoder.decode(Request<Initialize>.self, from: sentData[0])
+        #expect(request.method == Initialize.name)
+        let decodedNotification = try decoder.decode(
+            Message<InitializedNotification>.self, from: sentData[1])
+        #expect(decodedNotification.method == InitializedNotification.name)
 
         await client.disconnect()
+    }
+
+    @Test(
+        "Connect fails when the server answers initialize with an unsupported protocol version",
+        arguments: ["1999-01-01", Version.v2026_07_28])
+    func testConnectRejectsUnsupportedProtocolVersion(version: String) async throws {
+        let transport = MockTransport()
+        let client = Client(name: "TestClient", version: "1.0", configuration: .handshake)
+
+        let responder = Task {
+            try await transport.waitForSentMessages()
+            let data = try #require(await transport.sentData.first)
+            let request = try JSONDecoder().decode(Request<Initialize>.self, from: data)
+            try await transport.queue(
+                response: Initialize.response(
+                    id: request.id,
+                    result: .init(
+                        protocolVersion: version,
+                        capabilities: .init(),
+                        serverInfo: .init(name: "TestServer", version: "1.0")
+                    )
+                ))
+        }
+
+        await #expect(
+            throws: MCPError.internalError("Server's protocol version is not supported: \(version)")
+        ) {
+            try await client.connect(transport: transport)
+        }
+        try await responder.value
+
+        // Only the initialize request went out: no notifications/initialized.
+        #expect(await transport.sentData.count == 1)
+        #expect(await transport.isConnected == false)
+        #expect(await client.negotiatedProtocolVersion == nil)
+        #expect(await client.serverCapabilities == nil)
     }
 
     @Test("Race condition between send error and response")
     func testSendErrorResponseRace() async throws {
         let transport = MockTransport()
-        let client = Client(name: "TestClient", version: "1.0")
+        let client = Client(name: "TestClient", version: "1.0", configuration: .handshake)
 
         // Set up a task to handle the initialize response
         let initTask = Task {
-            try await Task.sleep(for: .milliseconds(10))
+            try await transport.waitForSentMessages()
             if let lastMessage = await transport.sentMessages.last,
                 let data = lastMessage.data(using: .utf8),
                 let request = try? JSONDecoder().decode(Request<Initialize>.self, from: data)
@@ -664,7 +609,7 @@ struct ClientTests {
                 let response = Initialize.response(
                     id: request.id,
                     result: .init(
-                        protocolVersion: Version.latest,
+                        protocolVersion: Version.latestHandshake,
                         capabilities: .init(),
                         serverInfo: .init(name: "TestServer", version: "1.0"),
                         instructions: nil
@@ -675,7 +620,6 @@ struct ClientTests {
         }
 
         try await client.connect(transport: transport)
-        try await Task.sleep(for: .milliseconds(10))
         initTask.cancel()
 
         // Set up the transport to fail sends from the start
@@ -713,11 +657,11 @@ struct ClientTests {
     @Test("Race condition between response and send error")
     func testResponseSendErrorRace() async throws {
         let transport = MockTransport()
-        let client = Client(name: "TestClient", version: "1.0")
+        let client = Client(name: "TestClient", version: "1.0", configuration: .handshake)
 
         // Set up a task to handle the initialize response
         let initTask = Task {
-            try await Task.sleep(for: .milliseconds(10))
+            try await transport.waitForSentMessages()
             if let lastMessage = await transport.sentMessages.last,
                 let data = lastMessage.data(using: .utf8),
                 let request = try? JSONDecoder().decode(Request<Initialize>.self, from: data)
@@ -725,7 +669,7 @@ struct ClientTests {
                 let response = Initialize.response(
                     id: request.id,
                     result: .init(
-                        protocolVersion: Version.latest,
+                        protocolVersion: Version.latestHandshake,
                         capabilities: .init(),
                         serverInfo: .init(name: "TestServer", version: "1.0"),
                         instructions: nil
@@ -736,7 +680,6 @@ struct ClientTests {
         }
 
         try await client.connect(transport: transport)
-        try await Task.sleep(for: .milliseconds(10))
         initTask.cancel()
 
         // Create a ping request to get the ID
@@ -770,6 +713,157 @@ struct ClientTests {
         // Verify no continuation misuse occurred
         // (If it did, the test would have crashed)
 
+        await client.disconnect()
+    }
+}
+
+@Suite("Client undecodable responses", .timeLimit(.minutes(1)))
+struct ClientUndecodableResponseTests {
+    private struct ServerResult: MCP.Method {
+        static let name = "test/malformed-result"
+        typealias Result = Value
+    }
+
+    private struct ExpectedResult: MCP.Method {
+        static let name = ServerResult.name
+
+        struct Result: Codable, Hashable, Sendable {
+            let count: Int
+        }
+    }
+
+    @Test("A malformed result keeps its raw value and decoding error")
+    func malformedResult() async throws {
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+        let server = Server(name: "s", version: "1", capabilities: .init())
+        await server.withMethodHandler(ServerResult.self) { _ in ["count": "not a number"] }
+        try await server.start(transport: serverTransport)
+
+        let client = Client(name: "c", version: "1")
+        try await client.connect(transport: clientTransport)
+        defer { Task { await client.disconnect(); await server.stop() } }
+
+        let context = try await client.send(ExpectedResult.request())
+        do {
+            _ = try await context.value
+            Issue.record("Expected a response decoding error")
+        } catch let error as ResponseDecodingError {
+            #expect(error.expectedType == String(reflecting: ExpectedResult.Result.self))
+            #expect(error.rawResult.objectValue?["count"] == "not a number")
+            #expect(error.rawResult.objectValue?["_meta"] != nil)
+            #expect(error.description.contains(error.expectedType))
+            #expect(error.localizedDescription.contains(error.expectedType))
+            #expect(error.description.contains("count: Expected to decode Int"))
+            #expect(error.localizedDescription.contains("count: Expected to decode Int"))
+            #expect(!error.description.contains("DecodingError.Context"))
+            #expect(!error.description.contains("not a number"))
+            #expect(!String(describing: error).contains("not a number"))
+            #expect(!error.localizedDescription.contains("not a number"))
+            guard case .typeMismatch(let type, let context) = error.underlyingError as? DecodingError else {
+                Issue.record("Expected an Int decoding error")
+                return
+            }
+            #expect(String(reflecting: type) == String(reflecting: Int.self))
+            #expect(context.codingPath.map(\.stringValue) == ["count"])
+        }
+    }
+
+    @Test("A response decoding error built by a caller keeps its fields")
+    func responseDecodingErrorInit() {
+        struct Underlying: Swift.Error, CustomStringConvertible {
+            var description: String { "bad shape" }
+        }
+        let error = ResponseDecodingError(
+            expectedType: "Example.Result", rawResult: ["secret": "value"], underlyingError: Underlying())
+        #expect(error.expectedType == "Example.Result")
+        #expect(error.rawResult == ["secret": "value"])
+        #expect(error.underlyingError is Underlying)
+        #expect(error.localizedDescription == "Could not decode the result as Example.Result: bad shape")
+        #expect(!String(describing: error).contains("secret"))
+    }
+
+    @Test("A response decoding error prints a decoding error as its path and reason")
+    func responseDecodingErrorSummary() {
+        struct Key: CodingKey {
+            let stringValue: String
+            let intValue: Int?
+            init(stringValue: String) { (self.stringValue, self.intValue) = (stringValue, nil) }
+            init(intValue: Int) { (self.stringValue, self.intValue) = ("Index \(intValue)", intValue) }
+        }
+        func summary(_ underlying: DecodingError) -> String {
+            ResponseDecodingError(expectedType: "R", rawResult: .null, underlyingError: underlying).description
+        }
+        let nested = DecodingError.Context(
+            codingPath: [Key(stringValue: "content"), Key(intValue: 0), Key(stringValue: "text")],
+            debugDescription: "Expected to decode String but found a number instead.")
+        #expect(
+            summary(.typeMismatch(String.self, nested))
+                == "Could not decode the result as R: content[0].text: Expected to decode String but found a number instead.")
+        let root = DecodingError.Context(codingPath: [], debugDescription: "The given data was not valid JSON.")
+        #expect(summary(.dataCorrupted(root)) == "Could not decode the result as R: The given data was not valid JSON.")
+    }
+
+    /// A handshake client connected to `transport`, which answers initialize.
+    private func connect(_ transport: MockTransport) async throws -> Client {
+        let client = Client(name: "c", version: "1", configuration: .handshake)
+        let answer = Task {
+            try await transport.waitForSentMessages()
+            let data = try #require(await transport.sentMessages.last?.data(using: .utf8))
+            let request = try JSONDecoder().decode(Request<Initialize>.self, from: data)
+            try await transport.queue(
+                response: Initialize.response(
+                    id: request.id,
+                    result: .init(
+                        protocolVersion: Version.latestHandshake, capabilities: .init(),
+                        serverInfo: .init(name: "s", version: "1"), instructions: nil)))
+        }
+        _ = try await client.connect(transport: transport)
+        try await answer.value
+        return client
+    }
+
+    @Test(
+        "An answer that does not decode fails the request it names",
+        arguments: [
+            #"{"jsonrpc":"2.0","id":"ID","error":{"code":"bad","message":"x"}}"#,
+            #"{"jsonrpc":"2.0","id":"ID","error":{"message":"x"}}"#,
+            #"{"id":"ID","result":{}}"#,
+        ])
+    func undecodableAnswer(_ template: String) async throws {
+        let transport = MockTransport()
+        let client = try await connect(transport)
+        let request = Ping.request()
+        let context = try await client.send(request)
+        await transport.queue(data: Data(template.replacingOccurrences(of: "ID", with: request.id.description).utf8))
+
+        await #expect(throws: MCPError.internalError("The server sent an invalid response")) {
+            try await context.value
+        }
+        await client.disconnect()
+    }
+
+    @Test("An undecodable message for no pending request changes nothing")
+    func unknownID() async throws {
+        let transport = MockTransport()
+        let client = try await connect(transport)
+        await transport.queue(data: Data(#"{"jsonrpc":"2.0","id":"other","error":{"code":"bad"}}"#.utf8))
+        let request = Ping.request()
+        let context = try await client.send(request)
+        try await transport.queue(response: Ping.response(id: request.id))
+        _ = try await context.value
+        await client.disconnect()
+    }
+
+    @Test("A malformed message with a method reusing a pending id does not fail the pending request")
+    func malformedRequestReusingPendingID() async throws {
+        let transport = MockTransport()
+        let client = try await connect(transport)
+        let request = Ping.request()
+        let context = try await client.send(request)
+        await transport.queue(
+            data: Data(#"{"jsonrpc":"1.0","id":"\#(request.id)","method":"ping"}"#.utf8))
+        try await transport.queue(response: Ping.response(id: request.id))
+        _ = try await context.value
         await client.disconnect()
     }
 }

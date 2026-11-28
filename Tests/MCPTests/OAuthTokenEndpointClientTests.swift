@@ -7,7 +7,7 @@ import Testing
     import FoundationNetworking
 #endif
 
-#if swift(>=6.1) && !os(Linux)
+#if swift(>=6.1)
 
     @Suite("OAuthTokenEndpointClient", .serialized)
     struct OAuthTokenEndpointClientTests {

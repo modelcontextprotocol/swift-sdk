@@ -1,0 +1,35 @@
+# The CI jobs, one per line: `<id> <linux> <script> [args...]`.
+#
+#   <script>  scripts/ci/<script>.sh, run with [args...].
+#   <linux>   `gate` or `advisory`: whether a Linux failure fails CI. On macOS
+#             every job gates. `advisory` is for a job that fails on Linux
+#             for a known reason (recorded in design/linux.md): it runs and
+#             reports without failing CI. No job is advisory today: Linux and
+#             macOS share the conformance baselines and interop/RESULTS.md.
+#
+# `scripts/ci-linux.sh all` runs every line; .github/workflows/ci.yml runs the
+# same scripts with the same arguments. A job a host cannot run passes there
+# and says so: fuzz needs Linux, the apple-* jobs need Xcode with the
+# platform's SDK and a simulator runtime (with CI set, a missing one fails).
+#
+# The apple-* jobs build every target for the platform's device SDK and run
+# the tests on its simulator (scripts/ci/apple-platform.sh). Conformance and
+# interop do not run on them. Another platform of Package.swift (tvOS,
+# watchOS, visionOS, macCatalyst) is one more line here and in ci.yml.
+build-test                     gate      build-test
+apple-ios                      gate      apple-platform iOS
+docs                           gate      docs
+api-breakage                   gate      api-breakage
+fuzz                           gate      fuzz
+conformance-scripts            gate      conformance-scripts
+conformance-2025-11-25-client  gate      conformance --spec-version 2025-11-25 --mode client
+conformance-2025-11-25-server  gate      conformance --spec-version 2025-11-25 --mode server
+conformance-2026-07-28-client  gate      conformance --spec-version 2026-07-28 --mode client
+conformance-2026-07-28-server  gate      conformance --spec-version 2026-07-28 --mode server
+conformance-default-client     gate      conformance --mode client
+conformance-default-server     gate      conformance --mode server
+tier-2025-11-25-client         gate      conformance --requirements 2025-11-25 --mode client
+tier-2025-11-25-server         gate      conformance --requirements 2025-11-25 --mode server
+tier-2026-07-28-client         gate      conformance --requirements 2026-07-28 --mode client
+tier-2026-07-28-server         gate      conformance --requirements 2026-07-28 --mode server
+interop                        gate      interop --check

@@ -11,6 +11,7 @@ import Foundation
 public struct ProgressNotification: Notification {
     public static let name: String = "notifications/progress"
 
+    /// The parameters of `notifications/progress`.
     public struct Parameters: Hashable, Codable, Sendable {
         /// The progress token from the original request.
         ///
@@ -33,6 +34,7 @@ public struct ProgressNotification: Notification {
         /// An optional human-readable message describing the current progress.
         public let message: String?
 
+        /// Creates progress parameters.
         public init(
             progressToken: ProgressToken,
             progress: Double,
@@ -51,8 +53,12 @@ public struct ProgressNotification: Notification {
 ///
 /// Progress tokens can be either strings or integers.
 /// Progress tokens MUST be unique across all active requests.
+///
+/// Frozen: no case is added in 1.x (a progress token is a string or an integer).
 public enum ProgressToken: Hashable, Codable, Sendable {
+    /// A string token.
     case string(String)
+    /// An integer token.
     case integer(Int)
 
     public init(from decoder: Decoder) throws {
@@ -92,6 +98,7 @@ public enum ProgressToken: Hashable, Codable, Sendable {
 ///
 /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/progress
 public struct Metadata: Hashable, Codable, Sendable {
+    /// The field for `key`, or `nil` when it is absent.
     public subscript(_ key: String) -> Value? {
         fields[key]
     }

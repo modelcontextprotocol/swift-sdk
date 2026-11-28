@@ -6,6 +6,10 @@ import class Foundation.JSONEncoder
 
 @testable import MCP
 
+// The deprecated values (SEP-2596), read as the wire carries them.
+private let thisServer = Sampling.ContextInclusion(rawValue: "thisServer")!
+private let allServers = Sampling.ContextInclusion(rawValue: "allServers")!
+
 @Suite("Sampling Tests")
 struct SamplingTests {
     @Test("Sampling.Message encoding and decoding")
@@ -73,7 +77,7 @@ struct SamplingTests {
         let encoder = JSONEncoder()
         let decoder = JSONDecoder()
 
-        let contexts: [Sampling.ContextInclusion] = [.none, .thisServer, .allServers]
+        let contexts: [Sampling.ContextInclusion] = [.none, thisServer, allServers]
 
         for context in contexts {
             let data = try encoder.encode(context)
@@ -117,7 +121,7 @@ struct SamplingTests {
             messages: messages,
             modelPreferences: modelPreferences,
             systemPrompt: "You are a helpful weather assistant.",
-            includeContext: .thisServer,
+            includeContext: thisServer,
             temperature: 0.7,
             maxTokens: 150,
             stopSequences: ["END", "STOP"],
@@ -130,7 +134,7 @@ struct SamplingTests {
         #expect(decoded.messages.count == 2)
         #expect(decoded.messages[0].role == .user)
         #expect(decoded.systemPrompt == "You are a helpful weather assistant.")
-        #expect(decoded.includeContext == .thisServer)
+        #expect(decoded.includeContext == thisServer)
         #expect(decoded.temperature == 0.7)
         #expect(decoded.maxTokens == 150)
         #expect(decoded.stopSequences?.count == 2)
@@ -201,8 +205,9 @@ struct SamplingTests {
     }
 
     @Test("Client sampling handler registration")
+    @available(*, deprecated, message: "Tests the deprecated sampling API (SEP-2577)")
     func testClientSamplingHandlerRegistration() async throws {
-        let client = Client(name: "TestClient", version: "1.0")
+        let client = Client(name: "TestClient", version: "1.0", configuration: .handshake)
 
         // Test that sampling handler can be registered
         let handlerClient = await client.withSamplingHandler { parameters in
@@ -485,6 +490,7 @@ struct SamplingTests {
 struct SamplingIntegrationTests {
 
     @Test
+    @available(*, deprecated, message: "Tests the deprecated sampling API (SEP-2577)")
     func testSamplingHandlerRegistration() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
@@ -495,7 +501,8 @@ struct SamplingIntegrationTests {
 
         let client = Client(
             name: "SamplingHandlerTestClient",
-            version: "1.0"
+            version: "1.0",
+            configuration: .handshake
         )
 
         nonisolated(unsafe) var handlerCalled = false
@@ -530,6 +537,7 @@ struct SamplingIntegrationTests {
     }
 
     @Test
+    @available(*, deprecated, message: "Tests the deprecated sampling API (SEP-2577)")
     func testServerSamplingRequestAPI() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
@@ -540,7 +548,8 @@ struct SamplingIntegrationTests {
 
         let client = Client(
             name: "SamplingTestClient",
-            version: "1.0"
+            version: "1.0",
+            configuration: .handshake
         )
 
         // Register sampling handler on client to respond to server's request
@@ -549,7 +558,7 @@ struct SamplingIntegrationTests {
             // Verify the request parameters were passed correctly
             #expect(parameters.messages.count == 3)
             #expect(parameters.systemPrompt == "You are a business analyst expert.")
-            #expect(parameters.includeContext == .thisServer)
+            #expect(parameters.includeContext == thisServer)
             #expect(parameters.temperature == 0.7)
             #expect(parameters.maxTokens == 500)
             #expect(parameters.stopSequences?.count == 2)
@@ -589,7 +598,7 @@ struct SamplingIntegrationTests {
             messages: messages,
             modelPreferences: modelPreferences,
             systemPrompt: "You are a business analyst expert.",
-            includeContext: .thisServer,
+            includeContext: thisServer,
             temperature: 0.7,
             maxTokens: 500,
             stopSequences: ["END_ANALYSIS", "\n\n---"],
@@ -697,6 +706,7 @@ struct SamplingIntegrationTests {
     }
 
     @Test
+    @available(*, deprecated, message: "Tests the deprecated sampling API (SEP-2577)")
     func testSamplingErrorHandling() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
@@ -708,7 +718,8 @@ struct SamplingIntegrationTests {
         // Client WITHOUT sampling capability
         let client = Client(
             name: "ErrorTestClient",
-            version: "1.0"
+            version: "1.0",
+            configuration: .handshake
         )
 
         try await server.start(transport: serverTransport)
@@ -731,6 +742,7 @@ struct SamplingIntegrationTests {
     }
 
     @Test("Strict mode succeeds when client declares sampling capability")
+    @available(*, deprecated, message: "Tests the deprecated sampling API (SEP-2577)")
     func testSamplingStrictCapabilitiesSuccess() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
@@ -744,7 +756,7 @@ struct SamplingIntegrationTests {
             name: "StrictTestClient",
             version: "1.0",
             capabilities: .init(sampling: .init()),
-            configuration: .strict
+            configuration: .strictHandshake
         )
 
         // Register sampling handler
@@ -779,6 +791,7 @@ struct SamplingIntegrationTests {
     }
 
     @Test("Strict mode fails when client doesn't declare sampling capability")
+    @available(*, deprecated, message: "Tests the deprecated sampling API (SEP-2577)")
     func testSamplingStrictCapabilitiesError() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
@@ -793,7 +806,7 @@ struct SamplingIntegrationTests {
             name: "StrictTestClient",
             version: "1.0",
             capabilities: .init(),
-            configuration: .strict
+            configuration: .strictHandshake
         )
 
         try await server.start(transport: serverTransport)
@@ -812,6 +825,7 @@ struct SamplingIntegrationTests {
     }
 
     @Test("Non-strict mode succeeds even without client capability declaration")
+    @available(*, deprecated, message: "Tests the deprecated sampling API (SEP-2577)")
     func testSamplingNonStrictCapabilities() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
@@ -826,7 +840,7 @@ struct SamplingIntegrationTests {
             name: "NonStrictTestClient",
             version: "1.0",
             capabilities: .init(),
-            configuration: .default
+            configuration: .handshake
         )
 
         // Register sampling handler anyway
@@ -884,7 +898,7 @@ struct SamplingIntegrationTests {
                 intelligencePriority: 0.9
             ),
             systemPrompt: "You are a helpful assistant.",
-            includeContext: .allServers,
+            includeContext: allServers,
             temperature: 0.7,
             maxTokens: 500,
             stopSequences: ["STOP", "END"],
@@ -897,7 +911,7 @@ struct SamplingIntegrationTests {
         #expect(comprehensiveParams.messages.count == 1)
         #expect(comprehensiveParams.modelPreferences?.hints?.count == 1)
         #expect(comprehensiveParams.systemPrompt == "You are a helpful assistant.")
-        #expect(comprehensiveParams.includeContext == .allServers)
+        #expect(comprehensiveParams.includeContext == allServers)
         #expect(comprehensiveParams.temperature == 0.7)
         #expect(comprehensiveParams.maxTokens == 500)
         #expect(comprehensiveParams.stopSequences?.count == 2)
@@ -938,7 +952,7 @@ struct SamplingIntegrationTests {
                 intelligencePriority: 0.9
             ),
             systemPrompt: "You are an expert business analyst. Provide actionable insights.",
-            includeContext: .thisServer,
+            includeContext: thisServer,
             temperature: 0.3,  // Lower temperature for analytical tasks
             maxTokens: 400,
             stopSequences: ["---END---"],

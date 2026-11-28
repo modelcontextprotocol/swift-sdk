@@ -41,11 +41,14 @@ public struct HTTPValidationContext: Sendable {
     /// The set of protocol versions this server supports.
     public let supportedProtocolVersions: Set<String>
 
+    /// Creates a context. `supportedProtocolVersions` defaults to the
+    /// handshake revisions, which session-based transports serve; a
+    /// stateless transport passes `Version.stateless` too.
     public init(
         httpMethod: String,
         sessionID: String? = nil,
         isInitializationRequest: Bool = false,
-        supportedProtocolVersions: Set<String> = Version.supported
+        supportedProtocolVersions: Set<String> = Set(Version.handshake)
     ) {
         self.httpMethod = httpMethod
         self.sessionID = sessionID
@@ -63,6 +66,8 @@ public struct HTTPValidationContext: Sendable {
 /// - GET requests always require `text/event-stream`
 public struct AcceptHeaderValidator: HTTPRequestValidator {
     /// The response mode determines which content types are required.
+    ///
+    /// Frozen: no case is added in 1.x (the two response modes of the HTTP transports).
     public enum Mode: Sendable {
         /// POST requires both `application/json` and `text/event-stream`.
         case sseRequired
@@ -70,12 +75,15 @@ public struct AcceptHeaderValidator: HTTPRequestValidator {
         case jsonOnly
     }
 
+    /// The content types POST requests must accept.
     public let mode: Mode
 
+    /// Creates a validator for the given response mode.
     public init(mode: Mode) {
         self.mode = mode
     }
 
+    /// Returns 406 when the `Accept` header lacks a required content type.
     public func validate(_ request: HTTPRequest, context: HTTPValidationContext) -> HTTPResponse? {
         let accept = request.header(HTTPHeaderName.accept) ?? ""
         let acceptTypes = accept.split(separator: ",").map {
@@ -131,8 +139,10 @@ public struct AcceptHeaderValidator: HTTPRequestValidator {
 
 /// Validates that POST requests have `Content-Type: application/json`.
 public struct ContentTypeValidator: HTTPRequestValidator {
+    /// Creates a content type validator.
     public init() {}
 
+    /// Returns 415 when a POST request's media type is not `application/json`.
     public func validate(_ request: HTTPRequest, context: HTTPValidationContext) -> HTTPResponse? {
         guard context.httpMethod == "POST" else { return nil }
 
@@ -163,8 +173,14 @@ public struct ContentTypeValidator: HTTPRequestValidator {
 /// - If the header is present but unsupported, the server returns 400 Bad Request
 /// - Initialization requests are exempt (protocol version comes from the request body)
 public struct ProtocolVersionValidator: HTTPRequestValidator {
+    /// Creates a protocol version validator.
     public init() {}
 
+    /// Returns 400 with ``MCPError/unsupportedProtocolVersion(supported:requested:)``
+    /// when the header names a version outside
+    /// ``HTTPValidationContext/supportedProtocolVersions``, and 400 with
+    /// ``MCPError/headerMismatch(_:)`` when it was sent more than once and
+    /// names a revision that defines that error (2026-07-28 and later).
     public func validate(_ request: HTTPRequest, context: HTTPValidationContext) -> HTTPResponse? {
         // Skip for initialization requests (version is in the body, not the header)
         guard !context.isInitializationRequest else { return nil }
@@ -176,13 +192,29 @@ public struct ProtocolVersionValidator: HTTPRequestValidator {
             return nil
         }
 
+        // The header is single-valued. A repeated one arrives on several
+        // field lines or joined with commas (RFC 9110 §5.3); at revisions
+        // that define HeaderMismatch it is a header failure, not an
+        // unsupported version.
+        if request.isRepeated(HTTPHeaderName.protocolVersion) {
+            let versions = request.headerValues(HTTPHeaderName.protocolVersion)
+                .flatMap { $0.split(separator: ",", omittingEmptySubsequences: false) }
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+            if versions.contains(where: { Version.profile(for: $0).usesStandardHeaders }) {
+                return .error(
+                    statusCode: 400,
+                    .headerMismatch("\(HTTPHeaderName.protocolVersion) appears more than once"),
+                    sessionID: context.sessionID
+                )
+            }
+        }
+
         guard context.supportedProtocolVersions.contains(version) else {
-            let supported = context.supportedProtocolVersions.sorted().joined(separator: ", ")
             return .error(
                 statusCode: 400,
-                .invalidRequest(
-                    "Bad Request: Unsupported protocol version: \(version). Supported: \(supported)"
-                ),
+                .unsupportedProtocolVersion(
+                    supported: context.supportedProtocolVersions.sorted(by: >),
+                    requested: version),
                 sessionID: context.sessionID
             )
         }
@@ -199,8 +231,11 @@ public struct ProtocolVersionValidator: HTTPRequestValidator {
 /// - Non-initialization requests must include the session ID header
 /// - The session ID must match the active session
 public struct SessionValidator: HTTPRequestValidator {
+    /// Creates a session validator.
     public init() {}
 
+    /// Returns 400 when no session exists or the header is missing, and 404
+    /// when the session ID does not match.
     public func validate(_ request: HTTPRequest, context: HTTPValidationContext) -> HTTPResponse? {
         // Skip validation for initialization requests
         guard !context.isInitializationRequest else { return nil }
@@ -247,10 +282,13 @@ public struct SessionValidator: HTTPRequestValidator {
 /// Use `.disabled` to skip validation (e.g., cloud deployments).
 /// Use `init(allowedHosts:allowedOrigins:)` for custom configurations.
 public struct OriginValidator: HTTPRequestValidator {
+    /// The allowed `Host` values; a trailing `:*` matches any numeric port.
     public let allowedHosts: [String]
+    /// The allowed `Origin` values; a trailing `:*` matches any numeric port.
     public let allowedOrigins: [String]
     private let enabled: Bool
 
+    /// Creates a validator that allows the given hosts and origins.
     public init(allowedHosts: [String], allowedOrigins: [String]) {
         self.allowedHosts = allowedHosts
         self.allowedOrigins = allowedOrigins
@@ -264,20 +302,23 @@ public struct OriginValidator: HTTPRequestValidator {
     }
 
     /// Protection for localhost-bound servers.
-    /// Allows requests from `localhost`, `127.0.0.1`, and `[::1]` with the specified port.
+    /// Allows requests from `localhost`, `127.0.0.1`, and `[::1]` on the given port.
+    /// Pass `nil` to allow any port, including none. Port 80 also accepts a request with no port.
     public static func localhost(port: Int? = nil) -> OriginValidator {
         let portPattern = port.map { String($0) } ?? "*"
+        // A request without a port uses the scheme's default (RFC 9110 §4.2.1): 80 for `http`.
+        let withoutPort = port == 80 ? ["127.0.0.1", "localhost", "[::1]"] : []
         return OriginValidator(
             allowedHosts: [
                 "127.0.0.1:\(portPattern)",
                 "localhost:\(portPattern)",
                 "[::1]:\(portPattern)",
-            ],
+            ] + withoutPort,
             allowedOrigins: [
                 "http://127.0.0.1:\(portPattern)",
                 "http://localhost:\(portPattern)",
                 "http://[::1]:\(portPattern)",
-            ]
+            ] + withoutPort.map { "http://\($0)" }
         )
     }
 
@@ -287,6 +328,9 @@ public struct OriginValidator: HTTPRequestValidator {
         OriginValidator(disabled: ())
     }
 
+    /// Returns 421 for a disallowed `Host` and 403 for a disallowed `Origin`.
+    ///
+    /// A request without either header passes that check.
     public func validate(_ request: HTTPRequest, context: HTTPValidationContext) -> HTTPResponse? {
         guard enabled else { return nil }
 
@@ -324,8 +368,8 @@ public struct OriginValidator: HTTPRequestValidator {
     /// Matches a value against a pattern that may contain a port wildcard `:*`.
     ///
     /// Examples:
-    /// - `"localhost:*"` matches `"localhost:8080"`, `"localhost:3000"`
-    /// - `"http://localhost:*"` matches `"http://localhost:8080"`
+    /// - `"localhost:*"` matches `"localhost:8080"`, `"localhost:3000"`, and `"localhost"`
+    /// - `"http://localhost:*"` matches `"http://localhost:8080"` and `"http://localhost"`
     /// - `"localhost:8080"` matches only `"localhost:8080"` exactly
     private func matchesPattern(_ value: String, pattern: String) -> Bool {
         guard pattern.hasSuffix(":*") else {
@@ -333,6 +377,9 @@ public struct OriginValidator: HTTPRequestValidator {
         }
 
         let prefix = String(pattern.dropLast(2))
+        // A value without a port uses the scheme's default port (RFC 9110 §4.2.1),
+        // which the wildcard covers.
+        if value == prefix { return true }
         guard value.hasPrefix(prefix + ":") else { return false }
 
         let portPart = value.dropFirst(prefix.count + 1)
@@ -367,10 +414,14 @@ public struct OriginValidator: HTTPRequestValidator {
 public struct ProtectedResourceMetadataValidator: HTTPRequestValidator {
     private let encodedMetadata: Data
 
+    /// Creates a validator that serves the given metadata.
     public init(metadata: OAuthProtectedResourceServerMetadata) {
         self.encodedMetadata = (try? JSONEncoder().encode(metadata)) ?? Data()
     }
 
+    /// Returns the metadata as JSON for a GET of
+    /// `/.well-known/oauth-protected-resource` or a path below it, and `nil`
+    /// for any other request.
     public func validate(_ request: HTTPRequest, context: HTTPValidationContext) -> HTTPResponse? {
         guard context.httpMethod == "GET",
             let path = request.path,
@@ -385,31 +436,59 @@ public struct ProtectedResourceMetadataValidator: HTTPRequestValidator {
 
 // MARK: - OAuth Bearer Validator
 
-/// Result produced by ``BearerTokenValidator`` when validating an access token.
-public enum BearerTokenValidationResult: Sendable, Equatable {
+/// Result produced by ``BearerTokenValidator/TokenValidator`` when validating an access
+/// token.
+///
+/// Create one with a static member, such as ``valid(_:)``. New results can appear in a minor
+/// release.
+public struct BearerTokenValidationResult: Sendable, Equatable {
+    enum Outcome: Sendable, Equatable {
+        case valid(BearerTokenInfo)
+        case insufficientScope(requiredScopes: Set<String>, errorDescription: String?)
+        case invalidToken(errorDescription: String?)
+        case malformedRequest(errorDescription: String?)
+    }
+
+    let outcome: Outcome
+
+    /// The claims of a ``valid(_:)`` result; `nil` for every other result.
+    public var tokenInfo: BearerTokenInfo? {
+        if case .valid(let info) = outcome { return info }
+        return nil
+    }
+
     /// Access token is valid for this request, with its extracted claims.
     ///
     /// Supply a ``BearerTokenInfo`` with `audience` and `expiresAt` populated so that
     /// ``BearerTokenValidator`` can enforce expiry and audience checks automatically.
     /// Pass `BearerTokenInfo()` (all `nil`) to delegate all enforcement to the caller.
-    case valid(BearerTokenInfo)
+    public static func valid(_ info: BearerTokenInfo) -> Self {
+        Self(outcome: .valid(info))
+    }
 
     /// Access token is missing required privileges, and new scopes are required.
-    case insufficientScope(requiredScopes: Set<String>, errorDescription: String? = nil)
+    public static func insufficientScope(requiredScopes: Set<String>, errorDescription: String? = nil) -> Self {
+        Self(outcome: .insufficientScope(requiredScopes: requiredScopes, errorDescription: errorDescription))
+    }
 
     /// Access token is invalid or expired.
-    case invalidToken(errorDescription: String? = nil)
+    public static func invalidToken(errorDescription: String? = nil) -> Self {
+        Self(outcome: .invalidToken(errorDescription: errorDescription))
+    }
 
     /// Authorization request is malformed.
-    case malformedRequest(errorDescription: String? = nil)
+    public static func malformedRequest(errorDescription: String? = nil) -> Self {
+        Self(outcome: .malformedRequest(errorDescription: errorDescription))
+    }
 }
 
 /// Validates OAuth 2.1 Bearer authorization for protected MCP HTTP endpoints.
 ///
 /// This validator implements resource-server error semantics aligned with the MCP auth spec:
-/// - `401` with `WWW-Authenticate: Bearer ...` for missing/invalid tokens
+/// - `401` with `WWW-Authenticate: Bearer ...` for missing/invalid tokens, and for credentials
+///   of another scheme
 /// - `403` with `error="insufficient_scope"` for insufficient permissions
-/// - `400` for malformed authorization requests
+/// - `400` with `error="invalid_request"` for malformed Bearer authorization requests
 ///
 /// Include this validator early in your pipeline, before `SessionValidator`, so unauthenticated
 /// initialization requests can return a challenge.
@@ -426,6 +505,7 @@ public enum BearerTokenValidationResult: Sendable, Equatable {
 /// ```swift
 /// let validator = BearerTokenValidator(
 ///     resourceMetadataURL: metadataURL,
+///     resourceIdentifier: URL(string: "https://api.example.com")!,
 ///     tokenValidator: { token, request, context in
 ///         guard let claims = verifyAndDecode(token) else {
 ///             return .invalidToken(errorDescription: "Token verification failed")
@@ -434,7 +514,7 @@ public enum BearerTokenValidationResult: Sendable, Equatable {
 ///         guard claims.audience.contains("https://api.example.com") else {
 ///             return .invalidToken(errorDescription: "Token audience mismatch")
 ///         }
-///         return .valid
+///         return .valid(BearerTokenInfo(audience: claims.audience, expiresAt: claims.expiry))
 ///     }
 /// )
 /// ```
@@ -463,7 +543,10 @@ public struct BearerTokenValidator: HTTPRequestValidator {
         _ context: HTTPValidationContext
     ) -> Bool
 
+    /// The RFC 9728 Protected Resource Metadata URL, sent as `resource_metadata`
+    /// in `WWW-Authenticate` challenges.
     public let resourceMetadataURL: URL
+    /// The canonical URI of this resource server, matched against token audiences.
     public let resourceIdentifier: URL
     private let tokenValidator: TokenValidator
     private let challengeScopeProvider: ChallengeScopeProvider?
@@ -499,31 +582,36 @@ public struct BearerTokenValidator: HTTPRequestValidator {
         self.metadataDiscovery = metadataDiscovery
     }
 
+    /// Checks the Bearer token of a request that requires authentication.
+    ///
+    /// Returns 401 with a `WWW-Authenticate` challenge for a request without
+    /// Bearer credentials (no `Authorization` header, or another scheme) and
+    /// for an invalid, expired or wrong-audience token, 403 for insufficient
+    /// scope, and 400 with an `error="invalid_request"` challenge for a
+    /// malformed Bearer `Authorization` header (RFC 6750 §3.1).
     public func validate(_ request: HTTPRequest, context: HTTPValidationContext) -> HTTPResponse? {
         guard requiresAuthentication(request, context) else { return nil }
 
-        guard let authorizationHeader = request.header(HTTPHeaderName.authorization) else {
+        let parsedToken: String
+        switch bearerCredentials(in: request.header(HTTPHeaderName.authorization)) {
+        case .token(let token):
+            parsedToken = token
+        case .none:
+            // RFC 6750 §3.1: a request without Bearer credentials gets the
+            // challenge without an error code.
             return unauthorizedResponse(
                 challengeScope: challengeScopeProvider?(request, context),
                 error: nil,
                 errorDescription: nil,
                 sessionID: context.sessionID
             )
+        case .malformed(let message):
+            return invalidRequestResponse(
+                message: message, challengeScope: challengeScopeProvider?(request, context),
+                sessionID: context.sessionID)
         }
 
-        let parsedToken: String
-        switch parseBearerToken(from: authorizationHeader) {
-        case .success(let token):
-            parsedToken = token
-        case .failure(let error):
-            return .error(
-                statusCode: 400,
-                .invalidRequest("Bad Request: \(error.message)"),
-                sessionID: context.sessionID
-            )
-        }
-
-        switch tokenValidator(parsedToken, request, context) {
+        switch tokenValidator(parsedToken, request, context).outcome {
         case .valid(let info):
             // Expiry check
             if let exp = info.expiresAt, exp <= Date() {
@@ -568,13 +656,29 @@ public struct BearerTokenValidator: HTTPRequestValidator {
             )
 
         case .malformedRequest(let errorDescription):
-            let message = errorDescription ?? "Malformed authorization request"
-            return .error(
-                statusCode: 400,
-                .invalidRequest("Bad Request: \(message)"),
-                sessionID: context.sessionID
-            )
+            return invalidRequestResponse(
+                message: errorDescription ?? "Malformed authorization request",
+                challengeScope: challengeScopeProvider?(request, context), sessionID: context.sessionID)
         }
+    }
+
+    /// 400 with a Bearer challenge carrying `error="invalid_request"`
+    /// (RFC 6750 §3.1), so the client still learns `resource_metadata`.
+    private func invalidRequestResponse(
+        message: String, challengeScope: Set<String>?, sessionID: String?
+    ) -> HTTPResponse {
+        let challenge = makeBearerChallenge(
+            resourceMetadataURL: resourceMetadataURL,
+            scope: challengeScope,
+            error: "invalid_request",
+            errorDescription: message
+        )
+        return .error(
+            statusCode: 400,
+            .invalidRequest("Bad Request: \(message)"),
+            sessionID: sessionID,
+            extraHeaders: [HTTPHeaderName.wwwAuthenticate: challenge]
+        )
     }
 
     private func unauthorizedResponse(
@@ -647,43 +751,36 @@ public struct BearerTokenValidator: HTTPRequestValidator {
             .replacingOccurrences(of: "\"", with: "\\\"")
     }
 
-    private struct BearerTokenParseError: Swift.Error {
-        let message: String
+    /// What the `Authorization` header of a request holds.
+    private enum BearerCredentials {
+        case token(String)
+        /// No Bearer credentials: no header, an empty one, or another scheme.
+        case none
+        /// A Bearer header that is malformed, for example without a token
+        /// or with two of them.
+        case malformed(String)
     }
 
-    private func parseBearerToken(
-        from authorizationHeader: String
-    ) -> Result<String, BearerTokenParseError> {
-        let trimmed = authorizationHeader.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            return .failure(.init(message: "Authorization header is empty"))
+    private func bearerCredentials(in authorizationHeader: String?) -> BearerCredentials {
+        let trimmed = (authorizationHeader ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let parts = trimmed.split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
+        guard let scheme = parts.first,
+            String(scheme).caseInsensitiveCompare(OAuthTokenType.bearer) == .orderedSame
+        else {
+            return .none
         }
 
-        let parts = trimmed.split(
-            maxSplits: 1,
-            whereSeparator: { $0.isWhitespace }
-        )
-
-        guard parts.count == 2 else {
-            return .failure(
-                .init(message: "Authorization header must be in the form: Bearer <token>")
-            )
-        }
-
-        guard String(parts[0]).caseInsensitiveCompare(OAuthTokenType.bearer) == .orderedSame else {
-            return .failure(.init(message: "Authorization scheme must be Bearer"))
-        }
-
-        let token = String(parts[1]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let token = parts.count == 2 ? String(parts[1]).trimmingCharacters(in: .whitespacesAndNewlines) : ""
         guard !token.isEmpty else {
-            return .failure(.init(message: "Bearer token is empty"))
+            return .malformed("Bearer token is empty")
         }
 
+        // Also two Authorization lines joined into `Bearer a, Bearer b`.
         if token.contains(where: \.isWhitespace) {
-            return .failure(.init(message: "Bearer token must not contain whitespace"))
+            return .malformed("Bearer token must not contain whitespace")
         }
 
-        return .success(token)
+        return .token(token)
     }
 }
 
@@ -713,6 +810,7 @@ public struct StandardValidationPipeline: HTTPRequestValidationPipeline {
         self.validators = validators
     }
 
+    /// Returns the first error response of the validators, in order, or `nil`.
     public func validate(_ request: HTTPRequest, context: HTTPValidationContext) -> HTTPResponse? {
         for validator in validators {
             if let errorResponse = validator.validate(request, context: context) {

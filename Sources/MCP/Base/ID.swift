@@ -1,6 +1,8 @@
 import struct Foundation.UUID
 
 /// A unique identifier for a request.
+///
+/// Frozen: no case is added in 1.x (a JSON-RPC 2.0 ID is a string or a number).
 public enum ID: Hashable, Sendable {
     /// A string ID.
     case string(String)

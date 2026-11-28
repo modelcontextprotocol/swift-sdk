@@ -24,6 +24,16 @@ struct ToolTests {
         #expect(tool.outputSchema == nil)
     }
 
+    @Test("A tool without a description encodes no description key")
+    func testToolWithoutDescriptionOmitsKey() throws {
+        let tool = Tool(name: "bare", description: nil, inputSchema: ["type": "object"])
+        let object = try JSONDecoder().decode(Value.self, from: JSONEncoder().encode(tool)).objectValue
+        #expect(object?["description"] == nil)
+        #expect(object?["name"] == "bare")
+        let decoded = try JSONDecoder().decode(Tool.self, from: JSONEncoder().encode(tool))
+        #expect(decoded.description == nil)
+    }
+
     @Test("Tool Annotations initialization and properties")
     func testToolAnnotationsInitialization() throws {
         // Empty annotations
@@ -240,7 +250,7 @@ struct ToolTests {
 
     @Test("Text content encoding and decoding")
     func testToolContentTextEncoding() throws {
-        let content = Tool.Content.text(text: "Hello, world!", annotations: nil, _meta: nil)
+        let content = Tool.Content.text(text: "Hello, world!")
         let encoder = JSONEncoder()
         let decoder = JSONDecoder()
 
@@ -488,8 +498,8 @@ struct ToolTests {
     @Test("CallTool success result validation")
     func testCallToolResult() throws {
         let content = [
-            Tool.Content.text(text: "Result 1", annotations: nil, _meta: nil),
-            Tool.Content.text(text: "Result 2", annotations: nil, _meta: nil),
+            Tool.Content.text(text: "Result 1"),
+            Tool.Content.text(text: "Result 2"),
         ]
 
         let result = CallTool.Result(content: content)
@@ -505,7 +515,7 @@ struct ToolTests {
 
     @Test("CallTool error result validation")
     func testCallToolErrorResult() throws {
-        let errorContent = [Tool.Content.text(text: "Error message", annotations: nil, _meta: nil)]
+        let errorContent = [Tool.Content.text(text: "Error message")]
         let errorResult = CallTool.Result(content: errorContent, isError: true)
         #expect(errorResult.content.count == 1)
         #expect(errorResult.isError == true)

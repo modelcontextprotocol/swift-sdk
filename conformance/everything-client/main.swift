@@ -1,0 +1,839 @@
+/**
+ * Everything client - a single conformance test client that handles all scenarios.
+ *
+ * Usage: mcp-everything-client <server-url>
+ *
+ * The scenario name is read from the MCP_CONFORMANCE_SCENARIO environment variable,
+ * which is set by the conformance test runner.
+ *
+ * This client routes to the appropriate behavior based on the scenario name,
+ * consolidating all the individual test clients into one.
+ */
+
+import Foundation
+import Logging
+import MCP
+
+#if canImport(FoundationNetworking)
+    import FoundationNetworking
+#endif
+
+// MARK: - Scenario Handlers
+
+typealias ScenarioHandler = ([String]) async throws -> Void
+
+/// The protocol mode for the harness leg: discover-first at 2026-07-28 and
+/// later (and outside the harness), the `initialize` handshake otherwise.
+let conformanceProtocolMode: Client.ProtocolMode = {
+    guard let version = ProcessInfo.processInfo.environment["MCP_CONFORMANCE_PROTOCOL_VERSION"],
+        Version.handshake.contains(version)
+    else { return .automatic }
+    return .handshake
+}()
+
+/// A client configured for the harness leg.
+func makeConformanceClient(capabilities: Client.Capabilities = .init()) -> Client {
+    Client(
+        name: "test-client", version: "1.0.0", capabilities: capabilities,
+        configuration: .init(protocolMode: conformanceProtocolMode))
+}
+
+// MARK: - Authorization Scenarios
+
+private func loadConformanceContext() -> [String: String] {
+    let env = ProcessInfo.processInfo.environment
+
+    if let raw = env["MCP_CONFORMANCE_CONTEXT"],
+        let data = raw.data(using: .utf8),
+        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    {
+        var parsed: [String: String] = [:]
+        for (key, value) in json {
+            if let value = value as? String {
+                parsed[key] = value
+            }
+        }
+        return parsed
+    }
+
+    var parsed: [String: String] = [:]
+    if let clientID = env["MCP_CONFORMANCE_CLIENT_ID"] {
+        parsed["client_id"] = clientID
+    }
+    if let clientSecret = env["MCP_CONFORMANCE_CLIENT_SECRET"] {
+        parsed["client_secret"] = clientSecret
+    }
+    return parsed
+}
+
+private func clientAssertionAudience(from tokenEndpoint: URL) -> String {
+    guard var components = URLComponents(url: tokenEndpoint, resolvingAgainstBaseURL: false) else {
+        return tokenEndpoint.absoluteString
+    }
+
+    components.query = nil
+    components.fragment = nil
+
+    var path = components.path
+    if path.hasSuffix("/token") {
+        path = String(path.dropLast("/token".count))
+    } else {
+        let parts = path.split(separator: "/")
+        if !parts.isEmpty {
+            let parent = parts.dropLast()
+            path = parent.isEmpty ? "" : "/" + parent.joined(separator: "/")
+        }
+    }
+    if path == "/" {
+        path = ""
+    }
+    components.path = path
+
+    return components.url?.absoluteString ?? tokenEndpoint.absoluteString
+}
+
+private func parsePrivateKeyJWTSigningAlgorithm(
+    _ signingAlgorithm: String
+) throws -> OAuthConfiguration.PrivateKeyJWTSigningAlgorithm {
+    switch signingAlgorithm.uppercased() {
+    case OAuthConfiguration.PrivateKeyJWTSigningAlgorithm.ES256.rawValue:
+        return .ES256
+    default:
+        throw ConformanceError.invalidArguments(
+            "Unsupported signing algorithm: \(signingAlgorithm)"
+        )
+    }
+}
+
+private func makeOAuthConfiguration(
+    for scenario: String,
+    context: [String: String]
+) -> OAuthConfiguration {
+    let clientID = context["client_id"] ?? "test-client"
+    let clientSecret = context["client_secret"] ?? "test-secret"
+
+    var configuration: OAuthConfiguration
+    switch scenario {
+    case "auth/pre-registration":
+        configuration = .init(
+            grantType: .authorizationCode,
+            authentication: .clientSecretBasic(
+                clientID: clientID,
+                clientSecret: clientSecret
+            )
+        )
+
+    case "auth/token-endpoint-auth-basic":
+        configuration = .init(
+            grantType: .authorizationCode,
+            authentication: .clientSecretBasic(
+                clientID: clientID,
+                clientSecret: clientSecret
+            )
+        )
+
+    case "auth/token-endpoint-auth-post":
+        configuration = .init(
+            grantType: .authorizationCode,
+            authentication: .clientSecretPost(
+                clientID: clientID,
+                clientSecret: clientSecret
+            )
+        )
+
+    case "auth/client-credentials-basic":
+        configuration = .init(
+            authentication: .clientSecretBasic(
+                clientID: clientID,
+                clientSecret: clientSecret
+            )
+        )
+
+    case "auth/client-credentials-jwt":
+        let privateKeyPEM = context["private_key_pem"] ?? ""
+        let signingAlgorithm = context["signing_algorithm"] ?? "ES256"
+        configuration = .init(
+            authentication: .privateKeyJWT(
+                clientID: clientID,
+                assertionFactory: { tokenEndpoint, clientID in
+                    try OAuthConfiguration.makePrivateKeyJWTAssertion(
+                        clientID: clientID,
+                        tokenEndpoint: tokenEndpoint,
+                        privateKeyPEM: privateKeyPEM,
+                        signingAlgorithm: try parsePrivateKeyJWTSigningAlgorithm(signingAlgorithm),
+                        audience: clientAssertionAudience(from: tokenEndpoint)
+                    )
+                }
+            )
+        )
+
+    case "auth/basic-cimd":
+        configuration = .init(
+            grantType: .authorizationCode,
+            authentication: .none(
+                clientID: context["client_id"]
+                    ?? "https://conformance-test.local/client-metadata.json")
+        )
+
+    case "auth/enterprise-managed-authorization":
+        // SEP-990: ID token -> ID-JAG at the IdP -> access token at the AS.
+        // The harness names the AS only in the protected resource metadata.
+        let idToken = context["idp_id_token"] ?? ""
+        var identityProvider = OAuthConfiguration.EnterpriseIdentityProvider(
+            endpoint: .tokenEndpoint(
+                URL(string: context["idp_token_endpoint"] ?? "") ?? URL(string: "http://localhost/token")!),
+            authentication: .none(clientID: context["idp_client_id"] ?? ""))
+        identityProvider.allowsLoopbackHTTP = true
+        configuration = .enterpriseManaged(
+            authentication: .clientSecretBasic(clientID: clientID, clientSecret: clientSecret),
+            authorizationServer: nil,
+            identityProvider: identityProvider,
+            idToken: { _ in idToken },
+            allowsDiscoveredAuthorizationServer: true)
+
+    case "auth/wif-jwt-bearer":
+        // SEP-1933: the workload's JWT is the assertion; the client is public.
+        let workloadJWT = context["valid_jwt"] ?? ""
+        // The harness names the AS only in the protected resource metadata.
+        configuration = .init(
+            grantType: .jwtBearer,
+            authentication: .none(clientID: ""),
+            assertionProvider: { _, _ in workloadJWT },
+            allowsDiscoveredAuthorizationServer: true)
+
+    case "auth/dpop", "auth/dpop-nonce":
+        // SEP-1932: DPoP-bound tokens for a dynamically registered client.
+        configuration = .init(
+            grantType: .authorizationCode,
+            authentication: .none(clientID: ""),
+            dpop: .init())
+
+    // An empty client ID registers dynamically; a supplied one is pre-registered.
+    case let s where s.hasPrefix("auth/client-credentials"):
+        configuration = .init(
+            authentication: .none(clientID: context["client_id"] ?? "")
+        )
+
+    default:
+        configuration = .init(
+            grantType: .authorizationCode,
+            authentication: .none(clientID: context["client_id"] ?? "")
+        )
+    }
+
+    // Conformance harness currently uses loopback http AS endpoints.
+    configuration.allowLoopbackHTTPAuthorizationServerEndpoints = true
+    return configuration
+}
+
+func runAuthorizationScenario(scenario: String, args: [String]) async throws {
+    var logger = Logger(
+        label: "mcp.conformance.client.auth",
+        factory: { StreamLogHandler.standardError(label: $0) }
+    )
+    logger.logLevel = .debug
+
+    logger.debug("Starting auth scenario", metadata: ["scenario": "\(scenario)"])
+
+    guard let serverURLString = args.last,
+        let serverURL = URL(string: serverURLString)
+    else {
+        throw ConformanceError.invalidArguments("Valid server URL is required")
+    }
+
+    let context = loadConformanceContext()
+    let oauthConfig = makeOAuthConfiguration(for: scenario, context: context)
+
+    let transport = HTTPClientTransport(
+        endpoint: serverURL,
+        streaming: true,
+        authorizer: OAuthAuthorizer(configuration: oauthConfig),
+        logger: logger
+    )
+
+    let client = makeConformanceClient()
+
+    // Scenarios that expect the connection to fail with a specific error.
+    if scenario == "auth/resource-mismatch" {
+        do {
+            _ = try await client.connect(transport: transport)
+            throw ConformanceError.invalidArguments(
+                "Expected authorization to fail with resource mismatch, but connection succeeded"
+            )
+        } catch let error as MCPError {
+            guard case .internalError(let detail) = error,
+                detail?.contains("resource mismatch") == true
+            else {
+                throw ConformanceError.invalidArguments(
+                    "Connection failed, but not due to resource mismatch: \(error.localizedDescription)"
+                )
+            }
+            logger.debug("Client correctly rejected mismatched PRM resource")
+        }
+        return
+    }
+
+    _ = try await client.connect(transport: transport)
+
+    // Exercise both initialization and regular request paths.
+    let tools = try await client.listTools().tools
+    logger.debug("Auth scenario listed tools", metadata: ["count": "\(tools.count)"])
+
+    // Trigger an additional request for scenarios that involve runtime scope behavior.
+    if scenario.contains("scope"), let firstTool = tools.first {
+        _ = try? await client.callTool(name: firstTool.name, arguments: [:])
+    }
+
+    await client.disconnect()
+    logger.debug("Auth scenario completed", metadata: ["scenario": "\(scenario)"])
+}
+
+// MARK: - Basic Scenarios
+
+/// Basic client that connects, initializes, and lists tools
+func runInitializeScenario(_ args: [String]) async throws {
+    var logger = Logger(
+        label: "mcp.conformance.client.initialize",
+        factory: { StreamLogHandler.standardError(label: $0) }
+    )
+    logger.logLevel = .debug
+
+    logger.debug("Starting initialize scenario")
+
+    // Get server URL from args
+    guard let serverURLString = args.last,
+          let serverURL = URL(string: serverURLString) else {
+        throw ConformanceError.invalidArguments("Valid server URL is required")
+    }
+
+    // Create HTTP transport
+    let transport = HTTPClientTransport(
+        endpoint: serverURL,
+        logger: logger
+    )
+
+    // Create client
+    let client = makeConformanceClient()
+
+    // Connect
+    let initResult = try await client.connect(transport: transport)
+    logger.debug("Successfully connected to MCP server", metadata: [
+        "serverName": "\(initResult.serverInfo?.name ?? "-")",
+        "serverVersion": "\(initResult.serverInfo?.version ?? "-")"
+    ])
+
+    // List tools
+    let tools = try await client.listTools().tools
+    logger.debug("Successfully listed tools", metadata: [
+        "toolCount": "\(tools.count)"
+    ])
+
+    // Disconnect
+    await client.disconnect()
+
+    logger.debug("Initialize scenario completed successfully")
+}
+
+/// Client that calls the add_numbers tool
+func runToolsCallScenario(_ args: [String]) async throws {
+    var logger = Logger(
+        label: "mcp.conformance.client.tools_call",
+        factory: { StreamLogHandler.standardError(label: $0) }
+    )
+    logger.logLevel = .debug
+
+    logger.debug("Starting tools_call scenario")
+
+    // Get server URL from args
+    guard let serverURLString = args.last,
+          let serverURL = URL(string: serverURLString) else {
+        throw ConformanceError.invalidArguments("Valid server URL is required")
+    }
+
+    // Create HTTP transport
+    let transport = HTTPClientTransport(
+        endpoint: serverURL,
+        logger: logger
+    )
+
+    // Create client
+    let client = makeConformanceClient()
+
+    // Connect
+    try await client.connect(transport: transport)
+    logger.debug("Successfully connected to MCP server")
+
+    // List tools
+    let tools = try await client.listTools().tools
+    logger.debug("Successfully listed tools", metadata: [
+        "toolCount": "\(tools.count)"
+    ])
+
+    // Call the add_numbers tool
+    if tools.contains(where: { $0.name == "add_numbers" }) {
+        let result = try await client.callTool(
+            name: "add_numbers",
+            arguments: ["a": 5, "b": 3]
+        )
+        logger.debug("Tool call result", metadata: [
+            "isError": "\(result.isError ?? false)",
+            "contentCount": "\(result.content.count)"
+        ])
+    } else {
+        logger.warning("add_numbers tool not found")
+    }
+
+    // Disconnect
+    await client.disconnect()
+
+    logger.debug("Tools call scenario completed successfully")
+}
+
+/// Lists tools and echoes the `json_schema_2020_12_tool` input schema back
+/// through `json_schema_echo`, so the harness can check that no JSON Schema
+/// 2020-12 keyword was dropped while decoding `tools/list`.
+func runJSONSchemaPreservationScenario(_ args: [String]) async throws {
+    var logger = Logger(
+        label: "mcp.conformance.client.json_schema",
+        factory: { StreamLogHandler.standardError(label: $0) }
+    )
+    logger.logLevel = .debug
+
+    guard let serverURLString = args.last,
+          let serverURL = URL(string: serverURLString) else {
+        throw ConformanceError.invalidArguments("Valid server URL is required")
+    }
+
+    let client = makeConformanceClient()
+    try await client.connect(transport: HTTPClientTransport(endpoint: serverURL, logger: logger))
+
+    let tools = try await client.listTools().tools
+    guard let focal = tools.first(where: { $0.name == "json_schema_2020_12_tool" }) else {
+        throw ConformanceError.invalidArguments("json_schema_2020_12_tool not listed")
+    }
+    _ = try await client.callTool(name: "json_schema_echo", arguments: ["schema": focal.inputSchema])
+
+    await client.disconnect()
+}
+
+/// Connects with every client capability declared, then lists tools and
+/// calls `add_numbers`. The harness checks each request's `_meta` envelope and
+/// `MCP-Protocol-Version` header (SEP-2575).
+func runRequestMetadataScenario(_ args: [String]) async throws {
+    guard let serverURLString = args.last, let serverURL = URL(string: serverURLString) else {
+        throw ConformanceError.invalidArguments("Valid server URL is required")
+    }
+    let client = makeConformanceClient(
+        capabilities: Client.Capabilities(
+            sampling: .init(), elicitation: .init(form: .init(), url: .init()),
+            roots: .init(listChanged: true)))
+    await client.withSamplingHandler { _ in
+        CreateSamplingMessage.Result(model: "stub", stopReason: .endTurn, role: .assistant, content: .text("stub"))
+    }
+    await client.withElicitationHandler { _ in CreateElicitation.Result(action: .decline) }
+    await client.withRootsHandler { [] }
+
+    try await client.connect(transport: HTTPClientTransport(endpoint: serverURL))
+    _ = try await client.listTools()
+    _ = try await client.callTool(name: "add_numbers", arguments: ["a": 5, "b": 3])
+    await client.disconnect()
+}
+
+/// Lists tools; the scenario fails if the client fetches a network `$ref` (SEP-2106).
+func runJSONSchemaRefNoDerefScenario(_ args: [String]) async throws {
+    guard let serverURLString = args.last, let serverURL = URL(string: serverURLString) else {
+        throw ConformanceError.invalidArguments("Valid server URL is required")
+    }
+    let client = makeConformanceClient()
+    try await client.connect(transport: HTTPClientTransport(endpoint: serverURL))
+    _ = try await client.listTools()
+    await client.disconnect()
+}
+
+// MARK: - Request Header Scenarios (SEP-2243)
+
+/// Stub arguments for the required properties of a tool input schema.
+private func stubArguments(for tool: Tool) -> [String: Value] {
+    let schema = tool.inputSchema.objectValue
+    let properties = schema?["properties"]?.objectValue ?? [:]
+    var arguments: [String: Value] = [:]
+    for name in schema?["required"]?.arrayValue?.compactMap(\.stringValue) ?? [] {
+        switch properties[name]?.objectValue?["type"]?.stringValue {
+        case "integer", "number": arguments[name] = 0
+        case "boolean": arguments[name] = false
+        case "object": arguments[name] = [:]
+        case "array": arguments[name] = []
+        default: arguments[name] = "stub"
+        }
+    }
+    return arguments
+}
+
+/// Exercises every request that carries `Mcp-Method` and `Mcp-Name`.
+func runHTTPStandardHeadersScenario(_ args: [String]) async throws {
+    guard let serverURLString = args.last, let serverURL = URL(string: serverURLString) else {
+        throw ConformanceError.invalidArguments("Valid server URL is required")
+    }
+    let client = makeConformanceClient()
+    try await client.connect(transport: HTTPClientTransport(endpoint: serverURL))
+    for tool in try await client.listTools().tools {
+        _ = try await client.callTool(name: tool.name, arguments: stubArguments(for: tool))
+    }
+    for resource in try await client.listResources().resources {
+        _ = try await client.readResource(uri: resource.uri)
+    }
+    for prompt in try await client.listPrompts().prompts {
+        _ = try await client.getPrompt(name: prompt.name)
+    }
+    await client.disconnect()
+}
+
+/// Calls the tools named in `context.toolCalls` with their arguments.
+func runHTTPCustomHeadersScenario(_ args: [String]) async throws {
+    guard let serverURLString = args.last, let serverURL = URL(string: serverURLString) else {
+        throw ConformanceError.invalidArguments("Valid server URL is required")
+    }
+    struct Context: Decodable {
+        struct ToolCall: Decodable {
+            let name: String
+            let arguments: [String: Value]?
+        }
+        let toolCalls: [ToolCall]
+    }
+    let raw = ProcessInfo.processInfo.environment["MCP_CONFORMANCE_CONTEXT"] ?? "{}"
+    let context = try JSONDecoder().decode(Context.self, from: Data(raw.utf8))
+
+    let client = makeConformanceClient()
+    try await client.connect(transport: HTTPClientTransport(endpoint: serverURL))
+    _ = try await client.listTools()
+    for call in context.toolCalls {
+        _ = try await client.callTool(name: call.name, arguments: call.arguments)
+    }
+    await client.disconnect()
+}
+
+/// Calls every listed tool; the client must have dropped tools with invalid
+/// `x-mcp-header` annotations.
+func runHTTPInvalidToolHeadersScenario(_ args: [String]) async throws {
+    guard let serverURLString = args.last, let serverURL = URL(string: serverURLString) else {
+        throw ConformanceError.invalidArguments("Valid server URL is required")
+    }
+    let client = makeConformanceClient()
+    try await client.connect(transport: HTTPClientTransport(endpoint: serverURL))
+    for tool in try await client.listTools().tools {
+        _ = try await client.callTool(name: tool.name, arguments: stubArguments(for: tool))
+    }
+    await client.disconnect()
+}
+
+// MARK: - Multi round-trip (SEP-2322)
+
+/// Calls the mock's MRTR tools. The first elicitation also calls an
+/// unrelated tool, between the rounds of another call.
+func runMultiRoundTripClientScenario(_ args: [String]) async throws {
+    guard let serverURLString = args.last, let serverURL = URL(string: serverURLString) else {
+        throw ConformanceError.invalidArguments("Valid server URL is required")
+    }
+    let client = makeConformanceClient(capabilities: .init(elicitation: .init()))
+    let calledUnrelated = Flag()
+    await client.withElicitationHandler { _ in
+        if await calledUnrelated.set() {
+            _ = try await client.callTool(name: "test_mrtr_unrelated")
+        }
+        return CreateElicitation.Result(action: .accept, content: ["confirmed": true])
+    }
+    try await client.connect(transport: HTTPClientTransport(endpoint: serverURL))
+    _ = try await client.listTools()
+    for name in ["test_mrtr_echo_state", "test_mrtr_no_state", "test_mrtr_no_result_type"] {
+        _ = try await client.callTool(name: name)
+    }
+    await client.disconnect()
+}
+
+/// Reports whether it was set before.
+actor Flag {
+    private var isSet = false
+    func set() -> Bool {
+        defer { isSet = true }
+        return !isSet
+    }
+}
+
+// MARK: - SSE Scenarios
+
+/// Handler for SSE-related scenarios (retry, reconnection, etc.)
+func runSSEScenario(_ args: [String]) async throws {
+    var logger = Logger(
+        label: "mcp.conformance.client.sse",
+        factory: { StreamLogHandler.standardError(label: $0) }
+    )
+    logger.logLevel = .debug
+
+    logger.debug("Starting SSE scenario")
+
+    // Get server URL from args
+    guard let serverURLString = args.last,
+          let serverURL = URL(string: serverURLString) else {
+        throw ConformanceError.invalidArguments("Valid server URL is required")
+    }
+
+    // Create HTTP transport with streaming enabled
+    let transport = HTTPClientTransport(
+        endpoint: serverURL,
+        streaming: true,
+        logger: logger
+    )
+
+    // Create client
+    let client = makeConformanceClient()
+
+    // Connect - this will start the SSE stream in the background
+    let initResult = try await client.connect(transport: transport)
+    logger.debug("Successfully connected to MCP server", metadata: [
+        "serverName": "\(initResult.serverInfo?.name ?? "-")",
+        "serverVersion": "\(initResult.serverInfo?.version ?? "-")"
+    ])
+
+    // Give the GET SSE stream time to establish
+    try await Task.sleep(for: .milliseconds(500))
+
+    // Call the test_reconnection tool to trigger SSE stream closure and retry test.
+    // The server will close the POST SSE stream without the response,
+    // then deliver it on the GET SSE stream after we reconnect.
+    logger.debug("Calling test_reconnection tool...")
+    let result = try await client.callTool(name: "test_reconnection", arguments: [:])
+    logger.debug("Tool call result received", metadata: [
+        "isError": "\(result.isError ?? false)",
+        "contentCount": "\(result.content.count)"
+    ])
+
+    // Keep the connection open briefly for the test to collect timing data
+    try await Task.sleep(for: .seconds(2))
+
+    // Disconnect
+    await client.disconnect()
+
+    logger.debug("SSE scenario completed")
+}
+
+/// Client that handles elicitation-sep1034-client-defaults scenario
+/// Tests that client properly applies default values for omitted fields
+func runElicitationSEP1034ClientDefaults(_ args: [String]) async throws {
+    var logger = Logger(
+        label: "mcp.conformance.client.elicitation_client_defaults",
+        factory: { StreamLogHandler.standardError(label: $0) }
+    )
+    logger.logLevel = .debug
+
+    logger.debug("Starting elicitation-sep1034-client-defaults scenario")
+
+    // Get server URL from args
+    guard let serverURLString = args.last,
+          let serverURL = URL(string: serverURLString) else {
+        throw ConformanceError.invalidArguments("Valid server URL is required")
+    }
+
+    // Create HTTP transport with streaming enabled for bidirectional communication
+    let transport = HTTPClientTransport(
+        endpoint: serverURL,
+        streaming: true,
+        logger: logger
+    )
+
+    // Create client with elicitation capabilities
+    let client = makeConformanceClient(
+        capabilities: Client.Capabilities(
+            elicitation: Client.Capabilities.Elicitation(form: .init(), url: .init())
+        )
+    )
+
+    // Set up elicitation handler that accepts defaults BEFORE connecting
+    await client.withElicitationHandler { [logger] params in
+        let message: String
+        switch params {
+        case .form(let formParams):
+            message = formParams.message
+        case .url(let urlParams):
+            message = urlParams.message
+        case .unknown:
+            return CreateElicitation.Result(action: .decline)
+        }
+
+        logger.debug("Elicitation handler invoked", metadata: [
+            "message": "\(message)"
+        ])
+
+        // Accept with default values applied
+        // The schema has optional fields with defaults:
+        // name: "John Doe", age: 30, score: 95.5, status: "active", verified: true
+        return CreateElicitation.Result(
+            action: .accept,
+            content: [
+                "name": "John Doe",
+                "age": 30,
+                "score": 95.5,
+                "status": "active",
+                "verified": true
+            ]
+        )
+    }
+
+    // Connect
+    try await client.connect(transport: transport)
+    logger.debug("Successfully connected to MCP server")
+
+    // List tools
+    let tools = try await client.listTools().tools
+    logger.debug("Successfully listed tools", metadata: [
+        "toolCount": "\(tools.count)"
+    ])
+
+    // Call the test_client_elicitation_defaults tool
+    if tools.contains(where: { $0.name == "test_client_elicitation_defaults" }) {
+        let result = try await client.callTool(
+            name: "test_client_elicitation_defaults",
+            arguments: [:]
+        )
+        logger.debug("Tool call result", metadata: [
+            "isError": "\(result.isError ?? false)",
+            "contentCount": "\(result.content.count)"
+        ])
+    } else {
+        logger.warning("test_client_elicitation_defaults tool not found")
+    }
+
+    // Disconnect
+    await client.disconnect()
+
+    logger.debug("Elicitation client defaults scenario completed successfully")
+}
+
+// MARK: - Default Handler for Unimplemented Scenarios
+
+/// Default handler that performs basic connection test for unimplemented scenarios
+func runDefaultScenario(_ args: [String]) async throws {
+    var logger = Logger(
+        label: "mcp.conformance.client.default",
+        factory: { StreamLogHandler.standardError(label: $0) }
+    )
+    logger.logLevel = .debug
+
+    logger.debug("Running default scenario handler")
+
+    // Get server URL from args
+    guard let serverURLString = args.last,
+          let serverURL = URL(string: serverURLString) else {
+        throw ConformanceError.invalidArguments("Valid server URL is required")
+    }
+
+    // Create HTTP transport
+    let transport = HTTPClientTransport(
+        endpoint: serverURL,
+        logger: logger
+    )
+
+    // Create client
+    let client = makeConformanceClient()
+
+    // Connect
+    let initResult = try await client.connect(transport: transport)
+    logger.debug("Successfully connected to MCP server", metadata: [
+        "serverName": "\(initResult.serverInfo?.name ?? "-")",
+        "serverVersion": "\(initResult.serverInfo?.version ?? "-")"
+    ])
+
+    // Disconnect
+    await client.disconnect()
+
+    logger.debug("Default scenario completed successfully")
+}
+
+// MARK: - Scenario Registry
+
+nonisolated(unsafe) let scenarioHandlers: [String: ScenarioHandler] = [
+    "initialize": runInitializeScenario,
+    "tools_call": runToolsCallScenario,
+    "sse-retry": runSSEScenario,
+    "elicitation-sep1034-client-defaults": runElicitationSEP1034ClientDefaults,
+    "json-schema-2020-12-preservation": runJSONSchemaPreservationScenario,
+    "json-schema-ref-no-deref": runJSONSchemaRefNoDerefScenario,
+    "request-metadata": runRequestMetadataScenario,
+    "http-standard-headers": runHTTPStandardHeadersScenario,
+    "http-custom-headers": runHTTPCustomHeadersScenario,
+    "http-invalid-tool-headers": runHTTPInvalidToolHeadersScenario,
+    "sep-2322-client-request-state": runMultiRoundTripClientScenario,
+    "sep-2640-client-no-prefetch": runSkillsListingScenario,
+    "sep-2640-client-verify-digest": runSkillsLoadingScenario,
+    "sep-2640-client-verify-size": runSkillsLoadingScenario,
+    "sep-2640-client-verify-frontmatter": runSkillsLoadingScenario,
+]
+
+// MARK: - Error Types
+
+enum ConformanceError: Error, CustomStringConvertible {
+    case missingScenario
+    case invalidArguments(String)
+
+    var description: String {
+        switch self {
+        case .missingScenario:
+            return "MCP_CONFORMANCE_SCENARIO environment variable not set"
+        case .invalidArguments(let message):
+            return "Invalid arguments: \(message)"
+        }
+    }
+}
+
+struct ConformanceClient {
+    static func run() async {
+        do {
+            // Get scenario from environment
+            guard let scenario = ProcessInfo.processInfo.environment["MCP_CONFORMANCE_SCENARIO"] else {
+                var stderr = StandardError()
+                print("Error: MCP_CONFORMANCE_SCENARIO environment variable not set", to: &stderr)
+                Foundation.exit(1)
+            }
+
+            // Get server URL from arguments (last argument)
+            let args = Array(CommandLine.arguments.dropFirst())
+            guard !args.isEmpty else {
+                var stderr = StandardError()
+                print("Usage: mcp-everything-client <server-url>", to: &stderr)
+                print("Error: Server URL is required", to: &stderr)
+                Foundation.exit(1)
+            }
+
+            // Get handler for scenario
+            let handler: ScenarioHandler
+            if let explicitHandler = scenarioHandlers[scenario] {
+                handler = explicitHandler
+            } else if scenario.hasPrefix("auth/") {
+                handler = { args in
+                    try await runAuthorizationScenario(scenario: scenario, args: args)
+                }
+            } else {
+                handler = runDefaultScenario
+                var stderr = StandardError()
+                print("⚠️  Scenario '\(scenario)' not fully implemented - using default handler", to: &stderr)
+            }
+
+            // Run the scenario
+            try await handler(args)
+            Foundation.exit(0)
+        } catch {
+            var stderr = StandardError()
+            print("Error: \(error)", to: &stderr)
+            Foundation.exit(1)
+        }
+    }
+}
+
+// MARK: - Helpers
+
+struct StandardError: TextOutputStream {
+    mutating func write(_ string: String) {
+        FileHandle.standardError.write(Data(string.utf8))
+    }
+}
+
+await ConformanceClient.run()

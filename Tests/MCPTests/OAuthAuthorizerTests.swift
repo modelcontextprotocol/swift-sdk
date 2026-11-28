@@ -64,13 +64,42 @@ final class MockDiscoveryClient: OAuthDiscoveryFetching, @unchecked Sendable {
         )
     }
 
+    /// The `reportRefused` of the last authorization server metadata fetch.
+    var lastReportRefused: Bool?
+    /// While set, every candidate is refused with it before a request, as
+    /// ``OAuthDiscoveryClient`` does: it is thrown with `reportRefused`, and
+    /// `authorizationServerMetadataDiscoveryFailed` without.
+    var candidateRefusal: Error?
+
+    /// Thrown by the next protected resource metadata fetch, then cleared.
+    var protectedResourceMetadataError: Error?
+    /// The `trustedIssuer` of the last authorization server metadata fetch.
+    var lastTrustedIssuer: URL?
+    /// Thrown by authorization server metadata fetches while set.
+    var authorizationServerMetadataError: Error?
+    /// The `candidates` of the last protected resource metadata fetch.
+    var lastProtectedResourceMetadataCandidates: [URL] = []
+
     func fetchProtectedResourceMetadata(candidates: [URL], fallbackIssuer: URL?, session: URLSession) async throws -> OAuthProtectedResourceMetadata {
         fetchProtectedResourceMetadataCallCount += 1
+        lastProtectedResourceMetadataCandidates = candidates
+        if let error = protectedResourceMetadataError {
+            protectedResourceMetadataError = nil
+            throw error
+        }
         return protectedResourceMetadataResult
     }
 
-    func fetchAuthorizationServerMetadata(candidates: [URL], session: URLSession) async throws -> (server: URL, metadata: OAuthAuthorizationServerMetadata) {
+    func fetchAuthorizationServerMetadata(
+        candidates: [URL], trustedIssuer: URL?, reportRefused: Bool, session: URLSession
+    ) async throws -> (server: URL, metadata: OAuthAuthorizationServerMetadata) {
         fetchAuthorizationServerMetadataCallCount += 1
+        lastTrustedIssuer = trustedIssuer
+        lastReportRefused = reportRefused
+        if let error = authorizationServerMetadataError { throw error }
+        if let refusal = candidateRefusal {
+            throw reportRefused ? refusal : OAuthAuthorizationError.authorizationServerMetadataDiscoveryFailed
+        }
         return authorizationServerMetadataResult
     }
 }
@@ -78,6 +107,8 @@ final class MockDiscoveryClient: OAuthDiscoveryFetching, @unchecked Sendable {
 final class MockTokenClient: OAuthTokenRequesting, @unchecked Sendable {
     var requestCallCount = 0
     var capturedParameters: [String: String]?
+    var capturedEndpoint: URL?
+    var capturedDPoP: DPoPProofSigner?
     var tokenResponse = OAuthTokenResponse(
         accessToken: "mock-access-token",
         tokenType: "Bearer",
@@ -90,16 +121,21 @@ final class MockTokenClient: OAuthTokenRequesting, @unchecked Sendable {
         parameters: inout [String: String],
         endpoint: URL,
         authentication: OAuthConfiguration.TokenEndpointAuthentication,
+        dpop: DPoPProofSigner?,
         session: URLSession
     ) async throws -> OAuthTokenResponse {
         requestCallCount += 1
+        capturedDPoP = dpop
         capturedParameters = parameters
+        capturedEndpoint = endpoint
         return tokenResponse
     }
 }
 
 final class MockClientRegistrar: OAuthClientRegistering, @unchecked Sendable {
     var registerCallCount = 0
+    /// The authentication each registration started from.
+    var registeredFrom: [OAuthConfiguration.TokenEndpointAuthentication] = []
     var registrationResult: (
         response: OAuthClientRegistrationResponse,
         updatedAuthentication: OAuthConfiguration.TokenEndpointAuthentication
@@ -114,6 +150,7 @@ final class MockClientRegistrar: OAuthClientRegistering, @unchecked Sendable {
         updatedAuthentication: OAuthConfiguration.TokenEndpointAuthentication
     )? {
         registerCallCount += 1
+        registeredFrom.append(configuration.authentication)
         return registrationResult
     }
 }
@@ -122,6 +159,7 @@ final class MockAuthCodeFlow: OAuthAuthorizationCodeFlowing, @unchecked Sendable
     var buildURLCallCount = 0
     var performCallCount = 0
     var authorizationCode = "mock-auth-code"
+    var lastIssuer: OAuthAuthorizationCodeFlow.ExpectedIssuer?
 
     func buildURL(
         authorizationEndpoint: URL,
@@ -141,10 +179,12 @@ final class MockAuthCodeFlow: OAuthAuthorizationCodeFlowing, @unchecked Sendable
         authorizationURL: URL,
         redirectURI: URL,
         state: String,
+        issuer: OAuthAuthorizationCodeFlow.ExpectedIssuer?,
         delegate: (any OAuthAuthorizationDelegate)?,
         session: URLSession
     ) async throws -> String {
         performCallCount += 1
+        lastIssuer = issuer
         return authorizationCode
     }
 }
@@ -266,7 +306,6 @@ struct OAuthAuthorizerTests {
 
     // MARK: - handleChallenge (authorization_code)
 
-    #if canImport(CryptoKit)
     @Test("handleChallenge 401 calls authCodeFlow for authorization_code grant")
     func testHandleChallenge401AuthorizationCodeCallsFlow() async throws {
         let authCodeFlow = MockAuthCodeFlow()
@@ -299,7 +338,6 @@ struct OAuthAuthorizerTests {
         #expect(tokenClient.capturedParameters?["grant_type"] == "authorization_code")
         #expect(tokenClient.capturedParameters?["code"] == "mock-auth-code")
     }
-    #endif
 
     // MARK: - handleChallenge (403)
 
@@ -425,5 +463,131 @@ struct OAuthAuthorizerTests {
         #expect(handled == true)
         #expect(registrar.registerCallCount == 1)
         #expect(tokenStorage.load()?.clientID == assignedClientID)
+    }
+
+    // MARK: - Refused authorization servers
+
+    @Test("A 2025-03-26 server whose origin is refused falls back to its default endpoints")
+    func testRefusedFallbackOriginUsesDefaultEndpoints() async throws {
+        let origin = URL(string: "https://mcp.example.com")!
+        let discovery = MockDiscoveryClient()
+        discovery.protectedResourceMetadataResult = OAuthProtectedResourceMetadata(
+            resource: nil, authorizationServers: [origin], scopesSupported: nil, isFallback: true)
+        discovery.candidateRefusal = OAuthAuthorizationError.privateIPAddressBlocked(
+            context: "Authorization server issuer", url: origin.absoluteString)
+        let tokenClient = MockTokenClient()
+        let authorizer = makeAuthorizer(discoveryClient: discovery, tokenClient: tokenClient)
+
+        let handled = try await authorizer.handleChallenge(
+            statusCode: 401, headers: ["WWW-Authenticate": "Bearer"], endpoint: endpoint, operationKey: nil,
+            session: .shared)
+
+        #expect(handled)
+        #expect(discovery.lastReportRefused == false)
+        #expect(tokenClient.capturedEndpoint == origin.appendingPathComponent("token"))
+    }
+
+    @Test("Refused authorization servers named by the resource fail with the refusal")
+    func testRefusedListedServerFails() async throws {
+        let refusal = OAuthAuthorizationError.privateIPAddressBlocked(
+            context: "Authorization server issuer", url: "https://10.0.0.1")
+        let discovery = MockDiscoveryClient()
+        discovery.candidateRefusal = refusal
+        let tokenClient = MockTokenClient()
+        let authorizer = makeAuthorizer(discoveryClient: discovery, tokenClient: tokenClient)
+
+        await #expect {
+            try await authorizer.handleChallenge(
+                statusCode: 401, headers: headers401, endpoint: endpoint, operationKey: nil, session: .shared)
+        } throws: { error in
+            (error as? OAuthAuthorizationError)?.errorDescription == refusal.errorDescription
+        }
+        #expect(discovery.lastReportRefused == true)
+        #expect(tokenClient.requestCallCount == 0)
+    }
+
+    // MARK: - Private addresses
+
+    /// An authorizer with the SDK's URL validator.
+    func makeValidatingAuthorizer(
+        grantType: OAuthConfiguration.GrantType = .clientCredentials,
+        discoveryClient: MockDiscoveryClient,
+        tokenClient: MockTokenClient = MockTokenClient(),
+        authCodeFlow: MockAuthCodeFlow = MockAuthCodeFlow()
+    ) -> OAuthAuthorizer {
+        OAuthAuthorizer(
+            configuration: OAuthConfiguration(
+                grantType: grantType,
+                authentication: .clientSecretBasic(clientID: "client", clientSecret: "secret"),
+                authorizationRedirectURI: URL(string: "https://app.example.com/callback")!
+            ),
+            urlValidator: OAuthURLValidator(),
+            discoveryClient: discoveryClient,
+            tokenEndpointClient: tokenClient,
+            clientRegistrar: MockClientRegistrar(),
+            authCodeFlow: authCodeFlow
+        )
+    }
+
+    func isPrivateIPBlocked(_ error: any Error, _ context: String, _ url: String) -> Bool {
+        (error as? OAuthAuthorizationError)?.errorDescription
+            == OAuthAuthorizationError.privateIPAddressBlocked(context: context, url: url).errorDescription
+    }
+
+    @Test("A challenge's resource_metadata URL on a private address is refused before discovery")
+    func testPrivateResourceMetadataURLIsRefused() async throws {
+        let discovery = MockDiscoveryClient()
+        let authorizer = makeValidatingAuthorizer(discoveryClient: discovery)
+        let metadataURL = "https://10.0.0.1/.well-known/oauth-protected-resource"
+
+        await #expect {
+            try await authorizer.handleChallenge(
+                statusCode: 401, headers: ["WWW-Authenticate": "Bearer resource_metadata=\"\(metadataURL)\""],
+                endpoint: endpoint, operationKey: nil, session: .shared)
+        } throws: { isPrivateIPBlocked($0, "Protected resource metadata URL", metadataURL) }
+        #expect(discovery.fetchProtectedResourceMetadataCallCount == 0)
+    }
+
+    @Test("A token endpoint on a private address is refused before the token request")
+    func testPrivateTokenEndpointIsRefused() async throws {
+        let tokenEndpoint = "https://[fd00::1]/token"
+        let discovery = MockDiscoveryClient(tokenEndpoint: URL(string: tokenEndpoint)!)
+        let tokenClient = MockTokenClient()
+        let authorizer = makeValidatingAuthorizer(discoveryClient: discovery, tokenClient: tokenClient)
+
+        await #expect {
+            try await authorizer.handleChallenge(
+                statusCode: 401, headers: headers401, endpoint: endpoint, operationKey: nil, session: .shared)
+        } throws: { isPrivateIPBlocked($0, "Token endpoint", tokenEndpoint) }
+        #expect(tokenClient.requestCallCount == 0)
+    }
+
+    @Test("An authorization endpoint on a private address is refused before the user is sent there")
+    func testPrivateAuthorizationEndpointIsRefused() async throws {
+        let authorizationEndpoint = "https://192.168.1.10/authorize"
+        let discovery = MockDiscoveryClient()
+        let server = discovery.authorizationServerMetadataResult
+        discovery.authorizationServerMetadataResult = (
+            server: server.server,
+            metadata: OAuthAuthorizationServerMetadata(
+                issuer: server.server,
+                authorizationEndpoint: URL(string: authorizationEndpoint)!,
+                tokenEndpoint: server.metadata.tokenEndpoint,
+                registrationEndpoint: nil,
+                codeChallengeMethodsSupported: ["S256"],
+                tokenEndpointAuthMethodsSupported: nil,
+                clientIDMetadataDocumentSupported: nil
+            )
+        )
+        let authCodeFlow = MockAuthCodeFlow()
+        let authorizer = makeValidatingAuthorizer(
+            grantType: .authorizationCode, discoveryClient: discovery, authCodeFlow: authCodeFlow)
+
+        await #expect {
+            try await authorizer.handleChallenge(
+                statusCode: 401, headers: headers401, endpoint: endpoint, operationKey: nil, session: .shared)
+        } throws: { isPrivateIPBlocked($0, "Authorization endpoint", authorizationEndpoint) }
+        #expect(authCodeFlow.buildURLCallCount == 0)
+        #expect(authCodeFlow.performCallCount == 0)
     }
 }

@@ -145,7 +145,7 @@ struct MetaFieldsTests {
         let meta = Metadata(additionalFields: ["vendor.example/executionTime": .int(150)])
 
         let result = CallTool.Result(
-            content: [.text(text: "Result data", annotations: nil, _meta: nil)],
+            content: [.text(text: "Result data")],
             isError: false,
             _meta: meta
         )

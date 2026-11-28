@@ -7,7 +7,7 @@ import Testing
     import FoundationNetworking
 #endif
 
-#if swift(>=6.1) && !os(Linux)
+#if swift(>=6.1)
 
     @Suite("OAuthClientRegistrar", .serialized)
     struct OAuthClientRegistrarTests {
@@ -60,6 +60,41 @@ import Testing
             let result = try await registrar.register(
                 configuration: config,
                 asMetadata: makeASMetadata(registrationEndpoint: nil),
+                session: session
+            )
+            #expect(result == nil)
+        }
+
+        // Without this, the authorization request carried `client_id=` and
+        // the server answered invalid_client.
+        @Test(
+            "Throws registrationInformationRequired without a client ID or a registration endpoint",
+            arguments: [OAuthConfiguration.GrantType.authorizationCode, .clientCredentials])
+        func testRegisterThrowsWithoutClientIDOrEndpoint(grantType: OAuthConfiguration.GrantType) async throws {
+            let config = OAuthConfiguration(grantType: grantType, authentication: .none(clientID: ""))
+            let (session, _) = makeIsolatedSession()
+            await #expect(throws: OAuthAuthorizationError.registrationInformationRequired) {
+                try await registrar.register(
+                    configuration: config,
+                    asMetadata: makeASMetadata(registrationEndpoint: nil),
+                    session: session
+                )
+            }
+        }
+
+        @Test("A pre-registered plain client ID is not registered again")
+        func testRegisterSkipsPreRegisteredClientID() async throws {
+            let (session, key) = makeIsolatedSession()
+            await IsolatedMockURLProtocol.setHandler(key: key) { _ in
+                Issue.record("the registration endpoint must not be called")
+                let response = HTTPURLResponse(
+                    url: self.registrationEndpoint, statusCode: 201,
+                    httpVersion: nil, headerFields: nil)!
+                return (response, try self.successRegistrationBody())
+            }
+            let result = try await registrar.register(
+                configuration: makeConfig(authentication: .none(clientID: "plain-client-id")),
+                asMetadata: makeASMetadata(registrationEndpoint: registrationEndpoint),
                 session: session
             )
             #expect(result == nil)
@@ -152,12 +187,7 @@ import Testing
                     session: session
                 )
             }
-            guard case .tokenRequestFailed(let statusCode, let oauthError) = error else {
-                Issue.record("Expected tokenRequestFailed, got \(String(describing: error))")
-                return
-            }
-            #expect(statusCode == 503)
-            #expect(oauthError == nil)
+            #expect(error == .tokenRequestFailed(statusCode: 503, oauthError: nil))
         }
 
         // MARK: - updatedAuthentication helper

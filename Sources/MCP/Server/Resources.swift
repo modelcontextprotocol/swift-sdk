@@ -27,6 +27,7 @@ public struct Resource: Hashable, Codable, Sendable {
     /// Metadata fields for the resource (see spec for _meta usage)
     public var _meta: Metadata?
 
+    /// Creates a resource.
     public init(
         name: String,
         uri: String,
@@ -100,6 +101,7 @@ public struct Resource: Hashable, Codable, Sendable {
         /// Metadata fields (see spec for _meta usage)
         public var _meta: Metadata?
 
+        /// Creates the text contents of the resource at `uri`.
         public static func text(
             _ content: String,
             uri: String,
@@ -109,6 +111,9 @@ public struct Resource: Hashable, Codable, Sendable {
             .init(uri: uri, mimeType: mimeType, text: content, _meta: _meta)
         }
 
+        /// Creates the binary contents of the resource at `uri`.
+        ///
+        /// The data is sent base64-encoded in `blob`.
         public static func binary(
             _ data: Data,
             uri: String,
@@ -195,6 +200,7 @@ public struct Resource: Hashable, Codable, Sendable {
         /// Metadata fields for the template (see spec for _meta usage)
         public var _meta: Metadata?
 
+        /// Creates a resource template.
         public init(
             uriTemplate: String,
             name: String,
@@ -217,8 +223,11 @@ public struct Resource: Hashable, Codable, Sendable {
     }
 
     // A resource annotation.
+    /// Hints about the audience, importance and age of a resource.
     public struct Annotations: Hashable, Codable, Sendable {
         /// The intended audience for this resource.
+        ///
+        /// Frozen: no case is added in 1.x (every revision has `user` and `assistant` only).
         public enum Audience: String, Hashable, Codable, Sendable {
             /// Content intended for end users.
             case user = "user"
@@ -233,6 +242,7 @@ public struct Resource: Hashable, Codable, Sendable {
         /// An ISO 8601 formatted timestamp indicating when the resource was last modified (e.g., "2025-01-12T15:00:58Z").
         public let lastModified: String?
 
+        /// Creates resource annotations.
         public init(
             audience: [Audience]? = nil,
             priority: Double? = nil,
@@ -252,35 +262,52 @@ public struct Resource: Hashable, Codable, Sendable {
 public enum ListResources: Method {
     public static let name: String = "resources/list"
 
+    /// The parameters of `resources/list`.
     public struct Parameters: NotRequired, Hashable, Codable, Sendable {
+        /// The cursor from the `nextCursor` of a previous result, or `nil` for the first page.
         public let cursor: String?
 
+        /// Creates the parameters of a request for the first page.
         public init() {
             self.cursor = nil
         }
 
+        /// Creates the parameters of a request for the page at `cursor`.
         public init(cursor: String) {
             self.cursor = cursor
         }
     }
 
-    public struct Result: Hashable, Codable, Sendable {
+    /// The result of `resources/list`.
+    public struct Result: Hashable, Codable, Sendable, CacheableResult {
+        /// The resources on this page.
         public let resources: [Resource]
+        /// The cursor of the next page, or `nil` on the last page.
         public let nextCursor: String?
+        /// Optional metadata about this result
         public var _meta: Metadata?
+        /// How long the result may be reused, in milliseconds (SEP-2549).
+        public var ttlMs: Int?
+        /// Who may reuse the result (SEP-2549).
+        public var cacheScope: CacheScope?
 
+        /// Creates the result of a `resources/list` request.
         public init(
             resources: [Resource],
             nextCursor: String? = nil,
-            _meta: Metadata? = nil
+            _meta: Metadata? = nil,
+            ttlMs: Int? = nil,
+            cacheScope: CacheScope? = nil
         ) {
             self.resources = resources
             self.nextCursor = nextCursor
             self._meta = _meta
+            self.ttlMs = ttlMs
+            self.cacheScope = cacheScope
         }
 
         private enum CodingKeys: String, CodingKey, CaseIterable {
-            case resources, nextCursor, _meta
+            case resources, nextCursor, _meta, ttlMs, cacheScope
         }
 
         public func encode(to encoder: Encoder) throws {
@@ -288,6 +315,8 @@ public enum ListResources: Method {
             try container.encode(resources, forKey: .resources)
             try container.encodeIfPresent(nextCursor, forKey: .nextCursor)
             try container.encodeIfPresent(_meta, forKey: ._meta)
+            try container.encodeIfPresent(ttlMs, forKey: .ttlMs)
+            try container.encodeIfPresent(cacheScope, forKey: .cacheScope)
         }
 
         public init(from decoder: Decoder) throws {
@@ -295,6 +324,8 @@ public enum ListResources: Method {
             resources = try container.decode([Resource].self, forKey: .resources)
             nextCursor = try container.decodeIfPresent(String.self, forKey: .nextCursor)
             _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
+            ttlMs = container.decodeTTL(forKey: .ttlMs)
+            cacheScope = container.decodeCacheScope(forKey: .cacheScope)
         }
     }
 }
@@ -304,43 +335,158 @@ public enum ListResources: Method {
 public enum ReadResource: Method {
     public static let name: String = "resources/read"
 
+    /// The parameters of `resources/read`.
     public struct Parameters: Hashable, Codable, Sendable {
+        /// The URI of the resource to read.
         public let uri: String
 
-        public init(uri: String) {
-            self.uri = uri
-        }
-    }
+        /// The client's responses to the server's input requests, keyed as
+        /// the requests were (2026-07-28, SEP-2322).
+        public var inputResponses: [String: InputResponse]?
 
-    public struct Result: Hashable, Codable, Sendable {
-        public let contents: [Resource.Content]
-        /// Optional metadata about this result
-        public var _meta: Metadata?
+        /// The `requestState` of the previous round, echoed unchanged.
+        public var requestState: String?
 
+        /// Creates the parameters of a `resources/read` request.
         public init(
-            contents: [Resource.Content],
-            _meta: Metadata? = nil
+            uri: String,
+            inputResponses: [String: InputResponse]? = nil,
+            requestState: String? = nil
         ) {
-            self.contents = contents
-            self._meta = _meta
+            self.uri = uri
+            self.inputResponses = inputResponses
+            self.requestState = requestState
         }
 
-        private enum CodingKeys: String, CodingKey, CaseIterable {
-            case contents, _meta
-        }
-
-        public func encode(to encoder: Encoder) throws {
-            var container = encoder.container(keyedBy: CodingKeys.self)
-            try container.encode(contents, forKey: .contents)
-            try container.encodeIfPresent(_meta, forKey: ._meta)
+        private enum CodingKeys: String, CodingKey {
+            case uri, inputResponses, requestState
         }
 
         public init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
-            contents = try container.decode([Resource.Content].self, forKey: .contents)
-            _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
+            uri = try container.decode(String.self, forKey: .uri)
+            inputResponses = try MRTR.decodeInputResponses(container, forKey: .inputResponses)
+            requestState = try container.decodeIfPresent(String.self, forKey: .requestState)
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(uri, forKey: .uri)
+            try container.encodeIfPresent(inputResponses, forKey: .inputResponses)
+            try container.encodeIfPresent(requestState, forKey: .requestState)
         }
     }
+
+    /// The resource contents, or, at 2026-07-28, a request for more input
+    /// (see `inputRequired(_:requestState:_meta:)`).
+    public struct Result: Hashable, Codable, Sendable, CacheableResult {
+        /// The contents of the resource, empty when the result asks for input.
+        public let contents: [Resource.Content]
+        /// Optional metadata about this result
+        public var _meta: Metadata?
+        /// How long the result may be reused, in milliseconds (SEP-2549).
+        public var ttlMs: Int?
+        /// Who may reuse the result (SEP-2549).
+        public var cacheScope: CacheScope?
+
+        /// Requests the client must fulfill before the resource can be
+        /// read, keyed by names the server chooses (SEP-2322).
+        public var inputRequests: [String: InputRequest]?
+
+        /// Opaque state the client echoes on the next round. The server
+        /// SDK seals it before it leaves the server.
+        public var requestState: String?
+
+        private var declaredResultType: ResultType?
+
+        /// Creates a result with the resource contents.
+        public init(
+            contents: [Resource.Content],
+            _meta: Metadata? = nil,
+            ttlMs: Int? = nil,
+            cacheScope: CacheScope? = nil
+        ) {
+            self.contents = contents
+            self._meta = _meta
+            self.ttlMs = ttlMs
+            self.cacheScope = cacheScope
+        }
+
+        /// A result that asks the client for input and a retry (SEP-2322).
+        ///
+        /// Give at least one of `requests` and `requestState`. For clients
+        /// before 2026-07-28 the server sends the requests itself and calls
+        /// the handler again with the responses.
+        public static func inputRequired(
+            _ requests: [String: InputRequest]? = nil,
+            requestState: String? = nil,
+            _meta: Metadata? = nil
+        ) -> Result {
+            var result = Result(contents: [], _meta: _meta)
+            result.inputRequests = requests
+            result.requestState = requestState
+            result.declaredResultType = .inputRequired
+            return result
+        }
+
+        /// ``ResultType/inputRequired`` when the server asks for input.
+        public var resultType: ResultType {
+            MRTR.resultType(
+                declared: declaredResultType, inputRequests: inputRequests, requestState: requestState)
+        }
+
+        private enum CodingKeys: String, CodingKey, CaseIterable {
+            case contents, _meta, ttlMs, cacheScope
+            case resultType, inputRequests, requestState
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            if resultType == .inputRequired {
+                try container.encode(resultType, forKey: .resultType)
+                try container.encodeIfPresent(inputRequests, forKey: .inputRequests)
+                try container.encodeIfPresent(requestState, forKey: .requestState)
+                try container.encodeIfPresent(_meta, forKey: ._meta)
+                return
+            }
+            try container.encode(contents, forKey: .contents)
+            try container.encodeIfPresent(_meta, forKey: ._meta)
+            try container.encodeIfPresent(ttlMs, forKey: .ttlMs)
+            try container.encodeIfPresent(cacheScope, forKey: .cacheScope)
+        }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            declaredResultType = MRTR.declared(
+                try container.decodeIfPresent(ResultType.self, forKey: .resultType))
+            _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
+            if declaredResultType == .inputRequired {
+                inputRequests = try container.decodeIfPresent(
+                    [String: InputRequest].self, forKey: .inputRequests)
+                requestState = try container.decodeIfPresent(String.self, forKey: .requestState)
+                contents = []
+                return
+            }
+            contents = try container.decode([Resource.Content].self, forKey: .contents)
+            ttlMs = container.decodeTTL(forKey: .ttlMs)
+            cacheScope = container.decodeCacheScope(forKey: .cacheScope)
+        }
+    }
+}
+
+extension ReadResource.Parameters: InputRespondingParameters {
+    var stateBinding: (target: String, arguments: Value) { (uri, .object([:])) }
+
+    func retrying(inputResponses: [String: InputResponse]?, requestState: String?) -> Self {
+        var copy = self
+        copy.inputResponses = inputResponses
+        copy.requestState = requestState
+        return copy
+    }
+}
+
+extension ReadResource.Result: InputRequiringResult {
+    var hasContent: Bool { !contents.isEmpty || ttlMs != nil || cacheScope != nil }
 }
 
 /// To discover available resource templates, clients send a `resources/templates/list` request.
@@ -348,38 +494,56 @@ public enum ReadResource: Method {
 public enum ListResourceTemplates: Method {
     public static let name: String = "resources/templates/list"
 
+    /// The parameters of `resources/templates/list`.
     public struct Parameters: NotRequired, Hashable, Codable, Sendable {
+        /// The cursor from the `nextCursor` of a previous result, or `nil` for the first page.
         public let cursor: String?
 
+        /// Creates the parameters of a request for the first page.
         public init() {
             self.cursor = nil
         }
 
+        /// Creates the parameters of a request for the page at `cursor`.
         public init(cursor: String) {
             self.cursor = cursor
         }
     }
 
-    public struct Result: Hashable, Codable, Sendable {
+    /// The result of `resources/templates/list`.
+    public struct Result: Hashable, Codable, Sendable, CacheableResult {
+        /// The resource templates on this page.
+        ///
+        /// On the wire this is `resourceTemplates`.
         public let templates: [Resource.Template]
+        /// The cursor of the next page, or `nil` on the last page.
         public let nextCursor: String?
         /// Optional metadata about this result
         public var _meta: Metadata?
+        /// How long the result may be reused, in milliseconds (SEP-2549).
+        public var ttlMs: Int?
+        /// Who may reuse the result (SEP-2549).
+        public var cacheScope: CacheScope?
 
+        /// Creates the result of a `resources/templates/list` request.
         public init(
             templates: [Resource.Template],
             nextCursor: String? = nil,
-            _meta: Metadata? = nil
+            _meta: Metadata? = nil,
+            ttlMs: Int? = nil,
+            cacheScope: CacheScope? = nil
         ) {
             self.templates = templates
             self.nextCursor = nextCursor
             self._meta = _meta
+            self.ttlMs = ttlMs
+            self.cacheScope = cacheScope
         }
 
         private enum CodingKeys: String, CodingKey, CaseIterable {
             case templates = "resourceTemplates"
             case nextCursor
-            case _meta
+            case _meta, ttlMs, cacheScope
         }
 
         public func encode(to encoder: Encoder) throws {
@@ -387,6 +551,8 @@ public enum ListResourceTemplates: Method {
             try container.encode(templates, forKey: .templates)
             try container.encodeIfPresent(nextCursor, forKey: .nextCursor)
             try container.encodeIfPresent(_meta, forKey: ._meta)
+            try container.encodeIfPresent(ttlMs, forKey: .ttlMs)
+            try container.encodeIfPresent(cacheScope, forKey: .cacheScope)
         }
 
         public init(from decoder: Decoder) throws {
@@ -394,6 +560,8 @@ public enum ListResourceTemplates: Method {
             templates = try container.decode([Resource.Template].self, forKey: .templates)
             nextCursor = try container.decodeIfPresent(String.self, forKey: .nextCursor)
             _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
+            ttlMs = container.decodeTTL(forKey: .ttlMs)
+            cacheScope = container.decodeCacheScope(forKey: .cacheScope)
         }
     }
 }
@@ -411,7 +579,9 @@ public struct ResourceListChangedNotification: Notification {
 public enum ResourceSubscribe: Method {
     public static let name: String = "resources/subscribe"
 
+    /// The parameters of `resources/subscribe`.
     public struct Parameters: Hashable, Codable, Sendable {
+        /// The URI of the resource to subscribe to.
         public let uri: String
     }
 
@@ -423,7 +593,9 @@ public enum ResourceSubscribe: Method {
 public enum ResourceUnsubscribe: Method {
     public static let name: String = "resources/unsubscribe"
 
+    /// The parameters of `resources/unsubscribe`.
     public struct Parameters: Hashable, Codable, Sendable {
+        /// The URI of the resource to unsubscribe from.
         public let uri: String
     }
 
@@ -435,9 +607,12 @@ public enum ResourceUnsubscribe: Method {
 public struct ResourceUpdatedNotification: Notification {
     public static let name: String = "notifications/resources/updated"
 
+    /// The parameters of `notifications/resources/updated`.
     public struct Parameters: Hashable, Codable, Sendable {
+        /// The URI of the resource that changed.
         public let uri: String
 
+        /// Creates the parameters for the resource at `uri`.
         public init(uri: String) {
             self.uri = uri
         }

@@ -1,11 +1,17 @@
 import Logging
 
 import struct Foundation.Data
+import struct Foundation.UUID
 import struct Foundation.Date
 import class Foundation.JSONDecoder
 import class Foundation.JSONEncoder
 
 /// Model Context Protocol client
+///
+/// A connected client must be disconnected: its receive loop and inbound
+/// queue keep it, and its transport, alive until ``disconnect()`` or until
+/// the transport closes the connection. Dropping the last reference to a
+/// connected client does not end the connection.
 public actor Client {
     /// The client configuration
     public struct Configuration: Hashable, Codable, Sendable {
@@ -25,9 +31,273 @@ public actor Client {
         /// servers, though this may lead to undefined behavior.
         public var strict: Bool
 
-        public init(strict: Bool = false) {
+        /// How the client opens a connection.
+        public var protocolMode: ProtocolMode
+
+        /// The lowest log level to request on stateless (2026-07-28) connections,
+        /// sent in each request's `_meta`. `nil` requests no log notifications.
+        /// Changing it to another value on ``Client/configuration`` sets
+        /// ``Client/logLevel`` for the following requests, as
+        /// ``Client/setLoggingLevel(_:)`` does. ``Client/setLoggingLevel(_:)``
+        /// does not change it, so assigning the value it already has does
+        /// nothing: a level set with ``Client/setLoggingLevel(_:)`` stays.
+        ///
+        /// > Important: Logging is deprecated by the specification (SEP-2577) and can be removed in
+        ///   the first revision released on or after 2027-07-28. It works on every revision that has
+        ///   it. To migrate, log to stderr (stdio) or use OpenTelemetry.
+        public var logLevel: LogLevel?
+
+        /// How long ``ProtocolMode/automatic`` waits for the answer to
+        /// `server/discover` before it falls back to `initialize`. `nil`
+        /// waits indefinitely. Time ``HTTPClientTransport`` spends
+        /// authorizing the request, such as a user signing in, does not
+        /// count: the timeout starts again when authorization ends. Other
+        /// requests, and `connect` as a whole, have no timeout.
+        public var discoveryTimeout: Duration?
+
+        /// How the client answers input-required results (SEP-2322).
+        public var multiRoundTrip: MultiRoundTrip
+
+        /// The most server-to-client requests (sampling, elicitation, roots)
+        /// whose handlers run at once. Up to 64 more wait; beyond that a
+        /// request is refused with -32603.
+        public var maxConcurrentServerRequests: Int
+
+        /// Whether the client uses tasks (SEP-1686, SEP-2663); `nil`, the
+        /// default, uses none.
+        ///
+        /// When set, the client declares the `io.modelcontextprotocol/tasks`
+        /// extension in each 2026-07-28 request, so a server may run a tool
+        /// call as a task. ``Client/callTool(name:arguments:meta:)`` drives a
+        /// task it gets back to its result either way.
+        public var tasks: Tasks?
+
+        /// Creates a client configuration.
+        public init(
+            strict: Bool = false,
+            protocolMode: ProtocolMode = .automatic,
+            logLevel: LogLevel? = nil,
+            discoveryTimeout: Duration? = .seconds(10),
+            multiRoundTrip: MultiRoundTrip = .init(),
+            maxConcurrentServerRequests: Int = 4,
+            tasks: Tasks? = nil
+        ) {
             self.strict = strict
+            self.protocolMode = protocolMode
+            self.logLevel = logLevel
+            self.discoveryTimeout = discoveryTimeout
+            self.multiRoundTrip = multiRoundTrip
+            self.maxConcurrentServerRequests = maxConcurrentServerRequests
+            self.tasks = tasks
         }
+
+        private enum CodingKeys: String, CodingKey {
+            case strict, protocolMode, logLevel, discoveryTimeout, multiRoundTrip, maxConcurrentServerRequests
+            case tasks
+        }
+
+        /// Decodes a configuration; keys added after `strict` are optional.
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            strict = try container.decode(Bool.self, forKey: .strict)
+            protocolMode = try container.decodeIfPresent(ProtocolMode.self, forKey: .protocolMode) ?? .automatic
+            logLevel = try container.decodeIfPresent(LogLevel.self, forKey: .logLevel)
+            discoveryTimeout =
+                container.contains(.discoveryTimeout)
+                ? try container.decodeIfPresent(Duration.self, forKey: .discoveryTimeout) : .seconds(10)
+            multiRoundTrip = try container.decodeIfPresent(MultiRoundTrip.self, forKey: .multiRoundTrip) ?? .init()
+            maxConcurrentServerRequests =
+                try container.decodeIfPresent(Int.self, forKey: .maxConcurrentServerRequests) ?? 4
+            tasks = try container.decodeIfPresent(Tasks.self, forKey: .tasks)
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(strict, forKey: .strict)
+            try container.encode(protocolMode, forKey: .protocolMode)
+            try container.encodeIfPresent(logLevel, forKey: .logLevel)
+            try container.encode(discoveryTimeout, forKey: .discoveryTimeout)
+            try container.encode(multiRoundTrip, forKey: .multiRoundTrip)
+            try container.encode(maxConcurrentServerRequests, forKey: .maxConcurrentServerRequests)
+            try container.encodeIfPresent(tasks, forKey: .tasks)
+        }
+
+        /// How the client uses tasks.
+        public struct Tasks: Hashable, Codable, Sendable {
+            /// The shortest wait between two polls of a task, whatever the
+            /// server suggests.
+            public var minimumPollInterval: Duration
+            /// The longest wait between two polls of a task.
+            public var maximumPollInterval: Duration
+            /// The wait between polls when the server suggests none.
+            public var defaultPollInterval: Duration
+            /// When to ask for a task at 2025-11-25, where the client decides.
+            public var augmentation: Augmentation
+            /// The lifetime to ask for at 2025-11-25; `nil` leaves it to the server.
+            public var requestedTTL: Duration?
+
+            /// When the client asks the server to run a tool call as a task
+            /// (2025-11-25). It asks only when the server declares
+            /// `tasks.requests.tools.call` and lists the tool with an
+            /// `execution.taskSupport` that allows it; a tool the client has
+            /// not listed on this connection is called without a task.
+            ///
+            /// Open to values this SDK does not know, which act as
+            /// ``whenRequired``.
+            public struct Augmentation: RawRepresentable, Hashable, Codable, Sendable,
+                ExpressibleByStringLiteral, CustomStringConvertible
+            {
+                public let rawValue: String
+
+                public init(rawValue: String) {
+                    self.rawValue = rawValue
+                }
+
+                public init(stringLiteral value: String) {
+                    self.rawValue = value
+                }
+
+                public init(from decoder: Decoder) throws {
+                    rawValue = try decoder.singleValueContainer().decode(String.self)
+                }
+
+                public func encode(to encoder: Encoder) throws {
+                    var container = encoder.singleValueContainer()
+                    try container.encode(rawValue)
+                }
+
+                public var description: String { rawValue }
+
+                /// Only for tools that require tasks. The default.
+                public static let whenRequired: Augmentation = "whenRequired"
+                /// For every tool that may run as a task.
+                public static let whenSupported: Augmentation = "whenSupported"
+                /// Never: a tool that requires tasks then fails with -32601.
+                public static let never: Augmentation = "never"
+
+                /// Whether to ask for a task for a tool with `support`.
+                func augments(_ support: TaskSupport) -> Bool {
+                    switch self {
+                    case .never: return false
+                    case .whenSupported: return support == .optional || support == .required
+                    default: return support == .required
+                    }
+                }
+            }
+
+            /// Creates task options.
+            public init(
+                minimumPollInterval: Duration = .milliseconds(100),
+                maximumPollInterval: Duration = .seconds(30),
+                defaultPollInterval: Duration = .seconds(1),
+                augmentation: Augmentation = .whenRequired,
+                requestedTTL: Duration? = nil
+            ) {
+                self.minimumPollInterval = minimumPollInterval
+                self.maximumPollInterval = maximumPollInterval
+                self.defaultPollInterval = defaultPollInterval
+                self.augmentation = augmentation
+                self.requestedTTL = requestedTTL
+            }
+
+            private enum CodingKeys: String, CodingKey {
+                case minimumPollInterval, maximumPollInterval, defaultPollInterval, augmentation, requestedTTL
+            }
+
+            public func encode(to encoder: Encoder) throws {
+                var container = encoder.container(keyedBy: CodingKeys.self)
+                try container.encode(minimumPollInterval, forKey: .minimumPollInterval)
+                try container.encode(maximumPollInterval, forKey: .maximumPollInterval)
+                try container.encode(defaultPollInterval, forKey: .defaultPollInterval)
+                try container.encode(augmentation, forKey: .augmentation)
+                try container.encodeIfPresent(requestedTTL, forKey: .requestedTTL)
+            }
+
+            /// Decodes the options; missing keys take their defaults.
+            public init(from decoder: Decoder) throws {
+                let container = try decoder.container(keyedBy: CodingKeys.self)
+                let defaults = Tasks()
+                minimumPollInterval =
+                    try container.decodeIfPresent(Duration.self, forKey: .minimumPollInterval)
+                    ?? defaults.minimumPollInterval
+                maximumPollInterval =
+                    try container.decodeIfPresent(Duration.self, forKey: .maximumPollInterval)
+                    ?? defaults.maximumPollInterval
+                defaultPollInterval =
+                    try container.decodeIfPresent(Duration.self, forKey: .defaultPollInterval)
+                    ?? defaults.defaultPollInterval
+                augmentation =
+                    try container.decodeIfPresent(Augmentation.self, forKey: .augmentation) ?? defaults.augmentation
+                requestedTTL = try container.decodeIfPresent(Duration.self, forKey: .requestedTTL)
+            }
+
+            /// The wait before the next poll, from the server's suggestion.
+            func pollInterval(suggested milliseconds: Int?) -> Duration {
+                let suggested = milliseconds.map { Duration.milliseconds($0) } ?? defaultPollInterval
+                return min(max(suggested, minimumPollInterval), maximumPollInterval)
+            }
+        }
+
+        /// How the client answers input-required results (SEP-2322).
+        ///
+        /// When enabled, ``Client/send(_:)`` fulfills the input requests of a
+        /// `tools/call`, `prompts/get` or `resources/read` result with the
+        /// registered sampling, elicitation and roots handlers, and retries
+        /// the request with the responses and the echoed `requestState`
+        /// until the result is complete.
+        public struct MultiRoundTrip: Hashable, Codable, Sendable {
+            /// Whether the client retries by itself. When `false`, ``Client/send(_:)``
+            /// returns input-required results, and the convenience methods
+            /// `callTool`, `getPrompt` and `readResource` throw for them.
+            public var isEnabled: Bool
+            /// The most retries before the request fails.
+            public var maxRounds: Int
+            /// The most input requests one result may carry. A result with
+            /// more fails the request before any handler runs.
+            public var maxInputRequests: Int
+
+            /// Creates multi round-trip options.
+            public init(isEnabled: Bool = true, maxRounds: Int = 10, maxInputRequests: Int = 16) {
+                self.isEnabled = isEnabled
+                self.maxRounds = maxRounds
+                self.maxInputRequests = maxInputRequests
+            }
+
+            private enum CodingKeys: String, CodingKey {
+                case isEnabled, maxRounds, maxInputRequests
+            }
+
+            /// Decodes the options; missing keys take their defaults.
+            public init(from decoder: Decoder) throws {
+                let container = try decoder.container(keyedBy: CodingKeys.self)
+                let defaults = MultiRoundTrip()
+                isEnabled = try container.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? defaults.isEnabled
+                maxRounds = try container.decodeIfPresent(Int.self, forKey: .maxRounds) ?? defaults.maxRounds
+                maxInputRequests =
+                    try container.decodeIfPresent(Int.self, forKey: .maxInputRequests) ?? defaults.maxInputRequests
+            }
+        }
+    }
+
+    /// How the client opens a connection.
+    ///
+    /// Frozen: no case is added in 1.x (a new protocol era is a major release).
+    public enum ProtocolMode: Hashable, Codable, Sendable {
+        /// Use the `initialize` handshake (2025-11-25 and earlier).
+        case handshake
+        /// Send `server/discover` at the newest stateless revision, retry once
+        /// with a version the server lists on -32022, and fall back to
+        /// `initialize` when the server does not serve a stateless revision:
+        /// it answers with a JSON-RPC error, lists only handshake revisions,
+        /// refuses the request with HTTP 400, 404 or 405, or does not answer
+        /// within ``Configuration/discoveryTimeout``. Other transport errors,
+        /// such as authorization failures, 429 or 5xx, are rethrown.
+        /// The default.
+        case automatic
+        /// Use one stateless revision; fail with
+        /// ``MCPError/unsupportedProtocolVersion(supported:requested:)`` if the
+        /// server does not serve it. Never retries or falls back.
+        case stateless(String)
     }
 
     /// Implementation information
@@ -45,6 +315,7 @@ public actor Client {
         /// Optional set of sized icons for display in a user interface
         public var icons: [Icon]?
 
+        /// Creates client implementation information.
         public init(
             name: String,
             version: String,
@@ -69,6 +340,7 @@ public actor Client {
             /// Whether the list of roots has changed
             public var listChanged: Bool?
 
+            /// Creates a roots capability.
             public init(listChanged: Bool? = nil) {
                 self.listChanged = listChanged
             }
@@ -78,11 +350,13 @@ public actor Client {
         public struct Sampling: Hashable, Sendable {
             /// Tools sub-capability for sampling
             public struct Tools: Hashable, Codable, Sendable {
+                /// Creates a sampling tools sub-capability.
                 public init() {}
             }
 
             /// Context sub-capability for sampling
             public struct Context: Hashable, Codable, Sendable {
+                /// Creates a sampling context sub-capability.
                 public init() {}
             }
 
@@ -91,6 +365,7 @@ public actor Client {
             /// Whether context is supported in sampling
             public var context: Context?
 
+            /// Creates a sampling capability.
             public init(tools: Tools? = nil, context: Context? = nil) {
                 self.tools = tools
                 self.context = context
@@ -101,11 +376,13 @@ public actor Client {
         public struct Elicitation: Hashable, Sendable {
             /// Form-based elicitation sub-capability
             public struct Form: Hashable, Codable, Sendable {
+                /// Creates a form elicitation sub-capability.
                 public init() {}
             }
 
             /// URL-based elicitation sub-capability
             public struct URL: Hashable, Codable, Sendable {
+                /// Creates a URL elicitation sub-capability.
                 public init() {}
             }
 
@@ -114,6 +391,9 @@ public actor Client {
             /// Whether URL-based elicitation is supported
             public var url: URL?
 
+            /// Creates an elicitation capability.
+            ///
+            /// By default only form-based elicitation is declared.
             public init(form: Form? = Form(), url: URL? = nil) {
                 self.form = form
                 self.url = url
@@ -121,24 +401,40 @@ public actor Client {
         }
 
         /// Whether the client supports sampling
+        ///
+        /// > Important: Sampling is deprecated by the specification (SEP-2577) and can be removed
+        ///   in the first revision released on or after 2027-07-28. It works on every revision that
+        ///   has it. To migrate, call the API of an LLM provider from the server.
         public var sampling: Sampling?
         /// Whether the client supports elicitation
         public var elicitation: Elicitation?
         /// Experimental features supported by the client
-        public var experimental: [String: String]?
+        public var experimental: [String: Value]?
         /// Whether the client supports roots
+        ///
+        /// > Important: Roots is deprecated by the specification (SEP-2577) and can be removed in
+        ///   the first revision released on or after 2027-07-28. It works on every revision that has
+        ///   it. To migrate, pass directories or files in tool arguments, resource URIs or server
+        ///   configuration.
         public var roots: Capabilities.Roots?
+        /// Protocol extensions supported by the client, keyed by extension
+        /// identifier (for example `io.modelcontextprotocol/tasks`), with
+        /// extension-defined settings (SEP-2133).
+        public var extensions: [String: Value]?
 
+        /// Creates client capabilities.
         public init(
             sampling: Sampling? = nil,
             elicitation: Elicitation? = nil,
-            experimental: [String: String]? = nil,
-            roots: Capabilities.Roots? = nil
+            experimental: [String: Value]? = nil,
+            roots: Capabilities.Roots? = nil,
+            extensions: [String: Value]? = nil
         ) {
             self.sampling = sampling
             self.elicitation = elicitation
             self.experimental = experimental
             self.roots = roots
+            self.extensions = extensions
         }
     }
 
@@ -163,14 +459,89 @@ public actor Client {
     /// The client capabilities
     public var capabilities: Client.Capabilities
     /// The client configuration
-    public var configuration: Configuration
+    public var configuration: Configuration {
+        didSet {
+            if configuration.logLevel != oldValue.logLevel { logLevel = configuration.logLevel }
+        }
+    }
 
-    /// The server capabilities
-    private var serverCapabilities: Server.Capabilities?
-    /// The server version
-    private var serverVersion: String?
+    /// The server capabilities, known after ``connect(transport:)``.
+    public private(set) var serverCapabilities: Server.Capabilities?
+    /// The negotiated protocol version, known after ``connect(transport:)``.
+    public private(set) var negotiatedProtocolVersion: String?
+    /// The server implementation, known after ``connect(transport:)``. `nil`
+    /// on a 2026-07-28 connection to a server that does not send
+    /// `io.modelcontextprotocol/serverInfo`.
+    public private(set) var serverInfo: Server.Info?
+    /// The lowest log level the server should send, carried in the `_meta` of
+    /// every 2026-07-28 request: ``Configuration/logLevel``, until
+    /// ``setLoggingLevel(_:)`` or a change of `configuration.logLevel`
+    /// changes it. ``connect(transport:)`` starts from
+    /// `configuration.logLevel` again.
+    public private(set) var logLevel: LogLevel?
     /// The server instructions
     private var instructions: String?
+    /// The background `subscriptions/listen` stream (2026-07-28): the list
+    /// changes the client has handlers for, and the subscribed resources.
+    private(set) var notificationStream: Subscription?
+    /// The filter requested for `notificationStream`.
+    private var notificationStreamRequest: SubscriptionFilter?
+    /// The filter of the stream being opened, or of the open one; `nil` when none.
+    private var notificationStreamFilter: SubscriptionFilter?
+    /// Incremented on each change, so stale openings are discarded.
+    private var notificationStreamGeneration = 0
+    /// Failures in a row to open or keep the stream; sets the retry delay.
+    private(set) var notificationStreamFailures = 0
+    /// When the background stream, or the one it replaced, was opened.
+    private var notificationStreamSince: ContinuousClock.Instant?
+    /// The pending reopen of a stream that failed.
+    private var notificationStreamRetry: Task<Void, Never>?
+    /// Replaced background streams that have not ended yet. Their
+    /// notifications are delivered while the client still wants them: one
+    /// the server sent before it registered the successor exists only on
+    /// the replaced stream, so a notification sent during the overlap may
+    /// arrive twice.
+    private var retiredNotificationStreams: Set<ID> = []
+    /// Resource URIs subscribed at 2026-07-28, in subscription order.
+    private(set) var subscribedResources: [String] = []
+    /// The subscribed URIs that `subscribeToResource` added and no stream has
+    /// served yet; one is dropped when the last call waiting for it is cancelled.
+    private var unservedResources: Set<String> = []
+    /// `subscribeToResource` calls waiting for a stream that names their URI.
+    private(set) var resourceWaiters: [(id: UUID, uri: String, continuation: CheckedContinuation<Void, Swift.Error>)] = []
+    /// Multi round-trip exchanges in progress: first request id to the id of the current round.
+    private var roundTrips: [ID: ID] = [:]
+    /// Exchanges cancelled between rounds.
+    private var cancelledRoundTrips: Set<ID> = []
+    /// Cancels the task that runs an exchange's rounds, by first request id.
+    private var roundTripCancellers: [ID: @Sendable () -> Void] = [:]
+    /// Waiters for `subscriptions/listen` acknowledgements, by request id.
+    private var listenAcknowledgements:
+        [ID: AsyncStream<Result<SubscriptionFilter, Swift.Error>>.Continuation] = [:]
+    /// `x-mcp-header` arguments of listed tools, by tool name.
+    private(set) var toolHeaderParameters: [String: [MCPRequestHeaders.Parameter]] = [:]
+    /// The `execution.taskSupport` of each listed tool, for 2025-11-25 augmentation.
+    private(set) var toolTaskSupport: [String: TaskSupport] = [:]
+    /// Tool names logged as invalid (SEP-986).
+    private var toolNameWarnings = ToolNameWarnings()
+    /// Task pollers waiting for the next poll, by task id then token; a task
+    /// notification wakes them early.
+    private var taskWakeups: [String: [Int: ResponseSlot<Void>]] = [:]
+    private var nextTaskWakeup = 0
+    /// `tools/call` requests awaiting their response.
+    private(set) var pendingToolCalls: Set<ID> = []
+    /// `tools/call` requests cancelled before their response arrived, oldest
+    /// first: a late response that creates a task gets `tasks/cancel`.
+    private var abandonedToolCalls: [ID] = []
+    /// Tasks notified while no poller waited, oldest first, at most
+    /// ``maxNotifiedTasks``: the next wait for one ends at once.
+    private var notifiedTasks: [String] = []
+    private static let maxNotifiedTasks = 256
+    /// Whether the connection uses a stateless revision (2026-07-28 and later),
+    /// where every request carries its `_meta` envelope.
+    public var isStateless: Bool {
+        negotiatedProtocolVersion.map { Version.profile(for: $0).usesRequestMeta } ?? false
+    }
 
     /// A dictionary of type-erased notification handlers, keyed by method name
     private var notificationHandlers: [String: [NotificationHandlerBox]] = [:]
@@ -178,13 +549,73 @@ public actor Client {
     private var methodHandlers: [String: RequestHandlerBox] = [:]
     /// The task for the message handling loop
     private var task: Task<Void, Never>?
+    /// Changes on every connect, disconnect and close of the connection. A
+    /// message loop or a batch only acts on the connection while the
+    /// generation it captured is current.
+    private var connectionGeneration = 0
 
     /// A dictionary of type-erased pending requests, keyed by request ID
     private var pendingRequests: [ID: AnyPendingRequest] = [:]
+    /// Registered requests not yet handed to the transport. A request
+    /// cancelled while here is never sent.
+    private var unsentRequests: Set<ID> = []
+    /// A running handler of a server-to-client request.
+    private struct IncomingHandler {
+        /// Tells this run from a later request that reuses the id.
+        let token: UUID
+        let task: Task<Void, Never>
+    }
+
+    /// Handlers of server-to-client requests that are still running.
+    private var incomingRequests: [ID: IncomingHandler] = [:]
+    /// Handlers that were cancelled, or whose connection closed, and have not
+    /// returned yet. They keep their slot: a handler that reconnects is not
+    /// cancelled, but it still runs.
+    private var drainingIncomingRequests: Set<UUID> = []
+    /// Server-to-client requests waiting for a free handler slot.
+    private var queuedIncomingRequests: [Request<AnyMethod>] = []
+    /// The most server-to-client requests that wait for a slot.
+    static let incomingRequestBacklog = 64
+
+    /// Notifications in arrival order. Their handlers run one at a time.
+    private var inboundQueue: AsyncStream<Message<AnyNotification>>.Continuation?
+    private var inboundTask: Task<Void, Never>?
+    /// Requests sent from a notification handler. Their responses never
+    /// wait for queued notifications, so that the handler can wait for them.
+    private var immediateResponses: Set<ID> = []
+    /// The progress tokens of requests in flight, recorded while progress
+    /// handlers are registered.
+    private var progressTokens: [ID: ProgressToken] = [:]
+    /// Progress notifications queued and not yet handled, by token.
+    private var queuedProgress: [ProgressToken: Int] = [:]
+    /// Responses that wait for the queued progress notifications of their
+    /// request, by token.
+    private var parkedResponses: [ProgressToken: [Response<AnyMethod>]] = [:]
+
+    /// Set while a notification handler runs.
+    @TaskLocal private static var isHandlingNotification = false
+    /// The slot of the server-to-client request whose handler runs.
+    @TaskLocal private static var incomingHandlerToken: UUID?
+
+    /// Notifications the client itself handles inside the receive loop,
+    /// before later messages: it only updates its state. Handlers registered
+    /// for them run in the inbound queue, like any other.
+    private static let inlineNotifications: Set<String> = [
+        CancelledNotification.name, SubscriptionsAcknowledgedNotification.name,
+        TaskStatusNotification.name, TaskUpdatedNotification.name,
+    ]
     // Add reusable JSON encoder/decoder
     private let encoder = JSONEncoder()
-    private let decoder = JSONDecoder()
+    /// Decodes incoming messages with `data:` URL strings kept as strings;
+    /// handlers get `.data` from their own typed decode.
+    private let decoder: JSONDecoder = {
+        let decoder = JSONDecoder()
+        decoder.userInfo[.valuePreservesStrings] = true
+        return decoder
+    }()
 
+    /// Creates a client with its implementation information, capabilities
+    /// and configuration.
     public init(
         name: String,
         version: String,
@@ -200,116 +631,254 @@ public actor Client {
             description: description, websiteUrl: websiteUrl, icons: icons)
         self.capabilities = capabilities
         self.configuration = configuration
+        self.logLevel = configuration.logLevel
     }
 
-    /// Connect to the server using the given transport
+    /// What ``connect(transport:)`` learned about the server.
+    public struct ConnectionInfo: Hashable, Sendable {
+        /// The negotiated protocol version.
+        public let protocolVersion: String
+        /// The server's capabilities.
+        public let capabilities: Server.Capabilities
+        /// The server's implementation: from `initialize`, or from the
+        /// `io.modelcontextprotocol/serverInfo` of `server/discover`. `nil` when
+        /// a 2026-07-28 server does not send it.
+        public let serverInfo: Server.Info?
+        /// The server's instructions, if any.
+        public let instructions: String?
+        /// Whether the connection is at 2026-07-28, without a handshake.
+        public let isStateless: Bool
+
+        /// Creates connection information.
+        public init(
+            protocolVersion: String,
+            capabilities: Server.Capabilities,
+            serverInfo: Server.Info?,
+            instructions: String? = nil,
+            isStateless: Bool
+        ) {
+            self.protocolVersion = protocolVersion
+            self.capabilities = capabilities
+            self.serverInfo = serverInfo
+            self.instructions = instructions
+            self.isStateless = isStateless
+        }
+    }
+
+    /// Connects to the server with `transport` and opens the protocol
+    /// connection: `server/discover` or `initialize`, depending on
+    /// ``Configuration/protocolMode``.
+    ///
+    /// If the client is already connected, it first disconnects the previous
+    /// transport, and that connection's pending requests fail as they do with
+    /// ``disconnect()``.
+    ///
+    /// If the transport later closes the connection, which it signals by
+    /// finishing its receive stream, the client does what ``disconnect()``
+    /// does and fails every pending request with ``MCPError/connectionClosed``.
+    /// If the stream ended with an error, requests fail with that error
+    /// instead, wrapped in ``MCPError/transportError(_:)`` unless it is an
+    /// ``MCPError``. Call `connect(transport:)` again with a new transport to
+    /// reconnect.
+    ///
+    /// - Returns: What the client learned about the server.
+    /// - Throws: The error the pending requests fail with when the connection
+    ///   closes before the server answered; `MCPError.internalError("Client
+    ///   disconnected")` if ``disconnect()`` or another `connect(transport:)`
+    ///   runs while the previous transport disconnects or this one connects;
+    ///   `MCPError.internalError("Server's protocol version is not supported:
+    ///   <version>")` if the server answers `initialize` with a version that
+    ///   is not in ``Version/handshake``; or any error from connecting the
+    ///   transport or opening the protocol connection. A `connect(transport:)`
+    ///   that throws leaves the client disconnected: it disconnects `transport`
+    ///   and stops the receive loop itself, so the caller need not call
+    ///   ``disconnect()``.
     @discardableResult
-    public func connect(transport: any Transport) async throws -> Initialize.Result {
+    public func connect(transport: any Transport) async throws -> ConnectionInfo {
+        // Release the previous connection, so that its transport and message
+        // loop stop and its requests don't wait for a response.
+        if connection != nil {
+            let released = await releaseConnection()
+            guard connectionGeneration == released else {
+                throw MCPError.internalError("Client disconnected")
+            }
+        }
+        connectionGeneration += 1
+        let generation = connectionGeneration
+        // A reconnect negotiates afresh; requests must not carry the
+        // previous connection's stateless `_meta`.
+        serverCapabilities = nil
+        negotiatedProtocolVersion = nil
+        serverInfo = nil
+        instructions = nil
         self.connection = transport
-        try await self.connection?.connect()
+        toolHeaderParameters = [:]
+        logLevel = configuration.logLevel
+        toolNameWarnings = ToolNameWarnings()
+        do {
+            return try await openConnection(transport, generation: generation)
+        } catch {
+            // Stop what the connection started, as disconnect() does, so that
+            // nothing keeps the client and the transport alive. A disconnect()
+            // or connect(transport:) that ran meanwhile has released it.
+            if connectionGeneration == generation {
+                let loop = task
+                _ = await releaseConnection()
+                _ = await loop?.value
+            }
+            throw error
+        }
+    }
+
+    /// Connects `transport` and opens the protocol connection, for
+    /// ``connect(transport:)``.
+    private func openConnection(_ transport: any Transport, generation: Int) async throws -> ConnectionInfo {
+        try await transport.connect()
+        guard connectionGeneration == generation else {
+            throw MCPError.internalError("Client disconnected")
+        }
 
         await logger?.debug(
             "Client connected", metadata: ["name": "\(name)", "version": "\(version)"])
 
+        // Notification handlers run in arrival order, outside the receive
+        // loop, so that a handler may await a request on this client.
+        let (inbound, queue) = AsyncStream<Message<AnyNotification>>.makeStream()
+        inboundQueue = queue
+        inboundTask = Task {
+            for await message in inbound {
+                // A handler that reconnected is not cancelled; the
+                // notifications queued behind it belong to the old connection.
+                if connectionGeneration != generation { break }
+                await Client.$isHandlingNotification.withValue(true) {
+                    await self.handleMessage(message)
+                }
+                if let token = Self.progressToken(of: message) {
+                    await self.progressHandled(token)
+                }
+            }
+        }
+
         // Start message handling loop
         task = Task {
-            guard let connection = self.connection else { return }
+            let connection = transport
+            var streamError: (any Swift.Error)?
             repeat {
-                // Check for cancellation before starting the iteration
-                if Task.isCancelled { break }
+                // Stop if cancelled, or if this connection was closed or replaced.
+                if Task.isCancelled || connectionGeneration != generation { break }
 
                 do {
                     let stream = await connection.receive()
                     for try await data in stream {
-                        if Task.isCancelled { break }  // Check inside loop too
+                        if Task.isCancelled || connectionGeneration != generation { break }
 
                         // Attempt to decode data
                         // Try decoding as a batch response first
                         if let batchResponse = try? decoder.decode([AnyResponse].self, from: data) {
-                            await handleBatchResponse(batchResponse)
-                        } else if let response = try? decoder.decode(AnyResponse.self, from: data) {
-                            await handleResponse(response)
-                        } else if let request = try? decoder.decode(AnyRequest.self, from: data) {
-                            await handleIncomingRequest(request)
-                        } else if let message = try? decoder.decode(AnyMessage.self, from: data) {
-                            await handleMessage(message)
-                        } else {
-                            var metadata: Logger.Metadata = [:]
-                            if let string = String(data: data, encoding: .utf8) {
-                                metadata["message"] = .string(string)
+                            for response in batchResponse {
+                                await deliver(response)
                             }
+                        } else if let response = try? decoder.decode(AnyResponse.self, from: data) {
+                            await deliver(response)
+                        } else if let request = try? decoder.decode(AnyRequest.self, from: data) {
+                            startIncomingRequest(request, on: connection)
+                        } else if let message = try? decoder.decode(AnyMessage.self, from: data) {
+                            if Self.inlineNotifications.contains(message.method) {
+                                await handleBuiltIn(message)
+                            }
+                            if notificationHandlers[message.method]?.isEmpty == false {
+                                if let token = Self.progressToken(of: message) {
+                                    queuedProgress[token, default: 0] += 1
+                                }
+                                inboundQueue?.yield(message)
+                            }
+                        } else {
+                            // An answer that does not decode (an error whose
+                            // code is missing or a string, neither `result`
+                            // nor `error`, no `jsonrpc`) fails the request it
+                            // names, which would otherwise wait for its timeout.
+                            if let id = Self.responseID(of: data), pendingRequests[id] != nil {
+                                await deliver(
+                                    AnyMethod.response(
+                                        id: id, error: .internalError("The server sent an invalid response")))
+                            }
+                            // Peer text: only a sanitized prefix is logged.
                             await logger?.warning(
                                 "Unexpected message received by client (not single/batch response or notification)",
-                                metadata: metadata
+                                metadata: [
+                                    "message": .string(
+                                        MCPRequestHeaders.sanitized(String(decoding: data.prefix(512), as: UTF8.self)))
+                                ]
                             )
                         }
                     }
+                    // The stream finished, so the transport is closed. Calling
+                    // receive() again would return a stream that has already ended.
+                    break
                 } catch let error where MCPError.isResourceTemporarilyUnavailable(error) {
                     try? await Task.sleep(for: .milliseconds(10))
                     continue
                 } catch {
                     await logger?.error(
                         "Error in message handling loop", metadata: ["error": "\(error)"])
+                    streamError = error
                     break
                 }
             } while true
             await self.logger?.debug("Client message handling loop task is terminating.")
+            await connectionDidClose(generation: generation, error: streamError)
         }
 
-        // Register cancellation notification handler
-        await self.onNotification(CancelledNotification.self) { message in
-
-            let requestId = message.params.requestId
-            let reason = message.params.reason
-
-            await self.logger?.debug(
-                "Received cancellation notification",
-                metadata: [
-                    "requestId": requestId.map { "\($0)" } ?? "none",
-                    "reason": reason.map { "\($0)" } ?? "none",
-                ]
-            )
-
-            // Remove the pending request and resume with cancellation error
-            if let requestId = requestId,
-                let pendingRequest = await self.removePendingRequest(id: requestId)
-            {
-                pendingRequest.resume(throwing: CancellationError())
-            }
+        // Open the protocol connection
+        switch configuration.protocolMode {
+        case .handshake:
+            try await _initialize()
+        case .automatic:
+            try await discoverOrInitialize(Version.stateless[0], fallback: true, generation: generation)
+        case .stateless(let version):
+            try await discoverOrInitialize(version, fallback: false, generation: generation)
         }
-
-        // Automatically initialize after connecting
-        return try await _initialize()
+        refreshNotificationStream()
+        return ConnectionInfo(
+            protocolVersion: negotiatedProtocolVersion ?? "",
+            capabilities: serverCapabilities ?? .init(),
+            serverInfo: serverInfo,
+            instructions: instructions,
+            isStateless: isStateless)
     }
 
-    /// Disconnect the client and cancel all pending requests
+    /// Disconnect the client and cancel all pending requests.
+    ///
+    /// Call this when done with a connected client: until then, or until the
+    /// transport closes the connection, the client's receive loop keeps the
+    /// client and its transport alive.
     public func disconnect() async {
         await logger?.debug("Initiating client disconnect...")
+        // A message loop that ends from here on leaves the teardown to this method.
+        connectionGeneration += 1
 
-        // Part 1: Inside actor - Grab state and clear internal references
-        let taskToCancel = self.task
-        let connectionToDisconnect = self.connection
-        let pendingRequestsToCancel = self.pendingRequests
+        // Close the listen stream while the connection is still open.
+        let (stream, waiters) = closeNotificationStream()
+        for waiter in waiters {
+            waiter.resume(throwing: MCPError.internalError("Client disconnected"))
+        }
+        await stream?.cancel()
 
-        self.task = nil
-        self.connection = nil
-        self.pendingRequests = [:]  // Use empty dictionary literal
-
-        // Part 2: Outside actor - Resume continuations, disconnect transport, await task
+        // Grab state and clear internal references. This also fails a
+        // subscribeToResource call made while the stream was closing.
+        let closed = detachConnection(sparingCaller: false)
 
         // Resume continuations first
-        for (_, request) in pendingRequestsToCancel {
-            request.resume(throwing: MCPError.internalError("Client disconnected"))
-        }
+        closed.fail(with: MCPError.internalError("Client disconnected"))
         await logger?.debug("Pending requests cancelled.")
 
         // Cancel the task
-        taskToCancel?.cancel()
+        closed.task?.cancel()
         await logger?.debug("Message loop task cancellation requested.")
 
         // Disconnect the transport *before* awaiting the task
         // This should ensure the transport stream is finished, unblocking the loop.
-        if let conn = connectionToDisconnect {
+        if let conn = closed.transport {
             await conn.disconnect()
             await logger?.debug("Transport disconnected.")
         } else {
@@ -317,35 +886,210 @@ public actor Client {
         }
 
         // Await the task completion *after* transport disconnect
-        _ = await taskToCancel?.value
+        _ = await closed.task?.value
         await logger?.debug("Client message loop task finished.")
 
         await logger?.debug("Client disconnect complete.")
     }
 
+    /// What is left to finish once the state of a connection is cleared.
+    private struct ClosedConnection {
+        let transport: (any Transport)?
+        let task: Task<Void, Never>?
+        let pendingRequests: [AnyPendingRequest]
+        let resourceWaiters: [CheckedContinuation<Void, Swift.Error>]
+        let taskWakeups: [ResponseSlot<Void>]
+
+        /// Fails the requests, `subscribeToResource` calls and task pollers
+        /// that waited for the connection.
+        func fail(with error: Swift.Error) {
+            for request in pendingRequests {
+                request.resume(throwing: error)
+            }
+            for waiter in resourceWaiters {
+                waiter.resume(throwing: error)
+            }
+            for slot in taskWakeups {
+                slot.resolve(.failure(error))
+            }
+        }
+    }
+
+    /// Forgets the background stream and its retry, and takes the
+    /// `subscribeToResource` calls waiting for it, for the caller to fail.
+    private func closeNotificationStream() -> (
+        stream: Subscription?, waiters: [CheckedContinuation<Void, Swift.Error>]
+    ) {
+        let stream = notificationStream
+        notificationStream = nil
+        notificationStreamRequest = nil
+        notificationStreamFilter = nil
+        notificationStreamGeneration += 1
+        notificationStreamFailures = 0
+        notificationStreamSince = nil
+        notificationStreamRetry?.cancel()
+        notificationStreamRetry = nil
+        retiredNotificationStreams = []
+        subscribedResources = []
+        unservedResources = []
+        let waiters = resourceWaiters.map(\.continuation)
+        resourceWaiters = []
+        return (stream, waiters)
+    }
+
+    /// Clears the state of the current connection and stops its handlers.
+    /// There is no suspension point, so nothing registers on the connection
+    /// in between. The caller disconnects the transport and fails what the
+    /// connection leaves.
+    ///
+    /// - Parameter sparingCaller: Whether the handler that calls this, to
+    ///   reconnect, keeps running. Its task is not cancelled.
+    private func detachConnection(sparingCaller: Bool) -> ClosedConnection {
+        connectionGeneration += 1
+        let closed = ClosedConnection(
+            transport: connection, task: task, pendingRequests: Array(pendingRequests.values),
+            resourceWaiters: closeNotificationStream().waiters,
+            taskWakeups: taskWakeups.values.flatMap(\.values))
+
+        self.task = nil
+        self.connection = nil
+        self.pendingRequests = [:]
+        pendingToolCalls = []
+        abandonedToolCalls = []
+        for cancel in roundTripCancellers.values { cancel() }
+        roundTripCancellers = [:]
+        roundTrips = [:]
+        cancelledRoundTrips = []
+        self.toolHeaderParameters = [:]
+        // The next server may declare other tools, and sends its own task
+        // notifications.
+        toolTaskSupport = [:]
+        taskWakeups = [:]
+        notifiedTasks = []
+        self.unsentRequests = []
+
+        // Stop the handlers. They are not awaited: disconnect may be called
+        // from one of them.
+        let caller = sparingCaller ? Client.incomingHandlerToken : nil
+        for handler in incomingRequests.values where handler.token != caller {
+            handler.task.cancel()
+        }
+        // They keep their slots until they return, also on the next connection.
+        drainingIncomingRequests.formUnion(incomingRequests.values.map(\.token))
+        incomingRequests = [:]
+        queuedIncomingRequests = []
+        immediateResponses = []
+        progressTokens = [:]
+        queuedProgress = [:]
+        parkedResponses = [:]
+        inboundQueue?.finish()
+        inboundQueue = nil
+        if !(sparingCaller && Client.isHandlingNotification) {
+            inboundTask?.cancel()
+        }
+        inboundTask = nil
+        return closed
+    }
+
+    /// Releases the current connection before `connect(transport:)` uses a
+    /// new one. Unlike ``disconnect()``, this does not cancel the handler
+    /// that called it nor wait for the message loop, which stops at its next
+    /// message because the connection generation changed.
+    ///
+    /// - Returns: The connection generation after the release.
+    private func releaseConnection() async -> Int {
+        let closed = detachConnection(sparingCaller: true)
+        let released = connectionGeneration
+        closed.task?.cancel()
+        await closed.transport?.disconnect()
+        closed.fail(with: MCPError.internalError("Client disconnected"))
+        return released
+    }
+
+    /// Handles the end of the message loop when the transport finished its
+    /// stream, normally or by throwing: does what ``disconnect()`` does and
+    /// fails what waited for the connection with the stream's error, or
+    /// ``MCPError/connectionClosed``. Does nothing if ``disconnect()`` or a
+    /// later ``connect(transport:)`` already closed this connection.
+    private func connectionDidClose(generation: Int, error: (any Swift.Error)?) async {
+        guard connectionGeneration == generation else { return }
+
+        let failure: MCPError
+        if let error = error as? MCPError {
+            failure = error
+        } else if let error {
+            failure = .transportError(error)
+        } else {
+            failure = .connectionClosed
+        }
+        let closed = detachConnection(sparingCaller: false)
+
+        // Release the transport before resuming the callers, so that a caller
+        // that reconnects with the same transport is not disconnected afterwards.
+        await closed.transport?.disconnect()
+        closed.fail(with: failure)
+        await closed.transport?.logger.warning(
+            "Client connection closed by the transport",
+            metadata: [
+                "error": "\(failure)",
+                "failedRequests": "\(closed.pendingRequests.count)",
+            ])
+    }
+
     // MARK: - Registration
 
     /// Register a handler for a notification
+    ///
+    /// Notification handlers run one at a time, in arrival order. A request
+    /// with a progress token is answered only after its progress
+    /// notifications that arrived first were handled, so a handler must not
+    /// await a request with a progress token sent outside a notification
+    /// handler: when its progress is queued behind the handler, its response
+    /// waits for it and the handler waits forever. Start a `Task` for that
+    /// wait instead.
     @discardableResult
     public func onNotification<N: Notification>(
         _ type: N.Type,
         handler: @escaping @Sendable (Message<N>) async throws -> Void
     ) async -> Self {
         notificationHandlers[N.name, default: []].append(TypedNotificationHandler(handler))
+        if Self.listChangeMethods.contains(N.name) {
+            refreshNotificationStream()
+        }
         return self
     }
 
     /// Register a handler for server-to-client requests
+    ///
+    /// The handler also fulfills input requests of the same method at
+    /// 2026-07-28. Before a `sampling/createMessage` handler runs, the client
+    /// refuses the request with -32602 when it has `tools` or `toolChoice` and
+    /// ``capabilities`` has no `sampling.tools`, or when its messages break the
+    /// rules for tool uses and tool results.
     @discardableResult
     public func withMethodHandler<M: Method>(
         _ type: M.Type,
         handler: @escaping @Sendable (M.Parameters) async throws -> M.Result
     ) -> Self {
-        methodHandlers[M.name] = TypedRequestHandler { (request: Request<M>) -> Response<M> in
+        methodHandlers[M.name] = TypedRequestHandler { [weak self] (request: Request<M>) -> Response<M> in
+            if let sampling = request.params as? CreateSamplingMessage.Parameters {
+                try await self?.checkSamplingRequest(sampling)
+            }
             let result = try await handler(request.params)
             return Response(id: request.id, result: result)
         }
         return self
+    }
+
+    /// Refuses a sampling request the client must not receive (SEP-1577).
+    private func checkSamplingRequest(_ params: CreateSamplingMessage.Parameters) throws {
+        if params.usesTools, capabilities.sampling?.tools == nil {
+            throw MCPError.invalidParams(
+                "The client did not declare sampling.tools, so the request cannot have tools or toolChoice")
+        }
+        if let problem = params.toolMessageProblem() {
+            throw MCPError.invalidParams(problem)
+        }
     }
 
     /// Send a notification to the server
@@ -358,13 +1102,11 @@ public actor Client {
         try await connection.send(notificationData)
     }
 
-    /// Send a response back to the server for a server-to-client request
-    private func send<M: Method>(_ response: Response<M>) async throws {
-        guard let connection = connection else {
-            throw MCPError.internalError("Client connection not initialized")
-        }
+    /// Send a response back to the server for a server-to-client request, on
+    /// the transport the request came from
+    private func send<M: Method>(_ response: Response<M>, on transport: any Transport) async throws {
         let responseData = try encoder.encode(response)
-        try await connection.send(responseData)
+        try await transport.send(responseData)
     }
 
     // MARK: - Requests
@@ -388,36 +1130,505 @@ public actor Client {
     /// - Throws: MCPError if the client is not connected
     /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/cancellation
     public func send<M: Method>(_ request: Request<M>) throws -> RequestContext<M.Result> {
-        guard let connection = connection else {
-            throw MCPError.internalError("Client connection not initialized")
+        let first = try dispatch(request)
+        return RequestContext(requestID: request.id, requestTask: withRoundTrips(request, first: first))
+    }
+
+    /// Runs the multi round-trip loop on the result of `first` when the
+    /// method can return an input-required result (SEP-2322).
+    private func withRoundTrips<M: Method>(
+        _ request: Request<M>, first: Task<M.Result, Error>
+    ) -> Task<M.Result, Error> {
+        let options = configuration.multiRoundTrip
+        guard MRTR.carriers.contains(M.name), options.isEnabled else { return first }
+        // Registered before the first response can arrive, so a
+        // cancelRequest always finds the exchange.
+        roundTrips[request.id] = request.id
+        let task = Task<M.Result, Error> {
+            defer { self.endRoundTrips(request.id) }
+            return try await self.resolveInputRequests(
+                request, first: Self.result(of: first), options: options)
         }
+        roundTripCancellers[request.id] = { task.cancel() }
+        return task
+    }
 
-        let requestData = try encoder.encode(request)
+    /// Fulfills input requests and retries until the result is complete (SEP-2322).
+    private func resolveInputRequests<M: Method>(
+        _ request: Request<M>, first: M.Result, options: Configuration.MultiRoundTrip
+    ) async throws -> M.Result {
+        var result = first
+        var params = request.params
+        var rounds = 0
+        var stateOnlyDelay = MRTR.stateOnlyInitialDelay
+        while let asking = result as? any InputRequiringResult, asking.isInputRequired,
+            let current = params as? any InputRespondingParameters
+        {
+            try Task.checkCancellation()
+            if cancelledRoundTrips.contains(request.id) { throw CancellationError() }
+            rounds += 1
+            guard rounds <= options.maxRounds else {
+                throw MCPError.internalError(
+                    "\(M.name): the server asked for input more than \(options.maxRounds) times")
+            }
+            var responses: [String: InputResponse]?
+            if let requests = asking.inputRequests, requests.count > options.maxInputRequests {
+                throw MCPError.internalError(
+                    "\(M.name): the server asked for \(requests.count) inputs at once, more than \(options.maxInputRequests)")
+            }
+            if let requests = asking.inputRequests, !requests.isEmpty {
+                stateOnlyDelay = MRTR.stateOnlyInitialDelay
+                responses = try await fulfillInputRequests(requests)
+            } else {
+                // Only state, or neither: the server is not done yet.
+                try await Task.sleep(for: stateOnlyDelay)
+                stateOnlyDelay = min(stateOnlyDelay * 2, MRTR.stateOnlyMaximumDelay)
+            }
+            try Task.checkCancellation()
+            if cancelledRoundTrips.contains(request.id) { throw CancellationError() }
+            params = current.retrying(inputResponses: responses, requestState: asking.requestState) as! M.Parameters
+            let retry = Request<M>(method: M.name, params: params, _meta: request._meta)
+            roundTrips[request.id] = retry.id
+            result = try await Self.result(of: dispatch(retry))
+        }
+        return result
+    }
 
-        let requestTask = Task<M.Result, Error> {
-            try await withCheckedThrowingContinuation { continuation in
-                Task {
-                    // Add the pending request before attempting to send
-                    self.addPendingRequest(
-                        id: request.id,
-                        continuation: continuation,
-                        type: M.Result.self
-                    )
+    /// The value of `task`; cancelling the caller cancels `task`.
+    private static func result<T>(of task: Task<T, Error>) async throws -> T {
+        try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+        }
+    }
 
-                    // Send the request data
-                    do {
-                        try await connection.send(requestData)
-                    } catch {
-                        // If send fails, try to remove the pending request.
-                        if self.removePendingRequest(id: request.id) != nil {
-                            continuation.resume(throwing: error)
-                        }
+    private func endRoundTrips(_ id: ID) {
+        roundTrips[id] = nil
+        cancelledRoundTrips.remove(id)
+        roundTripCancellers[id] = nil
+    }
+
+    /// Runs the registered handlers for input requests, concurrently.
+    func fulfillInputRequests(_ requests: [String: InputRequest]) async throws
+        -> [String: InputResponse]
+    {
+        var calls: [(String, InputRequest, RequestHandlerBox, AnyRequest)] = []
+        for (key, request) in requests {
+            guard let handler = methodHandlers[request.method] else {
+                throw MCPError.methodNotFound("No handler registered for \(request.method)")
+            }
+            calls.append((key, request, handler, Request(method: request.method, params: try request.params())))
+        }
+        return try await withThrowingTaskGroup(of: (String, InputResponse).self) { group in
+            for (key, request, handler, anyRequest) in calls {
+                group.addTask {
+                    let response = try await handler(anyRequest)
+                    switch response.result {
+                    case .success(let value):
+                        return (key, try InputResponse(method: request.method, result: value))
+                    case .failure(let error):
+                        throw error
                     }
                 }
             }
+            var responses: [String: InputResponse] = [:]
+            for try await (key, response) in group {
+                responses[key] = response
+            }
+            return responses
+        }
+    }
+
+    /// A request encoded and registered, ready to be handed to the transport.
+    struct OutgoingRequest: Sendable {
+        let id: ID
+        let data: Data
+        /// SEP-2243 `Mcp-Param-*` headers, for HTTP.
+        let headers: [String: String]
+    }
+
+    /// Adds the 2026-07-28 envelope, encodes the request and registers its
+    /// response slot. The request is not sent: it is in `unsentRequests`.
+    ///
+    /// Registration happens before this returns, so a response or a
+    /// `cancelRequest(_:)` that follows always finds the request.
+    private func register<M: Method>(_ request: Request<M>) throws -> (OutgoingRequest, Task<M.Result, Error>) {
+        var request = request
+        var headers: [String: String] = [:]
+        if isStateless, let version = negotiatedProtocolVersion {
+            request._meta = requestMeta(version: version, merging: request._meta)
+            if let call = request.params as? CallTool.Parameters,
+                let parameters = toolHeaderParameters[call.name]
+            {
+                headers = MCPRequestHeaders.parameterHeaders(
+                    parameters, arguments: call.arguments.map(Value.object))
+            }
+        }
+        let data = try encoder.encode(request)
+        let firstToolPage = (request.params as? ListTools.Parameters).map { $0.cursor == nil } ?? false
+
+        let slot = ResponseSlot<M.Result>()
+        pendingRequests[request.id] = AnyPendingRequest(slot)
+        unsentRequests.insert(request.id)
+        if M.name == CallTool.name { pendingToolCalls.insert(request.id) }
+        if Client.isHandlingNotification {
+            immediateResponses.insert(request.id)
+        }
+        if notificationHandlers[ProgressNotification.name]?.isEmpty == false,
+            let token = Self.progressToken(ofRequest: data)
+        {
+            progressTokens[request.id] = token
         }
 
-        return RequestContext(requestID: request.id, requestTask: requestTask)
+        let id = request.id
+        let isInitialize = M.name == Initialize.name
+        let task = Task<M.Result, Error> {
+            // Cancelling the task cancels the request. `initialize` must not
+            // be cancelled on the wire: it is only forgotten.
+            let value = try await withTaskCancellationHandler {
+                try await slot.value()
+            } onCancel: {
+                slot.resolve(.failure(CancellationError()))
+                Task {
+                    if isInitialize {
+                        await self.forgetRequest(id)
+                    } else {
+                        await self.cancelCancelledTask(id)
+                    }
+                }
+            }
+            if let listed = value as? ListTools.Result,
+                let filtered = await self.recordTools(listed, firstPage: firstToolPage)
+            {
+                return filtered as! M.Result
+            }
+            return value
+        }
+        return (OutgoingRequest(id: request.id, data: data, headers: headers), task)
+    }
+
+    /// A transport error raised while sending a request, as opposed to the
+    /// peer's answer.
+    private struct SendFailure: Swift.Error {
+        let error: Swift.Error
+    }
+
+    /// Sends one request and returns the task for its result. With
+    /// `markingSendFailures`, transport errors are wrapped in ``SendFailure``.
+    private func dispatch<M: Method>(
+        _ request: Request<M>, markingSendFailures: Bool = false
+    ) throws -> Task<M.Result, Error> {
+        guard let connection = connection else {
+            throw MCPError.internalError("Client connection not initialized")
+        }
+        let (outgoing, task) = try register(request)
+        Task { await self.transmit(outgoing, on: connection, markingSendFailures: markingSendFailures) }
+        return task
+    }
+
+    /// Hands a registered request to the transport, unless it was cancelled
+    /// first. A failed send fails the request.
+    private func transmit(
+        _ outgoing: OutgoingRequest, on connection: any Transport, markingSendFailures: Bool = false
+    ) async {
+        guard unsentRequests.remove(outgoing.id) != nil else { return }
+        do {
+            if !outgoing.headers.isEmpty {
+                try await connection.send(outgoing.data, additionalHeaders: outgoing.headers)
+            } else {
+                try await connection.send(outgoing.data)
+            }
+        } catch {
+            removePendingRequest(id: outgoing.id)?.resume(
+                throwing: markingSendFailures ? SendFailure(error: error) : error)
+        }
+    }
+
+    // MARK: - Subscriptions (2026-07-28)
+
+    /// An open `subscriptions/listen` stream.
+    ///
+    /// Notifications on the stream are delivered to the handlers registered
+    /// with ``Client/onNotification(_:handler:)``.
+    public struct Subscription: Sendable {
+        /// The JSON-RPC id of the listen request; notifications on the
+        /// stream carry it in `_meta["io.modelcontextprotocol/subscriptionId"]`.
+        public let id: ID
+        /// The notification types the server agreed to send.
+        public let notifications: SubscriptionFilter
+
+        private let client: Client
+        private let request: RequestContext<SubscriptionsListen.Result>
+
+        init(
+            id: ID, notifications: SubscriptionFilter, client: Client,
+            request: RequestContext<SubscriptionsListen.Result>
+        ) {
+            self.id = id
+            self.notifications = notifications
+            self.client = client
+            self.request = request
+        }
+
+        /// Closes the stream.
+        public func cancel() async {
+            try? await client.cancelRequest(id, reason: "Subscription cancelled")
+        }
+
+        /// Waits for the stream to end. Returns when the server closes it
+        /// gracefully; throws when it fails or is cancelled.
+        public func finished() async throws {
+            _ = try await request.value
+        }
+    }
+
+    private static let listChangeMethods: Set<String> = [
+        ToolListChangedNotification.name, PromptListChangedNotification.name,
+        ResourceListChangedNotification.name,
+    ]
+
+    /// What the background stream listens for: the list changes the server
+    /// sends and the client has a handler for, and the subscribed resources.
+    private var wantedNotifications: SubscriptionFilter {
+        func wants(_ method: String, _ declared: Bool?) -> Bool? {
+            declared == true && notificationHandlers[method]?.isEmpty == false ? true : nil
+        }
+        return SubscriptionFilter(
+            toolsListChanged: wants(ToolListChangedNotification.name, serverCapabilities?.tools?.listChanged),
+            promptsListChanged: wants(
+                PromptListChangedNotification.name, serverCapabilities?.prompts?.listChanged),
+            resourcesListChanged: wants(
+                ResourceListChangedNotification.name, serverCapabilities?.resources?.listChanged),
+            resourceSubscriptions: subscribedResources.isEmpty ? nil : subscribedResources)
+    }
+
+    /// The first delay before a background stream that ended is reopened; it
+    /// doubles while streams keep ending, up to ``notificationStreamMaxDelay``.
+    static let notificationStreamBaseDelay: Duration = .seconds(1)
+    static let notificationStreamMaxDelay: Duration = .seconds(60)
+
+    /// Opens, replaces or closes the background stream so that it matches
+    /// the registered handlers and subscribed resources (2026-07-28). The
+    /// stream opens in the background; a replaced stream closes once its
+    /// successor is acknowledged, and stays open when the successor fails.
+    private func refreshNotificationStream() {
+        guard isStateless, connection != nil else { return }
+        let wanted = wantedNotifications
+        let none = SubscriptionFilter()
+        guard wanted != (notificationStreamFilter ?? none) else { return }
+        notificationStreamRetry?.cancel()
+        notificationStreamRetry = nil
+        notificationStreamGeneration += 1
+        let generation = notificationStreamGeneration
+        guard wanted != none else {
+            if let previous = notificationStream { retire(previous) }
+            notificationStream = nil
+            notificationStreamRequest = nil
+            notificationStreamFilter = nil
+            return
+        }
+        notificationStreamFilter = wanted
+        Task { await self.openNotificationStream(wanted, generation: generation) }
+    }
+
+    private func openNotificationStream(_ wanted: SubscriptionFilter, generation: Int) async {
+        let opened: Subscription
+        do {
+            opened = try await listen(wanted)
+        } catch {
+            guard generation == notificationStreamGeneration else { return }
+            await logger?.warning(
+                "Could not open the notification stream", metadata: ["error": "\(error)"])
+            // Keep the stream that works.
+            notificationStreamFilter = notificationStreamRequest
+            failResourceWaiters(requested: wanted, error: error)
+            notificationStreamFailures += 1
+            scheduleNotificationStreamRetry()
+            return
+        }
+        let current = generation == notificationStreamGeneration
+        // A superseded opening still serves until its successor is
+        // acknowledged, unless a stream is open or none is wanted.
+        guard current || (notificationStream == nil && wantedNotifications != SubscriptionFilter()) else {
+            await opened.cancel()
+            return
+        }
+        if current {
+            // The previous stream may have ended meanwhile, which cleared the
+            // filter and scheduled a reopen; this stream serves what is wanted.
+            notificationStreamFilter = wanted
+            notificationStreamRetry?.cancel()
+            notificationStreamRetry = nil
+        } else if notificationStreamFilter == nil {
+            notificationStreamFilter = wanted
+        }
+        let previous = notificationStream
+        if previous == nil { notificationStreamSince = .now }
+        notificationStream = opened
+        notificationStreamRequest = wanted
+        if let previous { retire(previous) }
+        resolveResourceWaiters(requested: wanted, honored: opened.notifications)
+        Task {
+            _ = try? await opened.finished()
+            self.notificationStreamEnded(id: opened.id)
+        }
+    }
+
+    /// Closes a replaced background stream. Until it ends, its
+    /// notifications the client no longer wants are dropped.
+    private func retire(_ stream: Subscription) {
+        retiredNotificationStreams.insert(stream.id)
+        Task {
+            await stream.cancel()
+            self.forgetRetired(stream.id)
+        }
+    }
+
+    private func forgetRetired(_ id: ID) {
+        retiredNotificationStreams.remove(id)
+    }
+
+    /// Forgets a background stream that ended and reopens it after a delay,
+    /// also when the server ended it with its result, as it does when it
+    /// stops for a restart. The delay keeps growing while streams end sooner
+    /// than ``notificationStreamMaxDelay`` after opening.
+    private func notificationStreamEnded(id: ID) {
+        guard notificationStream?.id == id else { return }
+        notificationStream = nil
+        notificationStreamRequest = nil
+        notificationStreamFilter = nil
+        if notificationStreamSince.map({ .now - $0 >= Self.notificationStreamMaxDelay }) == true {
+            notificationStreamFailures = 0
+        }
+        notificationStreamSince = nil
+        notificationStreamFailures += 1
+        scheduleNotificationStreamRetry()
+    }
+
+    /// Retries ``refreshNotificationStream()`` after the backoff delay.
+    private func scheduleNotificationStreamRetry() {
+        guard notificationStreamRetry == nil, connection != nil,
+            wantedNotifications != (notificationStreamFilter ?? SubscriptionFilter())
+        else { return }
+        let delay = Self.notificationStreamDelay(failures: notificationStreamFailures)
+        let generation = connectionGeneration
+        notificationStreamRetry = Task {
+            guard (try? await Task.sleep(for: delay)) != nil else { return }
+            self.retryNotificationStream(generation: generation)
+        }
+    }
+
+    /// Reopens the stream, unless the connection it was for has closed.
+    private func retryNotificationStream(generation: Int) {
+        guard connectionGeneration == generation else { return }
+        notificationStreamRetry = nil
+        refreshNotificationStream()
+    }
+
+    /// The delay before reopening after `failures` failures in a row.
+    static func notificationStreamDelay(failures: Int) -> Duration {
+        let exponent = min(max(failures - 1, 0), 16)
+        return min(notificationStreamBaseDelay * (1 << exponent), notificationStreamMaxDelay)
+    }
+
+    /// Completes the `subscribeToResource` calls for the URIs `requested`
+    /// named. URIs the server did not honor fail and are unsubscribed.
+    private func resolveResourceWaiters(requested: SubscriptionFilter, honored: SubscriptionFilter) {
+        let named = Set(requested.resourceSubscriptions ?? [])
+        let served = Set(honored.resourceSubscriptions ?? [])
+        let refused = named.subtracting(served)
+        unservedResources.subtract(named)
+        if !refused.isEmpty {
+            subscribedResources.removeAll { refused.contains($0) }
+            if wantedNotifications == SubscriptionFilter() {
+                refreshNotificationStream()  // closes the stream
+            } else {
+                // The open stream already serves what remains.
+                notificationStreamFilter = wantedNotifications
+            }
+        }
+        var waiting: [(id: UUID, uri: String, continuation: CheckedContinuation<Void, Swift.Error>)] = []
+        for waiter in resourceWaiters {
+            if served.contains(waiter.uri) {
+                waiter.continuation.resume()
+            } else if refused.contains(waiter.uri) {
+                waiter.continuation.resume(
+                    throwing: MCPError.invalidRequest("The server does not send updates for \(waiter.uri)"))
+            } else {
+                waiting.append(waiter)
+            }
+        }
+        resourceWaiters = waiting
+    }
+
+    /// Fails the `subscribeToResource` calls whose URI only `requested`, a
+    /// stream that could not be opened, named. Established subscriptions
+    /// stay, so a stream that failed keeps being reopened for them.
+    private func failResourceWaiters(requested: SubscriptionFilter, error: Swift.Error) {
+        let served = Set(notificationStream?.notifications.resourceSubscriptions ?? [])
+        let failed = Set(requested.resourceSubscriptions ?? [])
+            .intersection(resourceWaiters.map(\.uri))
+            .subtracting(served)
+        guard !failed.isEmpty else { return }
+        subscribedResources.removeAll { failed.contains($0) }
+        unservedResources.subtract(failed)
+        var waiting: [(id: UUID, uri: String, continuation: CheckedContinuation<Void, Swift.Error>)] = []
+        for waiter in resourceWaiters {
+            if failed.contains(waiter.uri) {
+                waiter.continuation.resume(throwing: error)
+            } else {
+                waiting.append(waiter)
+            }
+        }
+        resourceWaiters = waiting
+    }
+
+    /// Opens a `subscriptions/listen` stream (2026-07-28, SEP-2575) and waits
+    /// for the server to acknowledge it.
+    ///
+    /// At protocol 2026-07-28, list-changed and resource-updated notifications
+    /// are sent only on these streams. Register handlers with
+    /// ``onNotification(_:handler:)`` before listening.
+    ///
+    /// - Throws: ``MCPError/invalidRequest(_:)`` on handshake connections,
+    ///   or the server's error.
+    public func listen(_ notifications: SubscriptionFilter) async throws -> Subscription {
+        guard isStateless else {
+            throw MCPError.invalidRequest(
+                "\(SubscriptionsListen.name) requires protocol version 2026-07-28 or later")
+        }
+        let request = SubscriptionsListen.request(.init(notifications: notifications))
+        // The acknowledgement, or the request ending before one arrives.
+        let (outcomes, outcome) = AsyncStream<Result<SubscriptionFilter, Swift.Error>>.makeStream()
+        listenAcknowledgements[request.id] = outcome
+        defer { listenAcknowledgements[request.id] = nil }
+
+        let context = try send(request)
+        Task {
+            do {
+                _ = try await context.value
+                outcome.yield(
+                    .failure(MCPError.internalError("\(SubscriptionsListen.name) ended before it was acknowledged")))
+            } catch {
+                outcome.yield(.failure(error))
+            }
+        }
+        var honored: SubscriptionFilter?
+        for await result in outcomes {
+            honored = try result.get()
+            break
+        }
+        guard let honored else {
+            // The caller was cancelled while waiting.
+            try? await cancelRequest(request.id)
+            throw CancellationError()
+        }
+        return Subscription(id: request.id, notifications: honored, client: self, request: context)
+    }
+
+    private func acknowledge(_ id: ID, _ notifications: SubscriptionFilter) {
+        listenAcknowledgements[id]?.yield(.success(notifications))
     }
 
     /// Cancel a request by sending a CancelledNotification to the server.
@@ -437,10 +1648,40 @@ public actor Client {
     /// - Throws: MCPError if the notification cannot be sent
     /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/cancellation
     public func cancelRequest(_ requestID: ID, reason: String? = nil) async throws {
+        // A request in a multi round-trip exchange: stop its rounds, which
+        // cancels running input handlers, and cancel its current round.
+        var requestID = requestID
+        var inRoundTrip = false
+        if let current = roundTrips[requestID] {
+            cancelledRoundTrips.insert(requestID)
+            roundTripCancellers[requestID]?()
+            requestID = current
+            inRoundTrip = true
+        }
+
+        if pendingToolCalls.remove(requestID) != nil {
+            abandonedToolCalls.append(requestID)
+            if abandonedToolCalls.count > 256 { abandonedToolCalls.removeFirst() }
+        }
+
         // Remove the pending request and resume with cancellation error
         // This ensures any response that arrives after cancellation is ignored
         if let pendingRequest = removePendingRequest(id: requestID) {
             pendingRequest.resume(throwing: CancellationError())
+        } else if inRoundTrip {
+            // Between rounds: the server has nothing in flight to cancel.
+            return
+        }
+
+        // Not sent yet: it never will be, and the server has nothing to cancel.
+        if unsentRequests.remove(requestID) != nil {
+            return
+        }
+
+        // At 2026-07-28 over HTTP, closing the response stream cancels the request.
+        if isStateless, let http = connection as? HTTPClientTransport {
+            await http.cancelRequest(requestID)
+            return
         }
 
         // Send cancellation notification to server
@@ -450,19 +1691,173 @@ public actor Client {
         try await notify(notification)
     }
 
+    /// Cancels the request of a cancelled task, unless it already ended.
+    /// ``cancelRequest(_:reason:)`` of an exchange cancels the task of the
+    /// round it cancels, and that round must not be cancelled twice.
+    private func cancelCancelledTask(_ id: ID) async {
+        guard pendingRequests[id] != nil else { return }
+        try? await cancelRequest(id, reason: "Cancelled")
+    }
 
-    private func addPendingRequest<T: Sendable & Decodable>(
-        id: ID,
-        continuation: CheckedContinuation<T, Swift.Error>,
-        type: T.Type  // Keep type for AnyPendingRequest internal logic
-    ) {
-        pendingRequests[id] = AnyPendingRequest(
-            PendingRequest(continuation: continuation)
-        )
+
+    /// Stops tracking a request without telling the server.
+    private func forgetRequest(_ id: ID) {
+        removePendingRequest(id: id)?.resume(throwing: CancellationError())
+        unsentRequests.remove(id)
     }
 
     private func removePendingRequest(id: ID) -> AnyPendingRequest? {
+        immediateResponses.remove(id)
+        progressTokens[id] = nil
+        pendingToolCalls.remove(id)
         return pendingRequests.removeValue(forKey: id)
+    }
+
+    // MARK: - Inbound ordering
+
+    /// Delivers a response at once, unless progress notifications of its
+    /// request are still queued: then after them.
+    private func deliver(_ response: Response<AnyMethod>) async {
+        if !immediateResponses.contains(response.id), let token = progressTokens[response.id],
+            queuedProgress[token, default: 0] > 0
+        {
+            parkedResponses[token, default: []].append(response)
+            return
+        }
+        await handleResponse(response)
+    }
+
+    private func progressHandled(_ token: ProgressToken) async {
+        let remaining = (queuedProgress[token] ?? 1) - 1
+        queuedProgress[token] = remaining > 0 ? remaining : nil
+        guard remaining <= 0, let parked = parkedResponses.removeValue(forKey: token) else { return }
+        for response in parked {
+            await handleResponse(response)
+        }
+    }
+
+    /// The token of a `notifications/progress` message.
+    private static func progressToken(of message: Message<AnyNotification>) -> ProgressToken? {
+        guard message.method == ProgressNotification.name else { return nil }
+        switch message.params.objectValue?["progressToken"] {
+        case .string(let string): return .string(string)
+        case .int(let int): return .integer(int)
+        default: return nil
+        }
+    }
+
+    /// The `params._meta.progressToken` of an encoded request.
+    private static func progressToken(ofRequest data: Data) -> ProgressToken? {
+        struct Probe: Decodable {
+            struct Params: Decodable {
+                struct Meta: Decodable { let progressToken: ProgressToken? }
+                let _meta: Meta?
+            }
+            let params: Params?
+        }
+        return (try? JSONDecoder().decode(Probe.self, from: data))?.params?._meta?.progressToken
+    }
+
+    /// The `id` of a message without a `method` (a response, maybe one that
+    /// does not decode), when it is a string or an integer.
+    private static func responseID(of data: Data) -> ID? {
+        struct Probe: Decodable {
+            let id: ID?
+            let hasMethod: Bool
+            private enum Keys: String, CodingKey { case id, method }
+            init(from decoder: Decoder) throws {
+                let container = try decoder.container(keyedBy: Keys.self)
+                // `ID` reads `null` as `""`.
+                let isNull = (try? container.decodeNil(forKey: .id)) == true
+                id = isNull ? nil : try? container.decode(ID.self, forKey: .id)
+                hasMethod = container.contains(.method)
+            }
+        }
+        guard let probe = try? JSONDecoder().decode(Probe.self, from: data), !probe.hasMethod else { return nil }
+        return probe.id
+    }
+
+    private static func decode<T: Decodable>(_ value: Value, as type: T.Type) -> T? {
+        guard let data = try? JSONEncoder().encode(value) else { return nil }
+        return try? JSONDecoder().decode(T.self, from: data)
+    }
+
+    /// The client's own handling of `notifications/cancelled` and
+    /// `notifications/subscriptions/acknowledged`.
+    private func handleBuiltIn(_ message: Message<AnyNotification>) async {
+        switch message.method {
+        case SubscriptionsAcknowledgedNotification.name:
+            guard let id = message._meta?.subscriptionID,
+                let params = Self.decode(message.params, as: SubscriptionsAcknowledgedNotification.Parameters.self)
+            else { return }
+            acknowledge(id, params.notifications)
+        case TaskStatusNotification.name, TaskUpdatedNotification.name:
+            guard let id = message.params.objectValue?["taskId"]?.stringValue else { return }
+            let waiting = taskWakeups.removeValue(forKey: id) ?? [:]
+            if waiting.isEmpty {
+                if !notifiedTasks.contains(id) { notifiedTasks.append(id) }
+                if notifiedTasks.count > Self.maxNotifiedTasks { notifiedTasks.removeFirst() }
+            } else {
+                for slot in waiting.values { slot.resolve(.success(())) }
+            }
+        case CancelledNotification.name:
+            guard let params = Self.decode(message.params, as: CancelledNotification.Parameters.self) else { return }
+            await logger?.debug(
+                "Received cancellation notification",
+                metadata: [
+                    "requestId": params.requestId.map { "\($0)" } ?? "none",
+                    "reason": params.reason.map { "\($0)" } ?? "none",
+                ])
+            guard let requestId = params.requestId else { return }
+            // The server cancels a request it sent: stop its handler.
+            if cancelIncomingRequest(requestId) { return }
+            if let pendingRequest = removePendingRequest(id: requestId) {
+                pendingRequest.resume(throwing: CancellationError())
+            }
+        default:
+            break
+        }
+    }
+
+    /// Forgets the notifications of a task no one drives any more.
+    func endDriving(_ id: String) {
+        notifiedTasks.removeAll { $0 == id }
+    }
+
+    /// Waits for `timeout`, or less when a notification for the task arrives
+    /// or arrived since the last wait.
+    ///
+    /// - Throws: The connection's error when it closes during the wait, and
+    ///   ``MCPError/connectionClosed`` when it closed before.
+    func waitForTask(_ id: String, timeout: Duration) async throws {
+        if let index = notifiedTasks.firstIndex(of: id) {
+            notifiedTasks.remove(at: index)
+            return
+        }
+        guard connection != nil else { throw MCPError.connectionClosed }
+        nextTaskWakeup += 1
+        let token = nextTaskWakeup
+        let slot = ResponseSlot<Void>()
+        taskWakeups[id, default: [:]][token] = slot
+        defer {
+            taskWakeups[id]?[token] = nil
+            if taskWakeups[id]?.isEmpty == true { taskWakeups[id] = nil }
+        }
+        let timer = Task {
+            try? await Task.sleep(for: timeout)
+            slot.resolve(.success(()))
+        }
+        defer { timer.cancel() }
+        try await withTaskCancellationHandler {
+            try await slot.value()
+        } onCancel: {
+            slot.resolve(.failure(CancellationError()))
+        }
+    }
+
+    /// The number of task pollers waiting for their next poll.
+    func taskPollerCount() -> Int {
+        taskWakeups.values.reduce(0) { $0 + $1.count }
     }
 
     // MARK: - Batching
@@ -473,35 +1868,74 @@ public actor Client {
     /// of the ``Client/withBatch(body:)`` method.
     public actor Batch {
         unowned let client: Client
-        var requests: [AnyRequest] = []
+        /// The client's connection generation when the batch was created.
+        let generation: Int
+        var requests: [OutgoingRequest] = []
 
-        init(client: Client) {
+        init(client: Client, generation: Int) {
             self.client = client
+            self.generation = generation
         }
 
         /// Adds a request to the batch and prepares its expected response task.
         /// The actual sending happens when the `withBatch` scope completes.
+        ///
+        /// The request gets what ``Client/send(_:)`` adds: the 2026-07-28
+        /// `_meta` envelope and header parameters, and the multi round-trip
+        /// loop for `tools/call`, `prompts/get` and `resources/read`.
         /// - Returns: A `Task` that will eventually produce the result or throw an error.
         public func addRequest<M: Method>(_ request: Request<M>) async throws -> Task<
             M.Result, Swift.Error
         > {
-            requests.append(try AnyRequest(request))
+            let (outgoing, task) = try await client.registerBatchRequest(request, generation: generation)
+            requests.append(outgoing)
+            return task
+        }
+    }
 
-            // Return a Task that registers the pending request and awaits its result.
-            // The continuation is resumed when the response arrives.
-            return Task<M.Result, Swift.Error> {
-                try await withCheckedThrowingContinuation { continuation in
-                    // We are already inside a Task, but need another Task
-                    // to bridge to the client actor's context.
-                    Task {
-                        await client.addPendingRequest(
-                            id: request.id,
-                            continuation: continuation,
-                            type: M.Result.self
-                        )
-                    }
-                }
+    private func registerBatchRequest<M: Method>(_ request: Request<M>, generation: Int) throws -> (
+        OutgoingRequest, Task<M.Result, Error>
+    ) {
+        // The connection the batch is for closed or was replaced.
+        guard connectionGeneration == generation else {
+            throw MCPError.connectionClosed
+        }
+        guard connection != nil else {
+            throw MCPError.internalError("Client connection not initialized")
+        }
+        let (outgoing, first) = try register(request)
+        return (outgoing, withRoundTrips(request, first: first))
+    }
+
+    /// Fails registered batch requests that will not be sent.
+    private func abandonBatch(_ requests: [OutgoingRequest], with error: Swift.Error) {
+        for request in requests where unsentRequests.remove(request.id) != nil {
+            removePendingRequest(id: request.id)?.resume(throwing: error)
+        }
+    }
+
+    /// Sends the batch requests that were not cancelled as one JSON array.
+    /// On a stateless connection each request is sent alone: 2026-07-28
+    /// requests carry per-request HTTP headers.
+    private func sendBatch(_ requests: [OutgoingRequest], on connection: any Transport) async throws {
+        if isStateless {
+            for request in requests {
+                Task { await self.transmit(request, on: connection) }
             }
+            return
+        }
+        let ready = requests.filter { unsentRequests.remove($0.id) != nil }
+        guard !ready.isEmpty else { return }
+        var data = Data("[".utf8)
+        data.append(Data(ready.map(\.data).joined(separator: Data(",".utf8))))
+        data.append(Data("]".utf8))
+        do {
+            try await connection.send(data)
+        } catch {
+            for request in ready {
+                removePendingRequest(id: request.id)?.resume(throwing: error)
+            }
+            throw error
         }
     }
 
@@ -578,6 +2012,9 @@ public actor Client {
     /// - Parameter body: An asynchronous closure that takes a `Batch` object as input.
     ///                   Use this object to add requests to the batch.
     /// - Throws: `MCPError.internalError` if the client is not connected.
+    ///           `MCPError.connectionClosed` if, while `body` ran, the connection
+    ///           closed or was replaced by ``disconnect()`` or
+    ///           ``connect(transport:)``; the batch is then not sent.
     ///           Can also rethrow errors from the `body` closure or from sending the batch request.
     public func withBatch(body: @escaping @Sendable (Batch) async throws -> Void) async throws {
         guard let connection = connection else {
@@ -585,10 +2022,17 @@ public actor Client {
         }
 
         // Create Batch actor, passing self (Client)
-        let batch = Batch(client: self)
+        let generation = connectionGeneration
+        let batch = Batch(client: self, generation: generation)
 
         // Populate the batch actor by calling the user's closure.
-        try await body(batch)
+        do {
+            try await body(batch)
+        } catch {
+            // The requests added so far are never sent.
+            abandonBatch(await batch.requests, with: error)
+            throw error
+        }
 
         // Get the collected requests from the batch actor
         let requests = await batch.requests
@@ -601,44 +2045,41 @@ public actor Client {
 
         await logger?.debug(
             "Sending batch request", metadata: ["count": "\(requests.count)"])
-
-        // Encode the array of AnyMethod requests into a single JSON payload
-        let data = try encoder.encode(requests)
-        try await connection.send(data)
+        // Not on a connection that closed or was replaced while the batch was built.
+        guard connectionGeneration == generation else {
+            abandonBatch(requests, with: MCPError.connectionClosed)
+            throw MCPError.connectionClosed
+        }
+        try await sendBatch(requests, on: connection)
 
         // Responses will be handled asynchronously by the message loop and handleBatchResponse/handleResponse.
     }
 
     // MARK: - Lifecycle
 
-    /// Initialize the connection with the server.
-    ///
-    /// - Important: This method is deprecated. Initialization now happens automatically
-    ///   when calling `connect(transport:)`. You should use that method instead.
-    ///
-    /// - Returns: The server's initialization response containing capabilities and server info
-    @available(
-        *, deprecated,
-        message:
-            "Initialization now happens automatically during connect. Use connect(transport:) instead."
-    )
-    public func initialize() async throws -> Initialize.Result {
-        return try await _initialize()
-    }
-
-    /// Internal initialization implementation
-    private func _initialize() async throws -> Initialize.Result {
+    /// Sends `initialize` and `notifications/initialized`.
+    private func _initialize() async throws {
         let request = Initialize.request(
             .init(
-                protocolVersion: Version.latest,
+                protocolVersion: Version.latestHandshake,
                 capabilities: capabilities,
                 clientInfo: clientInfo
             ))
 
         let result = try await send(request).value
 
+        // A client that does not support the server's version should
+        // disconnect (2025-11-25 lifecycle, version negotiation).
+        // `connect(transport:)` disconnects when this throws.
+        guard Version.handshake.contains(result.protocolVersion) else {
+            throw MCPError.internalError(
+                "Server's protocol version is not supported: \(result.protocolVersion)")
+        }
+
         self.serverCapabilities = result.capabilities
-        self.serverVersion = result.protocolVersion
+        await logDeprecationNotices(result.capabilities)
+        self.negotiatedProtocolVersion = result.protocolVersion
+        self.serverInfo = result.serverInfo
         self.instructions = result.instructions
 
         // For HTTP transport, ensure subsequent MCP-Protocol-Version headers
@@ -648,100 +2089,374 @@ public actor Client {
         }
 
         try await notify(InitializedNotification.message())
-
-        return result
     }
 
+    /// Records the `x-mcp-header` arguments of each listed tool and drops
+    /// tools with invalid annotations, at revisions that define
+    /// `Mcp-Param-*` headers (SEP-2243). Returns `nil` at other revisions.
+    /// A first page (no cursor) replaces what earlier listings recorded.
+    ///
+    /// The record is replaced in one step before the warnings are logged:
+    /// logging awaits the transport's logger, and a `tools/call` sent
+    /// meanwhile must find every tool of the page.
+    private func recordTools(_ result: ListTools.Result, firstPage: Bool) async -> ListTools.Result? {
+        // Names are not refused: the specification says SHOULD (SEP-986).
+        for (name, problem) in toolNameWarnings.warnings(for: result.tools.map(\.name), checkDuplicates: false) {
+            await logger?.warning(
+                "The server listed a tool whose name does not follow the specification (SEP-986): \(problem)",
+                metadata: ["tool": "\(MCPRequestHeaders.sanitized(name))"])
+        }
+        if firstPage { toolTaskSupport = [:] }
+        for tool in result.tools { toolTaskSupport[tool.name] = tool.taskSupport }
+        guard let version = negotiatedProtocolVersion, Version.profile(for: version).usesStandardHeaders
+        else { return nil }
+        var recorded = firstPage ? [:] : toolHeaderParameters
+        var valid: [Tool] = []
+        var rejected: [(tool: String, error: String)] = []
+        for tool in result.tools {
+            do {
+                recorded[tool.name] = try tool.headerParameters()
+                valid.append(tool)
+            } catch {
+                recorded[tool.name] = nil
+                rejected.append((MCPRequestHeaders.sanitized(tool.name), "\(error)"))
+            }
+        }
+        toolHeaderParameters = recorded
+        for (tool, error) in rejected {
+            await logger?.warning(
+                "Ignoring tool with an invalid x-mcp-header annotation",
+                metadata: ["tool": "\(tool)", "error": "\(error)"])
+        }
+        guard valid.count != result.tools.count else { return result }
+        return ListTools.Result(
+            tools: valid, nextCursor: result.nextCursor, _meta: result._meta,
+            ttlMs: result.ttlMs, cacheScope: result.cacheScope)
+    }
+
+    /// The `_meta` envelope of a stateless request; keys already in `existing` win.
+    private func requestMeta(version: String, merging existing: Metadata?) -> Metadata {
+        var meta = Metadata()
+        meta.protocolVersion = version
+        var declared = capabilities
+        if configuration.tasks != nil, Version.profile(for: version).usesTasksExtension {
+            var extensions = declared.extensions ?? [:]
+            if extensions[ExtensionID.tasks] == nil { extensions[ExtensionID.tasks] = [:] }
+            declared.extensions = extensions
+        }
+        meta.clientCapabilities = declared
+        meta.clientInfo = clientInfo
+        meta.logLevel = logLevel
+        if let existing {
+            meta.fields.merge(existing.fields) { _, own in own }
+        }
+        return meta
+    }
+
+    /// Opens a stateless connection with `server/discover` (SEP-2575).
+    ///
+    /// - Parameter fallback: `true` for `.automatic`: on -32022 retry once
+    ///   with the newest stateless version the server lists; fall back to
+    ///   `initialize` on a JSON-RPC error, a server without a stateless
+    ///   revision in common, an HTTP 400/404/405 refusal or no answer within
+    ///   ``Configuration/discoveryTimeout``. Other transport errors are
+    ///   rethrown. `false` for `.stateless(_:)`: only `preferred` is accepted.
+    /// - Parameter generation: The connection generation of the
+    ///   `connect(transport:)` call. Once another connect or a disconnect
+    ///   replaced it, this throws instead of acting on the new connection.
+    private func discoverOrInitialize(_ preferred: String, fallback: Bool, generation: Int) async throws {
+        func ensureCurrent() throws {
+            guard connectionGeneration == generation else {
+                throw MCPError.internalError("Client disconnected")
+            }
+        }
+        func initialize() async throws {
+            try ensureCurrent()
+            try await _initialize()
+        }
+        var version = preferred
+        var retried = false
+        while true {
+            try ensureCurrent()
+            let request = ServerDiscover.request(
+                .init(), _meta: requestMeta(version: version, merging: nil))
+            // Only discovery runs inside the do: an error from the
+            // `initialize` fallback must not be handled as a discovery error.
+            let result: ServerDiscover.Result
+            do {
+                let context = RequestContext(
+                    requestID: request.id, requestTask: try dispatch(request, markingSendFailures: true))
+                result = try await discoverResult(
+                    context, timeout: fallback ? configuration.discoveryTimeout : nil)
+            } catch MCPError.unsupportedProtocolVersion(let supported, let requested) {
+                if fallback, !retried, let mutual = supported.first(where: Version.stateless.contains) {
+                    retried = true
+                    version = mutual
+                    continue
+                }
+                if fallback, supported.isEmpty || supported.contains(where: Version.handshake.contains) {
+                    return try await initialize()
+                }
+                throw MCPError.unsupportedProtocolVersion(supported: supported, requested: requested)
+            } catch let failure as SendFailure {
+                guard fallback, HTTPClientTransport.isSessionlessRefusal(failure.error) else {
+                    throw failure.error
+                }
+                await logger?.info(
+                    "server/discover refused; falling back to initialize",
+                    metadata: ["error": "\(failure.error)"])
+                return try await initialize()
+            } catch is DiscoverTimeout {
+                await logger?.info("server/discover timed out; falling back to initialize")
+                return try await initialize()
+            } catch let error as MCPError where fallback && connection != nil {
+                // The peer answered with a JSON-RPC error. On a closed
+                // connection the error is rethrown: there is nothing to fall back on.
+                try ensureCurrent()
+                await logger?.info(
+                    "server/discover failed; falling back to initialize",
+                    metadata: ["error": "\(error)"])
+                return try await initialize()
+            }
+            let served =
+                result.supportedVersions.contains(version)
+                ? version
+                : fallback ? result.supportedVersions.first(where: Version.stateless.contains) : nil
+            guard let served else {
+                if fallback { return try await initialize() }
+                throw MCPError.unsupportedProtocolVersion(
+                    supported: result.supportedVersions, requested: version)
+            }
+            try ensureCurrent()
+            return await adopt(result, version: served)
+        }
+    }
+
+    /// The probe of ``ProtocolMode/automatic`` went unanswered.
+    private struct DiscoverTimeout: Swift.Error {}
+
+    /// Awaits a `server/discover` result. After `timeout`, the request is
+    /// abandoned, its HTTP POST closed, and ``DiscoverTimeout`` thrown. Time
+    /// the transport spends authorizing the request does not count: the
+    /// timeout starts again when authorization ends.
+    private func discoverResult(
+        _ context: RequestContext<ServerDiscover.Result>, timeout: Duration?
+    ) async throws -> ServerDiscover.Result {
+        guard let timeout else { return try await context.value }
+        let timer = Task {
+            var deadline = ContinuousClock.now + timeout
+            while true {
+                guard (try? await Task.sleep(until: deadline, clock: .continuous)) != nil else { return }
+                // An interactive sign-in can outlast the timeout: cancelling
+                // it would sign in again for `initialize`.
+                guard let http = connection as? HTTPClientTransport,
+                    let ended = await http.authorizationEnd(of: context.requestID),
+                    ended + timeout > .now
+                else { break }
+                deadline = ended + timeout
+            }
+            guard let pending = removePendingRequest(id: context.requestID) else { return }
+            // No notifications/cancelled: the server may not know the request.
+            await (connection as? HTTPClientTransport)?.cancelRequest(context.requestID)
+            pending.resume(throwing: DiscoverTimeout())
+        }
+        defer { timer.cancel() }
+        return try await context.value
+    }
+
+    /// Logs a notice the first time a server declares a capability the
+    /// specification deprecates (SEP-2577).
+    private func logDeprecationNotices(_ capabilities: Server.Capabilities) async {
+        DeprecationNotices.current.log(forServer: capabilities, to: await logger)
+    }
+
+    /// Records a `server/discover` result as the connection state.
+    private func adopt(_ result: ServerDiscover.Result, version: String) async {
+        serverCapabilities = result.capabilities
+        await logDeprecationNotices(result.capabilities)
+        negotiatedProtocolVersion = version
+        serverInfo = result.serverInfo
+        instructions = result.instructions
+        if let httpTransport = connection as? HTTPClientTransport {
+            await httpTransport.useStatelessProtocol(version)
+        }
+    }
+
+    /// Checks that the server is reachable.
+    ///
+    /// On stateless connections, where `ping` does not exist, this sends
+    /// `server/discover` instead.
     public func ping() async throws {
+        if isStateless {
+            _ = try await send(ServerDiscover.request(.init())).value
+            return
+        }
         let request = Ping.request()
         _ = try await send(request).value
     }
 
     // MARK: - Prompts
 
+    /// Gets a prompt from the server (`prompts/get`).
+    ///
+    /// When the server asks for input, the client answers with its handlers
+    /// (``Configuration/multiRoundTrip``) and returns the final result.
     public func getPrompt(name: String, arguments: [String: String]? = nil) async throws
-        -> (description: String?, messages: [Prompt.Message])
+        -> GetPrompt.Result
     {
         try validateServerCapability(\.prompts, "Prompts")
         let request = GetPrompt.request(.init(name: name, arguments: arguments))
-        let result = try await send(request).value
-        return (description: result.description, messages: result.messages)
+        return try Self.complete(try await send(request).value, GetPrompt.name)
     }
 
-    public func listPrompts(cursor: String? = nil) async throws
-        -> (prompts: [Prompt], nextCursor: String?)
-    {
+    /// Lists one page of the server's prompts (`prompts/list`). Pass the
+    /// result's `nextCursor` to get the next page.
+    public func listPrompts(cursor: String? = nil) async throws -> ListPrompts.Result {
         try validateServerCapability(\.prompts, "Prompts")
-        let request: Request<ListPrompts>
-        if let cursor = cursor {
-            request = ListPrompts.request(.init(cursor: cursor))
-        } else {
-            request = ListPrompts.request(.init())
-        }
-        let result = try await send(request).value
-        return (prompts: result.prompts, nextCursor: result.nextCursor)
+        return try await send(ListPrompts.request(cursor.map { .init(cursor: $0) } ?? .init())).value
     }
 
     // MARK: - Resources
 
-    public func readResource(uri: String) async throws -> [Resource.Content] {
+    /// Reads a resource (`resources/read`).
+    ///
+    /// When the server asks for input, the client answers with its handlers
+    /// (``Configuration/multiRoundTrip``) and returns the final result.
+    public func readResource(uri: String) async throws -> ReadResource.Result {
         try validateServerCapability(\.resources, "Resources")
         let request = ReadResource.request(.init(uri: uri))
-        let result = try await send(request).value
-        return result.contents
+        return try Self.complete(try await send(request).value, ReadResource.name)
     }
 
-    public func listResources(cursor: String? = nil) async throws -> (
-        resources: [Resource], nextCursor: String?
-    ) {
+    /// Lists one page of the server's resources (`resources/list`). Pass the
+    /// result's `nextCursor` to get the next page.
+    public func listResources(cursor: String? = nil) async throws -> ListResources.Result {
         try validateServerCapability(\.resources, "Resources")
-        let request: Request<ListResources>
-        if let cursor = cursor {
-            request = ListResources.request(.init(cursor: cursor))
-        } else {
-            request = ListResources.request(.init())
-        }
-        let result = try await send(request).value
-        return (resources: result.resources, nextCursor: result.nextCursor)
+        return try await send(ListResources.request(cursor.map { .init(cursor: $0) } ?? .init())).value
     }
 
+    /// Asks for `notifications/resources/updated` when the resource at `uri` changes.
+    ///
+    /// On handshake connections this sends `resources/subscribe`. At
+    /// 2026-07-28 the URI joins the background `subscriptions/listen`
+    /// stream, which is replaced by one that names it; this returns once the
+    /// server acknowledges that stream. Subscribing again to a subscribed URI
+    /// does nothing. Cancelling the calling task ends the wait with
+    /// `CancellationError`; the URI is dropped again when no stream has
+    /// served it yet and no other call waits for it.
+    ///
+    /// - Throws: ``MCPError/invalidRequest(_:)`` when the server does not
+    ///   send updates for `uri`, or the error that kept the stream from
+    ///   opening.
     public func subscribeToResource(uri: String) async throws {
         try validateServerCapability(\.resources?.subscribe, "Resource subscription")
-        let request = ResourceSubscribe.request(.init(uri: uri))
-        _ = try await send(request).value
+        guard isStateless else {
+            let request = ResourceSubscribe.request(.init(uri: uri))
+            _ = try await send(request).value
+            return
+        }
+        guard connection != nil else { throw MCPError.internalError("Client disconnected") }
+        if subscribedResourceURIs.contains(uri) { return }
+        try Task.checkCancellation()
+        if !subscribedResources.contains(uri) {
+            subscribedResources.append(uri)
+            unservedResources.insert(uri)
+        }
+        let waiter = UUID()
+        try await withTaskCancellationHandler { () async throws -> Void in
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Swift.Error>) in
+                addResourceWaiter(waiter, uri: uri, continuation: continuation)
+            }
+        } onCancel: {
+            Task { await self.abandonResourceWaiter(waiter, uri: uri) }
+        }
     }
 
-    public func listResourceTemplates(cursor: String? = nil) async throws -> (
-        templates: [Resource.Template], nextCursor: String?
+    /// Records a `subscribeToResource` call and reopens the stream for it.
+    private func addResourceWaiter(
+        _ id: UUID, uri: String, continuation: CheckedContinuation<Void, Swift.Error>
     ) {
-        try validateServerCapability(\.resources, "Resources")
-        let request: Request<ListResourceTemplates>
-        if let cursor = cursor {
-            request = ListResourceTemplates.request(.init(cursor: cursor))
-        } else {
-            request = ListResourceTemplates.request(.init())
+        guard !Task.isCancelled else {
+            // The cancellation handler drops the URI; opening a stream for
+            // it now would only be replaced again.
+            continuation.resume(throwing: CancellationError())
+            return
         }
-        let result = try await send(request).value
-        return (templates: result.templates, nextCursor: result.nextCursor)
+        resourceWaiters.append((id: id, uri: uri, continuation: continuation))
+        refreshNotificationStream()
+    }
+
+    /// Ends a `subscribeToResource` call whose task was cancelled. Once no
+    /// call waits for the URI, it is dropped if no stream has served it yet.
+    private func abandonResourceWaiter(_ id: UUID, uri: String) {
+        if let index = resourceWaiters.firstIndex(where: { $0.id == id }) {
+            resourceWaiters.remove(at: index).continuation.resume(throwing: CancellationError())
+        }
+        guard unservedResources.contains(uri), !resourceWaiters.contains(where: { $0.uri == uri })
+        else { return }
+        unservedResources.remove(uri)
+        subscribedResources.removeAll { $0 == uri }
+        refreshNotificationStream()
+    }
+
+    /// Stops `notifications/resources/updated` for the resource at `uri`.
+    ///
+    /// On handshake connections this sends `resources/unsubscribe`. At
+    /// 2026-07-28 the background stream is replaced by one without the URI;
+    /// updates may arrive until the server acknowledges the replacement. It
+    /// does nothing when the URI is not subscribed.
+    public func unsubscribeFromResource(uri: String) async throws {
+        guard isStateless else {
+            try validateServerCapability(\.resources?.subscribe, "Resource subscription")
+            let request = ResourceUnsubscribe.request(.init(uri: uri))
+            _ = try await send(request).value
+            return
+        }
+        guard subscribedResources.contains(uri) else { return }
+        subscribedResources.removeAll { $0 == uri }
+        unservedResources.remove(uri)
+        var waiting: [(id: UUID, uri: String, continuation: CheckedContinuation<Void, Swift.Error>)] = []
+        for waiter in resourceWaiters {
+            if waiter.uri == uri {
+                waiter.continuation.resume(throwing: CancellationError())
+            } else {
+                waiting.append(waiter)
+            }
+        }
+        resourceWaiters = waiting
+        refreshNotificationStream()
+    }
+
+    /// The subscribed URIs the open background stream serves (2026-07-28).
+    public var subscribedResourceURIs: Set<String> {
+        Set(notificationStream?.notifications.resourceSubscriptions ?? []).intersection(subscribedResources)
+    }
+
+    /// Lists one page of the server's resource templates
+    /// (`resources/templates/list`). Pass the result's `nextCursor` to get the
+    /// next page.
+    public func listResourceTemplates(cursor: String? = nil) async throws -> ListResourceTemplates.Result {
+        try validateServerCapability(\.resources, "Resources")
+        return try await send(ListResourceTemplates.request(cursor.map { .init(cursor: $0) } ?? .init())).value
     }
 
     // MARK: - Tools
 
-    public func listTools(cursor: String? = nil) async throws -> (
-        tools: [Tool], nextCursor: String?
-    ) {
+    /// Lists one page of the server's tools (`tools/list`). Pass the result's
+    /// `nextCursor` to get the next page.
+    public func listTools(cursor: String? = nil) async throws -> ListTools.Result {
         try validateServerCapability(\.tools, "Tools")
-        let request: Request<ListTools>
-        if let cursor = cursor {
-            request = ListTools.request(.init(cursor: cursor))
-        } else {
-            request = ListTools.request(.init())
-        }
-        let result = try await send(request).value
-        return (tools: result.tools, nextCursor: result.nextCursor)
+        return try await send(ListTools.request(cursor.map { .init(cursor: $0) } ?? .init())).value
     }
 
-    /// Call a tool on the server.
+    /// Calls a tool on the server (`tools/call`).
+    ///
+    /// When the server asks for input, the client answers with its handlers
+    /// (``Configuration/multiRoundTrip``) and returns the final result. When
+    /// the server runs the call as a task, the client polls the task,
+    /// answers its input requests with the same handlers, and returns the
+    /// task's result; see ``TaskHandle/result()``. To cancel the call or read
+    /// its request ID, use ``startToolCall(name:arguments:meta:)``.
     ///
     /// - Parameters:
     ///   - name: The name of the tool to call.
@@ -749,39 +2464,57 @@ public actor Client {
     ///   - meta: Optional request metadata including progress token. If `progressToken` is specified,
     ///           the caller is requesting out-of-band progress notifications for this request.
     ///           Use `onNotification(ProgressNotification.self)` to receive progress updates.
-    /// - Returns: A tuple containing the tool's content response and an optional error flag.
-    /// - Note: For advanced use cases requiring cancellation support, use `send()` directly to get a `RequestContext`.
+    /// - Returns: The result: `content`, `structuredContent`, `isError` and `_meta`. `isError`
+    ///   means the tool ran and failed; a protocol failure is thrown.
     /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/server/tools/#calling-tools
     public func callTool(
         name: String,
         arguments: [String: Value]? = nil,
         meta: Metadata? = nil
-    ) async throws -> (content: [Tool.Content], isError: Bool?) {
+    ) async throws -> CallTool.Result {
         try validateServerCapability(\.tools, "Tools")
-        let request = CallTool.request(.init(name: name, arguments: arguments, meta: meta))
-        let result = try await send(request).value
-        return (content: result.content, isError: result.isError)
+        let request = CallTool.request(toolCall(name: name, arguments: arguments, meta: meta))
+        let result = try Self.complete(try await send(request).value, CallTool.name)
+        guard let task = result.task else { return result }
+        return try await self.task(task).result()
     }
 
-    /// Call a tool on the server.
+    /// Starts a tool call and returns at once, with the call's ``RequestContext``.
     ///
-    /// - Parameters:
-    ///   - name: The name of the tool to call.
-    ///   - arguments: Arguments to use for the tool call.
-    ///   - meta: Optional request metadata including progress token. If `progressToken` is specified,
-    ///           the caller is requesting out-of-band progress notifications for this request.
-    ///           Use `onNotification(ProgressNotification.self)` to receive progress updates.
-    /// - Returns: A tuple containing the tool's content response and an optional error flag.
-    /// - Note: For advanced use cases requiring cancellation support, use `send()` directly to get a `RequestContext`.
-    /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/server/tools/#calling-tools
-    public func callTool(
+    /// Await `value` for the result, or pass `requestID` to
+    /// ``cancelRequest(_:reason:)``; cancelling the task that awaits `value`
+    /// cancels the call too. Unlike ``callTool(name:arguments:meta:)``, an
+    /// input-required result is returned as is when multi round-trip is off,
+    /// and a result that creates a task is returned as is: pass its
+    /// `task` to ``task(_:)`` to follow it.
+    public func startToolCall(
         name: String,
         arguments: [String: Value]? = nil,
         meta: Metadata? = nil
     ) throws -> RequestContext<CallTool.Result> {
         try validateServerCapability(\.tools, "Tools")
-        let request = CallTool.request(.init(name: name, arguments: arguments, meta: meta))
-        return try send(request)
+        return try send(CallTool.request(toolCall(name: name, arguments: arguments, meta: meta)))
+    }
+
+    /// The parameters of a tool call, with `task` when the call should run as
+    /// a task (2025-11-25, ``Configuration/Tasks-swift.struct/augmentation``).
+    private func toolCall(name: String, arguments: [String: Value]?, meta: Metadata?) -> CallTool.Parameters {
+        var params = CallTool.Parameters(name: name, arguments: arguments, meta: meta)
+        if let options = configuration.tasks,
+            let version = negotiatedProtocolVersion, Version.profile(for: version).usesTaskAugmentation,
+            serverCapabilities?.tasks?.requests?.tools?.call != nil,
+            let support = toolTaskSupport[name], options.augmentation.augments(support)
+        {
+            params.task = TaskMetadata(ttl: options.requestedTTL?.wholeMilliseconds)
+        }
+        return params
+    }
+
+    /// Rejects an input-required result, returned when multi round-trip is disabled.
+    private static func complete<R: InputRequiringResult>(_ result: R, _ method: String) throws -> R {
+        guard result.isInputRequired else { return result }
+        throw MCPError.invalidRequest(
+            "\(method) requires input; enable Configuration.multiRoundTrip or use send(_:)")
     }
 
     // MARK: - Sampling
@@ -798,9 +2531,16 @@ public actor Client {
     /// 4. Client reviews the completion (via this handler)
     /// 5. Client returns the result to the server
     ///
+    /// To receive requests with tools, declare `sampling.tools` in
+    /// ``capabilities``. Without it, the client answers a request with `tools`
+    /// or `toolChoice` with -32602, and the handler does not run. The client
+    /// also answers -32602 when the messages break the rules for tool uses and
+    /// tool results.
+    ///
     /// - Parameter handler: A closure that processes sampling requests and returns completions
     /// - Returns: Self for method chaining
     /// - SeeAlso: https://modelcontextprotocol.io/docs/concepts/sampling#how-sampling-works
+    @available(*, deprecated, message: "Sampling is deprecated by the specification (SEP-2577) and can be removed in the first revision released on or after 2027-07-28. To migrate, call the API of an LLM provider from the server.")
     @discardableResult
     public func withSamplingHandler(
         _ handler:
@@ -841,6 +2581,7 @@ public actor Client {
     /// - Parameter handler: A closure that returns the list of available roots
     /// - Returns: Self for method chaining
     /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/client/roots
+    @available(*, deprecated, message: "Roots is deprecated by the specification (SEP-2577) and can be removed in the first revision released on or after 2027-07-28. To migrate, pass directories or files in tool arguments, resource URIs or server configuration.")
     @discardableResult
     public func withRootsHandler(
         _ handler: @escaping @Sendable () async throws -> [Root]
@@ -851,33 +2592,39 @@ public actor Client {
         }
     }
 
-    /// Notify the server that the list of roots has changed
+    /// Notifies the server that the client's roots changed.
     ///
-    /// Clients should send this notification when roots are added, removed,
-    /// or modified to inform connected servers of the change.
+    /// Send it when roots are added, removed or modified. Does nothing on
+    /// stateless connections, where servers ask for roots per request.
     ///
     /// - Throws: MCPError if the client is not connected
     /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/client/roots
+    @available(*, deprecated, message: "Roots is deprecated by the specification (SEP-2577) and can be removed in the first revision released on or after 2027-07-28. To migrate, pass directories or files in tool arguments, resource URIs or server configuration.")
     public func notifyRootsChanged() async throws {
+        if isStateless { return }
         let notification = RootsListChangedNotification.message()
         try await notify(notification)
     }
 
     // MARK: - Logging
 
-    /// Set the minimum logging level for server log messages.
+    /// Sets the lowest log level the server should send.
     ///
-    /// Servers that declare the `logging` capability will send log messages via
-    /// `notifications/message` notifications. Use this method to control which
-    /// severity levels the server should send.
+    /// On handshake connections this sends `logging/setLevel`. On stateless
+    /// connections that method does not exist: the level is sent in the
+    /// `_meta` of every following request instead. Either way it becomes
+    /// ``logLevel``; ``configuration`` does not change.
     ///
     /// - Parameter level: The minimum log level to receive
     /// - Throws: MCPError if the client is not connected or if the server doesn't support logging
     /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/server/utilities/logging/
+    @available(*, deprecated, message: "Logging is deprecated by the specification (SEP-2577) and can be removed in the first revision released on or after 2027-07-28. To migrate, log to stderr (stdio) or use OpenTelemetry.")
     public func setLoggingLevel(_ level: LogLevel) async throws {
         try validateServerCapability(\.logging, "Logging")
-        let request = SetLoggingLevel.request(.init(level: level))
-        _ = try await send(request).value
+        if !isStateless {
+            _ = try await send(SetLoggingLevel.request(.init(level: level))).value
+        }
+        logLevel = level
     }
 
     // MARK: - Completions
@@ -951,13 +2698,22 @@ public actor Client {
             "Processing response",
             metadata: ["id": "\(response.id)"])
 
+        let isToolCall = pendingToolCalls.remove(response.id) != nil
+        var abandoned = false
+        if let index = abandonedToolCalls.firstIndex(of: response.id) {
+            abandonedToolCalls.remove(at: index)
+            abandoned = true
+        }
+
         // Attempt to remove the pending request using the response ID.
         // Resume with the response only if it hadn't yet been removed.
         if let removedRequest = self.removePendingRequest(id: response.id) {
             // If we successfully removed it, resume its continuation.
             switch response.result {
             case .success(let value):
-                removedRequest.resume(returning: value)
+                // Refused when the caller was cancelled and its
+                // `cancelRequest` has not run yet: the call is abandoned too.
+                if !removedRequest.resume(returning: value), isToolCall { abandoned = true }
             case .failure(let error):
                 removedRequest.resume(throwing: error)
             }
@@ -969,12 +2725,27 @@ public actor Client {
                 metadata: ["id": "\(response.id)"]
             )
         }
+
+        // The call was cancelled after the server created a task for it.
+        if abandoned, case .success(let value) = response.result,
+            let taskID = value.objectValue?["taskId"]?.stringValue
+                ?? value.objectValue?["task"]?.objectValue?["taskId"]?.stringValue
+        {
+            Task { try? await self.cancelTask(taskID) }
+        }
     }
 
     private func handleMessage(_ message: Message<AnyNotification>) async {
         await logger?.trace(
             "Processing notification",
             metadata: ["method": "\(message.method)"])
+
+        // A replaced background stream may carry what its successor does not.
+        if let stream = message._meta?.subscriptionID, retiredNotificationStreams.contains(stream),
+            !wantsNotification(message)
+        {
+            return
+        }
 
         // Find notification handlers for this method
         guard let handlers = notificationHandlers[message.method] else { return }
@@ -994,7 +2765,108 @@ public actor Client {
         }
     }
 
-    private func handleIncomingRequest(_ request: Request<AnyMethod>) async {
+    /// Whether the background stream still asks for `message`.
+    private func wantsNotification(_ message: Message<AnyNotification>) -> Bool {
+        let wanted = wantedNotifications
+        switch message.method {
+        case ToolListChangedNotification.name: return wanted.toolsListChanged == true
+        case PromptListChangedNotification.name: return wanted.promptsListChanged == true
+        case ResourceListChangedNotification.name: return wanted.resourcesListChanged == true
+        case ResourceUpdatedNotification.name:
+            guard case .string(let uri)? = message.params.objectValue?["uri"] else { return false }
+            return subscribedResources.contains(uri)
+        default: return true
+        }
+    }
+
+    /// Runs the handler of a server-to-client request in its own task, so
+    /// that the receive loop keeps reading while it runs. At most
+    /// ``Configuration/maxConcurrentServerRequests`` run at once; up to
+    /// ``incomingRequestBacklog`` more wait, and further ones are refused.
+    private func startIncomingRequest(_ request: Request<AnyMethod>, on transport: any Transport) {
+        func refuse(_ error: MCPError) {
+            Task { try? await self.send(AnyMethod.response(id: request.id, error: error), on: transport) }
+        }
+        // 2026-07-28 has no server-to-client requests.
+        if isStateless {
+            refuse(.methodNotFound("\(request.method) cannot be sent at protocol version \(negotiatedProtocolVersion ?? "")"))
+            return
+        }
+        // Answered at once, outside the handler slots: it checks liveness.
+        if request.method == Ping.name {
+            Task {
+                if self.methodHandlers[Ping.name] != nil {
+                    await self.handleIncomingRequest(request, on: transport)
+                } else {
+                    try? await self.send(Response<AnyMethod>(id: request.id, result: .object([:])), on: transport)
+                }
+            }
+            return
+        }
+        if incomingRequests[request.id] != nil || queuedIncomingRequests.contains(where: { $0.id == request.id }) {
+            refuse(.invalidRequest("A request with id \(request.id) is already in progress"))
+            return
+        }
+        if hasFreeIncomingSlot {
+            runIncomingRequest(request, on: transport)
+            return
+        }
+        guard queuedIncomingRequests.count < Self.incomingRequestBacklog else {
+            refuse(.internalError("Too many requests from the server"))
+            return
+        }
+        queuedIncomingRequests.append(request)
+    }
+
+    private func runIncomingRequest(_ request: Request<AnyMethod>, on transport: any Transport) {
+        let token = UUID()
+        let task = Task {
+            await Client.$incomingHandlerToken.withValue(token) {
+                await self.handleIncomingRequest(request, on: transport)
+            }
+            self.incomingRequestFinished(request.id, token: token)
+        }
+        incomingRequests[request.id] = IncomingHandler(token: token, task: task)
+    }
+
+    /// Frees the slot of a finished handler and starts waiting requests.
+    private func incomingRequestFinished(_ id: ID, token: UUID) {
+        if incomingRequests[id]?.token == token {
+            incomingRequests[id] = nil
+        }
+        drainingIncomingRequests.remove(token)
+        startQueuedIncomingRequests()
+    }
+
+    /// Whether a handler may start: running and cancelled-but-running
+    /// handlers count against ``Configuration/maxConcurrentServerRequests``.
+    private var hasFreeIncomingSlot: Bool {
+        incomingRequests.count + drainingIncomingRequests.count
+            < max(configuration.maxConcurrentServerRequests, 1)
+    }
+
+    private func startQueuedIncomingRequests() {
+        // The queue belongs to the current connection; closing it empties the queue.
+        guard let connection else { return }
+        while hasFreeIncomingSlot, !queuedIncomingRequests.isEmpty {
+            runIncomingRequest(queuedIncomingRequests.removeFirst(), on: connection)
+        }
+    }
+
+    /// Cancels the handler of a server-to-client request, or drops it while
+    /// it waits. Returns `false` when there is no such request.
+    private func cancelIncomingRequest(_ id: ID) -> Bool {
+        if let index = queuedIncomingRequests.firstIndex(where: { $0.id == id }) {
+            queuedIncomingRequests.remove(at: index)
+            return true
+        }
+        guard let handler = incomingRequests.removeValue(forKey: id) else { return false }
+        drainingIncomingRequests.insert(handler.token)
+        handler.task.cancel()
+        return true
+    }
+
+    private func handleIncomingRequest(_ request: Request<AnyMethod>, on transport: any Transport) async {
         await logger?.trace(
             "Processing incoming request from server",
             metadata: ["method": "\(request.method)", "id": "\(request.id)"])
@@ -1006,7 +2878,7 @@ public actor Client {
             let error = MCPError.methodNotFound("Unknown method: \(request.method)")
             let response = AnyMethod.response(id: request.id, error: error)
             do {
-                try await send(response)
+                try await send(response, on: transport)
             } catch {
                 await logger?.error(
                     "Failed to send error response",
@@ -1017,12 +2889,15 @@ public actor Client {
 
         do {
             let response = try await handler(request)
-            try await send(response)
+            // A cancelled request is not answered.
+            guard !Task.isCancelled else { return }
+            try await send(response, on: transport)
         } catch {
+            guard !Task.isCancelled else { return }
             let mcpError = error as? MCPError ?? MCPError.internalError(error.localizedDescription)
             let response = AnyMethod.response(id: request.id, error: mcpError)
             do {
-                try await send(response)
+                try await send(response, on: transport)
             } catch {
                 await logger?.error(
                     "Failed to send error response",

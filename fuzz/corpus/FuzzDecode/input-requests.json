@@ -1,0 +1,1 @@
+{"name":{"method":"elicitation/create","params":{"mode":"form","message":"Name?","requestedSchema":{"type":"object","properties":{"n":{"type":"string"}}}}},"roots":{"method":"roots/list"}}

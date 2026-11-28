@@ -1,8 +1,6 @@
 import Foundation
 
-#if canImport(CryptoKit)
-    import CryptoKit
-#endif
+import Crypto
 
 /// Pure PKCE (RFC 7636) helpers required by the authorization_code flow.
 public enum PKCE {
@@ -33,14 +31,11 @@ public enum PKCE {
     ///
     /// - Parameter verifier: A code verifier produced by ``makeVerifier(length:)``.
     /// - Returns: The base64url-encoded SHA-256 hash of the verifier.
-    /// - Throws: ``OAuthAuthorizationError/pkceS256Unavailable`` on platforms without CryptoKit.
+    /// - Throws: Nothing. SHA-256 comes from swift-crypto on every platform;
+    ///   the function keeps `throws` for source compatibility.
     public static func makeChallenge(from verifier: String) throws -> String {
-        #if canImport(CryptoKit)
-            let hash = SHA256.hash(data: Data(verifier.utf8))
-            return Data(hash).base64URLEncodedString()
-        #else
-            throw OAuthAuthorizationError.pkceS256Unavailable
-        #endif
+        let hash = SHA256.hash(data: Data(verifier.utf8))
+        return Data(hash).base64URLEncodedString()
     }
 
     /// Verifies that the authorization server metadata advertises S256 PKCE support.

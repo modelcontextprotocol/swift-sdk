@@ -1,0 +1,11 @@
+# Expected failures at the 2026-07-28 wire ('--suite all --spec-version
+# 2026-07-28'): stateless requests with per-request _meta.
+#
+# Generated; do not edit. Regenerate with:
+#   scripts/run-conformance.sh --spec-version 2026-07-28 --mode both --update-baseline
+#
+# Entries are '<scenario>:<check-id>', or '<scenario>' for a scenario that
+# failed without producing a failing check. The harness fails a run on any
+# unlisted failure and on any listed entry that now passes.
+server: []
+client: []

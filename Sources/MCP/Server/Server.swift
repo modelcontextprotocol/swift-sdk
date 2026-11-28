@@ -16,14 +16,85 @@ public actor Server {
         public static let strict = Configuration(strict: true)
 
         /// When strict mode is enabled, the server:
-        /// - Requires clients to send an initialize request before any other requests
-        /// - Rejects all requests from uninitialized clients with a protocol error
+        /// - Requires handshake-era clients to send an initialize request before
+        ///   any other requests
+        /// - Rejects requests from uninitialized handshake-era clients with a
+        ///   protocol error
+        ///
+        /// Stateless requests (2026-07-28 and later) carry their client's
+        /// capabilities and are never initialized; strict mode does not gate
+        /// them. To gate clients, pass an `initializeHook` and a
+        /// `statelessRequestHook` to ``Server/start(transport:initializeHook:statelessRequestHook:)``.
         ///
         /// While the MCP specification requires clients to initialize the connection
         /// before sending other requests, some implementations may not follow this.
         /// Disabling strict mode allows the server to be more lenient with non-compliant
         /// clients, though this may lead to undefined behavior.
         public var strict: Bool
+
+        /// The protocol versions the server serves, newest first.
+        ///
+        /// Handshake revisions are negotiated through `initialize`; stateless
+        /// revisions (2026-07-28 and later) are served per request. Requests
+        /// for other versions are rejected with -32022.
+        public var protocolVersions: [String]
+
+        /// Cache hints for results of cacheable methods that do not set their
+        /// own, keyed by method name (for example `tools/list`). Applies to
+        /// stateless requests only.
+        public var cacheHints: [String: CacheHint]
+
+        /// Cache hint for cacheable methods missing from ``cacheHints``.
+        public var defaultCacheHint: CacheHint
+
+        /// The most `subscriptions/listen` streams open at once. Further
+        /// streams are refused with -32600.
+        public var maxSubscriptionStreams: Int
+
+        /// The most resource URIs one `subscriptions/listen` stream may name.
+        /// A stream that names more is refused with -32602.
+        public var maxResourceSubscriptions: Int
+
+        /// Creates a server configuration.
+        public init(
+            strict: Bool = false,
+            protocolVersions: [String] = Version.stateless + Version.handshake,
+            cacheHints: [String: CacheHint] = [:],
+            defaultCacheHint: CacheHint = .uncached,
+            maxSubscriptionStreams: Int = 1000,
+            maxResourceSubscriptions: Int = 256
+        ) {
+            self.strict = strict
+            self.protocolVersions = protocolVersions
+            self.cacheHints = cacheHints
+            self.defaultCacheHint = defaultCacheHint
+            self.maxSubscriptionStreams = maxSubscriptionStreams
+            self.maxResourceSubscriptions = maxResourceSubscriptions
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case strict, protocolVersions, cacheHints, defaultCacheHint
+            case maxSubscriptionStreams, maxResourceSubscriptions
+        }
+
+        /// Decodes a configuration; keys added after `strict` take their
+        /// defaults when absent.
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            let defaults = Configuration()
+            strict = try container.decode(Bool.self, forKey: .strict)
+            protocolVersions =
+                try container.decodeIfPresent([String].self, forKey: .protocolVersions) ?? defaults.protocolVersions
+            cacheHints = try container.decodeIfPresent([String: CacheHint].self, forKey: .cacheHints) ?? [:]
+            defaultCacheHint =
+                try container.decodeIfPresent(CacheHint.self, forKey: .defaultCacheHint) ?? defaults.defaultCacheHint
+            maxSubscriptionStreams =
+                try container.decodeIfPresent(Int.self, forKey: .maxSubscriptionStreams)
+                ?? defaults.maxSubscriptionStreams
+            maxResourceSubscriptions =
+                try container.decodeIfPresent(Int.self, forKey: .maxResourceSubscriptions)
+                ?? defaults.maxResourceSubscriptions
+        }
     }
 
     /// Implementation information
@@ -41,6 +112,7 @@ public actor Server {
         /// Optional set of sized icons for display in a user interface
         public let icons: [Icon]?
 
+        /// Creates the server implementation information.
         public init(
             name: String,
             version: String,
@@ -67,6 +139,7 @@ public actor Server {
             /// Whether the list of resources has changed
             public var listChanged: Bool?
 
+            /// Creates the `resources` capability.
             public init(
                 subscribe: Bool? = nil,
                 listChanged: Bool? = nil
@@ -81,6 +154,7 @@ public actor Server {
             /// Whether the server notifies clients when tools change
             public var listChanged: Bool?
 
+            /// Creates the `tools` capability.
             public init(listChanged: Bool? = nil) {
                 self.listChanged = listChanged
             }
@@ -91,6 +165,7 @@ public actor Server {
             /// Whether the server notifies clients when prompts change
             public var listChanged: Bool?
 
+            /// Creates the `prompts` capability.
             public init(listChanged: Bool? = nil) {
                 self.listChanged = listChanged
             }
@@ -98,17 +173,68 @@ public actor Server {
 
         /// Logging capabilities
         public struct Logging: Hashable, Codable, Sendable {
+            /// Creates the `logging` capability, which has no settings.
             public init() {}
         }
 
         /// Completions capabilities
         public struct Completions: Hashable, Codable, Sendable {
+            /// Creates the `completions` capability, which has no settings.
             public init() {}
+        }
+
+        /// The `tasks` capability of protocol 2025-11-25 (SEP-1686): which
+        /// task methods the server serves and which requests it runs as tasks.
+        ///
+        /// ``Server/withTasks(_:)`` sets it for 2025-11-25 clients; at
+        /// 2026-07-28 tasks are the `io.modelcontextprotocol/tasks` extension.
+        public struct Tasks: Hashable, Codable, Sendable {
+            /// The requests that may run as tasks.
+            public struct Requests: Hashable, Codable, Sendable {
+                /// Tool requests that may run as tasks.
+                public struct Tools: Hashable, Codable, Sendable {
+                    /// Present when `tools/call` may run as a task.
+                    public var call: [String: Value]?
+
+                    /// Creates the tool requests that may run as tasks.
+                    public init(call: [String: Value]? = nil) {
+                        self.call = call
+                    }
+                }
+
+                /// Tool requests that may run as tasks.
+                public var tools: Tools?
+
+                /// Creates the requests that may run as tasks.
+                public init(tools: Tools? = nil) {
+                    self.tools = tools
+                }
+            }
+
+            /// Present when the server serves `tasks/list`.
+            public var list: [String: Value]?
+            /// Present when the server serves `tasks/cancel`.
+            public var cancel: [String: Value]?
+            /// The requests that may run as tasks.
+            public var requests: Requests?
+
+            /// Creates the `tasks` capability.
+            public init(
+                list: [String: Value]? = nil, cancel: [String: Value]? = nil, requests: Requests? = nil
+            ) {
+                self.list = list
+                self.cancel = cancel
+                self.requests = requests
+            }
         }
 
         /// Completions capabilities
         public var completions: Completions?
         /// Logging capabilities
+        ///
+        /// > Important: Logging is deprecated by the specification (SEP-2577) and can be removed in
+        ///   the first revision released on or after 2027-07-28. It works on every revision that has
+        ///   it. To migrate, log to stderr (stdio) or use OpenTelemetry.
         public var logging: Logging?
         /// Prompts capabilities
         public var prompts: Prompts?
@@ -116,19 +242,33 @@ public actor Server {
         public var resources: Resources?
         /// Tools capabilities
         public var tools: Tools?
+        /// Task capabilities (2025-11-25)
+        public var tasks: Tasks?
+        /// Experimental features supported by the server
+        public var experimental: [String: Value]?
+        /// Protocol extensions supported by the server, keyed by extension
+        /// identifier, with extension-defined settings (SEP-2133).
+        public var extensions: [String: Value]?
 
+        /// Creates server capabilities.
         public init(
             completions: Completions? = nil,
             logging: Logging? = nil,
             prompts: Prompts? = nil,
             resources: Resources? = nil,
-            tools: Tools? = nil
+            tools: Tools? = nil,
+            experimental: [String: Value]? = nil,
+            extensions: [String: Value]? = nil,
+            tasks: Tasks? = nil
         ) {
             self.completions = completions
             self.logging = logging
             self.prompts = prompts
             self.resources = resources
             self.tools = tools
+            self.experimental = experimental
+            self.extensions = extensions
+            self.tasks = tasks
         }
     }
 
@@ -148,7 +288,13 @@ public actor Server {
         e.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         return e
     }()
-    private let decoder = JSONDecoder()
+    /// Decodes incoming messages with `data:` URL strings kept as strings;
+    /// handlers get `.data` from their own typed decode.
+    private let decoder: JSONDecoder = {
+        let decoder = JSONDecoder()
+        decoder.userInfo[.valuePreservesStrings] = true
+        return decoder
+    }()
 
     /// The server name
     public nonisolated var name: String { serverInfo.name }
@@ -170,13 +316,52 @@ public actor Server {
 
     /// Request handlers
     private var methodHandlers: [String: RequestHandlerBox] = [:]
+    /// The methods whose handler is the SDK's default, which `start` may
+    /// replace; a handler registered with `withMethodHandler` is never replaced.
+    private var defaultHandlerMethods: Set<String> = []
+    /// The level of the last `logging/setLevel` on this connection; `nil`
+    /// before one, when every message is sent.
+    private var clientLogLevel: LogLevel?
     /// Notification handlers
     private var notificationHandlers: [String: [NotificationHandlerBox]] = [:]
+    /// Whether the built-in `notifications/cancelled` handler is registered:
+    /// once per server, not on every `start`.
+    private var registeredCancellationHandler = false
     /// Pending request tasks (for cancellation support)
     private var pendingRequestTasks: [ID: Task<Response<AnyMethod>, Error>] = [:]
+    /// Requests received whose handler task is not registered yet, and
+    /// whether `notifications/cancelled` arrived for them meanwhile.
+    private var startingRequests: [ID: Bool] = [:]
+    /// The methods of requests sent while no client request was handled,
+    /// each logged once per connection (SEP-2260).
+    private var unassociatedRequestMethods: Set<String> = []
+    /// Tool names logged as invalid or duplicate (SEP-986).
+    private var toolNameWarnings = ToolNameWarnings()
+
+    /// Runs and keeps tasks; set by ``withTasks(_:)``.
+    private var taskManager: TaskManager?
+
+    /// The resources the server answers before the application's handlers;
+    /// set by ``withAppResources(_:listInResources:)`` and
+    /// ``withSkills(_:listInResources:)``.
+    private var builtInResourceSources: [BuiltInResourceSource] = []
+    /// This server's observer of `taskManager`'s changes.
+    private var taskObserver: Int?
+    private var observingTasks = false
+    /// The 2025-11-25 tasks this server created, by the status last sent in
+    /// `notifications/tasks/status`, with when each task expires.
+    private var notifiedTasks: [String: (status: TaskStatus, expiresAt: Date?)] = [:]
 
     /// Pending requests sent to the client, awaiting responses
     private var pendingRequests: [ID: AnyPendingRequest] = [:]
+    /// Requests to the client that `send` created but has not registered in
+    /// `pendingRequests` yet. Removing an id withdraws the request before it
+    /// is sent.
+    private var unsentRequests: Set<ID> = []
+    /// Incremented by ``stop()``. Work started for a connection that `stop()`
+    /// ended carries the old value: a request received on it is not answered,
+    /// and a request to its client that was not sent yet is not sent.
+    private var connectionGeneration = 0
 
     /// Whether the server is initialized
     private var isInitialized = false
@@ -186,11 +371,56 @@ public actor Server {
     private var clientCapabilities: Client.Capabilities?
     /// The protocol version
     private var protocolVersion: String?
-    /// The list of subscriptions
-    private var subscriptions: [String: Set<ID>] = [:]
+    /// Open `subscriptions/listen` streams.
+    private var listeners: [Int: Listener] = [:]
+    private var nextListenerToken = 0
+    /// The tasks handling `subscriptions/listen` requests, by request id, so
+    /// that ``stop()`` can wait for the results of the streams it ends.
+    private var listenRequests: [ID: Task<Void, Never>] = [:]
+    /// Whether ``stop()`` is ending the listen streams; a stream that would
+    /// open meanwhile is refused.
+    private var isStopping = false
     /// The task for the message handling loop
     private var task: Task<Void, Never>?
+    /// Whether ``start(transport:initializeHook:statelessRequestHook:)`` got an initialize hook.
+    private var hasInitializeHook = false
+    /// Runs before each stateless request; see ``start(transport:initializeHook:statelessRequestHook:)``.
+    private var statelessRequestHook: StatelessRequestHook?
 
+    /// A hook that runs before a stateless request (2026-07-28 and later) is
+    /// handled, with the client info and capabilities from its `_meta`.
+    /// ``Server/currentHandlerContext`` is set, so the hook can read the
+    /// originating HTTP request. Throwing refuses the request: an
+    /// ``MCPError`` is sent as is, any other error as -32600.
+    ///
+    /// Behind ``StatelessHTTPServerTransport`` it also runs before every
+    /// handshake request other than `initialize`, with `nil` client info and
+    /// empty capabilities: such a request has no session, so the
+    /// `initialize` that passed the initialize hook does not cover it.
+    public typealias StatelessRequestHook =
+        @Sendable (_ clientInfo: Client.Info?, _ capabilities: Client.Capabilities) async throws -> Void
+
+    /// Seals and verifies `requestState` at 2026-07-28; `nil` when disabled.
+    private nonisolated let requestStateBoundary: RequestStateBoundary?
+
+    /// Creates a server.
+    ///
+    /// - Parameters:
+    ///   - name: The server name.
+    ///   - version: The server version.
+    ///   - title: A human-readable title for display.
+    ///   - description: What the server does, for display.
+    ///   - websiteUrl: The URL of the server's website.
+    ///   - icons: Icons for display in a user interface.
+    ///   - instructions: How to use the server, for the client's model.
+    ///   - capabilities: The features the server provides.
+    ///   - configuration: Protocol and validation settings.
+    ///   - requestStateProtection: How the `requestState` of input-required
+    ///     results is protected at 2026-07-28 (SEP-2322). The default uses a
+    ///     key held only by this process; servers with several instances pass
+    ///     shared keys. `nil` sends the state as the handler wrote it and
+    ///     trusts what clients echo: use it only when the state cannot affect
+    ///     authorization, resource access or business logic.
     public init(
         name: String,
         version: String,
@@ -200,7 +430,8 @@ public actor Server {
         icons: [Icon]? = nil,
         instructions: String? = nil,
         capabilities: Server.Capabilities = .init(),
-        configuration: Configuration = .default
+        configuration: Configuration = .default,
+        requestStateProtection: RequestStateProtection? = .ephemeral()
     ) {
         self.serverInfo = Server.Info(
             name: name,
@@ -213,19 +444,53 @@ public actor Server {
         self.capabilities = capabilities
         self.configuration = configuration
         self.instructions = instructions
+        self.requestStateBoundary = requestStateProtection.map {
+            RequestStateBoundary(protection: $0, audience: $0.audience ?? name)
+        }
     }
 
     /// Start the server
+    ///
+    /// `start` adds the SDK's handlers for `initialize`, `ping`,
+    /// `logging/setLevel` (with the `logging` capability),
+    /// `subscriptions/listen` and `server/discover`, except where a handler
+    /// registered with ``withMethodHandler(_:handler:)`` exists: that one is
+    /// kept. An application `Initialize` handler therefore replaces the SDK's
+    /// handshake: `initializeHook` and version negotiation do not run, and the
+    /// server neither records the client's info and capabilities nor counts
+    /// as initialized: list-changed and resource-updated notifications are
+    /// not sent on the connection, and with
+    /// ``Configuration/strict-swift.property`` later requests are refused.
+    ///
     /// - Parameters:
     ///   - transport: The transport to use for the server
-    ///   - initializeHook: An optional hook that runs when the client sends an initialize request
+    ///   - initializeHook: An optional hook that runs when the client sends an
+    ///     initialize request, in the SDK's `Initialize` handler
+    ///   - statelessRequestHook: An optional hook that runs before every
+    ///     stateless request (2026-07-28 and later), which never sends
+    ///     `initialize`, and behind ``StatelessHTTPServerTransport`` before
+    ///     every handshake request other than `initialize`, which has no
+    ///     session. When `initializeHook` is set and this hook is not,
+    ///     stateless requests are refused with -32022, so a gate in
+    ///     `initializeHook` cannot be bypassed; clients then fall back to
+    ///     `initialize`. Behind ``StatelessHTTPServerTransport`` handshake
+    ///     requests other than `initialize` are then refused with -32600.
     public func start(
         transport: any Transport,
-        initializeHook: (@Sendable (Client.Info, Client.Capabilities) async throws -> Void)? = nil
+        initializeHook: (@Sendable (Client.Info, Client.Capabilities) async throws -> Void)? = nil,
+        statelessRequestHook: StatelessRequestHook? = nil
     ) async throws {
         self.connection = transport
+        self.hasInitializeHook = initializeHook != nil
+        self.statelessRequestHook = statelessRequestHook
         registerDefaultHandlers(initializeHook: initializeHook)
-        registerCancellationHandler()
+        if !registeredCancellationHandler {
+            registeredCancellationHandler = true
+            registerCancellationHandler()
+        }
+        if let stateless = transport as? StatelessHTTPServerTransport {
+            await stateless.serve(protocolVersions: configuration.protocolVersions)
+        }
         try await transport.connect()
 
         await logger?.debug(
@@ -233,6 +498,7 @@ public actor Server {
         )
 
         // Start message handling loop
+        let generation = connectionGeneration
         task = Task {
             do {
                 let stream = await transport.receive()
@@ -243,13 +509,58 @@ public actor Server {
                     do {
                         // Attempt to decode as batch first, then as individual response, request, or notification
                         if let batch = try? decoder.decode(Server.Batch.self, from: data) {
-                            try await handleBatch(batch)
+                            // Recorded before the task, as for a single request,
+                            // so that a cancellation arriving first is kept.
+                            let admitted = admittingRequests(of: batch)
+                            // Answers to this server's requests (JSON-RPC 2.0
+                            // §6) resume their callers now, not after the
+                            // batch's requests are handled.
+                            for case .response(let response) in batch.items {
+                                await handleResponse(response)
+                            }
+                            // Off the receive loop: a batched request may wait
+                            // for the client's answer to a bridged input request.
+                            Task {
+                                do {
+                                    try await self.handleBatch(admitted, generation: generation)
+                                } catch {
+                                    await self.logger?.error(
+                                        "Error processing batch", metadata: ["error": "\(error)"])
+                                }
+                            }
                         } else if let response = try? decoder.decode(AnyResponse.self, from: data) {
                             await handleResponse(response)
                         } else if let request = try? decoder.decode(AnyRequest.self, from: data) {
+                            guard admit(request.id) else {
+                                do {
+                                    try await send(
+                                        AnyMethod.response(
+                                            id: request.id, error: .invalidRequest(Self.inProgress(request.id))))
+                                } catch {
+                                    await logger?.error(
+                                        "Failed to send error response",
+                                        metadata: ["id": "\(request.id)", "error": "\(error)"])
+                                }
+                                continue
+                            }
                             // Handle request in a separate task to avoid blocking the receive loop
-                            Task {
-                                _ = try? await self.handleRequest(request, sendResponse: true)
+                            let isListen = request.method == SubscriptionsListen.name
+                            let handling = Task {
+                                _ = try? await self.handleRequest(
+                                    request, sendResponse: true, generation: generation)
+                            }
+                            // Before the task runs; handleRequest removes it.
+                            if isListen { listenRequests[request.id] = handling }
+                        } else if case .invalid(_, let id, let reason) = try? decoder.decode(
+                            JSONRPCMessageKind.self, from: data)
+                        {
+                            // JSON-RPC 2.0 §5: a request whose `id` or
+                            // `jsonrpc` is invalid gets -32600; it is not a
+                            // notification.
+                            if let id {
+                                try? await send(AnyMethod.response(id: id, error: .invalidRequest(reason)))
+                            } else {
+                                await sendUnattributedError(.invalidRequest(reason))
                             }
                         } else if let message = try? decoder.decode(AnyMessage.self, from: data) {
                             try await handleMessage(message)
@@ -274,12 +585,15 @@ public actor Server {
                     } catch {
                         await logger?.error(
                             "Error processing message", metadata: ["error": "\(error)"])
-                        let response = AnyMethod.response(
-                            id: requestID ?? .random,
-                            error: error as? MCPError
-                                ?? MCPError.internalError(error.localizedDescription)
-                        )
-                        try? await send(response)
+                        let mcpError =
+                            error as? MCPError ?? MCPError.internalError(error.localizedDescription)
+                        if let requestID {
+                            try? await send(AnyMethod.response(id: requestID, error: mcpError))
+                        } else if case .parseError = mcpError {
+                            // A message that could not be read: `"id": null`.
+                            await sendUnattributedError(mcpError)
+                        }
+                        // Notifications are never answered.
                     }
                 }
             } catch {
@@ -291,23 +605,73 @@ public actor Server {
     }
 
     /// Stop the server
+    ///
+    /// Open `subscriptions/listen` streams end with their result, as with
+    /// ``closeSubscriptions()``, and `stop()` waits until those results are
+    /// sent before it closes the transport. A stream that is still being
+    /// authorized is refused.
+    ///
+    /// The server can be started again with
+    /// ``start(transport:initializeHook:statelessRequestHook:)``; the next
+    /// connection starts from a fresh handshake, with no client info,
+    /// capabilities or negotiated protocol version from the previous one.
     public func stop() async {
+        isStopping = true
+        defer { isStopping = false }
+        closeSubscriptions()
+        // The handlers resume only once this suspends: closing the
+        // transport first lost their results.
+        let ending = listeners.values.compactMap { listenRequests[$0.context.id] }
+        for handling in ending { await handling.value }
+
+        if let manager = taskManager, let token = taskObserver {
+            taskObserver = nil
+            observingTasks = false
+            await manager.removeObserver(token)
+        }
+        notifiedTasks = [:]
         task?.cancel()
         task = nil
+        unassociatedRequestMethods = []
+        clientLogLevel = nil
+        toolNameWarnings = ToolNameWarnings()
 
-        // Clear pending requests with errors
+        // Their responses can no longer be sent. The requests of this
+        // connection are not answered from here on, and those whose handler
+        // task is not registered yet do not start one.
+        connectionGeneration += 1
+        let handlerTasks = pendingRequestTasks
+        pendingRequestTasks = [:]
+        for handler in handlerTasks.values { handler.cancel() }
+        startingRequests = [:]
+
+        // Clear pending requests with errors. A request not registered yet
+        // fails when it would register.
         let pendingRequestsToCancel = self.pendingRequests
         self.pendingRequests = [:]
+        unsentRequests.removeAll()
         for (_, request) in pendingRequestsToCancel {
             request.resume(throwing: MCPError.internalError("Server disconnected"))
         }
 
-        if let connection = connection {
-            await connection.disconnect()
-        }
+        // The handshake belongs to the connection: after a restart the next
+        // client sends its own `initialize`.
+        isInitialized = false
+        clientInfo = nil
+        clientCapabilities = nil
+        protocolVersion = nil
+        servedStatelessRequest = false
+
+        // Cleared first: nothing is sent on a transport that is disconnecting.
+        let stoppedConnection = connection
         connection = nil
+        await stoppedConnection?.disconnect()
     }
 
+    /// Waits until the message handling loop ends.
+    ///
+    /// The loop ends when the transport stops delivering messages or on
+    /// ``stop()``. Returns at once when the server was not started.
     public func waitUntilCompleted() async {
         await task?.value
     }
@@ -330,9 +694,66 @@ public actor Server {
         /// path.
         public let httpContext: HTTPRequest?
 
-        package init(id: ID, httpContext: HTTPRequest?) {
+        /// The protocol version of the request: from its `_meta` for stateless
+        /// requests, otherwise the version negotiated by `initialize`.
+        public let protocolVersion: String?
+
+        /// The capabilities the client declared for this request, or at
+        /// `initialize` for handshake connections.
+        public let clientCapabilities: Client.Capabilities?
+
+        /// The client implementation, if it identified itself.
+        public let clientInfo: Client.Info?
+
+        /// The lowest log level the client wants for this request. Stateless
+        /// requests that omit it receive no log notifications.
+        public let logLevel: LogLevel?
+
+        /// Whether the request is a self-contained 2026-07-28 request.
+        public let isStateless: Bool
+
+        /// The method of the request; `nil` for a context made by the application.
+        var method: String?
+
+        /// How the request may run as a task; set for `tools/call` on a
+        /// server with ``Server/withTasks(_:)``.
+        var taskRuntime: TaskRuntime?
+
+        /// Sends input requests to the client during the request; set on
+        /// connections that allow server requests.
+        var inputBridge: InputBridge?
+
+        /// Sends progress for the request's progress token; set when it has one.
+        var progressReporter: ProgressReporter?
+
+        /// The feature profile of ``protocolVersion``.
+        public var profile: ProtocolProfile? { protocolVersion.map(Version.profile(for:)) }
+
+        /// Creates a context, for example to test a handler that reads
+        /// ``Server/currentHandlerContext`` without a connection:
+        ///
+        /// ```swift
+        /// let context = Server.HandlerContext(id: 1, httpContext: nil, isStateless: true)
+        /// let result = try await Server.$currentHandlerContext.withValue(context) {
+        ///     try await handler(params)
+        /// }
+        /// ```
+        public init(
+            id: ID,
+            httpContext: HTTPRequest?,
+            protocolVersion: String? = nil,
+            clientCapabilities: Client.Capabilities? = nil,
+            clientInfo: Client.Info? = nil,
+            logLevel: LogLevel? = nil,
+            isStateless: Bool = false
+        ) {
             self.id = id
             self.httpContext = httpContext
+            self.protocolVersion = protocolVersion
+            self.clientCapabilities = clientCapabilities
+            self.clientInfo = clientInfo
+            self.logLevel = logLevel
+            self.isStateless = isStateless
         }
     }
 
@@ -353,16 +774,648 @@ public actor Server {
     // MARK: - Registration
 
     /// Register a method handler
+    ///
+    /// Handlers for `tools/call`, `prompts/get` and `resources/read` may
+    /// return an input-required result (SEP-2322), made with
+    /// `inputRequired(_:requestState:_meta:)`. At 2026-07-28 it goes to the
+    /// client, which retries with the responses. For earlier clients the
+    /// server sends the input requests itself and calls the handler again
+    /// with the responses, calling it at most 10 times, so one handler serves both.
+    ///
+    /// A handler for a method the SDK answers itself (`initialize`, `ping`,
+    /// `logging/setLevel`, `subscriptions/listen`, `server/discover`)
+    /// replaces the SDK's, whether registered before or after
+    /// ``start(transport:initializeHook:statelessRequestHook:)``. For
+    /// `Initialize`, the `initializeHook` passed to `start` then does not run.
     @discardableResult
     public func withMethodHandler<M: Method>(
         _ type: M.Type,
         handler: @escaping @Sendable (M.Parameters) async throws -> M.Result
     ) -> Self {
-        methodHandlers[M.name] = TypedRequestHandler { (request: Request<M>) -> Response<M> in
-            let result = try await handler(request.params)
+        let roundTrips = MRTR.carriers.contains(M.name)
+        methodHandlers[M.name] = TypedRequestHandler { [weak self] (request: Request<M>) -> Response<M> in
+            guard roundTrips, let self else {
+                return Response(id: request.id, result: try await handler(request.params))
+            }
+            let result = try await self.serveRoundTrips(M.self, request.params, handler: handler)
             return Response(id: request.id, result: result)
         }
+        defaultHandlerMethods.remove(M.name)
         return self
+    }
+
+    /// Registers a default handler unless the application registered one.
+    private func registerDefault<M: Method>(
+        _ type: M.Type, handler: @escaping @Sendable (M.Parameters) async throws -> M.Result
+    ) {
+        guard methodHandlers[M.name] == nil || defaultHandlerMethods.contains(M.name) else { return }
+        withMethodHandler(type, handler: handler)
+        defaultHandlerMethods.insert(M.name)
+    }
+
+    // MARK: - Tasks (SEP-1686, SEP-2663)
+
+    /// Serves tasks with `manager`.
+    ///
+    /// The server then answers the task methods of each protocol version it
+    /// serves, and declares tasks to clients: at 2026-07-28 the
+    /// `io.modelcontextprotocol/tasks` extension in `server/discover`. A
+    /// `tools/call` handler runs work as a task with
+    /// ``HandlerContext/runAsTask(ttl:pollInterval:_:)``; which tools may do
+    /// so is declared by each tool's `execution.taskSupport` in `tools/list`.
+    ///
+    /// Servers that serve the same clients, such as the per-session servers
+    /// of a stateful HTTP transport, should share one manager.
+    @discardableResult
+    public func withTasks(_ manager: TaskManager = TaskManager()) -> Self {
+        taskManager = manager
+        registerDefault(GetTask.self) { [weak self] params in
+            guard let self else { throw MCPError.internalError("Server is gone") }
+            return try await self.serveGetTask(params)
+        }
+        registerDefault(UpdateTask.self) { [weak self] params in
+            guard let self else { throw MCPError.internalError("Server is gone") }
+            return try await self.serveUpdateTask(params)
+        }
+        registerDefault(CancelTask.self) { [weak self] params in
+            guard let self else { throw MCPError.internalError("Server is gone") }
+            return try await self.serveCancelTask(params)
+        }
+        registerDefault(GetTaskPayload.self) { [weak self] params in
+            guard let self else { throw MCPError.internalError("Server is gone") }
+            return try await self.serveTaskPayload(params)
+        }
+        registerDefault(ListTasks.self) { [weak self] params in
+            guard let self else { throw MCPError.internalError("Server is gone") }
+            return try await self.serveListTasks(params)
+        }
+        return self
+    }
+
+    /// The manager, the caller and the task generation of a task request.
+    private func taskRequest(_ method: String) throws -> (TaskManager, HandlerContext, TaskGeneration) {
+        guard let manager = taskManager, let context = Server.currentHandlerContext,
+            let generation = context.profile?.taskGeneration
+        else {
+            throw MCPError.methodNotFound("\(method) is not available at this protocol version")
+        }
+        return (manager, context, generation)
+    }
+
+    private static func unknownTask(_ id: String) -> MCPError {
+        .invalidParams("Unknown task: \(MCPRequestHeaders.sanitized(id))")
+    }
+
+    private func serveGetTask(_ params: GetTask.Parameters) async throws -> TaskSnapshot {
+        let (manager, context, generation) = try taskRequest(GetTask.name)
+        guard let record = try await manager.lookup(params.taskId, context: context, generation: generation) else {
+            throw Self.unknownTask(params.taskId)
+        }
+        return record.snapshot(detailed: generation == .v2)
+    }
+
+    private func serveUpdateTask(_ params: UpdateTask.Parameters) async throws -> Empty {
+        let (manager, context, generation) = try taskRequest(UpdateTask.name)
+        guard generation == .v2 else {
+            throw MCPError.methodNotFound("\(UpdateTask.name) is not available at this protocol version")
+        }
+        guard try await manager.lookup(params.taskId, context: context, generation: generation) != nil else {
+            throw Self.unknownTask(params.taskId)
+        }
+        try await manager.submit(params.taskId, params.inputResponses)
+        return Empty()
+    }
+
+    private func serveCancelTask(_ params: CancelTask.Parameters) async throws -> CancelTask.Result {
+        let (manager, context, generation) = try taskRequest(CancelTask.name)
+        guard let record = try await manager.lookup(params.taskId, context: context, generation: generation) else {
+            throw Self.unknownTask(params.taskId)
+        }
+        switch generation {
+        case .v2:
+            try await manager.cancel(record.id)
+            return CancelTask.Result()
+        case .v1:
+            guard !record.status.isTerminal else {
+                throw MCPError.invalidParams("The task is already \(record.snapshot(detailed: false).status)")
+            }
+            let cancelled = try await manager.cancel(record.id) ?? record
+            return CancelTask.Result(task: cancelled.snapshot(detailed: false))
+        }
+    }
+
+    /// Waits for a task to finish and returns the result of its request
+    /// (`tasks/result`, 2025-11-25).
+    ///
+    /// Until then it sends the task's input requests to the client on this
+    /// request's stream, with related-task metadata, and records the answers.
+    /// A request the client fails fails the call waiting for it; one not
+    /// answered because this request or the connection ended (including
+    /// ``stop()``) is sent again by the next `tasks/result`.
+    private func serveTaskPayload(_ params: GetTaskPayload.Parameters) async throws -> Value {
+        let (manager, context, generation) = try taskRequest(GetTaskPayload.name)
+        guard generation == .v1 else {
+            throw MCPError.methodNotFound("\(GetTaskPayload.name) is not available at this protocol version")
+        }
+        guard var record = try await manager.lookup(params.taskId, context: context, generation: .v1) else {
+            throw Self.unknownTask(params.taskId)
+        }
+        while !record.status.isTerminal {
+            try Task.checkCancellation()
+            let input = await manager.claimInput(record.id)
+            if input.isEmpty {
+                try await manager.waitForChange(record.id, from: record, timeout: .seconds(30))
+            } else {
+                do {
+                    // Delivery ends when the task does, withdrawing the requests.
+                    let id = record.id
+                    let responses = try await withThrowingTaskGroup(of: [String: InputResponse]?.self) { group in
+                        group.addTask { try await self.fulfill(input, relatedTask: id) }
+                        group.addTask {
+                            try await manager.waitUntilFinished(id)
+                            return nil
+                        }
+                        defer { group.cancelAll() }
+                        return try await group.next() ?? nil
+                    }
+                    if let responses {
+                        try await manager.submit(record.id, responses)
+                    } else {
+                        await manager.releaseInput(record.id, input.keys)
+                    }
+                } catch let error as MCPError
+                    where !Task.isCancelled && connection != nil && !Self.isConnectionFailure(error)
+                {
+                    await manager.failInput(record.id, Set(input.keys), error)
+                } catch {
+                    await manager.releaseInput(record.id, input.keys)
+                    throw error
+                }
+            }
+            guard let next = try await manager.lookup(record.id, context: context, generation: .v1) else {
+                throw Self.unknownTask(params.taskId)
+            }
+            record = next
+        }
+        switch record.status {
+        case .completed:
+            guard case .object(var result)? = record.result else {
+                throw MCPError.internalError("The task has no result")
+            }
+            var meta = result["_meta"]?.objectValue ?? [:]
+            meta[MetaKey.relatedTask] = ["taskId": .string(record.id)]
+            result["_meta"] = .object(meta)
+            return .object(result)
+        case .failed:
+            throw record.error ?? MCPError.internalError("The task failed")
+        default:
+            throw MCPError.internalError("The task was cancelled")
+        }
+    }
+
+    /// The caller's tasks (`tasks/list`, 2025-11-25), oldest first, 100 a
+    /// page. Served only when tasks are bound to principals.
+    private func serveListTasks(_ params: ListTasks.Parameters) async throws -> ListTasks.Result {
+        let (manager, context, generation) = try taskRequest(ListTasks.name)
+        guard generation == .v1, manager.bindsPrincipals else {
+            throw MCPError.methodNotFound("\(ListTasks.name) is not available")
+        }
+        let tasks = try await manager.list(context: context, generation: .v1)
+        var start = 0
+        if let cursor = params.cursor {
+            guard let index = tasks.firstIndex(where: { $0.id == cursor }) else {
+                throw MCPError.invalidParams("Invalid cursor")
+            }
+            start = index
+        }
+        let page = tasks[start...].prefix(Self.taskPageSize)
+        let next = start + page.count < tasks.count ? tasks[start + page.count].id : nil
+        return ListTasks.Result(tasks: page.map { $0.snapshot(detailed: false) }, nextCursor: next)
+    }
+
+    private static let taskPageSize = 100
+
+    /// Decides how a `tools/call` may run as a task, before its handler runs.
+    ///
+    /// - Throws: -32021 at 2026-07-28 for a tool that requires tasks and a
+    ///   client that did not declare them; -32601 at 2025-11-25 for an
+    ///   augmentation the tool does not allow, or none for a tool that
+    ///   requires it.
+    private func taskRuntime(
+        for request: Request<AnyMethod>, context: HandlerContext, manager: TaskManager,
+        listing: inout ToolListing?
+    ) async throws -> TaskRuntime? {
+        guard let generation = context.profile?.taskGeneration else { return nil }
+        let params = request.params.objectValue
+        let name = params?["name"]?.stringValue ?? ""
+        let support =
+            try await toolInfo(context: context, request: request, listing: &listing)?[name]?.taskSupport ?? .forbidden
+        switch generation {
+        case .v2:
+            let declared = context.clientCapabilities?.declaresTasksExtension == true
+            if support == .required, !declared {
+                throw MCPError.missingRequiredClientCapabilities(
+                    .init(extensions: [ExtensionID.tasks: [:]]),
+                    message: "The tool runs only as a task: declare the \(ExtensionID.tasks) extension")
+            }
+            return TaskRuntime(
+                manager: manager, generation: .v2, accepted: declared && support != .forbidden,
+                requestedTTL: nil, support: support)
+        case .v1:
+            let task = params?["task"]
+            let augmented = task != nil && task != .null
+            if augmented, support == .forbidden {
+                throw MCPError.methodNotFound("The tool does not run as a task")
+            }
+            if !augmented, support == .required {
+                throw MCPError.methodNotFound("The tool runs only as a task")
+            }
+            let requested = task.flatMap { try? TaskMetadata(decoding: $0) }?.ttl
+            var runtime = TaskRuntime(
+                manager: manager, generation: .v1, accepted: augmented, requestedTTL: requested, support: support)
+            if manager.configuration.sendsStatusNotifications {
+                runtime.created = { [weak self] record in await self?.trackTask(record) }
+            }
+            return runtime
+        }
+    }
+
+    /// Starts observing the task manager's changes, once.
+    private func observeTasks(_ manager: TaskManager) async {
+        guard !observingTasks else { return }
+        observingTasks = true
+        taskObserver = await manager.addObserver { [weak self] record in
+            await self?.taskChanged(record)
+        }
+    }
+
+    /// Records a 2025-11-25 task this server created, for status notifications.
+    private func trackTask(_ record: TaskRecord) async {
+        guard let manager = taskManager else { return }
+        // A task that expired before it finished sends no last change:
+        // forget it here.
+        let now = Date()
+        notifiedTasks = notifiedTasks.filter { $0.value.expiresAt.map { $0 > now } ?? true }
+        notifiedTasks[record.id] = (record.snapshot(detailed: false).status, record.expiresAt)
+        await observeTasks(manager)
+    }
+
+    /// The number of 2025-11-25 tasks tracked for status notifications.
+    func trackedTaskCount() -> Int {
+        notifiedTasks.count
+    }
+
+    /// Sends a task's change: `notifications/tasks/status` on the connection
+    /// for a 2025-11-25 task this server created, `notifications/tasks` on
+    /// the listen streams that name a 2026-07-28 task.
+    private func taskChanged(_ record: TaskRecord) async {
+        switch record.generation {
+        case .v1:
+            guard let last = notifiedTasks[record.id]?.status else { return }
+            let snapshot = record.snapshot(detailed: false)
+            guard snapshot.status != last else { return }
+            notifiedTasks[record.id] = snapshot.status.isTerminal ? nil : (snapshot.status, record.expiresAt)
+            guard isInitialized, let connection,
+                let data = try? encoder.encode(TaskStatusNotification.message(snapshot))
+            else { return }
+            try? await connection.send(data)
+        case .v2:
+            guard listeners.values.contains(where: { $0.tasks.contains(record.id) }),
+                let snapshot = try? Value.preservingStrings(record.snapshot(detailed: true))
+            else { return }
+            publish(.task(id: record.id, snapshot: snapshot), to: nil)
+        }
+    }
+
+    /// The tasks of `ids` the caller of `context` may see at 2026-07-28.
+    private func visibleTasks(_ ids: [String], context: HandlerContext) async throws -> [String]? {
+        guard let manager = taskManager else { return nil }
+        var visible: [String] = []
+        for id in ids where try await manager.lookup(id, context: context, generation: .v2) != nil {
+            visible.append(id)
+        }
+        await observeTasks(manager)
+        return visible.isEmpty ? nil : visible
+    }
+
+    /// The capabilities to declare at `version`, with the task
+    /// capabilities the SDK derives.
+    private func advertisedCapabilities(for version: String?) -> Capabilities {
+        var advertised = capabilities
+        guard let manager = taskManager else { return advertised }
+        switch version.map(Version.profile(for:))?.taskGeneration {
+        case .v2?:
+            var extensions = advertised.extensions ?? [:]
+            if extensions[ExtensionID.tasks] == nil { extensions[ExtensionID.tasks] = [:] }
+            advertised.extensions = extensions
+            advertised.tasks = nil
+        case .v1?:
+            if advertised.tasks == nil {
+                // `list` only with principals: unbound tasks must not be listed.
+                advertised.tasks = .init(
+                    list: manager.bindsPrincipals ? [:] : nil, cancel: [:],
+                    requests: .init(tools: .init(call: [:])))
+            }
+        case nil:
+            advertised.tasks = nil
+        }
+        return advertised
+    }
+
+    /// Removes `execution` from a `tools/list` result: only 2025-11-25 has it.
+    private static func strippingExecution(_ response: Response<AnyMethod>) -> Response<AnyMethod> {
+        guard case .success(let value) = response.result,
+            var object = value.objectValue,
+            let tools = object["tools"]?.arrayValue,
+            tools.contains(where: { $0.objectValue?["execution"] != nil })
+        else { return response }
+        object["tools"] = .array(
+            tools.map { tool in
+                guard var fields = tool.objectValue else { return tool }
+                fields["execution"] = nil
+                return .object(fields)
+            })
+        return Response(id: response.id, result: .object(object))
+    }
+
+    // MARK: - Skills (SEP-2640)
+
+    func installSkills(_ catalog: some SkillCatalog, listInResources: Bool) {
+        installResourceSource(
+            .init(
+                key: .skills, lists: listInResources,
+                read: { uri in try await catalog.readResource(uri: uri) },
+                list: { cursor in try await catalog.listResources(cursor: cursor) }))
+        var extensions = capabilities.extensions ?? [:]
+        extensions[ExtensionID.skills] = SkillsSettings(directoryRead: catalog.supportsDirectoryRead ? true : nil).value
+        capabilities.extensions = extensions
+        registerDefault(ListSkills.self) { params in
+            try await catalog.listSkills(cursor: params.cursor)
+        }
+        registerDefault(GetSkill.self) { params in
+            guard let skill = try await catalog.skill(uri: params.uri) else {
+                throw MCPError.invalidParams("Not a skill: \(MCPRequestHeaders.sanitized(params.uri))")
+            }
+            return GetSkill.Result(skill: skill)
+        }
+        if catalog.supportsDirectoryRead {
+            registerDefault(ReadResourceDirectory.self) { params in
+                guard let result = try await catalog.readDirectory(uri: params.uri, cursor: params.cursor) else {
+                    throw MCPError.invalidParams("Not a directory: \(MCPRequestHeaders.sanitized(params.uri))")
+                }
+                return result
+            }
+        }
+    }
+
+    // MARK: - MCP Apps (SEP-1865)
+
+    func installAppResources(_ catalog: AppResourceCatalog, listInResources: Bool) {
+        installResourceSource(
+            .init(
+                key: .apps, lists: listInResources, read: { uri in catalog.read(uri: uri) },
+                list: { cursor in try catalog.list(cursor: cursor) }))
+        var extensions = capabilities.extensions ?? [:]
+        extensions[ExtensionID.ui] = [:]
+        capabilities.extensions = extensions
+    }
+
+    /// Adds `source`, or replaces the source with its key, and declares the
+    /// `resources` capability.
+    private func installResourceSource(_ source: BuiltInResourceSource) {
+        builtInResourceSources = builtInResourceSources.installing(source)
+        if capabilities.resources == nil { capabilities.resources = .init() }
+        // Built-in resources are read before these; they answer for the rest.
+        registerDefault(ReadResource.self) { params in
+            throw MCPError.resourceNotFound(uri: params.uri)
+        }
+        registerDefault(ListResources.self) { _ in ListResources.Result(resources: []) }
+    }
+
+    // MARK: - Multi round-trip requests (SEP-2322)
+
+    /// Runs a handler that may ask for input: verifies and seals
+    /// `requestState` at 2026-07-28, and fulfills input requests itself for
+    /// earlier clients.
+    private nonisolated func serveRoundTrips<M: Method>(
+        _: M.Type, _ params: M.Parameters,
+        handler: @Sendable (M.Parameters) async throws -> M.Result
+    ) async throws -> M.Result {
+        guard let context = Server.currentHandlerContext,
+            var params = params as? any InputRespondingParameters
+        else { return try await handler(params) }
+
+        // Computed once: the arguments do not change between rounds.
+        let original = params
+        var cachedBinding: RequestStateBoundary.Binding?
+        func binding() -> RequestStateBoundary.Binding {
+            if let cachedBinding { return cachedBinding }
+            let (target, arguments) = original.stateBinding
+            let computed = RequestStateBoundary.binding(target: target, arguments: arguments)
+            cachedBinding = computed
+            return computed
+        }
+
+        if context.isStateless {
+            if let token = params.requestState, let boundary = requestStateBoundary {
+                do {
+                    let verified = try boundary.unseal(
+                        token, method: M.name, binding: binding, context: context)
+                    if let consume = boundary.protection.consume {
+                        let fresh: Bool
+                        do {
+                            fresh = try await consume(verified.tokenID, verified.expiry)
+                        } catch let error as CancellationError {
+                            throw error
+                        } catch {
+                            // Not a replay: the check could not be made.
+                            await logger?.error(
+                                "requestState replay check failed",
+                                metadata: ["method": "\(M.name)", "error": "\(error)"])
+                            throw MCPError.internalError("Could not check requestState")
+                        }
+                        if !fresh { throw InvalidRequestState("replayed") }
+                    }
+                    params = params.retrying(inputResponses: params.inputResponses, requestState: verified.state)
+                } catch let error as MCPError {
+                    throw error
+                } catch let error as CancellationError {
+                    throw error
+                } catch {
+                    await logger?.warning(
+                        "requestState rejected",
+                        metadata: ["method": "\(M.name)", "reason": "\((error as? InvalidRequestState)?.reason ?? "\(error)")"])
+                    throw RequestStateBoundary.rejection
+                }
+            }
+        } else if params.inputResponses != nil || params.requestState != nil {
+            // Not part of the protocol before 2026-07-28: only the bridge below sets them.
+            params = params.retrying(inputResponses: nil, requestState: nil)
+        }
+
+        var round = 1
+        var stateOnlyDelay = MRTR.stateOnlyInitialDelay
+        while true {
+            try Task.checkCancellation()
+            let result = try await handler(params as! M.Parameters)
+            guard var asking = result as? any InputRequiringResult else { return result }
+            if asking.isInputRequired, asking.hasContent {
+                await logger?.error("Handler returned both content and input requests", metadata: ["method": "\(M.name)"])
+                throw MCPError.internalError(
+                    "Server bug: result has both content and inputRequests or requestState")
+            }
+            guard asking.isInputRequired else { return result }
+            // An empty `inputRequests` asks for nothing, so the retry would be the same request.
+            if asking.inputRequests?.isEmpty != false, asking.requestState == nil {
+                throw MCPError.internalError("Server bug: input-required result without inputRequests or requestState")
+            }
+
+            if context.isStateless {
+                try Self.checkInputRequests(
+                    asking.inputRequests ?? [:], method: M.name, declared: context.clientCapabilities)
+                if let state = asking.requestState, let boundary = requestStateBoundary {
+                    asking.requestState = try boundary.seal(
+                        state, method: M.name, binding: binding(), context: context)
+                }
+                return asking as! M.Result
+            }
+
+            guard round < MRTR.maxRounds else {
+                throw MCPError.internalError(
+                    "\(M.name) asked for input \(MRTR.maxRounds) times")
+            }
+            let requests = asking.inputRequests ?? [:]
+            if requests.isEmpty {
+                // Only state: the handler is not done yet. Wait as a
+                // 2026-07-28 client would before the next round.
+                try await Task.sleep(for: stateOnlyDelay)
+                stateOnlyDelay = min(stateOnlyDelay * 2, MRTR.stateOnlyMaximumDelay)
+            } else {
+                stateOnlyDelay = MRTR.stateOnlyInitialDelay
+                // As at 2026-07-28, whatever `strict` says. A sessionless
+                // request carries no capabilities: the client answers.
+                let sessionless = await isSessionless
+                try Self.checkInputRequests(
+                    requests, method: M.name, declared: context.clientCapabilities,
+                    checkingCapabilities: context.clientCapabilities != nil || !sessionless)
+            }
+            let responses = try await fulfill(requests)
+            params = params.retrying(
+                inputResponses: responses.isEmpty ? nil : responses, requestState: asking.requestState)
+            round += 1
+        }
+    }
+
+    /// Checks input requests before they go to the client.
+    ///
+    /// Throws -32603 when a sampling request breaks the message rules for
+    /// tools, which is a server bug, and -32021 when the requests need
+    /// capabilities the client did not declare. `checkingCapabilities: false`
+    /// skips the second check, for a sessionless client whose capabilities
+    /// are unknown.
+    static func checkInputRequests(
+        _ requests: [String: InputRequest], method: String, declared: Client.Capabilities?,
+        checkingCapabilities: Bool = true
+    ) throws {
+        for (key, request) in requests.sorted(by: { $0.key < $1.key }) {
+            if case .sampling(let params) = request, let problem = params.toolMessageProblem() {
+                throw MCPError.internalError("Server bug: input request \(key) of \(method): \(problem)")
+            }
+        }
+        guard checkingCapabilities else { return }
+        var missing = Client.Capabilities()
+        var methods: Set<String> = []
+        for request in requests.values where !request.isSupported(by: declared ?? .init()) {
+            request.require(in: &missing)
+            methods.insert(request.method)
+        }
+        guard !methods.isEmpty else { return }
+        throw MCPError.missingRequiredClientCapabilities(
+            missing,
+            message: "\(method) needs client capabilities for \(methods.sorted().joined(separator: ", "))")
+    }
+
+    /// Sends input requests to a client before 2026-07-28, concurrently.
+    /// Cancelling the calling task cancels the requests still outstanding.
+    /// `relatedTask` adds related-task metadata to each request.
+    private func fulfill(_ requests: [String: InputRequest], relatedTask: String? = nil) async throws
+        -> [String: InputResponse]
+    {
+        try await withThrowingTaskGroup(of: (String, InputResponse).self) { group in
+            for (key, request) in requests {
+                group.addTask { (key, try await self.fulfill(request, relatedTask: relatedTask)) }
+            }
+            var responses: [String: InputResponse] = [:]
+            for try await (key, response) in group {
+                responses[key] = response
+            }
+            return responses
+        }
+    }
+
+    private func fulfill(_ request: InputRequest, relatedTask: String?) async throws -> InputResponse {
+        var meta: Metadata?
+        if let relatedTask {
+            meta = Metadata()
+            meta?.relatedTaskID = relatedTask
+        }
+        switch request {
+        case .elicitation(let params):
+            return .elicitation(try await ask(CreateElicitation.request(params, _meta: meta)))
+        case .sampling(let params):
+            return .sampling(try await ask(CreateSamplingMessage.request(params, _meta: meta)))
+        case .listRoots:
+            return .roots(try await ask(ListRoots.request(_meta: meta)))
+        case .unknown(let method, let params):
+            return .unknown(
+                try await ask(Request<UnknownInputRequest>(method: method, params: params, _meta: meta)).value)
+        }
+    }
+
+    /// A bridged input request of a method the SDK does not know: its
+    /// result is kept as received, with `data:` URL strings as written.
+    private enum UnknownInputRequest: Method {
+        static var name: String { "" }
+        typealias Parameters = Value
+        typealias Result = Value.Preserved
+    }
+
+    /// Sends one bridged request to the client. A client error fails the
+    /// carrier with -32603; a failure of the connection is thrown as it is;
+    /// cancellation withdraws the request.
+    private func ask<M: Method>(_ request: Request<M>) async throws -> M.Result {
+        try Task.checkCancellation()
+        let task = try send(request)
+        do {
+            return try await withTaskCancellationHandler {
+                try await task.value
+            } onCancel: {
+                Task { await self.withdraw(request.id) }
+            }
+        } catch let error as MCPError where !Self.isConnectionFailure(error) {
+            throw MCPError.internalError("The client failed \(request.method): \(error.localizedDescription)")
+        }
+    }
+
+    /// Whether `error` is the transport's, not the client's answer.
+    private static func isConnectionFailure(_ error: MCPError) -> Bool {
+        switch error {
+        case .connectionClosed, .transportError: return true
+        default: return false
+        }
+    }
+
+    /// Ends a bridged request whose carrier was cancelled, and tells the
+    /// client. A request not sent yet is not sent at all.
+    private func withdraw(_ id: ID) async {
+        guard let pending = removePendingResponse(id: id) else {
+            unsentRequests.remove(id)
+            return
+        }
+        pending.resume(throwing: CancellationError())
+        try? await notify(
+            CancelledNotification.message(
+                .init(requestId: id, reason: "The request that needed this input was cancelled")))
     }
 
     /// Register a notification handler
@@ -387,14 +1440,246 @@ public actor Server {
         try await connection.send(responseData)
     }
 
-    /// Send a notification to connected clients
+    /// Send a notification to connected clients.
+    ///
+    /// Called from a method handler, the notification is delivered on the
+    /// stream of the request being handled when the transport has one.
+    ///
+    /// List-changed and resource-updated notifications are also delivered to
+    /// the matching `subscriptions/listen` streams. At 2026-07-28 they are
+    /// sent only there: without an `initialize` session they are not sent on
+    /// the connection. Behind ``StatelessHTTPServerTransport`` a handler of a
+    /// handshake request sends them on its request's stream. Every caller's
+    /// matching stream receives them; use ``notify(_:to:)`` to reach only
+    /// some callers.
     public func notify<N: Notification>(_ notification: Message<N>) async throws {
+        try await notify(notification, matching: nil)
+    }
+
+    /// Sends a list-changed or resource-updated notification only to the
+    /// `subscriptions/listen` streams whose caller `recipients` accepts, for
+    /// example by the principal in `context.httpContext`.
+    ///
+    /// On an `initialize` session the notification is also sent on the
+    /// connection, as ``notify(_:)`` does: that session has one client.
+    /// Behind ``StatelessHTTPServerTransport`` a handler of a handshake
+    /// request sends it on its request's stream only when `recipients`
+    /// accepts that request's context.
+    public func notify<N: Notification>(
+        _ notification: Message<N>, to recipients: @escaping @Sendable (HandlerContext) -> Bool
+    ) async throws {
+        try await notify(notification, matching: recipients)
+    }
+
+    private func notify<N: Notification>(
+        _ notification: Message<N>, matching recipients: ((HandlerContext) -> Bool)?
+    ) async throws {
         guard let connection = connection else {
             throw MCPError.internalError("Server connection not initialized")
         }
 
         let notificationData = try encoder.encode(notification)
-        try await connection.send(notificationData)
+        if let event = SubscriptionEvent(notification) {
+            publish(event, to: recipients)
+            // A handshake handler behind a sessionless transport sends it
+            // on its own request's stream, when `recipients` accepts that
+            // caller: one server serves every client there.
+            let sessionlessHandshake =
+                isSessionless
+                && Server.currentHandlerContext.map { !$0.isStateless && (recipients?($0) ?? true) } == true
+            guard isInitialized || sessionlessHandshake else { return }
+        }
+        try await connection.send(
+            notificationData, relatedRequestID: Server.currentHandlerContext?.id)
+    }
+
+    // MARK: - Subscriptions (2026-07-28)
+
+    private struct Listener {
+        let filter: SubscriptionFilter
+        /// `filter.resourceSubscriptions`, for lookups.
+        let resources: Set<String>
+        /// `filter.taskIds`, for lookups.
+        let tasks: Set<String>
+        /// The caller, for ``notify(_:to:)``.
+        let context: HandlerContext
+        let events: AsyncStream<SubscriptionEvent>.Continuation
+    }
+
+    /// The longest resource URI a `subscriptions/listen` stream may name.
+    static let maxSubscriptionURILength = 4096
+
+    /// Narrows or refuses `subscriptions/listen` filters.
+    private var subscriptionAuthorizer:
+        (@Sendable (SubscriptionFilter, HandlerContext) async throws -> SubscriptionFilter)?
+
+    /// Sets a check that runs for each `subscriptions/listen` stream
+    /// (2026-07-28) with the requested filter and the caller's context,
+    /// before the server acknowledges it. Return the filter to serve, for
+    /// example without the resource URIs the caller may not read, or throw
+    /// an `MCPError` to refuse the stream.
+    ///
+    /// Without one, any caller can listen to every list change and to any
+    /// resource URI, and ``notify(_:)`` reaches every caller's matching
+    /// stream.
+    @discardableResult
+    public func withSubscriptionAuthorizer(
+        _ authorize: @escaping @Sendable (SubscriptionFilter, HandlerContext) async throws -> SubscriptionFilter
+    ) -> Self {
+        subscriptionAuthorizer = authorize
+        return self
+    }
+
+    /// The most events buffered for a listen stream; older ones are dropped.
+    /// Events are level triggers ("refetch"), so dropping duplicates is safe.
+    private static let listenerBufferSize = 256
+
+    private func publish(_ event: SubscriptionEvent, to recipients: ((HandlerContext) -> Bool)?) {
+        for listener in listeners.values
+        where event.matches(listener.filter, resources: listener.resources, tasks: listener.tasks) {
+            if let recipients, !recipients(listener.context) { continue }
+            listener.events.yield(event)
+        }
+    }
+
+    /// The number of open `subscriptions/listen` streams.
+    var openSubscriptionCount: Int { listeners.count }
+
+    /// The number of `subscriptions/listen` requests still being handled.
+    var listenRequestCount: Int { listenRequests.count }
+
+    /// Ends every open `subscriptions/listen` stream with its result.
+    public func closeSubscriptions() {
+        for listener in listeners.values {
+            listener.events.finish()
+        }
+    }
+
+    /// The part of a filter this server honors: kinds whose capability it declares.
+    private func honored(_ requested: SubscriptionFilter) -> SubscriptionFilter {
+        SubscriptionFilter(
+            toolsListChanged: requested.toolsListChanged == true && capabilities.tools?.listChanged == true
+                ? true : nil,
+            promptsListChanged: requested.promptsListChanged == true
+                && capabilities.prompts?.listChanged == true ? true : nil,
+            resourcesListChanged: requested.resourcesListChanged == true
+                && capabilities.resources?.listChanged == true ? true : nil,
+            resourceSubscriptions: capabilities.resources?.subscribe == true
+                && requested.resourceSubscriptions?.isEmpty == false
+                ? requested.resourceSubscriptions : nil,
+            taskIds: requested.taskIds?.isEmpty == false ? requested.taskIds : nil)
+    }
+
+    /// The requested filter with duplicate URIs removed; throws -32602 for
+    /// too many or too long URIs.
+    private func checked(_ requested: SubscriptionFilter) throws -> SubscriptionFilter {
+        var filter = requested
+        if let uris = requested.resourceSubscriptions {
+            var seen: Set<String> = []
+            let unique = uris.filter { seen.insert($0).inserted }
+            guard unique.count <= configuration.maxResourceSubscriptions else {
+                throw MCPError.invalidParams(
+                    "A listen stream may name at most \(configuration.maxResourceSubscriptions) resources")
+            }
+            guard unique.allSatisfy({ $0.utf8.count <= Self.maxSubscriptionURILength }) else {
+                throw MCPError.invalidParams(
+                    "Resource URIs may have at most \(Self.maxSubscriptionURILength) bytes")
+            }
+            filter.resourceSubscriptions = unique
+        }
+        if let ids = requested.taskIds {
+            var seen: Set<String> = []
+            let unique = ids.filter { seen.insert($0).inserted }
+            guard unique.count <= configuration.maxResourceSubscriptions else {
+                throw MCPError.invalidParams(
+                    "A listen stream may name at most \(configuration.maxResourceSubscriptions) tasks")
+            }
+            guard unique.allSatisfy({ $0.utf8.count <= Self.maxSubscriptionURILength }) else {
+                throw MCPError.invalidParams("Task ids may have at most \(Self.maxSubscriptionURILength) bytes")
+            }
+            filter.taskIds = unique
+        }
+        return filter
+    }
+
+    /// Serves one `subscriptions/listen` stream: acknowledges, then forwards
+    /// matching events until the client goes away or the server closes it.
+    private func serveListen(_ params: SubscriptionsListen.Parameters) async throws
+        -> SubscriptionsListen.Result
+    {
+        guard let connection, let context = Server.currentHandlerContext else {
+            throw MCPError.internalError("Server connection not initialized")
+        }
+        func checkCapacity() throws {
+            guard listeners.count < configuration.maxSubscriptionStreams else {
+                throw MCPError.invalidRequest("Too many open \(SubscriptionsListen.name) streams")
+            }
+        }
+        try checkCapacity()
+        var requested = try checked(params.notifications)
+        if requested.taskIds?.isEmpty == false {
+            guard context.clientCapabilities?.declaresTasksExtension == true else {
+                throw MCPError.missingRequiredClientCapabilities(
+                    .init(extensions: [ExtensionID.tasks: [:]]),
+                    message: "Task notifications need the \(ExtensionID.tasks) extension")
+            }
+        }
+        if let authorize = subscriptionAuthorizer {
+            requested = try checked(try await authorize(requested, context))
+            try checkCapacity()
+        }
+        if let ids = requested.taskIds, !ids.isEmpty {
+            requested.taskIds = try await visibleTasks(ids, context: context)
+            try checkCapacity()
+        }
+        // The server may have stopped, or be stopping, while the authorizer
+        // or the task lookup ran.
+        guard !isStopping, let current = self.connection, current === connection else {
+            throw MCPError.internalError("Server stopped")
+        }
+        let filter = honored(requested)
+        var meta = Metadata()
+        meta.subscriptionID = context.id
+
+        let (events, continuation) = AsyncStream<SubscriptionEvent>.makeStream(
+            bufferingPolicy: .bufferingNewest(Self.listenerBufferSize))
+        let token = nextListenerToken
+        nextListenerToken += 1
+        // Register before the acknowledgement so no event is lost; the
+        // acknowledgement is still first because only this task writes.
+        listeners[token] = Listener(
+            filter: filter, resources: Set(filter.resourceSubscriptions ?? []), tasks: Set(filter.taskIds ?? []),
+            context: context, events: continuation)
+        defer { listeners[token] = nil }
+
+        let ack = Message<SubscriptionsAcknowledgedNotification>(
+            method: SubscriptionsAcknowledgedNotification.name,
+            params: .init(notifications: filter), _meta: meta)
+        try await connection.send(encoder.encode(ack), relatedRequestID: context.id)
+
+        for await event in events {
+            try await connection.send(
+                encoder.encode(event.message(subscriptionID: context.id)), relatedRequestID: context.id)
+        }
+        try Task.checkCancellation()
+        return SubscriptionsListen.Result(_meta: meta)
+    }
+
+    /// After the result that closes a `subscriptions/listen` stream the
+    /// server ended, sends `notifications/cancelled` for it: a server MUST
+    /// send one when it tears a subscription down. Over HTTP the end of the
+    /// response is the teardown, so nothing is sent there; nor after a
+    /// stream the client cancelled.
+    ///
+    /// - SeeAlso: https://modelcontextprotocol.io/specification/2026-07-28/basic/utilities/cancellation
+    private func sendListenTeardown(_ id: ID) async {
+        guard !isSessionless, let connection else { return }
+        let cancelled = CancelledNotification.message(.init(requestId: id, reason: "Subscription closed"))
+        do {
+            try await connection.send(encoder.encode(cancelled))
+        } catch {
+            await logger?.debug("Listen teardown not sent", metadata: ["error": "\(error)"])
+        }
     }
 
     /// Send a request to the client and return a Task for the response
@@ -403,11 +1688,35 @@ public actor Server {
             throw MCPError.internalError("Server connection not initialized")
         }
 
-        let requestData = try encoder.encode(request)
+        if let refusal = serverRequestRefusal(M.name) {
+            throw MCPError.invalidRequest(refusal)
+        }
 
+        let requestData = try encoder.encode(request)
+        let relatedRequestID = Server.currentHandlerContext?.id
+        let generation = connectionGeneration
+        let warning = unassociatedRequestWarning(M.name)
+
+        unsentRequests.insert(request.id)
         let requestTask = Task<M.Result, Error> {
             try await withCheckedThrowingContinuation { continuation in
                 Task {
+                    if let warning {
+                        await self.logger?.warning("\(warning)", metadata: ["method": "\(M.name)"])
+                    }
+                    // No suspension from here to the registration, so a
+                    // withdraw either finds the id unsent or registered.
+                    guard generation == self.connectionGeneration else {
+                        // `stop()` ended the connection before the request was
+                        // registered, and no longer resumes it.
+                        continuation.resume(throwing: MCPError.internalError("Server disconnected"))
+                        return
+                    }
+                    guard self.unsentRequests.remove(request.id) != nil else {
+                        // Withdrawn before it was registered.
+                        continuation.resume(throwing: CancellationError())
+                        return
+                    }
                     // Add pending response before sending
                     self.addPendingResponse(
                         id: request.id,
@@ -417,7 +1726,8 @@ public actor Server {
 
                     // Send the request
                     do {
-                        try await connection.send(requestData)
+                        try await connection.send(
+                            requestData, relatedRequestID: relatedRequestID)
                     } catch {
                         // If send fails, remove pending response and resume with error
                         if self.removePendingResponse(id: request.id) != nil {
@@ -431,6 +1741,53 @@ public actor Server {
         return requestTask
     }
 
+    /// Why a request to the client cannot be sent now, or `nil` when it can.
+    ///
+    /// In a handler, the request's revision decides. Outside one, for example
+    /// in a background or detached task or in a task body, the connection
+    /// decides: a negotiated handshake revision allows the request; a
+    /// connection that served a stateless request, or a server that serves no
+    /// handshake revision, is at 2026-07-28, which has no server-to-client
+    /// requests (SEP-2260); and a sessionless transport has no stream outside a
+    /// request, so the request would wait for an answer that never comes.
+    private func serverRequestRefusal(_ method: String) -> String? {
+        if let context = Server.currentHandlerContext {
+            guard context.profile?.allowsServerRequests == false else { return nil }
+            return "\(method) cannot be sent at protocol version \(context.protocolVersion ?? "")"
+        }
+        if let protocolVersion {
+            guard !Version.profile(for: protocolVersion).allowsServerRequests else { return nil }
+            return "\(method) cannot be sent at protocol version \(protocolVersion)"
+        }
+        if servedStatelessRequest || handshakeVersions.isEmpty {
+            let version =
+                configuration.protocolVersions.first { !Version.profile(for: $0).allowsServerRequests }
+                ?? Version.stateless[0]
+            return "\(method) cannot be sent at protocol version \(version)"
+        }
+        if isSessionless {
+            return "\(method) cannot be sent outside a client request: the transport has no stream for it"
+        }
+        return nil
+    }
+
+    /// The warning to log when `method` is sent while the server handles no
+    /// client request, the first time only; otherwise `nil`.
+    ///
+    /// SEP-2260 requires `sampling/createMessage` and `elicitation/create` to
+    /// belong to a client request. 2025-11-25 and earlier do not require it, so
+    /// the request is sent anyway. `ping` and `roots/list` are not checked: at
+    /// 2025-11-25 a server can ask for roots after
+    /// `notifications/roots/list_changed`.
+    private func unassociatedRequestWarning(_ method: String) -> String? {
+        guard method == CreateSamplingMessage.name || method == CreateElicitation.name else { return nil }
+        if let id = Server.currentHandlerContext?.id, pendingRequestTasks[id] != nil { return nil }
+        guard unassociatedRequestMethods.insert(method).inserted else { return nil }
+        return "\(method) was sent while the server handled no client request. SEP-2260 requires "
+            + "this request to belong to a client request: send it from the handler of the request "
+            + "that needs it. At 2026-07-28, return an input request instead. This warning is "
+            + "logged once for each method."
+    }
 
     private func addPendingResponse<T: Sendable & Decodable>(
         id: ID,
@@ -460,6 +1817,19 @@ public actor Server {
     /// 4. Client reviews the completion
     /// 5. Client returns the result to the server
     ///
+    /// Call it from the handler of the request that needs the answer: the
+    /// request then belongs to that client request (SEP-2260). Sent while the
+    /// server handles no client request, it is sent anyway, and the server logs
+    /// one warning for each method.
+    ///
+    /// With `tools`, the model can ask for tool calls: the result then has
+    /// ``Sampling/StopReason/toolUse`` and one tool use block for each call.
+    /// To continue, send a new request with the history, the assistant
+    /// message with the tool uses, and a user message with one tool result
+    /// for each tool use. Limit the number of rounds, and send
+    /// `toolChoice: .init(mode: .none)` on the last round to get a final
+    /// answer.
+    ///
     /// - Parameters:
     ///   - messages: The conversation history to send to the LLM
     ///   - modelPreferences: Model selection preferences
@@ -468,10 +1838,20 @@ public actor Server {
     ///   - temperature: Controls randomness (0.0 to 1.0)
     ///   - maxTokens: Maximum tokens to generate
     ///   - stopSequences: Array of sequences that stop generation
+    ///   - tools: Tools the model can use during this request. They do not
+    ///     need to be tools of the server.
+    ///   - toolChoice: Whether the model can, must, or must not use the tools.
     ///   - _meta: Optional request metadata
     /// - Returns: The sampling result containing the model used, stop reason, role, and content
-    /// - Throws: MCPError if the request fails
-    /// - SeeAlso: https://modelcontextprotocol.io/docs/concepts/sampling#how-sampling-works
+    /// - Throws: ``MCPError/methodNotFound(_:)`` when the request has `tools`
+    ///   or `toolChoice` and the client did not declare `sampling.tools`. In
+    ///   strict mode, also when the client did not declare `sampling`, or when
+    ///   `includeContext` is not `none` and the client did not declare
+    ///   `sampling.context`. ``MCPError/invalidParams(_:)`` when the messages
+    ///   break the rules for tool uses and tool results. The SDK checks these
+    ///   before it sends the request.
+    /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/client/sampling
+    @available(*, deprecated, message: "Sampling is deprecated by the specification (SEP-2577) and can be removed in the first revision released on or after 2027-07-28. To migrate, call the API of an LLM provider from the server.")
     public func requestSampling(
         messages: [Sampling.Message],
         modelPreferences: Sampling.ModelPreferences? = nil,
@@ -480,29 +1860,42 @@ public actor Server {
         temperature: Double? = nil,
         maxTokens: Int,
         stopSequences: [String]? = nil,
+        tools: [Tool]? = nil,
+        toolChoice: CreateSamplingMessage.ToolChoice? = nil,
         _meta: Metadata? = nil
     ) async throws -> CreateSamplingMessage.Result {
         guard connection != nil else {
             throw MCPError.internalError("Server connection not initialized")
         }
 
-        try validateClientCapability(\.sampling, "Sampling")
-
-        let request = CreateSamplingMessage.request(
-            .init(
-                messages: messages,
-                modelPreferences: modelPreferences,
-                systemPrompt: systemPrompt,
-                includeContext: includeContext,
-                temperature: temperature,
-                maxTokens: maxTokens,
-                stopSequences: stopSequences,
-                _meta: _meta
-            )
+        let params = CreateSamplingMessage.Parameters(
+            messages: messages,
+            modelPreferences: modelPreferences,
+            systemPrompt: systemPrompt,
+            includeContext: includeContext,
+            temperature: temperature,
+            maxTokens: maxTokens,
+            stopSequences: stopSequences,
+            _meta: _meta,
+            tools: tools,
+            toolChoice: toolChoice
         )
+        try validateClientCapability(\.sampling, "Sampling")
+        // The specification forbids tools without `sampling.tools` (a MUST),
+        // so this check does not depend on strict mode.
+        if params.usesTools {
+            try validateClientCapability("Sampling with tools", evenIfNotStrict: true) {
+                $0.sampling?.tools != nil
+            }
+        }
+        if params.usesContext {
+            try validateClientCapability("Sampling with context") { $0.sampling?.context != nil }
+        }
+        if let problem = params.toolMessageProblem() {
+            throw MCPError.invalidParams(problem)
+        }
 
-        let result = try await send(request).value
-        return result
+        return try await send(CreateSamplingMessage.request(params)).value
     }
 
     // MARK: - Elicitation
@@ -518,6 +1911,11 @@ public actor Server {
     /// 2. Client displays the request to the user
     /// 3. User provides input or declines
     /// 4. Client returns the result to the server
+    ///
+    /// Call it from the handler of the request that needs the answer: the
+    /// request then belongs to that client request (SEP-2260). Sent while the
+    /// server handles no client request, it is sent anyway, and the server logs
+    /// one warning for each method.
     ///
     /// - Parameters:
     ///   - message: The message to display to the user
@@ -559,6 +1957,11 @@ public actor Server {
     /// URL-based elicitation directs the user to an external URL for authentication
     /// or data collection. This is useful for OAuth flows or other web-based input.
     ///
+    /// Call it from the handler of the request that needs the answer: the
+    /// request then belongs to that client request (SEP-2260). Sent while the
+    /// server handles no client request, it is sent anyway, and the server logs
+    /// one warning for each method.
+    ///
     /// - Parameters:
     ///   - message: The message to display to the user
     ///   - url: The URL to direct the user to
@@ -599,8 +2002,10 @@ public actor Server {
     /// Send a log message notification to connected clients.
     ///
     /// Servers that declare the `logging` capability can send structured log messages
-    /// to clients. The client controls which severity levels it wants to receive via
-    /// the `logging/setLevel` request.
+    /// to clients. A stateless (2026-07-28) request receives messages only at or above
+    /// the level in its `_meta`. On handshake connections the built-in
+    /// `logging/setLevel` handler records the client's level, and messages below it
+    /// are not sent; before the client sets a level, every message is sent.
     ///
     /// - Parameters:
     ///   - level: The severity level of the log message
@@ -608,11 +2013,19 @@ public actor Server {
     ///   - data: Arbitrary JSON-serializable data for the log message
     /// - Throws: MCPError if the server is not connected
     /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/server/utilities/logging/
+@available(*, deprecated, message: "Logging is deprecated by the specification (SEP-2577) and can be removed in the first revision released on or after 2027-07-28. To migrate, log to stderr (stdio) or use OpenTelemetry.")
     public func log(
         level: LogLevel,
         logger: String? = nil,
         data: Value
     ) async throws {
+        // A stateless request receives log notifications only at or above
+        // the level it set in `_meta`, and none when it set no level.
+        if let context = Server.currentHandlerContext, context.isStateless {
+            guard let minimum = context.logLevel, level >= minimum else { return }
+        } else if let minimum = clientLogLevel, level < minimum {
+            return
+        }
         let notification = LogMessageNotification.message(
             .init(level: level, logger: logger, data: data)
         )
@@ -629,6 +2042,7 @@ public actor Server {
     ///   - data: Any codable data for the log message
     /// - Throws: MCPError if the server is not connected or encoding fails
     /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/server/utilities/logging/
+    @available(*, deprecated, message: "Logging is deprecated by the specification (SEP-2577) and can be removed in the first revision released on or after 2027-07-28. To migrate, log to stderr (stdio) or use OpenTelemetry.")
     public func log<T: Codable>(
         level: LogLevel,
         logger: String? = nil,
@@ -649,6 +2063,7 @@ public actor Server {
     /// - Returns: Array of Root objects representing accessible directories/files
     /// - Throws: MCPError if the client doesn't support roots or request fails
     /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/client/roots
+    @available(*, deprecated, message: "Roots is deprecated by the specification (SEP-2577) and can be removed in the first revision released on or after 2027-07-28. To migrate, pass directories or files in tool arguments, resource URIs or server configuration.")
     public func listRoots() async throws -> [Root] {
         guard connection != nil else {
             throw MCPError.internalError("Server connection not initialized")
@@ -661,13 +2076,15 @@ public actor Server {
         return result.roots
     }
 
-    /// A JSON-RPC batch containing multiple requests and/or notifications
+    /// A JSON-RPC batch of requests, notifications and responses
     struct Batch: Sendable {
         /// An item in a JSON-RPC batch
         enum Item: Sendable {
             case request(Request<AnyMethod>)
             case notification(Message<AnyNotification>)
-
+            /// An answer to a request this server sent; it gets no reply.
+            case response(Response<AnyMethod>)
+            case invalid(id: ID?, reason: String)
         }
 
         var items: [Item]
@@ -677,47 +2094,83 @@ public actor Server {
         }
     }
 
+    /// A JSON-RPC response or an error whose `id` is `null` (JSON-RPC 2.0 §5, §6).
+    private enum BatchReply: Encodable {
+        case response(Response<AnyMethod>)
+        case unattributedError(MCPError)
+
+        func encode(to encoder: Encoder) throws {
+            switch self {
+            case .response(let response):
+                try response.encode(to: encoder)
+            case .unattributedError(let error):
+                var container = encoder.container(keyedBy: Keys.self)
+                try container.encode("2.0", forKey: .jsonrpc)
+                try container.encodeNil(forKey: .id)
+                try container.encode(error, forKey: .error)
+            }
+        }
+
+        private enum Keys: String, CodingKey { case jsonrpc, id, error }
+    }
+
     /// Process a batch of requests and/or notifications
-    private func handleBatch(_ batch: Batch) async throws {
+    ///
+    /// - Parameter generation: The ``connectionGeneration`` the batch was
+    ///   received in; nothing is sent once ``stop()`` changed it.
+    private func handleBatch(_ batch: Batch, generation: Int) async throws {
         await logger?.trace("Processing batch request", metadata: ["size": "\(batch.items.count)"])
+        guard generation == connectionGeneration else { return }
 
         if batch.items.isEmpty {
             // Empty batch is invalid according to JSON-RPC spec
-            let error = MCPError.invalidRequest("Batch array must not be empty")
-            let response = AnyMethod.response(id: .random, error: error)
-            try await send(response)
+            await sendUnattributedError(MCPError.invalidRequest("Batch array must not be empty"))
             return
         }
 
         // Process each item in the batch and collect responses
-        var responses: [Response<AnyMethod>] = []
+        var replies: [BatchReply] = []
 
         for item in batch.items {
             do {
                 switch item {
                 case .request(let request):
                     // For batched requests, collect responses instead of sending immediately
-                    if let response = try await handleRequest(request, sendResponse: false) {
-                        responses.append(response)
+                    if let response = try await handleRequest(
+                        request, sendResponse: false, generation: generation)
+                    {
+                        replies.append(.response(response))
                     }
 
                 case .notification(let notification):
                     // Handle notification (no response needed)
                     try await handleMessage(notification)
+
+                case .response:
+                    // Handled by the receive loop.
+                    continue
+
+                case .invalid(let id, let reason):
+                    let error = MCPError.invalidRequest(reason)
+                    if let id {
+                        replies.append(.response(AnyMethod.response(id: id, error: error)))
+                    } else {
+                        replies.append(.unattributedError(error))
+                    }
                 }
             } catch {
                 // Only add errors to response for requests (notifications don't have responses)
                 if case .request(let request) = item {
                     let mcpError =
                         error as? MCPError ?? MCPError.internalError(error.localizedDescription)
-                    responses.append(AnyMethod.response(id: request.id, error: mcpError))
+                    replies.append(.response(AnyMethod.response(id: request.id, error: mcpError)))
                 }
             }
         }
 
         // Send collected responses if any
-        if !responses.isEmpty {
-            let responseData = try encoder.encode(responses)
+        if !replies.isEmpty, generation == connectionGeneration {
+            let responseData = try encoder.encode(replies)
 
             guard let connection = connection else {
                 throw MCPError.internalError("Server connection not initialized")
@@ -734,17 +2187,32 @@ public actor Server {
     /// - Parameters:
     ///   - request: The request to handle
     ///   - sendResponse: Whether to send the response immediately (true) or return it (false)
+    ///   - generation: The ``connectionGeneration`` the request was received
+    ///     in. Once ``stop()`` changed it, the request is not answered and
+    ///     `nil` is returned.
     /// - Returns: The response when sendResponse is false
-    private func handleRequest(_ request: Request<AnyMethod>, sendResponse: Bool = true)
-        async throws -> Response<AnyMethod>?
-    {
-        // Check if this is a pre-processed error request (empty method)
-        if request.method.isEmpty && !sendResponse {
-            // This is a placeholder for an invalid request that couldn't be parsed in batch mode
-            return AnyMethod.response(
-                id: request.id,
-                error: MCPError.invalidRequest("Invalid batch item format")
-            )
+    private func handleRequest(
+        _ request: Request<AnyMethod>, sendResponse: Bool = true, generation: Int
+    ) async throws -> Response<AnyMethod>? {
+        // While the request is tracked, a request that reuses its id is
+        // refused (`admit(_:)`): in `startingRequests` until its handler task
+        // is registered, so that a cancellation arriving first is kept, then
+        // in `pendingRequestTasks`, and, for a listen stream the receive loop
+        // started, in `listenRequests`. Tracking stops before the response is
+        // sent: a client that has the response may reuse the id. After
+        // `stop()` the entries of `startingRequests` and `pendingRequestTasks`
+        // are gone, or belong to the next connection.
+        let isListenStream = sendResponse && request.method == SubscriptionsListen.name
+        // Each return before the handler task is registered calls this once.
+        func untrackStarting() {
+            if isListenStream { listenRequests[request.id] = nil }
+            if generation == connectionGeneration { startingRequests.removeValue(forKey: request.id) }
+        }
+
+        // Received on a connection that `stop()` ended, whose state is gone.
+        guard generation == connectionGeneration else {
+            untrackStarting()
+            return nil
         }
 
         await logger?.trace(
@@ -754,28 +2222,104 @@ public actor Server {
                 "id": "\(request.id)",
             ])
 
-        if configuration.strict {
-            // The client SHOULD NOT send requests other than pings
-            // before the server has responded to the initialize request.
-            switch request.method {
-            case Initialize.name, Ping.name:
-                break
-            default:
-                try checkInitialized()
+        // Replies with an error without running a handler; not once `stop()`
+        // ended the connection.
+        func reject(_ error: MCPError) async throws -> Response<AnyMethod>? {
+            untrackStarting()
+            guard generation == connectionGeneration else { return nil }
+            let response = AnyMethod.response(id: request.id, error: error)
+            if sendResponse {
+                try await send(response)
+                return nil
+            }
+            return response
+        }
+
+        let era: RequestEra
+        do {
+            era = try StatelessRequests.classify(
+                request._meta, served: configuration.protocolVersions)
+            try StatelessRequests.checkProgressToken(request._meta)
+        } catch let error as MCPError {
+            return try await reject(error)
+        } catch {
+            untrackStarting()
+            throw error
+        }
+
+        switch era {
+        case .handshake:
+            // A server that serves no handshake revision serves only requests
+            // that name their version: one that names none is missing a
+            // required `_meta` field (-32602), not at an unsupported version.
+            if handshakeVersions.isEmpty, request.method != Initialize.name,
+                request._meta?[MetaKey.protocolVersion] == nil
+            {
+                return try await reject(
+                    StatelessRequests.missingProtocolVersion(served: configuration.protocolVersions))
+            }
+            if StatelessRequests.statelessOnlyMethods.contains(request.method) {
+                return try await reject(
+                    .methodNotFound("\(request.method) requires protocol version 2026-07-28 or later"))
+            }
+            // A server that lists no handshake revision serves no handshake request.
+            if handshakeVersions.isEmpty {
+                let requested =
+                    request.method == Initialize.name
+                    ? request.params.objectValue?["protocolVersion"]?.stringValue
+                    : request._meta?.protocolVersion
+                return try await reject(
+                    .unsupportedProtocolVersion(
+                        supported: configuration.protocolVersions, requested: requested))
+            }
+            // The client SHOULD NOT send requests other than pings before the
+            // server has responded to the initialize request. Without a
+            // session there is nothing to initialize.
+            if configuration.strict, !isInitialized, !isSessionless,
+                request.method != Initialize.name, request.method != Ping.name
+            {
+                return try await reject(.invalidRequest("Server is not initialized"))
+            }
+            // Without a session, a request is not tied to the `initialize`
+            // that passed the initialize hook: the stateless hook gates it,
+            // and without one it is refused.
+            if isSessionless, request.method != Initialize.name, hasInitializeHook,
+                statelessRequestHook == nil
+            {
+                return try await reject(
+                    .invalidRequest(
+                        "Request refused: without a session the initialize hook cannot gate \(request.method)"))
+            }
+        case .stateless(let info):
+            // An initialize hook gates handshake clients; without a stateless
+            // hook, stateless requests would bypass it.
+            if hasInitializeHook, statelessRequestHook == nil {
+                return try await reject(
+                    .unsupportedProtocolVersion(supported: handshakeVersions, requested: info.protocolVersion))
+            }
+            if StatelessRequests.removedMethods.contains(request.method) {
+                return try await reject(
+                    .methodNotFound(
+                        "\(request.method) is not available at protocol version \(info.protocolVersion)"))
+            }
+            if !StatelessRequests.isDeclared(request.method, in: capabilities) {
+                return try await reject(
+                    .methodNotFound("\(request.method): capability not declared by the server"))
+            }
+            // Before the task is looked up: no existence leak to undeclared clients.
+            if TaskMethods.v2.contains(request.method), taskManager != nil,
+                !info.clientCapabilities.declaresTasksExtension
+            {
+                return try await reject(
+                    .missingRequiredClientCapabilities(
+                        .init(extensions: [ExtensionID.tasks: [:]]),
+                        message: "\(request.method) needs the \(ExtensionID.tasks) extension"))
             }
         }
 
         // Find handler for method name
         guard let handler = methodHandlers[request.method] else {
-            let error = MCPError.methodNotFound("Unknown method: \(request.method)")
-            let response = AnyMethod.response(id: request.id, error: error)
-
-            if sendResponse {
-                try await send(response)
-                return nil
-            }
-
-            return response
+            return try await reject(.methodNotFound("Unknown method: \(request.method)"))
         }
 
         // Ask the transport for the originating HTTP request so handlers can observe
@@ -783,7 +2327,81 @@ public actor Server {
         // that don't carry HTTP context (stdio, in-memory) don't conform.
         let httpContext = await (connection as? any HTTPContextProviding)?
             .httpRequestContext(for: request.id)
-        let handlerContext = HandlerContext(id: request.id, httpContext: httpContext)
+        // `stop()` may have run meanwhile, and a new connection may have started.
+        guard generation == connectionGeneration else {
+            untrackStarting()
+            return nil
+        }
+        var dispatchContext: HandlerContext
+        switch era {
+        case .handshake where isSessionless:
+            // No session: each request stands alone, and only its
+            // `MCP-Protocol-Version` header says which revision it uses.
+            let header = httpContext?.header(HTTPHeaderName.protocolVersion)
+            dispatchContext = HandlerContext(
+                id: request.id, httpContext: httpContext,
+                protocolVersion: header.flatMap { Version.handshake.contains($0) ? $0 : nil },
+                clientCapabilities: nil,
+                clientInfo: nil)
+        case .handshake:
+            dispatchContext = HandlerContext(
+                id: request.id, httpContext: httpContext,
+                protocolVersion: protocolVersion,
+                clientCapabilities: clientCapabilities,
+                clientInfo: clientInfo)
+        case .stateless(let info):
+            dispatchContext = HandlerContext(
+                id: request.id, httpContext: httpContext,
+                protocolVersion: info.protocolVersion,
+                clientCapabilities: info.clientCapabilities,
+                clientInfo: info.clientInfo,
+                logLevel: info.logLevel,
+                isStateless: true)
+            servedStatelessRequest = true
+        }
+        dispatchContext.method = request.method
+        if let token = request._meta?.progressToken {
+            dispatchContext.progressReporter = { [weak self] progress, total, message in
+                try await self?.notify(
+                    ProgressNotification.message(
+                        .init(progressToken: token, progress: progress, total: total, message: message)))
+            }
+        }
+        if !dispatchContext.isStateless {
+            dispatchContext.inputBridge = { [weak self] requests in
+                guard let self else { throw MCPError.internalError("Server is gone") }
+                return try await self.fulfill(requests)
+            }
+        }
+        let taskManager = request.method == CallTool.name ? taskManager : nil
+        let resourceSources =
+            request.method == ReadResource.name || request.method == ListResources.name ? builtInResourceSources : []
+        let applicationList =
+            defaultHandlerMethods.contains(ListResources.name) ? nil : methodHandlers[ListResources.name]
+        let handlerContext = dispatchContext
+        // Checked in the handler task, after the stateless hook, so it can be
+        // cancelled and an unauthorized client cannot trigger it.
+        let headerCheck: HTTPRequest? =
+            handlerContext.isStateless && request.method == CallTool.name
+                && handlerContext.profile?.usesStandardHeaders == true
+            ? httpContext : nil
+        let cacheHint = configuration.cacheHints[request.method] ?? configuration.defaultCacheHint
+        let annotate: @Sendable (Response<AnyMethod>) -> Response<AnyMethod> = {
+            [serverInfo] response in
+            guard handlerContext.isStateless, case .success(let value) = response.result else {
+                return response
+            }
+            return Response(
+                id: response.id,
+                result: StatelessRequests.annotate(
+                    value, method: request.method, serverInfo: serverInfo, cacheHint: cacheHint))
+        }
+
+        // Sessionless handshake requests, other than `initialize`, pass the
+        // same hook with no client info or capabilities.
+        let gatesRequest =
+            handlerContext.isStateless || (isSessionless && request.method != Initialize.name)
+        let statelessHook = gatesRequest ? statelessRequestHook : nil
 
         // Create a task to handle the request with cancellation support.
         // Set currentHandlerContext as a task local so handlers see it.
@@ -794,9 +2412,62 @@ public actor Server {
                     // Check if task was cancelled before starting
                     try Task.checkCancellation()
 
+                    if let hook = statelessHook {
+                        do {
+                            try await hook(handlerContext.clientInfo, handlerContext.clientCapabilities ?? .init())
+                        } catch let error as MCPError {
+                            return AnyMethod.response(id: request.id, error: error)
+                        } catch is CancellationError {
+                            throw CancellationError()
+                        } catch {
+                            return AnyMethod.response(
+                                id: request.id, error: .invalidRequest("Request refused: \(error.localizedDescription)"))
+                        }
+                    }
+
+                    var listing: ToolListing?
+                    if let http = headerCheck,
+                        let mismatch = try await self.parameterHeaderError(
+                            request, http: http, context: handlerContext, listing: &listing)
+                    {
+                        return AnyMethod.response(id: request.id, error: mismatch)
+                    }
+
+                    if let declared = handlerContext.clientCapabilities {
+                        DeprecationNotices.current.log(forClient: declared, to: await self.logger)
+                    }
+
+                    var context = handlerContext
+                    if let manager = taskManager {
+                        do {
+                            context.taskRuntime = try await self.taskRuntime(
+                                for: request, context: handlerContext, manager: manager, listing: &listing)
+                        } catch let error as MCPError {
+                            return annotate(AnyMethod.response(id: request.id, error: error))
+                        }
+                    }
+
                     // Handle request and get response
-                    let response = try await handler(request)
-                    return response
+                    var response = try await Server.$currentHandlerContext.withValue(context) {
+                        if !resourceSources.isEmpty,
+                            let served = try await Self.builtInResources(
+                                request, sources: resourceSources, applicationList: applicationList,
+                                cacheHint: cacheHint)
+                        {
+                            return served
+                        }
+                        return try await handler(request)
+                    }
+                    if request.method == ListTools.name {
+                        await self.warnAboutToolNames(in: response)
+                        if handlerContext.isStateless {
+                            response = await self.droppingInvalidHeaderTools(response)
+                        }
+                        if handlerContext.profile?.taskGeneration != .v1 {
+                            response = Self.strippingExecution(response)
+                        }
+                    }
+                    return annotate(response)
                 } catch is CancellationError {
                     // Request was cancelled, don't send a response per MCP spec
                     await logger?.debug(
@@ -814,17 +2485,56 @@ public actor Server {
 
         // Store the handler task for potential cancellation
         pendingRequestTasks[request.id] = handlerTask
-
-        // Ensure cleanup happens regardless of success or failure
-        defer {
-            pendingRequestTasks.removeValue(forKey: request.id)
+        if startingRequests.removeValue(forKey: request.id) == true {
+            // `notifications/cancelled` arrived before the task was registered.
+            handlerTask.cancel()
         }
+
+        // Stops tracking the request, once, before its response is sent or
+        // when it returns. After `notifications/cancelled` the task's entry
+        // may belong to a request that reused the id.
+        var isTracked = true
+        func release() {
+            guard isTracked else { return }
+            isTracked = false
+            if isListenStream { listenRequests[request.id] = nil }
+            if generation == connectionGeneration, pendingRequestTasks[request.id] == handlerTask {
+                pendingRequestTasks.removeValue(forKey: request.id)
+            }
+        }
+        defer { release() }
 
         do {
             let response = try await handlerTask.value
+            // Cancelled after it created a task: no one will learn the task's id.
+            if handlerTask.isCancelled, let manager = taskManager,
+                case .success(let value) = response.result,
+                let taskID = value.objectValue?["taskId"]?.stringValue
+                    ?? value.objectValue?["task"]?.objectValue?["taskId"]?.stringValue
+            {
+                _ = try? await manager.cancel(taskID)
+                return nil
+            }
+            // `stop()` ended the connection while the handler ran.
+            guard generation == connectionGeneration else { return nil }
+            // The handler returned although it was cancelled: the receiver of
+            // `notifications/cancelled` SHOULD NOT send a response for the
+            // cancelled request (2025-11-25 basic/utilities/cancellation).
+            if handlerTask.isCancelled { return nil }
 
             if sendResponse {
+                // The teardown of a stream the server closed names the id: it
+                // stays in flight until then, and a cancellation that arrives
+                // meanwhile still skips the teardown.
+                var tearsDown = false
+                if request.method == SubscriptionsListen.name, case .success = response.result {
+                    tearsDown = true
+                }
+                if !tearsDown { release() }
                 try await send(response)
+                if tearsDown, !handlerTask.isCancelled {
+                    await sendListenTeardown(request.id)
+                }
                 return nil
             }
 
@@ -833,11 +2543,13 @@ public actor Server {
             // Request was cancelled, don't send a response per MCP spec
             return nil
         } catch {
+            guard generation == connectionGeneration else { return nil }
             // This should not happen as errors are caught in the task
             let mcpError = error as? MCPError ?? MCPError.internalError(error.localizedDescription)
             let response = AnyMethod.response(id: request.id, error: mcpError)
 
             if sendResponse {
+                release()
                 try await send(response)
                 return nil
             }
@@ -846,16 +2558,180 @@ public actor Server {
         }
     }
 
+    // MARK: - Custom headers (SEP-2243)
+
+    /// Checks the `Mcp-Param-*` headers of a `tools/call` against its
+    /// arguments, using the input schemas of the `tools/list` handler.
+    ///
+    /// Fails closed: a call that carries `Mcp-Param-*` headers is refused
+    /// with -32020 when the tool's schema cannot be found, and a call with
+    /// arguments or headers to a tool hidden for an invalid annotation is
+    /// refused. A call with neither has nothing to check and is let through.
+    private func parameterHeaderError(
+        _ request: Request<AnyMethod>, http: HTTPRequest, context: HandlerContext, listing: inout ToolListing?
+    ) async throws -> MCPError? {
+        let params = request.params.objectValue
+        let arguments = params?["arguments"]
+        let prefix = MCPRequestHeaders.parameterPrefix.lowercased()
+        let hasHeaders = http.headers.keys.contains { $0.lowercased().hasPrefix(prefix) }
+        // Nothing to compare: skip the schema lookup.
+        if arguments?.objectValue?.isEmpty ?? true, !hasHeaders { return nil }
+        guard methodHandlers[ListTools.name] != nil else {
+            return hasHeaders ? .headerMismatch("No input schema to check the Mcp-Param headers against") : nil
+        }
+        let name = params?["name"]?.stringValue ?? ""
+
+        switch try await toolInfo(context: context, request: request, listing: &listing)?[name]?.headers {
+        case .valid(let parameters)?:
+            // Single-valued, and a value may contain commas: only separate
+            // field lines count as a repeat.
+            if let repeated = parameters.first(where: {
+                http.isRepeated($0.fieldName, valuesMayContainCommas: true)
+            }) {
+                return .headerMismatch("\(repeated.fieldName) header appears more than once")
+            }
+            return MCPRequestHeaders.validate(parameters, arguments: arguments, header: http.header)
+                .map { MCPError.headerMismatch($0) }
+        case .invalid?:
+            return .headerMismatch("The tool has an invalid \(MCPRequestHeaders.schemaKeyword) annotation")
+        case nil:
+            return hasHeaders ? .headerMismatch("No input schema to check the Mcp-Param headers against") : nil
+        }
+    }
+
+    /// The `x-mcp-header` parameters of a listed tool.
+    enum ToolHeaders: Sendable {
+        case valid([MCPRequestHeaders.Parameter])
+        /// Hidden from `tools/list` for an invalid annotation.
+        case invalid
+    }
+
+    /// What `tools/call` needs to know about a listed tool.
+    struct ToolInfo: Sendable {
+        let headers: ToolHeaders
+        /// The declared support, with an unknown value read as `forbidden`.
+        let taskSupport: TaskSupport
+    }
+
+    /// What one `tools/call` read from the `tools/list` handler, so that its
+    /// checks share one pass.
+    struct ToolListing {
+        /// `nil` when the pass failed.
+        let tools: [String: ToolInfo]?
+    }
+
+    /// The parameters and task support of every tool the `tools/list`
+    /// handler lists for the caller, from one pass through its pages run
+    /// under the caller's context: the list may differ per caller, so it is
+    /// not kept across calls. `listing` holds the pass for the rest of the
+    /// call. `nil` when the pass fails.
+    ///
+    /// - Throws: `CancellationError` when the call is cancelled.
+    private func toolInfo(
+        context: HandlerContext, request: Request<AnyMethod>, listing: inout ToolListing?
+    ) async throws -> [String: ToolInfo]? {
+        if let listing { return listing.tools }
+        guard let handler = methodHandlers[ListTools.name] else { return nil }
+        let tools = try await Self.listTools(handler, context: context, request: request)
+        listing = ToolListing(tools: tools)
+        if tools == nil {
+            await logger?.warning(
+                "Cannot read the tools/list input schemas; calls with Mcp-Param headers are refused")
+        }
+        return tools
+    }
+
+    private static func listTools(
+        _ handler: RequestHandlerBox, context: HandlerContext, request: Request<AnyMethod>
+    ) async throws -> [String: ToolInfo]? {
+        var tools: [String: ToolInfo] = [:]
+        var cursor: String?
+        for _ in 0..<maxToolListPages {
+            try Task.checkCancellation()
+            var params: [String: Value] = [:]
+            if let cursor { params["cursor"] = .string(cursor) }
+            let list = Request<AnyMethod>(
+                id: request.id, method: ListTools.name, params: .object(params), _meta: request._meta)
+            let response = try? await Server.$currentHandlerContext.withValue(context) {
+                try await handler(list)
+            }
+            try Task.checkCancellation()
+            guard case .success(let result)? = response?.result else { return nil }
+            for tool in result.objectValue?["tools"]?.arrayValue ?? [] {
+                guard let name = tool.objectValue?["name"]?.stringValue else { continue }
+                let parameters = try? MCPRequestHeaders.parameters(in: tool.objectValue?["inputSchema"] ?? .null)
+                let support = tool.objectValue?["execution"]?.objectValue?["taskSupport"]?.stringValue
+                tools[name] = ToolInfo(
+                    headers: parameters.map(ToolHeaders.valid) ?? .invalid,
+                    taskSupport: support.map { TaskSupport(rawValue: $0).known } ?? .forbidden)
+            }
+            guard let next = result.objectValue?["nextCursor"]?.stringValue else { return tools }
+            cursor = next
+        }
+        return nil
+    }
+
+    private static let maxToolListPages = 100
+
+    /// Logs the names in a `tools/list` result that do not have the format
+    /// the specification recommends, or that appear more than once in it
+    /// (SEP-986), each once. The result is sent unchanged.
+    private func warnAboutToolNames(in response: Response<AnyMethod>) async {
+        guard case .success(let value) = response.result,
+            let tools = value.objectValue?["tools"]?.arrayValue
+        else { return }
+        let names = tools.compactMap { $0.objectValue?["name"]?.stringValue }
+        for (name, problem) in toolNameWarnings.warnings(for: names, checkDuplicates: true) {
+            await logger?.warning(
+                "Tool name does not follow the specification (SEP-986): \(problem)",
+                metadata: ["tool": "\(MCPRequestHeaders.sanitized(name))"])
+        }
+    }
+
+    /// Removes tools with invalid `x-mcp-header` annotations from a
+    /// `tools/list` result: clients must ignore them (SEP-2243).
+    private func droppingInvalidHeaderTools(_ response: Response<AnyMethod>) async
+        -> Response<AnyMethod>
+    {
+        guard case .success(let value) = response.result,
+            var object = value.objectValue,
+            let tools = object["tools"]?.arrayValue
+        else { return response }
+        var valid: [Value] = []
+        for tool in tools {
+            do {
+                _ = try MCPRequestHeaders.parameters(in: tool.objectValue?["inputSchema"] ?? .null)
+                valid.append(tool)
+            } catch {
+                await logger?.warning(
+                    "Tool not listed: invalid x-mcp-header annotation",
+                    metadata: [
+                        "tool": "\(MCPRequestHeaders.sanitized(tool.objectValue?["name"]?.stringValue ?? "?"))",
+                        "error": "\(error)",
+                    ])
+            }
+        }
+        guard valid.count != tools.count else { return response }
+        object["tools"] = .array(valid)
+        return Response(id: response.id, result: .object(object))
+    }
+
     private func handleMessage(_ message: Message<AnyNotification>) async throws {
         await logger?.trace(
             "Processing notification",
             metadata: ["method": "\(message.method)"])
 
-        if configuration.strict {
-            // Check initialization state unless this is an initialized notification
-            if message.method != InitializedNotification.name {
-                try checkInitialized()
-            }
+        // A strict server ignores notifications of handshake clients before
+        // `initialize`; a notification is never answered, not even with an
+        // error. A connection that served a stateless request has a
+        // 2026-07-28 client, which never initializes, and a cancellation is
+        // always let through.
+        if configuration.strict, !isInitialized, !isSessionless, !servedStatelessRequest,
+            message.method != InitializedNotification.name, message.method != CancelledNotification.name
+        {
+            await logger?.warning(
+                "Notification before initialize ignored", metadata: ["method": "\(message.method)"])
+            return
         }
 
         // Find notification handlers for this method
@@ -892,10 +2768,29 @@ public actor Server {
         }
     }
 
-    private func checkInitialized() throws {
-        guard isInitialized else {
-            throw MCPError.invalidRequest("Server is not initialized")
+    /// Sends an error that answers no known request: `"id": null`
+    /// (JSON-RPC 2.0, section 5).
+    private func sendUnattributedError(_ error: MCPError) async {
+        guard let connection else { return }
+        do {
+            try await connection.send(try encoder.encode(BatchReply.unattributedError(error)))
+        } catch {
+            await logger?.error("Failed to send error response", metadata: ["error": "\(error)"])
         }
+    }
+
+    /// The handshake revisions this server serves, newest first.
+    private var handshakeVersions: [String] {
+        configuration.protocolVersions.filter { Version.handshake.contains($0) }
+    }
+
+    /// Whether this connection has served a stateless (2026-07-28) request.
+    private var servedStatelessRequest = false
+
+    /// Whether the transport has no connection or session, so that each
+    /// handshake request stands alone (``StatelessHTTPServerTransport``).
+    private var isSessionless: Bool {
+        connection is StatelessHTTPServerTransport
     }
 
     /// Validate the client capabilities.
@@ -906,53 +2801,117 @@ public actor Server {
     )
         throws
     {
-        if configuration.strict {
-            guard let capabilities = clientCapabilities else {
-                throw MCPError.methodNotFound("Client capabilities not initialized")
-            }
-            guard capabilities[keyPath: keyPath] != nil else {
-                throw MCPError.methodNotFound("\(name) is not supported by the client")
-            }
+        try validateClientCapability(name) { $0[keyPath: keyPath] != nil }
+    }
+
+    /// Throws -32601 when the client did not declare a capability. Checks only
+    /// in strict mode, unless `evenIfNotStrict` is set.
+    private func validateClientCapability(
+        _ name: String, evenIfNotStrict: Bool = false,
+        _ isDeclared: (Client.Capabilities) -> Bool
+    ) throws {
+        guard configuration.strict || evenIfNotStrict else { return }
+        guard let capabilities = Server.currentHandlerContext?.clientCapabilities
+            ?? clientCapabilities
+        else {
+            // A sessionless handshake request carries no capabilities:
+            // let the client answer.
+            if isSessionless { return }
+            throw MCPError.methodNotFound("Client capabilities not initialized")
+        }
+        guard isDeclared(capabilities) else {
+            throw MCPError.methodNotFound("\(name) is not supported by the client")
         }
     }
 
     private func registerDefaultHandlers(
         initializeHook: (@Sendable (Client.Info, Client.Capabilities) async throws -> Void)?
     ) {
-        // Initialize
-        withMethodHandler(Initialize.self) { params in
+        // The handlers are stored on the server: capturing it strongly would
+        // keep every started server alive.
 
-            guard await !self.isInitialized else {
+        // Initialize
+        registerDefault(Initialize.self) { [weak self] params in
+            guard let self else { throw MCPError.internalError("Server is gone") }
+            // Behind a sessionless transport every client sends its own
+            // `initialize`; the server keeps no per-client state.
+            let sessionless = await self.isSessionless
+            let initialized = await self.isInitialized
+            guard sessionless || !initialized else {
                 throw MCPError.invalidRequest("Server is already initialized")
+            }
+
+            // Negotiate among the configured handshake revisions.
+            let handshakeVersions = await self.handshakeVersions
+            guard let newest = handshakeVersions.first else {
+                throw MCPError.unsupportedProtocolVersion(
+                    supported: await self.configuration.protocolVersions,
+                    requested: params.protocolVersion)
             }
 
             // Call initialization hook if registered
             if let hook = initializeHook {
                 try await hook(params.clientInfo, params.capabilities)
             }
+            // The request context has no client capabilities yet; behind a
+            // sessionless transport it never has them (SEP-2577).
+            DeprecationNotices.current.log(forClient: params.capabilities, to: await self.logger)
 
-            // Perform version negotiation
             let clientRequestedVersion = params.protocolVersion
-            let negotiatedProtocolVersion = Version.negotiate(
-                clientRequestedVersion: clientRequestedVersion)
+            let negotiatedProtocolVersion =
+                handshakeVersions.contains(clientRequestedVersion) ? clientRequestedVersion : newest
 
-            // Set initial state with the negotiated protocol version
-            await self.setInitialState(
-                clientInfo: params.clientInfo,
-                clientCapabilities: params.capabilities,
-                protocolVersion: negotiatedProtocolVersion
-            )
+            if !sessionless {
+                await self.setInitialState(
+                    clientInfo: params.clientInfo,
+                    clientCapabilities: params.capabilities,
+                    protocolVersion: negotiatedProtocolVersion
+                )
+            }
 
             return Initialize.Result(
                 protocolVersion: negotiatedProtocolVersion,
-                capabilities: await self.capabilities,
+                capabilities: await self.advertisedCapabilities(for: negotiatedProtocolVersion),
                 serverInfo: self.serverInfo,
                 instructions: self.instructions
             )
         }
 
         // Ping
-        withMethodHandler(Ping.self) { _ in return Empty() }
+        registerDefault(Ping.self) { _ in return Empty() }
+
+        // Log level (handshake connections; 2026-07-28 sets it per request)
+        if capabilities.logging != nil {
+            registerDefault(SetLoggingLevel.self) { [weak self] params in
+                guard let self else { throw MCPError.internalError("Server is gone") }
+                await self.setClientLogLevel(params.level)
+                return Empty()
+            }
+        }
+
+        // Notification streams (2026-07-28 and later)
+        registerDefault(SubscriptionsListen.self) { [weak self] params in
+            guard let self else { throw MCPError.internalError("Server is gone") }
+            return try await self.serveListen(params)
+        }
+
+        // Discovery (2026-07-28 and later)
+        registerDefault(ServerDiscover.self) { [weak self] _ in
+            guard let self else { throw MCPError.internalError("Server is gone") }
+            return ServerDiscover.Result(
+                supportedVersions: await self.configuration.protocolVersions,
+                capabilities: await self.advertisedCapabilities(
+                    for: Server.currentHandlerContext?.protocolVersion ?? Version.stateless[0]),
+                instructions: self.instructions
+            )
+        }
+    }
+
+    /// Records the level of `logging/setLevel`. Behind a sessionless
+    /// transport there is no connection to record it for.
+    private func setClientLogLevel(_ level: LogLevel) {
+        guard !isSessionless else { return }
+        clientLogLevel = level
     }
 
     private func setInitialState(
@@ -966,13 +2925,58 @@ public actor Server {
         self.isInitialized = true
     }
 
-    /// Cancel and remove a pending request task
-    private func removePendingRequest(id: ID) -> Task<Response<AnyMethod>, Error>? {
-        pendingRequestTasks.removeValue(forKey: id)
+    /// Records a request received on the connection in `startingRequests`,
+    /// before its task starts, so that a cancellation arriving first is kept.
+    /// Returns `false`, recording nothing, for a request whose id is in
+    /// flight, not answered yet: it is answered with -32600, and the entries
+    /// of the request that has the id, which its cancellation and cleanup
+    /// use, are kept.
+    ///
+    /// - SeeAlso: https://modelcontextprotocol.io/specification/2026-07-28/basic#requests
+    private func admit(_ id: ID) -> Bool {
+        // The request ID MUST NOT match the ID of any other request the
+        // sender has issued and not yet received a response for (2026-07-28
+        // basic, Requests). 2025-11-25 forbids any reuse within the session;
+        // only the reuse of an id in flight is refused, under either revision.
+        guard startingRequests[id] == nil, pendingRequestTasks[id] == nil, listenRequests[id] == nil else {
+            return false
+        }
+        startingRequests[id] = false
+        return true
+    }
+
+    /// `batch` with its requests admitted in order (``admit(_:)``): a request
+    /// whose id is in flight, or taken by an earlier request of the batch,
+    /// becomes an invalid item, answered with -32600 in the batch's reply.
+    private func admittingRequests(of batch: Batch) -> Batch {
+        Batch(
+            items: batch.items.map { item in
+                guard case .request(let request) = item, !admit(request.id) else { return item }
+                return .invalid(id: request.id, reason: Self.inProgress(request.id))
+            })
+    }
+
+    /// The reason of the -32600 for a request whose id is in flight.
+    private static func inProgress(_ id: ID) -> String {
+        "A request with id \(id) is already in progress"
+    }
+
+    /// Cancels the handler of the request `id` and stops tracking it. A
+    /// request whose handler task is not registered yet is cancelled when it
+    /// registers. Returns `false` for a request that is unknown or complete.
+    private func cancelRequestHandler(id: ID) -> Bool {
+        if let task = pendingRequestTasks.removeValue(forKey: id) {
+            task.cancel()
+            return true
+        }
+        guard startingRequests[id] != nil else { return false }
+        startingRequests[id] = true
+        return true
     }
 
     private func registerCancellationHandler() {
-        onNotification(CancelledNotification.self) { message in
+        onNotification(CancelledNotification.self) { [weak self] message in
+            guard let self else { return }
 
             let requestId = message.params.requestId
             let reason = message.params.reason
@@ -994,8 +2998,7 @@ public actor Server {
             }
 
             // Cancel the pending request task if it exists and remove from tracking
-            if let task = await self.removePendingRequest(id: requestId) {
-                task.cancel()
+            if await self.cancelRequestHandler(id: requestId) {
                 await self.logger?.debug(
                     "Cancelled request",
                     metadata: ["requestId": "\(requestId)"]
@@ -1036,49 +3039,62 @@ public actor Server {
     }
 }
 
-extension Server.Batch: Codable {
+extension Server.Batch: Decodable {
     init(from decoder: Decoder) throws {
-        let container = try decoder.singleValueContainer()
-
-        let encoder = JSONEncoder()
-        let decoder = JSONDecoder()
-
+        var container = try decoder.unkeyedContainer()
         var items: [Item] = []
-        for item in try container.decode([Value].self) {
-            let data = try encoder.encode(item)
-            try items.append(decoder.decode(Item.self, from: data))
+        while !container.isAtEnd {
+            items.append(try container.decode(Item.self))
         }
-
         self.items = items
-    }
-
-    func encode(to encoder: Encoder) throws {
-        var container = encoder.singleValueContainer()
-        try container.encode(items)
     }
 }
 
-extension Server.Batch.Item: Codable {
+extension Server.Batch.Item: Decodable {
     private enum CodingKeys: String, CodingKey {
         case id
     }
 
+    /// Classifies an item as ``JSONRPCMessageKind`` does for a single
+    /// message. An item that is not a request, a notification or a response
+    /// is invalid: its -32600 carries its `id` when it is a string or an
+    /// integer, except for an unreadable response, whose `id` names a request
+    /// of this server, not one of the peer.
     init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        // Check if it's a request (has id) or notification (no id)
-        if container.contains(.id) {
-            self = .request(try Request<AnyMethod>(from: decoder))
-        } else {
-            self = .notification(try Message<AnyNotification>(from: decoder))
+        let format = "Invalid batch item format"
+        guard let container = try? decoder.container(keyedBy: CodingKeys.self) else {
+            _ = try? Value(from: decoder)
+            self = .invalid(id: nil, reason: format)
+            return
         }
-    }
+        let isNull = (try? container.decodeNil(forKey: .id)) == true
+        let id = isNull ? nil : try? container.decode(ID.self, forKey: .id)
 
-    func encode(to encoder: Encoder) throws {
-        switch self {
-        case .request(let request):
-            try request.encode(to: encoder)
-        case .notification(let notification):
-            try notification.encode(to: encoder)
+        switch try? JSONRPCMessageKind(from: decoder) {
+        case .invalid(_, let id, let reason):
+            self = .invalid(id: id, reason: reason)
+        case .request:
+            if let request = try? Request<AnyMethod>(from: decoder) {
+                self = .request(request)
+            } else {
+                self = .invalid(id: id, reason: format)
+            }
+        case .notification:
+            if let notification = try? Message<AnyNotification>(from: decoder) {
+                self = .notification(notification)
+            } else {
+                self = .invalid(id: nil, reason: format)
+            }
+        case .response:
+            if let response = try? Response<AnyMethod>(from: decoder) {
+                self = .response(response)
+            } else {
+                self = .invalid(id: nil, reason: format)
+            }
+        case nil:
+            // No string `method`, and no `result` or `error` with a valid
+            // `id`, such as `{"jsonrpc": "2.0", "id": 7}`.
+            self = .invalid(id: id, reason: format)
         }
     }
 }

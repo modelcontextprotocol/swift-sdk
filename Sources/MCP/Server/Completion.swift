@@ -17,6 +17,7 @@ public struct ResourceReference: Hashable, Codable, Sendable {
     /// The resource URI
     public let uri: String
 
+    /// Creates a reference to the resource or resource template at `uri`.
     public init(uri: String) {
         self.uri = uri
     }
@@ -46,6 +47,8 @@ public struct ResourceReference: Hashable, Codable, Sendable {
 }
 
 /// A reference type for completion requests (either prompt or resource)
+///
+/// Frozen: no case is added in 1.x (`ref/prompt` and `ref/resource` in every revision).
 public enum CompletionReference: Hashable, Codable, Sendable {
     /// References a prompt by name
     case prompt(PromptReference)
@@ -91,6 +94,7 @@ public enum CompletionReference: Hashable, Codable, Sendable {
 public enum Complete: Method {
     public static let name = "completion/complete"
 
+    /// The parameters of `completion/complete`.
     public struct Parameters: Hashable, Codable, Sendable {
         /// The reference to what is being completed
         public let ref: CompletionReference
@@ -99,6 +103,7 @@ public enum Complete: Method {
         /// Optional context with already-resolved arguments
         public let context: Context?
 
+        /// Creates the parameters of a `completion/complete` request.
         public init(
             ref: CompletionReference,
             argument: Argument,
@@ -116,6 +121,7 @@ public enum Complete: Method {
             /// The current value (partial or complete)
             public let value: String
 
+            /// Creates an argument with its name and current value.
             public init(name: String, value: String) {
                 self.name = name
                 self.value = value
@@ -127,18 +133,21 @@ public enum Complete: Method {
             /// A mapping of already-resolved argument names to their values
             public let arguments: [String: String]
 
+            /// Creates a context from the already-resolved arguments.
             public init(arguments: [String: String]) {
                 self.arguments = arguments
             }
         }
     }
 
+    /// The result of `completion/complete`.
     public struct Result: Hashable, Codable, Sendable {
         /// The completion result
         public let completion: Completion
         /// Optional metadata about this result
         public var _meta: Metadata?
 
+        /// Creates the result of a `completion/complete` request.
         public init(completion: Completion, _meta: Metadata? = nil) {
             self.completion = completion
             self._meta = _meta
@@ -169,6 +178,7 @@ public enum Complete: Method {
             /// Whether additional results exist
             public let hasMore: Bool?
 
+            /// Creates a completion with suggested values.
             public init(
                 values: [String],
                 total: Int? = nil,

@@ -249,6 +249,7 @@ struct RootsTests {
     // MARK: - Integration Tests
 
     @Test("Server listRoots with client that has roots capability")
+    @available(*, deprecated, message: "Tests the deprecated roots API (SEP-2577)")
     func testServerListRootsWithCapableClient() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
@@ -268,7 +269,8 @@ struct RootsTests {
             version: "1.0.0",
             capabilities: Client.Capabilities(
                 roots: Client.Capabilities.Roots(listChanged: true)
-            )
+            ),
+            configuration: .handshake
         )
 
         await client.withRootsHandler {
@@ -278,9 +280,6 @@ struct RootsTests {
         // Start server and client
         try await server.start(transport: serverTransport)
         try await client.connect(transport: clientTransport)
-
-        // Wait for initialization to complete
-        try await Task.sleep(for: .milliseconds(100))
 
         // Server requests roots from client - should succeed
         let roots = try await server.listRoots()
@@ -293,6 +292,7 @@ struct RootsTests {
     }
 
     @Test("Server listRoots fails when client lacks roots capability (strict mode)")
+    @available(*, deprecated, message: "Tests the deprecated roots API (SEP-2577)")
     func testServerListRootsFailsWithoutCapability() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
@@ -305,15 +305,13 @@ struct RootsTests {
         // Client has NO roots capability (default empty capabilities)
         let client = Client(
             name: "test-client",
-            version: "1.0.0"
+            version: "1.0.0",
+            configuration: .handshake
         )
 
         // Start server and client
         try await server.start(transport: serverTransport)
         try await client.connect(transport: clientTransport)
-
-        // Wait for initialization to complete
-        try await Task.sleep(for: .milliseconds(100))
 
         // Server tries to request roots - should fail
         await #expect(throws: MCPError.self) {
@@ -326,6 +324,7 @@ struct RootsTests {
     }
 
     @Test("Server listRoots succeeds when client lacks capability (non-strict mode)")
+    @available(*, deprecated, message: "Tests the deprecated roots API (SEP-2577)")
     func testServerListRootsNonStrictMode() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
@@ -340,7 +339,8 @@ struct RootsTests {
         // Client has NO roots capability but registers handler anyway
         let client = Client(
             name: "test-client",
-            version: "1.0.0"
+            version: "1.0.0",
+            configuration: .handshake
         )
 
         await client.withRootsHandler {
@@ -350,9 +350,6 @@ struct RootsTests {
         // Start server and client
         try await server.start(transport: serverTransport)
         try await client.connect(transport: clientTransport)
-
-        // Wait for initialization to complete
-        try await Task.sleep(for: .milliseconds(100))
 
         // Server requests roots - should succeed in non-strict mode
         let roots = try await server.listRoots()
@@ -364,6 +361,7 @@ struct RootsTests {
     }
 
     @Test("Client sends roots list changed notification")
+    @available(*, deprecated, message: "Tests the deprecated roots API (SEP-2577)")
     func testClientSendsRootsListChangedNotification() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
@@ -377,30 +375,25 @@ struct RootsTests {
             version: "1.0.0",
             capabilities: Client.Capabilities(
                 roots: Client.Capabilities.Roots(listChanged: true)
-            )
+            ),
+            configuration: .handshake
         )
 
         // Register notification handler on server
-        nonisolated(unsafe) var didReceive = false
+        let didReceive = Flag()
         await server.onNotification(RootsListChangedNotification.self) { _ in
-            didReceive = true
+            await didReceive.set()
         }
 
         // Start server and client
         try await server.start(transport: serverTransport)
         try await client.connect(transport: clientTransport)
 
-        // Wait for initialization
-        try await Task.sleep(for: .milliseconds(100))
-
         // Client sends notification
         try await client.notifyRootsChanged()
 
-        // Wait for notification to be processed
-        try await Task.sleep(for: .milliseconds(100))
-
         // Verify notification was received
-        #expect(didReceive)
+        #expect(await eventually { await didReceive.isSet })
 
         // Cleanup
         await server.stop()
@@ -408,6 +401,7 @@ struct RootsTests {
     }
 
     @Test("Server listRoots fails when client has no handler registered")
+    @available(*, deprecated, message: "Tests the deprecated roots API (SEP-2577)")
     func testServerListRootsFailsWithoutHandler() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
@@ -422,7 +416,8 @@ struct RootsTests {
             version: "1.0.0",
             capabilities: Client.Capabilities(
                 roots: Client.Capabilities.Roots(listChanged: true)
-            )
+            ),
+            configuration: .handshake
         )
 
         // NO handler registered on client
@@ -430,9 +425,6 @@ struct RootsTests {
         // Start server and client
         try await server.start(transport: serverTransport)
         try await client.connect(transport: clientTransport)
-
-        // Wait for initialization
-        try await Task.sleep(for: .milliseconds(100))
 
         // Server requests roots - should fail with method not found
         await #expect(throws: MCPError.self) {
@@ -445,6 +437,7 @@ struct RootsTests {
     }
 
     @Test("Multiple roots requests work correctly")
+    @available(*, deprecated, message: "Tests the deprecated roots API (SEP-2577)")
     func testMultipleRootsRequests() async throws {
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
 
@@ -460,7 +453,8 @@ struct RootsTests {
             version: "1.0.0",
             capabilities: Client.Capabilities(
                 roots: Client.Capabilities.Roots(listChanged: true)
-            )
+            ),
+            configuration: .handshake
         )
 
         await client.withRootsHandler {
@@ -471,8 +465,6 @@ struct RootsTests {
         // Start server and client
         try await server.start(transport: serverTransport)
         try await client.connect(transport: clientTransport)
-
-        try await Task.sleep(for: .milliseconds(100))
 
         // Make multiple requests
         let roots1 = try await server.listRoots()

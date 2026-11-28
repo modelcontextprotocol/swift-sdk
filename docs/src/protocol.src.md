@@ -1,0 +1,691 @@
+# The base protocol
+
+This guide covers the parts of MCP that every client and server share: the connection lifecycle in both protocol eras, the transports, notification streams, authorization, security, and the utilities (cancellation, ping, progress, error codes). Features built on top of them are in [server.md](server.md) and [client.md](client.md). The version model is in [protocol_versions.md](protocol_versions.md).
+
+## Lifecycle
+
+The SDK speaks two protocol eras at once:
+
+| Era | Revisions | How a connection starts | Where the client's state lives |
+|---|---|---|---|
+| Handshake | 2025-11-25, 2025-06-18, 2025-03-26, 2024-11-05 (`Version.handshake`) | `initialize` request, then `notifications/initialized` | On the server, for the life of the connection or HTTP session |
+| Stateless | 2026-07-28 (`Version.stateless`) | Optional `server/discover`; no handshake | In the `_meta` of every request |
+
+`Client` and `Server` are actors. A client connects with `connect(transport:)` and a server with `start(transport:)`. The same handler code serves both eras: the server decides the era of each request from its `_meta`.
+
+Current defaults:
+
+- `Client.Configuration.protocolMode` defaults to `.automatic`: `server/discover` at 2026-07-28, with a fallback to `initialize`.
+- `Server.Configuration.protocolVersions` defaults to `Version.stateless + Version.handshake`, so a server serves both eras.
+- `Version.supported` lists both eras. `Version.latestHandshake`, the version `initialize` requests, is 2025-11-25.
+
+### The initialize handshake
+
+With `.handshake`, or after an `.automatic` fallback, the client sends `initialize` with `Version.latestHandshake`, then `notifications/initialized`. The server negotiates: it answers with the requested version when it serves it, and otherwise with its newest handshake revision.
+
+%include Examples/Snippets/Protocol/Lifecycle.swift lifecycle-handshake
+
+After `connect` returns, `client.negotiatedProtocolVersion`, `client.serverInfo` and `client.serverCapabilities` are set. On the server, the client's info and capabilities are kept for the connection and passed to every handler.
+
+`start(transport:initializeHook:statelessRequestHook:)` takes an optional `initializeHook` that runs before the server answers `initialize`. Throw from it to refuse the client:
+
+%include Examples/Snippets/Protocol/Lifecycle.swift lifecycle-initialize-hook
+
+The hook runs only for `initialize`. Stateless requests do not reach it; pass a `statelessRequestHook` too, which runs before each of them with the client info and capabilities from its `_meta`, or check `Server.currentHandlerContext?.clientInfo` in handlers. With an initialize hook and no stateless hook, stateless requests are refused with -32022, so clients fall back to `initialize`.
+
+With `Server.Configuration.strict` set (`.strict`), the server rejects requests other than `initialize` and `ping` that arrive before `initialize`, with -32600 "Server is not initialized", and ignores notifications other than `notifications/initialized`. The default is lenient. A second `initialize` on one connection fails with -32600 "Server is already initialized". Behind a `StatelessHTTPServerTransport`, which has no connection or session, every `initialize` is answered, the server keeps no client state, and `strict` does not apply to handshake requests. No session ties a later request to the `initialize` that passed the hook, so there the `statelessRequestHook` runs before every other handshake request, with no client info and empty capabilities; with an initialize hook and no stateless hook, those requests are refused with -32600.
+
+A server never answers a notification. A message it cannot read gets a parse error (-32700) with `"id": null`, and an empty batch gets -32600 with `"id": null`. In a batch, each invalid item gets its own -32600, and a response answers the server's request it names and gets no reply. A request whose id is already in progress, from an earlier message or an earlier item of the same batch, gets -32600 and runs no handler; the request that has the id is not affected. An id is free again once its response is sent; a listen stream the server closes keeps its id until the `notifications/cancelled` that follows its result.
+
+### Discovery and protocol modes
+
+At 2026-07-28 there is no handshake. A client may send `server/discover` to learn the server's versions, capabilities and instructions; the result creates no session. Every `Server` registers a `server/discover` handler. Its result lists `Server.Configuration.protocolVersions` and carries the server's identity in `_meta["io.modelcontextprotocol/serverInfo"]`.
+
+`Client.ProtocolMode` selects how `connect(transport:)` opens the connection:
+
+| Mode | Behavior |
+|---|---|
+| `.automatic` (default) | `server/discover` at `Version.stateless[0]`. On -32022 it retries once with the first version in `data.supported` that is in `Version.stateless`. Falls back to `initialize` (see below). |
+| `.handshake` | `initialize` with `Version.latestHandshake`. |
+| `.stateless(v)` | `server/discover` at `v`. No retry and no fallback: when the server does not serve `v`, the -32022 error is thrown. |
+
+`.automatic` falls back to `initialize` when:
+
+- The `server/discover` result lists no stateless revision.
+- The server answers -32022, no retry is possible, and `data.supported` is empty or lists a handshake revision.
+- The server answers with any other JSON-RPC error, such as -32601.
+- `HTTPClientTransport` reports HTTP 400, 404 or 405 without a JSON-RPC error for the request.
+- No answer arrives within `Client.Configuration.discoveryTimeout` (10 seconds by default). Time spent authorizing the request, such as a user signing in, does not count.
+
+Other transport errors are thrown in every mode: authorization failures, 408, 429, 5xx, `transportError`, and errors that are not `MCPError`, such as a `URLError`.
+
+%include Examples/Snippets/Protocol/Lifecycle.swift lifecycle-automatic
+
+`connect` returns a `Client.ConnectionInfo` in both eras: `protocolVersion`, `capabilities`, `serverInfo`, `instructions` and `isStateless`. After discovery it is built from the `server/discover` result, so code that reads `result.capabilities` works unchanged; `serverInfo` is `nil` when the server sends no `io.modelcontextprotocol/serverInfo`. `client.isStateless` is `true` when the negotiated version uses per-request `_meta`.
+
+To end a connection, disconnect the client and stop the server. `disconnect()` first closes the client's open listen streams, fails pending requests with -32603 "Client disconnected", and disconnects the transport. `stop()` closes the server's listen streams and fails its pending requests to the client.
+
+%include Examples/Snippets/Protocol/Lifecycle.swift lifecycle-shutdown
+
+### Per-request `_meta` keys
+
+At 2026-07-28 every request carries its context in `params._meta`. The keys are constants on `MetaKey`, and `Metadata` has typed accessors for each:
+
+| `MetaKey` | Wire key | `Metadata` accessor | Sent by | Required |
+|---|---|---|---|---|
+| `protocolVersion` | `io.modelcontextprotocol/protocolVersion` | `protocolVersion: String?` | client, every request | yes |
+| `clientCapabilities` | `io.modelcontextprotocol/clientCapabilities` | `clientCapabilities: Client.Capabilities?` | client, every request | yes |
+| `clientInfo` | `io.modelcontextprotocol/clientInfo` | `clientInfo: Client.Info?` | client, every request | no |
+| `logLevel` | `io.modelcontextprotocol/logLevel` | `logLevel: LogLevel?` | client, when `Configuration.logLevel` is set | no |
+| `serverInfo` | `io.modelcontextprotocol/serverInfo` | `serverInfo: Server.Info?` | server, every stateless result | no |
+| `subscriptionID` | `io.modelcontextprotocol/subscriptionId` | `subscriptionID: ID?` | server, on listen streams | yes, on those messages |
+
+The client adds the envelope itself when `isStateless` is `true`. Keys that a request already has in `_meta`, such as a `progressToken`, are kept; on a conflict the caller's value wins. To build a request by hand, set the keys on `Metadata` and pass it as `_meta:` to any `Method.request(...)` factory. `Request._meta` is merged into `params._meta` when encoded.
+
+%include Examples/Snippets/Protocol/Lifecycle.swift lifecycle-meta-keys
+
+The request encodes as:
+
+```json
+{
+  "jsonrpc": "2.0", "id": "…", "method": "server/discover",
+  "params": {
+    "_meta": {
+      "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+      "io.modelcontextprotocol/clientCapabilities": {},
+      "io.modelcontextprotocol/clientInfo": {"name": "raw-client", "version": "1.0.0"},
+      "io.modelcontextprotocol/logLevel": "info"
+    }
+  }
+}
+```
+
+Handlers do not parse `_meta`. They read `Server.currentHandlerContext`, a task-local `HandlerContext`:
+
+| Property | Stateless request | Handshake request |
+|---|---|---|
+| `protocolVersion` | from `_meta` | negotiated by `initialize` |
+| `clientCapabilities` | from `_meta` | sent in `initialize` |
+| `clientInfo` | from `_meta`, if sent | sent in `initialize` |
+| `logLevel` | from `_meta`; `nil` means no log notifications | `nil` (the level is set with `logging/setLevel`) |
+| `isStateless` | `true` | `false` |
+| `profile` | `Version.profile(for:)` of the version | same |
+| `httpContext` | the originating `HTTPRequest` on HTTP server transports | same |
+
+%include Examples/Snippets/Protocol/Lifecycle.swift lifecycle-handler-context
+
+### Request classification on the server
+
+The server classifies every request before it looks up a handler:
+
+1. No `io.modelcontextprotocol/protocolVersion` in `_meta`: the request belongs to the handshake era. Otherwise the server checks the version first: a value that is not a non-empty string fails with -32602, and a version that is not in `Configuration.protocolVersions`, a handshake revision included, fails with -32022. A served handshake revision belongs to the handshake era.
+2. Otherwise the request is stateless. The server then checks, in order: `clientCapabilities` is present and valid (-32602), and `clientInfo` is valid if present (-32602). A request for a version the server does not serve gets -32022 even when these are missing.
+3. A handshake-era request for `server/discover` or `subscriptions/listen` fails with -32601: these methods need 2026-07-28.
+4. A stateless request for a removed method (`initialize`, `ping`, `logging/setLevel`, `resources/subscribe`, `resources/unsubscribe`) fails with -32601.
+5. A stateless request for a feature whose capability the server does not declare fails with -32601: `tools/*` needs `capabilities.tools`, `prompts/*` needs `prompts`, `resources/*` needs `resources`, `completion/complete` needs `completions`.
+6. No handler: -32601 "Unknown method".
+
+Stateless results are annotated before they are sent: `resultType: "complete"` unless the handler set one, `_meta.serverInfo`, and for cacheable methods (`tools/list`, `prompts/list`, `resources/list`, `resources/templates/list`, `resources/read`, `server/discover`) the `ttlMs` and `cacheScope` hints from `Configuration.cacheHints` or `defaultCacheHint` (`.uncached`: 0 ms, private). See [server.md](server.md#cacheable-results) for cache hints.
+
+`Configuration.protocolVersions` narrows what the server serves. Handshake revisions in it are negotiated by `initialize`; stateless revisions are accepted per request; it is also the `supportedVersions` list of `server/discover`.
+
+%include Examples/Snippets/Protocol/Lifecycle.swift lifecycle-server-versions
+
+### Unsupported protocol version (-32022)
+
+A stateless request for a version the server does not serve fails with -32022 `MCPError.unsupportedProtocolVersion(supported:requested:)`. The error's `data` is `{"supported": [...], "requested": "..."}`. Over HTTP the status is 400. `.automatic` and `.stateless` clients retry once with the first stateless version in `supported`. When no retry is possible, `.automatic` falls back to `initialize` if `supported` is empty or lists a handshake revision; otherwise the client throws the error.
+
+%include Examples/Snippets/Protocol/Lifecycle.swift lifecycle-unsupported-version
+
+Common lifecycle errors:
+
+| Code | Cause |
+|---|---|
+| -32022 | Stateless version not in `Configuration.protocolVersions`; or a 2026-07-28 request sent to `StatefulHTTPServerTransport`. |
+| -32602 | Stateless `_meta` without `clientCapabilities`, or with an invalid version or `clientInfo`. |
+| -32601 | `ping`, `initialize`, `logging/setLevel` or `resources/(un)subscribe` at 2026-07-28; `server/discover` or `subscriptions/listen` without a stateless version; an undeclared capability at 2026-07-28. |
+| -32600 | A request before `initialize` on a strict server; a second `initialize`. |
+
+## Transports
+
+A transport moves JSON-RPC messages between a client and a server. In the SDK a transport is an actor that conforms to `Transport`; `Client.connect(transport:)` and `Server.start(transport:)` take any conforming value. Use one transport per connection: do not reuse a transport after `disconnect()`.
+
+| Transport | Side | Eras | Notes |
+|---|---|---|---|
+| `StdioTransport` | both | both | Newline-delimited JSON over two file descriptors. Apple platforms and Linux (glibc, musl). |
+| `HTTPClientTransport` | client | both | Streamable HTTP, with SSE. |
+| `StatefulHTTPServerTransport` | server | handshake | One instance per `Mcp-Session-Id`. |
+| `StatelessHTTPServerTransport` | server | 2026-07-28 (and sessionless handshake use) | One instance for all requests. |
+| `InMemoryTransport` | both | both | Same process; tests and embedding. |
+| `NetworkTransport` | both | both | Network.framework `NWConnection`; Apple platforms only. |
+
+The HTTP server transports do not open sockets. They take a framework-neutral `HTTPRequest` and return an `HTTPResponse`; an adapter for your HTTP framework converts between the two. [`Examples/http-server/main.swift`](../Examples/http-server/main.swift) is a complete adapter for SwiftNIO that serves both eras.
+
+Build the request with `HTTPRequest(method:headerFields:body:path:)`, passing the header field lines as received (with SwiftNIO, `Array(head.headers)`). The transports then see how many times each header was sent: at 2026-07-28, a repeated `MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name` or `Mcp-Param-*` header is refused with -32020, even when the copies are equal (a repeated handshake `MCP-Protocol-Version` gets -32022). `HTTPRequest(method:headers:body:path:)` takes a dictionary instead; join repeated lines into one value with `", "` (RFC 9110 §5.3). The transports then catch only repeated `MCP-Protocol-Version` and `Mcp-Method` headers, whose values never contain a comma.
+
+### stdio
+
+A server started by its client reads requests from stdin and writes responses to stdout. Write logs to stderr, never to stdout.
+
+%include Examples/Snippets/Protocol/Transports.swift transport-stdio-server
+
+`waitUntilCompleted()` returns when the message loop ends, which happens when stdin closes.
+
+The SDK has no process-launching transport. A client starts the server itself and passes the pipe file descriptors to `StdioTransport(input:output:logger:)`:
+
+%include Examples/Snippets/Protocol/Transports.swift transport-stdio-client
+
+`send` fails with `MCPError.transportError` (ENOTCONN) before `connect()` or after `disconnect()`. `connect()` makes the descriptors non-blocking; `disconnect()` waits for the read loop and the sends in progress, then makes blocking again each descriptor that was blocking and still refers to the same file. The protocol era is independent of stdio: with `.automatic` the client sends `server/discover` over the pipe like any other request.
+
+### HTTP client
+
+`HTTPClientTransport` implements Streamable HTTP for the client. Every message is a POST. The reply is JSON or an SSE stream; the transport yields every JSON-RPC message from either.
+
+%include Examples/Snippets/Protocol/Transports.swift transport-http-client
+
+What the transport sends depends on the era of each message:
+
+| | Handshake connection | 2026-07-28 connection |
+|---|---|---|
+| `MCP-Protocol-Version` | negotiated version, after `initialize` | from the message's `_meta` |
+| `Mcp-Session-Id` | the ID the server returned on `initialize` | never; `useStatelessProtocol(_:)` drops it |
+| `Mcp-Method`, `Mcp-Name`, `Mcp-Param-*` | not sent | sent (see [request headers](#request-headers-sep-2243)) |
+| GET stream | opened when `streaming` is `true` | closed and never opened |
+| `Last-Event-ID` resumption | on the GET stream and on POST response streams | not used: a response stream that ends early fails its request |
+
+The client switches the transport when the connection opens: `Client` calls `updateNegotiatedProtocolVersion(_:)` after `initialize` and `useStatelessProtocol(_:)` after `server/discover`.
+
+On handshake connections with `streaming: true`, the transport waits up to `sseInitializationTimeout` (10 s) for a session ID, then opens the GET stream for server-initiated messages. When the stream ends it reconnects after the server's SSE `retry:` interval (3000 ms by default) and sends `Last-Event-ID` with the last event ID it saw. A 405 on GET stops the stream, and so does a 404 on a GET that carried the session ID: the stream is not reopened, and the session ID is kept. The next request carries it, receives the server's 404, drops the session and reports `isSessionExpired`. A line, or the data of one event, over 16 MiB ends the stream, and the next GET opens a fresh stream without `Last-Event-ID`, since a replay would repeat the event; that event is lost.
+
+`disconnect()` ends the connection at once: it stops the GET stream, cancels the POSTs in flight and finishes the message stream. A transport dropped without `disconnect()` is still released, and then stops its GET stream and invalidates its URL sessions; a `send` still running keeps the transport alive until it finishes or its task is cancelled. A `Client` connected through it keeps it alive until `Client.disconnect()` or until the connection closes (see [Disconnecting](client.md#disconnecting)).
+
+When a POST's SSE stream ends before the response to its request, a handshake connection resumes that stream: after the stream's `retry:` interval the transport sends a GET with `Last-Event-ID` set to the stream's own last event ID, and reads the replay until the response arrives. It repeats this while the server closes the stream again, up to 10 times in a row without a new message: a resumed stream that delivers a message, such as a progress notification, under an event ID the transport has not seen starts the count again. A message under an event ID it has seen, which a server that ignores `Last-Event-ID` replays, does not. A resumption GET that fails to connect is retried within the same count. When the stream had no event ID, the server refuses the GET (the Go SDK's server keeps no events and answers 400), or the attempts run out, the request fails with -32603 ("The server closed the response stream without a response or an event ID to resume from", or "The response stream could not be resumed") instead of waiting. At 2026-07-28 there is no resumption: the request fails at once ("The server closed the response stream without a response").
+
+`HTTPClientTransport.defaultConfiguration` is `URLSessionConfiguration.default` with `httpMaximumConnectionsPerHost` raised to 64. Over HTTP/1.1 each request in flight holds a connection until its response ends, and the GET stream holds one more. A server-to-client request (sampling, elicitation, roots) arrives on one of those streams, and the client's reply needs a connection of its own, so with the system's limit (6 per host on Apple platforms) five concurrent calls that each wait for a reply deadlock. A custom configuration needs a limit above the number of concurrent requests plus one.
+
+HTTP errors map as follows. At 2026-07-28 a server answers protocol errors with a 4xx status and a JSON-RPC error body; the transport delivers that body, so the caller sees the `MCPError` (-32601, -32602, -32020, -32021, -32022), not an HTTP error. Only an `error` whose ID is the request's ID is delivered. A `result`, an error with another ID (such as a placeholder), a batch, or the reply to a notification gives the status error below. A 404 to a POST that carried the session ID ends the session in both cases.
+
+Without a JSON-RPC error for the request, the transport throws `MCPError.transportError(_:)` with an `HTTPStatusError`: its `statusCode`, the response `headers` (`value(forHeader:)` reads one, such as `Retry-After`), and `isSessionExpired`. Its `debugDescription`, which `MCPError`'s includes, names the headers without their values, so a logged error carries no cookie or challenge.
+
+| Status | Also |
+|---|---|
+| 401, 403 | Handled by the authorizer, if one is set; the error when it is not, or when retries run out |
+| 404 | To a POST that carried the session ID: `isSessionExpired` is `true` (for each such POST in flight), the session ID is dropped and the GET stream stops. To the GET stream: the stream stops, and the session ID is kept for the next request |
+| 405 | On the GET stream, the stream stops; a 405 to a POST does not stop it |
+
+To add headers to every request (an API key, a user agent), pass `requestModifier`. For OAuth, pass an `authorizer` (see [Authorization](#authorization)).
+
+### Stateful HTTP server
+
+`StatefulHTTPServerTransport` serves one handshake session. It assigns the session ID when it answers `initialize` and validates it on every later request.
+
+| Method | Behavior |
+|---|---|
+| POST `initialize` | Creates the session; the response is an SSE stream with an `Mcp-Session-Id` header. A second `initialize` gets 400. |
+| POST request | SSE stream that carries related notifications and requests, then the response. |
+| POST notification or response | 202 Accepted. |
+| GET | The standalone SSE stream for messages not tied to a request. One per session (409 for a second). With `Last-Event-ID` it replays stored events of that stream. |
+| DELETE | Ends the session; later validated requests with a session ID get 404, and those without one get 400. |
+
+Requests whose `MCP-Protocol-Version` is a stateless revision get 400 with -32022 and `data.supported` set to the handshake revisions, so a client in `.automatic` mode falls back to `initialize`.
+
+The default validation pipeline is `OriginValidator.localhost()`, `AcceptHeaderValidator(mode: .sseRequired)`, `ContentTypeValidator()`, `ProtocolVersionValidator()`, `SessionValidator()`. Pass `validationPipeline:` to replace it, for example to add authentication or allow other hosts. `sessionIDGenerator:` replaces the UUID generator; IDs must be visible ASCII (0x21-0x7E) or the transport answers 500. `retryInterval:` sets the SSE `retry:` field of the priming event; priming events are sent at 2025-03-26 through 2025-11-25.
+
+Your HTTP layer keeps one transport and one `Server` per session and routes by `Mcp-Session-Id`. The snippet leaves out what a deployed router needs: create a session only for a POST `initialize`, cap the number of sessions, and close idle ones, as [`Examples/http-server/main.swift`](../Examples/http-server/main.swift) does:
+
+%include Examples/Snippets/Protocol/Transports.swift transport-stateful-sessions
+
+The transport stores the messages it sends for replay, up to `eventStoreCapacity` events (default 1000) and `eventStoreByteCapacity` bytes (default 16 MiB) per session; when the store is full the oldest event is dropped, but the newest is always kept. Priming events are not stored. A resumption finds its stream from the `Last-Event-ID` (`<stream>_<counter>`), so a quiet stream stays resumable while other streams fill the store. It gets HTTP 400 "Invalid Last-Event-ID" only when the ID is unknown or an event of that stream after it was dropped. All events are dropped when the session ends. End idle sessions in your router (the example server and the conformance fixture do this on a timer).
+
+Validation errors:
+
+| Status | Cause |
+|---|---|
+| 400 | Empty or invalid JSON-RPC body; missing `Mcp-Session-Id`, including after termination; request before `initialize`; second `initialize`; unsupported `MCP-Protocol-Version` (-32022); a stateless request (-32022). |
+| 404 | Unknown or expired session ID, including any ID sent after the session ended. A transport stopped before a session existed answers 400, as before `initialize`. |
+| 403, 421 | `Origin` or `Host` not allowed by `OriginValidator`. |
+| 406 | POST `Accept` lacks `application/json` or `text/event-stream`; GET `Accept` lacks `text/event-stream`. |
+| 415 | `Content-Type` is not `application/json`. |
+
+### Stateless HTTP server
+
+`StatelessHTTPServerTransport` answers each POST with one exchange and keeps no session. One transport and one `Server` serve every client.
+
+- POST only; other methods get 405 with `Allow: POST`.
+- `Mcp-Session-Id` is neither read nor set.
+- The reply is a single JSON body. When the handler sends notifications for the request (progress, logs, listen events) and the client accepts `text/event-stream`, the reply becomes an SSE stream that carries them and ends with the response. Without SSE in `Accept`, those notifications are dropped, and `subscriptions/listen` is refused with 406.
+- Each request gets an internal JSON-RPC id (`mcp-http-<uuid>`) while in flight, so clients may reuse ids. The response carries the client's id again.
+- Messages not related to an in-flight request are dropped: there is no stream outside a request.
+- If the client closes an SSE reply, the transport cancels the request (see [Cancellation](#cancellation)). If it goes away before the reply is decided, the adapter must cancel the task that awaits `handleRequest(_:)`; the transport then cancels the request too.
+- A POSTed `notifications/cancelled` is honored only when it carries the same `Authorization` header as exactly one request in flight with that id (compared by value: `1` and `"1"` differ). The cancelled request's HTTP response then ends without a JSON-RPC response: 202 Accepted when no reply was sent yet, or the end of its SSE stream.
+- An open SSE reply carries a `: keep-alive` comment every `keepAliveInterval` (15 seconds; `nil` turns it off), so that idle listen streams survive client and proxy timeouts.
+- At 2026-07-28 JSON-RPC errors get an HTTP status: 404 for -32601; 400 for -32600, -32602, -32020, -32021 and -32022; 200 otherwise.
+- After `disconnect()` every request gets 404; a request in flight at that moment gets 503.
+
+The default pipeline is `OriginValidator.localhost()`, `AcceptHeaderValidator(mode: .jsonOnly)`, `ContentTypeValidator()`, `ProtocolVersionValidator()`. The transport accepts the versions in `Version.stateless + Version.handshake`; the `Server` then applies its own `protocolVersions`.
+
+A 2026-07-28 request over HTTP needs these headers and `_meta` keys:
+
+%include Examples/Snippets/Protocol/Transports.swift transport-stateless-request
+
+The transport checks, before the server sees the request:
+
+| Check | Error |
+|---|---|
+| `Mcp-Method` present and equal to `method`; `Mcp-Name` present and equal to the name, for methods that have one | 400, -32020 |
+| `MCP-Protocol-Version` header equal to `_meta` `protocolVersion` | 400, -32020 |
+| `MCP-Protocol-Version` is stateless but `_meta` has no version | 400, -32602 |
+| `_meta` names a stateless version but the header is missing or a handshake revision | 400, -32020 |
+
+The transport parses the body once and re-serializes it; it checks and dispatches that one form. A body with duplicate member names therefore cannot pass `Mcp-Name: a` and run `b`, whichever duplicate the platform's parser keeps.
+
+### Routing both eras on one endpoint
+
+Route on `HTTPRequest.statelessProtocolVersion`. It returns the `MCP-Protocol-Version` header when the value is not a handshake revision (2026-07-28 or an unknown version), and `nil` otherwise. Send non-`nil` requests to the shared `StatelessHTTPServerTransport`; send the rest to the session router.
+
+%include Examples/Snippets/Protocol/Transports.swift transport-routing
+
+The first stateless request starts the shared server, and requests that arrive meanwhile wait for the same start. If it fails, they get 500 and the next request tries again.
+
+[`Examples/http-server/main.swift`](../Examples/http-server/main.swift) is this router with a SwiftNIO adapter and one tool. Run it with `swift run HTTPServerExample --port 3000`; the comment at the top of the file has `curl` commands for an `initialize` request and a 2026-07-28 `server/discover` request. It also has the limits a deployed router needs: a session is created only for a POST `initialize` (400 otherwise), at most 100 sessions exist, counting handshakes still in progress (503 beyond), bodies are capped at 4 MiB (413), the validators check Host and Origin for its port, and a session is closed after 10 minutes without requests only when no response or SSE stream is open. It has no authentication, so it listens on 127.0.0.1. A refused `initialize` (an initialize hook threw) is also an SSE response with an `Mcp-Session-Id`, sent before the router can see the outcome, so the router stores it: the transport refuses later requests with that ID (400), and the slot is freed when the reaper closes the session 10 minutes after its stream ended. The SSE adapter writes each event only after the previous write completed, so a slow client slows its stream down instead of filling the server's buffers.
+
+A client in `.automatic` mode then works against this endpoint in both directions: its `server/discover` reaches the stateless transport; an older client's `initialize` (no stateless header) reaches the session router. Unknown future versions also go to the stateless transport, which answers with -32022 and the versions it serves.
+
+### Request headers (SEP-2243)
+
+At 2026-07-28 the HTTP transports mirror parts of the body in headers so that proxies and gateways can route without parsing JSON:
+
+| Header | Value | Sent for |
+|---|---|---|
+| `Mcp-Method` | the JSON-RPC `method` | every request and notification |
+| `Mcp-Name` | `params.name` (`tools/call`, `prompts/get`) or `params.uri` (`resources/read`) | those methods |
+| `Mcp-Param-<Name>` | a `tools/call` argument whose input schema property has `"x-mcp-header": "<Name>"` | `tools/call` |
+
+The client adds `Mcp-Method` and `Mcp-Name` in `HTTPClientTransport` when `Version.profile(for:).usesStandardHeaders` is `true`. It adds `Mcp-Param-*` from the schemas it saw in `tools/list` results, and passes them to the transport's `send(_:additionalHeaders:)` (see [custom transports](#custom-transports)); call `listTools()` before `callTool` to get them. Values that are empty, contain characters outside printable ASCII, have a leading or trailing space, or look like an encoded value are sent as `=?base64?<base64 of UTF-8>?=`. Annotated properties must be `string`, `integer` or `boolean`, reached only through `properties`, with header names made of token characters and unique without regard to case. At 2026-07-28 a tool with an invalid annotation is dropped from `tools/list` results, by the server before it sends them and by the client when it receives them, with a logged warning.
+
+`MCPRequestHeaders` exposes the codec for custom transports and gateways:
+
+%include Examples/Snippets/Protocol/Transports.swift transport-request-headers
+
+On the server, `StatelessHTTPServerTransport` checks `Mcp-Method` and `Mcp-Name` (see the table above). `Server` checks `Mcp-Param-*` for stateless `tools/call` requests that arrive over HTTP: it reads the input schemas from the `tools/list` handler, called for each such request with that request's context (up to 100 pages, nothing kept between calls, so per-caller lists work), and compares each header with the decoded argument. Headers for a tool it cannot find a schema for, including when the server has no `tools/list` handler, and calls with arguments or headers to a tool with an invalid annotation, are refused. A missing, extra or different value fails with -32020 `MCPError.headerMismatch`, HTTP 400. Handshake requests carry none of these headers and are not checked.
+
+### In-memory
+
+`InMemoryTransport.createConnectedPair()` returns two paired transports. Messages go directly from one actor to the other. Use it for tests (see [testing.md](testing.md)) and for embedding a server in an app.
+
+%include Examples/Snippets/Protocol/Transports.swift transport-in-memory
+
+### Custom transports
+
+A transport is an actor with a `logger`, `connect()`, `disconnect()`, `send(_:)` and `receive()`. Each `Data` value is one complete JSON-RPC message or batch. `receive()` returns the same stream every time; finish it when the connection ends so the client or server loop exits.
+
+%include Examples/Snippets/Protocol/Transports.swift transport-custom
+
+`send(_:relatedRequestID:)` has a default implementation that calls `send(_:)`. The server passes the id of the request whose handler produced a notification or a server-to-client request. Override it when your transport has a stream per request, as the HTTP server transports do. To expose HTTP details to handlers, also conform to `HTTPContextProviding` and return the `HTTPRequest` for a request id.
+
+`send(_:additionalHeaders:)` also has a default implementation, which ignores the headers and calls `send(_:)`. At 2026-07-28 the client passes the `Mcp-Param-*` headers of a `tools/call` to it (see [request headers](#request-headers-sep-2243)), and only when there are headers to send. A Streamable HTTP transport sends them on the request's POST, as `HTTPClientTransport` does; a transport that wraps another one forwards them. A server that serves 2026-07-28 answers a call without its headers with -32020.
+
+### Concurrency
+
+- `Client`, `Server` and every transport are actors. Their methods are safe to call from any task.
+- The server reads messages in one loop. Each request runs in its own task, so a slow handler does not block others. Notifications are handled in order, in the loop.
+- Handlers are `@Sendable` closures and run outside the server's isolation; they call back into the server with `await`.
+- `Server.currentHandlerContext` is a `@TaskLocal`. It is set for the handler task and child tasks; it is `nil` in detached tasks and outside handlers.
+- A notification sent with `await server.notify(_:)` from a handler is handed to the transport before `notify` returns. Over HTTP it goes to the stream of the request being handled.
+- MCP gives no ordering between messages on different HTTP streams.
+
+%include Examples/Snippets/Protocol/Transports.swift transport-task-local
+
+## Notification streams
+
+Some notifications do not belong to a request: list changes (`notifications/tools/list_changed`, `prompts/list_changed`, `resources/list_changed`) and resource updates (`notifications/resources/updated`). The two eras deliver them differently:
+
+| | Handshake | 2026-07-28 |
+|---|---|---|
+| Delivery | On the connection: stdio, in-memory, or the HTTP GET stream | On a `subscriptions/listen` request's stream |
+| Opt-in for list changes | Implicit: the server sends them when it declares `listChanged` | The client names the kinds it wants in the listen filter |
+| Resource updates | `resources/subscribe` / `resources/unsubscribe` | `resourceSubscriptions` URIs in the listen filter |
+
+### The listen request
+
+`subscriptions/listen` (SEP-2575) is a long-lived request. Its parameters are a `SubscriptionFilter`:
+
+```json
+{"jsonrpc": "2.0", "id": 7, "method": "subscriptions/listen",
+ "params": {"notifications": {"toolsListChanged": true, "resourceSubscriptions": ["file:///a.txt"]},
+            "_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28", "…": "…"}}}
+```
+
+The server answers on the request's stream:
+
+1. `notifications/subscriptions/acknowledged` first, with the honored subset of the filter. The server honors a list-change kind only when it declares `listChanged` for that feature, resource URIs only when it declares `resources.subscribe`, and `taskIds` (the tasks extension) only for the caller's own tasks of a server with [tasks](server.md#tasks). Kinds it does not honor are omitted. A filter with `taskIds` from a client that did not declare the tasks extension is refused with -32021.
+2. Every matching notification, each with `_meta["io.modelcontextprotocol/subscriptionId"]` set to the listen request's JSON-RPC id.
+3. A `SubscriptionsListen.Result` (with the same `subscriptionId` in `_meta`) when the server ends the stream gracefully, with `closeSubscriptions()` or `stop()`. On stdio and other message-stream transports a `notifications/cancelled` for the listen request follows it; over HTTP the end of the response is the teardown. `stop()` waits until both are sent before it disconnects the transport. A stream the client cancelled gets neither.
+
+The server keeps the newest 256 events per stream when the client reads slowly. The events are refetch triggers, so dropping older ones loses no state.
+
+On the server there is nothing to register: every `Server` has a built-in listen handler. Declare the capabilities and call `notify`:
+
+%include Examples/Snippets/Protocol/Streams.swift listen-server
+
+%include Examples/Snippets/Protocol/Streams.swift listen-notify
+
+`notify` publishes list-changed and resource-updated notifications to every matching listen stream, of every caller; `notify(_:to:)` reaches only the streams whose caller's `HandlerContext` the closure accepts. It also sends them on the connection, but only after an `initialize` handshake; at 2026-07-28 they go only to listen streams. Behind `StatelessHTTPServerTransport`, a handler of a handshake request sends them on its request's stream; `notify(_:to:)` does so only when the closure accepts that request's context. Over `StatelessHTTPServerTransport` the transport rewrites the internal request id in `subscriptionId` back to the client's id.
+
+By default any caller may listen to any list change and resource URI. To restrict streams per caller, set an authorizer: it runs before the acknowledgement with the requested filter and the caller's `HandlerContext` (including `httpContext`), and returns the filter to serve or throws an `MCPError` to refuse the stream:
+
+%include Examples/Snippets/Protocol/Streams.swift listen-authorizer
+
+`Server.Configuration.maxSubscriptionStreams` (1000) caps the open streams and `maxResourceSubscriptions` (256) the URIs, and the task ids, of one stream; duplicates are dropped before the acknowledgement.
+
+### Listening from the client
+
+`Client.listen(_:)` sends the request, waits for the acknowledgement and returns a `Subscription`. Notifications on the stream go to the handlers registered with `onNotification`; register them first.
+
+%include Examples/Snippets/Protocol/Streams.swift listen-client
+
+`Subscription` has:
+
+- `id`: the listen request id, equal to the `subscriptionId` on its messages.
+- `notifications`: the honored filter.
+- `cancel()`: closes the stream.
+- `finished()`: returns when the server ends the stream gracefully; throws when it fails or is cancelled.
+
+%include Examples/Snippets/Protocol/Streams.swift listen-cancel
+
+Most clients do not call `listen` directly:
+
+- At 2026-07-28 the client keeps one background stream for the list kinds that have a registered handler and that the server declares, and for the subscribed resources. When the filter changes, the client opens the new stream and cancels the old one after the new one is acknowledged; if the new one fails, the old one stays. Until the old stream ends, its notifications that the client still wants are delivered, so one sent during the replacement may arrive twice. A stream that ends is reopened with a backoff from 1 to 60 seconds that keeps growing while streams end within a minute, even after being acknowledged; a failed reopen keeps the subscribed resources. That includes a stream the server ends with its result, for example when it stops for a restart.
+- `subscribeToResource(uri:)` adds the URI to that stream at 2026-07-28 and waits for an acknowledgement that names it; on handshake connections it sends `resources/subscribe`. `unsubscribeFromResource(uri:)` replaces the stream with one without the URI, or sends `resources/unsubscribe`. `subscribedResourceURIs` lists the URIs the open stream serves.
+- `disconnect()` cancels the stream.
+
+### Closing a stream
+
+The client closes a stream with `Subscription.cancel()`, which calls `cancelRequest`. Over stateless HTTP that aborts the POST; the transport sees the SSE consumer go away and cancels the handler. On other transports the client sends `notifications/cancelled`. Either way the server removes the listener; a cancelled stream gets no result.
+
+Errors:
+
+| Error | Cause |
+|---|---|
+| -32600 `invalidRequest` from `listen` | The connection uses the handshake; `subscriptions/listen` needs 2026-07-28. |
+| -32601 from the server | A handshake-era request for `subscriptions/listen`. |
+| -32600 from `subscribeToResource` | The server did not honor the URI (no `resources.subscribe`). |
+| -32603 "ended before it was acknowledged" | The server answered the listen request without an acknowledgement. |
+| -32600 "Too many open subscriptions/listen streams" | The server has `maxSubscriptionStreams` streams open. |
+| -32602 from the server | The filter names more than `maxResourceSubscriptions` URIs, or a URI longer than 4096 bytes. |
+| HTTP 406 | A listen POST whose `Accept` lacks `text/event-stream`. |
+
+## Authorization
+
+MCP authorization is OAuth 2.1 on the HTTP transport. The client side is in the SDK: `OAuthAuthorizer` handles challenges, discovery, registration, tokens and refresh for `HTTPClientTransport`. The server side is a set of HTTP validators: the SDK serves the protected resource metadata and checks bearer tokens with a closure you supply; it does not issue tokens. Authorization does not apply to stdio or in-memory transports. It works the same in both protocol eras.
+
+### Client
+
+Pass an `HTTPClientAuthorizer` to `HTTPClientTransport(endpoint:authorizer:)`. The built-in implementation is `OAuthAuthorizer`, configured with `OAuthConfiguration`:
+
+%include Examples/Snippets/Protocol/Authorization.swift auth-client-credentials
+
+What happens on a request:
+
+1. Before the first request, `validateEndpointSecurity` requires the MCP endpoint to be `https`, or `http` on a loopback host.
+2. Before every request, the authorizer refreshes a token that expires within `proactiveRefreshWindowSeconds` (60 s). A token issued for less than the window is refreshed halfway through the time it is sent (until 30 s before it expires), so it is not refreshed on every request. Each token is tried once; when that fails, the next 401 recovers. The transport then sets the authorizer's headers, after `requestModifier`: `Authorization: Bearer <token>`, or for a [DPoP](#dpop) token `Authorization: DPoP <token>` and a proof.
+3. On 401 or 403 the transport calls `handleChallenge`. The authorizer parses `WWW-Authenticate`, discovers metadata and gets a token, and the transport retries. It sends one request at most `RetryPolicy.maxAuthorizationAttempts` (3) times. A 403 with `error="insufficient_scope"` requests the union of the current and the challenged scopes, up to `maxScopeUpgradeAttempts` (2) times per resource, method and scope set.
+
+Discovery follows the MCP authorization spec: protected resource metadata (RFC 9728) from the challenge's `resource_metadata` or the well-known URLs, then authorization server metadata (RFC 8414, then OpenID Connect discovery). Tokens are bound to the resource with the RFC 8707 `resource` parameter. `EndpointOverrides` skips parts of discovery.
+
+`OAuthConfiguration.GrantType`:
+
+| Grant | Use | Notes |
+|---|---|---|
+| `.clientCredentials` (default) | Services without a user | Needs a confidential `authentication`. |
+| `.authorizationCode` | Apps with a user | PKCE with S256 is required; the flow fails with `pkceS256NotSupported` when the server advertises other methods only. The `authorizationDelegate` shows the URL and returns the redirect. |
+| `.jwtBearer` | Enterprise-managed authorization, workload identity | RFC 7523: presents the JWT that `assertionProvider` returns. No client registration. See [Enterprise-managed authorization](#enterprise-managed-authorization) and [Workload identity](#workload-identity). |
+
+`TokenEndpointAuthentication`: `.clientSecretBasic`, `.clientSecretPost`, `.none(clientID:)` for public clients, and `.privateKeyJWT(clientID:assertionFactory:)`. `OAuthConfiguration.makePrivateKeyJWTAssertion` builds ES256 assertions.
+
+An interactive client:
+
+%include Examples/Snippets/Protocol/Authorization.swift auth-delegate
+
+%include Examples/Snippets/Protocol/Authorization.swift auth-authorization-code
+
+How the client identifies itself, with `.none(clientID:)`:
+
+- **Client ID Metadata Document (CIMD).** When the client ID is an `https` URL with a path and the server metadata has `client_id_metadata_document_supported: true`, the URL is the client ID; no registration happens. If the server does not support CIMD and has no registration endpoint, the flow fails with `cimdNotSupported`. A URL client ID that is not `https` with a path fails with `invalidClientIDMetadataURL` when the server supports CIMD.
+- **Pre-registered public client.** A client ID that is not empty and not a URL was issued by the authorization server in advance; no registration happens.
+- **Dynamic client registration (RFC 7591).** Otherwise, with an empty client ID or a CIMD URL the server does not accept, when the server has a `registration_endpoint`, the authorizer registers with `client_name` (`clientName`, default `"mcp-swift-sdk"`), the redirect URI, the grant and response types, and `application_type` (SEP-837). `applicationType: nil` sends `web` for the authorization code grant with an `https` redirect URI on a non-loopback host, else `native`. The registered credentials replace `authentication` for this authorizer. A registration that fails with an error is tried again in the next flow. Without a `registration_endpoint`, an empty client ID fails with `registrationInformationRequired` before any token request, and the next flow checks the metadata again.
+- **Pre-registration.** Pass `.clientSecretBasic`, `.clientSecretPost` or `.privateKeyJWT`; no registration happens.
+
+Tokens are kept in a `TokenStorage`. The default `InMemoryTokenStorage` loses them when the process exits. Implement the protocol to persist them, for example in the Keychain. Its methods may be called from several tasks at once:
+
+%include Examples/Snippets/Protocol/Authorization.swift auth-token-storage
+
+%include Examples/Snippets/Protocol/Authorization.swift auth-authorizer-storage
+
+Use one `OAuthAuthorizer` per transport. Requests of a transport run concurrently: the authorizer handles one challenge or proactive refresh at a time, and a request whose 401, or 403 for the same scopes, arrives while another is handled retries with the token that one obtained, so concurrent challenges cause one refresh or sign-in. The authorizer compares a challenge with the token the challenged request carried, so a late 401 for a token another request already replaced retries with the new one instead of starting over. When the challenge being handled fails and leaves no usable token other than the one the waiting requests carried (the user cancelled the authorization, the grant was refused), the requests that waited for it fail with its error instead of each starting the flow again; a later request starts a new flow. A request cancelled while it waits stops waiting.
+
+`accessTokenProvider` lets the app supply a token it got elsewhere. The SDK calls it after discovery with an `AccessTokenProviderContext` (resource, endpoints, scopes); return `nil` to run the configured grant. The provider and the `authorizationDelegate` run while the authorizer handles a challenge, and the transport's other challenges wait for them: they must not send requests through the transport they authorize.
+
+Issuer checks and authorization server changes:
+
+- Authorization server metadata is accepted only when its `issuer` equals the issuer the metadata URL was built from (RFC 8414 §3.3). The comparison is case-sensitive; a root issuer may differ by a trailing slash. A mismatch fails with `authorizationServerIssuerMismatch`. An issuer set in `endpointOverrides.authorizationServerURL` is trusted: its metadata is used whatever `issuer` it names, except with `.jwtBearer`, whose assertion is addressed to that issuer.
+- The `iss` parameter of the authorization response must equal the metadata issuer exactly (RFC 9207). An `iss` given more than once or without a value is rejected too. A missing `iss` is rejected when the server advertises `authorization_response_iss_parameter_supported`. Errors: `authorizationResponseIssuerMismatch`, `authorizationResponseMissingIssuer`.
+- When a stored token is rejected, the authorizer refreshes it at the server that issued it. It reads the protected resource metadata again when the refresh fails, when the refreshed token is rejected too, or when the challenge names another metadata URL; a refreshed token is then refreshed again when the resource still names the same server. If the selected authorization server is no longer listed, it drops the stored token, selects a new server (SEP-2352) and drops credentials it registered at the old one; pre-registered credentials are kept. When `endpointOverrides.authorizationServerURL` configures the server, the resource cannot move away from it, and the token is kept. A read that fails falls back to the metadata read before; with none, the request fails and the token is kept. A network error or an unexpected status while reading the authorization server metadata also fails the request and keeps the token.
+- A refresh token is sent only to the server that issued it. A token without a recorded server is refreshed only at a configured `authorizationServerURL` or `tokenEndpoint`.
+- For 2025-03-26 servers that publish no metadata at all, the authorizer falls back to `/authorize`, `/token` and `/register` at the server origin, with S256. It does so only on first discovery, and only when every metadata URL answers 404 or 410; a network error, a cancelled request or another status fails the request instead.
+
+Errors reach the caller as `MCPError.transportError(_:)` with the `OAuthAuthorizationError` (or the error a custom authorizer threw; a `CancellationError` is thrown as is), or with an `HTTPStatusError` of 401 or 403 when retries run out.
+
+#### Enterprise-managed authorization
+
+In an enterprise that manages access to MCP servers (SEP-990), the user signs in once at the company's identity provider, and the client turns that sign-in into MCP access tokens without a browser round trip per server:
+
+1. The application gets the user's ID token from its sign-in at the identity provider.
+2. The client exchanges it at the identity provider for an identity assertion (ID-JAG) with an RFC 8693 token exchange: `subject_token_type` `urn:ietf:params:oauth:token-type:id_token`, `requested_token_type` `urn:ietf:params:oauth:token-type:id-jag`, the MCP authorization server's issuer as `audience`, the MCP server as `resource`, and the requested scopes.
+3. The client presents the ID-JAG to the MCP authorization server with the jwt-bearer grant and its own credentials there.
+
+`OAuthConfiguration.enterpriseManaged(authentication:authorizationServer:identityProvider:idToken:retryPolicy:additionalTokenRequestParameters:allowsDiscoveredAuthorizationServer:)` configures all three:
+
+%include Examples/Snippets/Protocol/Authorization.swift auth-enterprise
+
+- `authorizationServer` pins the MCP authorization server, which receives the ID-JAG and the client credentials. Its metadata must name it as `issuer`, which becomes the ID-JAG's audience; otherwise the grant fails with `authorizationServerIssuerMismatch` before the token exchange. `nil` uses the server named in the protected resource metadata, so the MCP server decides where they go; it needs `allowsDiscoveredAuthorizationServer: true`, and fails with `authorizationServerNotConfigured` otherwise.
+- `identityProvider.endpoint` is the identity provider's token endpoint, or its issuer (`.issuer`), from whose metadata (`/.well-known/oauth-authorization-server`, then `/.well-known/openid-configuration`) the token endpoint is read once; a failed exchange reads it again next time, a cancelled one does not.
+- `idToken` runs before each token exchange. The SDK does not sign the user in: use the identity provider's SDK, or the authorization code flow with the `openid` scope.
+- Every 401 runs both steps again, unless the authorization server issued a refresh token. Without a refresh token, the authorizer also runs them before the token expires (`proactiveRefreshWindowSeconds`). ID-JAGs are not cached. Concurrent 401s run them once.
+- The exchange requires `issued_token_type` to be the ID-JAG type (`issuedTokenTypeMismatch` otherwise) and accepts the `token_type` `N_A`. Exchange and grant requests follow no redirects.
+
+`OAuthTokenExchange.exchange(_:tokenEndpoint:authentication:session:urlValidator:)` performs one RFC 8693 exchange for other uses, and `OAuthTokenExchange.tokenEndpoint(issuer:session:urlValidator:)` discovers a token endpoint. `OAuthTokenExchange.TokenType` has the token type URIs.
+
+#### Workload identity
+
+A workload with a platform identity, such as a Kubernetes service account or a cloud workload identity, authenticates with a JWT its platform issued (SEP-1933). Use `.jwtBearer` with a public client and return the JWT from `assertionProvider`:
+
+%include Examples/Snippets/Protocol/Authorization.swift auth-workload-identity
+
+`AssertionContext` carries the `audience` (the authorization server's issuer), the `resource`, the `tokenEndpoint` and the `requestedScopes`. The provider runs for every token request, and before the token expires; return a JWT that is still valid.
+
+The `.jwtBearer` grant sends its assertion only to a configured server: `endpointOverrides.authorizationServerURL` or `tokenEndpoint`. Otherwise it fails with `authorizationServerNotConfigured`, because the MCP server's metadata would choose where a credential goes that a hostile server could replay at the real authorization server. `allowsDiscoveredAuthorizationServer: true` lets the metadata choose; then an assertion whose `aud` is neither the discovered issuer nor its token endpoint, or that is not a JWT with an `aud` claim, fails with `assertionAudienceMismatch` before it is sent, so do not return a token with a fixed audience for an unexpected `context.audience`. `tokenEndpoint` alone fixes where the assertion goes but not `context.audience`: the authorization server, and its issuer, still come from the protected resource metadata. Set `authorizationServerURL` to fix both; its metadata must then name it as `issuer` (RFC 8414 §3.3), or the grant fails with `authorizationServerIssuerMismatch`. The 2025-03-26 fallback to endpoints at the server origin is never used for this grant. A rejected grant (`invalid_grant`, `invalid_scope`, `unauthorized_client`) fails the request with `tokenRequestFailed` and is not retried with another grant.
+
+#### DPoP
+
+With `dpop` set, tokens are sender-constrained (RFC 9449, SEP-1932): the authorization server binds them to a key, and a stolen token is useless without it.
+
+%include Examples/Snippets/Protocol/Authorization.swift auth-dpop
+
+- Every token request (authorization code, refresh, client credentials, jwt-bearer) carries a `DPoP` proof: an ES256 JWS with `typ` `dpop+jwt`, the public key as `jwk`, and the claims `jti`, `htm`, `htu` (the URL without user information, query and fragment) and `iat`.
+- A `token_type` of `DPoP` is presented as `Authorization: DPoP <token>` with a new proof per request, which also carries `ath`, the hash of the token. A `Bearer` answer means the server does not bind tokens: the token is used as a Bearer token, unless the protected resource sets `dpop_bound_access_tokens_required`, which fails with `dpopRequired`.
+- A `use_dpop_nonce` error, from the token endpoint (400) or from the MCP server (401 with a `DPoP` challenge), is retried once with the `DPoP-Nonce` the server sent; this retry does not count against `maxAuthorizationAttempts`. A 401 `use_dpop_nonce` without a `DPoP-Nonce` header is an ordinary challenge and counts, and so does one that arrives without a valid DPoP token, which `OAuthAuthorizer` answers with a new token. The authorizer, not the transport, decides that a challenge is a nonce retry: `OAuthAuthorizer` reads it with its `challengeParser` and reports it as `HTTPChallengeResult.isDPoPNonceRetry`; a custom `HTTPClientAuthorizer` that implements only the Bool `handleChallenge` gets the reading of `DefaultOAuthWWWAuthenticateParser`. A `DPoP-Nonce` in any MCP server response is kept for the origin the request went to; the MCP server's token is kept.
+- The stored token records the key's thumbprint (`OAuthAccessToken.keyThumbprint`). A token bound to another key is discarded. Persist the key with the tokens (`P256.Signing.PrivateKey.rawRepresentation`) to use them after a relaunch, or keep it in the Secure Enclave: `DPoP(key:)` takes any `DPoPSigningKey`, which `SecureEnclave.P256.Signing.PrivateKey` is on Apple platforms. The key signs synchronously for every request, and the transport waits for it, so a key behind a network call (a remote HSM, a key service) slows every request.
+- With `dpop`, an authorization server whose `dpop_signing_alg_values_supported` lacks ES256 fails with `dpopAlgorithmUnsupported`, and a `Bearer` token for a resource with `dpop_bound_access_tokens_required` fails with `dpopRequired`. Without `dpop`, such a resource fails with `dpopRequired` before the grant.
+- Tokens from `accessTokenProvider` are always Bearer tokens.
+- When the MCP server sends both a `Bearer` and a `DPoP` challenge, `OAuthAuthorizer` reads the `error` and `scope` of the one for the scheme the request used (RFC 9449 §7.2), so a 403 `insufficient_scope` in the `DPoP` challenge steps up a DPoP token.
+- A token bound to another key is discarded even when it has expired, and its refresh token is not used (RFC 9449 §5).
+
+### Server
+
+A protected server puts two validators in front of its transport's pipeline:
+
+- `ProtectedResourceMetadataValidator` answers GET `/.well-known/oauth-protected-resource` (and paths below it) with an `OAuthProtectedResourceServerMetadata` document. Put it first, so discovery needs no token.
+- `BearerTokenValidator` requires `Authorization: Bearer`. Your `tokenValidator` closure verifies the token (signature, introspection) and returns a `BearerTokenValidationResult`. With `.valid(BearerTokenInfo)` the validator also rejects an `expiresAt` in the past and an `audience` that does not match `resourceIdentifier`; set both fields. Pass `requiresAuthentication:` to exempt requests.
+
+%include Examples/Snippets/Protocol/Authorization.swift auth-server-pipeline
+
+Pass the pipeline to the transport. The stateless transport takes the same validators; use `AcceptHeaderValidator(mode: .jsonOnly)` and leave out `SessionValidator`.
+
+%include Examples/Snippets/Protocol/Authorization.swift auth-server-transport
+
+Responses:
+
+| Result | HTTP | `WWW-Authenticate` |
+|---|---|---|
+| No `Authorization` header, or credentials of another scheme (`Basic …`) | 401 | `Bearer resource_metadata="…"` plus `scope` from `challengeScopeProvider` |
+| `.invalidToken`, expired, wrong audience | 401 | adds `error="invalid_token"` and `error_description` |
+| `.insufficientScope(requiredScopes:)` | 403 | `error="insufficient_scope"`, `scope="…"` |
+| `.malformedRequest`, a malformed Bearer header (`Bearer` without a token, two tokens, two `Authorization` lines) | 400 | adds `error="invalid_request"` and `error_description` |
+
+Handlers see the request headers, including `Authorization`, through `Server.currentHandlerContext?.httpContext`. The SDK does not pass the validated `BearerTokenInfo` to handlers; decode the token again or cache the result by token (see [Session hijacking](#session-hijacking)).
+
+## Security
+
+The MCP [security best practices](https://modelcontextprotocol.io/docs/tutorials/security/security_best_practices) name five attacks. This section says what the SDK does about each and what your application must do.
+
+### Confused deputy
+
+A proxy server that uses one static client ID at a third-party authorization server can be tricked into granting a token to an attacker's client.
+
+- The SDK client generates a random `state` for every authorization request and rejects a redirect with a missing or different `state` (`authorizationResponseMissingState`, `authorizationResponseStateMismatch`). PKCE S256 binds the code to the client that started the flow.
+- Your application, when it is such a proxy, must obtain user consent for each dynamically registered client before forwarding to the third-party server. The SDK has no consent screen.
+
+### Token passthrough
+
+A server must accept only tokens issued for itself and must not forward client tokens to other services.
+
+- `BearerTokenValidator` rejects tokens whose `BearerTokenInfo.audience` does not match `resourceIdentifier`. It skips the check when `audience` is `nil` (opaque tokens): then your `tokenValidator` must check the audience, for example through introspection.
+- The SDK never forwards a token. Do not copy the `Authorization` header into calls to other services; get a separate token for them.
+
+%include Examples/Snippets/Protocol/Authorization.swift security-session-binding
+
+### Server-side request forgery
+
+A malicious server can point OAuth discovery at internal addresses. `OAuthAuthorizer` applies these rules:
+
+- **HTTPS.** The MCP endpoint, resource metadata URLs and authorization server endpoints must be `https`; `http` is accepted only for loopback hosts (`localhost`, `127.0.0.1`, `::1`), and for authorization server endpoints not at all by default. URLs with fragments are rejected.
+- **Private addresses.** `OAuthURLValidator.isPrivateIPHost` parses literal IP hosts with `inet_pton` and rejects `0.0.0.0/8`, `10.0.0.0/8`, `100.64.0.0/10`, `169.254.0.0/16` (cloud metadata), `172.16.0.0/12`, `192.0.0.0/24`, `192.168.0.0/16`, `198.18.0.0/15`, `224.0.0.0/4`, `240.0.0.0/4`, `::`, `fc00::/7`, `fe80::/10`, `fec0::/10` and `ff00::/8`, in any spelling: bracketed, zoned (`%en0`), and IPv4 addresses embedded as IPv4-mapped, IPv4-compatible or NAT64 IPv6. Numeric hosts that are not a canonical dotted quad (`167772161`, `10.1`, `0x0a.0.0.1`, `012.0.0.1`) are rejected too. Host names and loopback addresses are never rejected. It is applied to the challenge's `resource_metadata` URL, authorization server candidates (skipped; when every candidate is refused, discovery throws the first refusal, `privateIPAddressBlocked` or `insecureAuthorizationServerEndpoint`), and the authorization, token and registration endpoints (`privateIPAddressBlocked`).
+- **Redirects.** Metadata discovery follows a redirect only to an `https` URL, or from loopback `http` to loopback `http`, whose host is not a private address, and to a loopback host (`localhost`, a name under `.localhost`, `127.0.0.0/8`, `::1`) only from a loopback host. Each hop is checked against the one before it. Token and registration requests, which carry credentials, follow no redirects.
+
+What the SDK does not do: it checks literal IP addresses only, so a host name that resolves to a private address passes, and DNS rebinding is not prevented. On Linux (swift-corelibs-foundation), which has no per-task delegates, each OAuth request runs in a session with the caller session's configuration and the redirect check as its delegate. Run clients that connect to untrusted servers behind an egress proxy or firewall that blocks internal ranges.
+
+On the server side, `OriginValidator` protects local servers against DNS rebinding of the server itself. Both HTTP server transports use `OriginValidator.localhost()` by default: a present `Host` must be a loopback host (421 otherwise) and a present `Origin` must be a loopback origin (403 otherwise). A deployed server must replace it with `OriginValidator(allowedHosts:allowedOrigins:)`; `.disabled` turns the check off.
+
+### Session hijacking
+
+An attacker who learns a session ID could send requests in another user's session.
+
+- `StatefulHTTPServerTransport` generates session IDs with `UUID()` (`UUIDSessionIDGenerator`) and rejects IDs outside visible ASCII. A custom `SessionIDGenerator` must produce unguessable IDs.
+- The SDK does not bind a session to a user. Put `BearerTokenValidator` in every session's pipeline so each request is authenticated, and in your session router record the token subject when the session is created and reject later requests whose subject differs.
+- At 2026-07-28 there are no sessions: every request is authenticated on its own.
+
+### Issuer mix-up
+
+A client that talks to several authorization servers can be tricked into sending a code from one to another.
+
+- The client accepts authorization server metadata only when `issuer` matches the URL it was fetched for (RFC 8414 §3.3).
+- It requires the authorization response `iss` to equal that issuer, and requires `iss` when the server advertises `authorization_response_iss_parameter_supported` (RFC 9207).
+- Your `OAuthAuthorizationDelegate` must return the redirect URL unmodified, with its `iss` parameter.
+
+### Request state tampering
+
+At 2026-07-28 an input-required result (SEP-2322) may carry `requestState`, which the client echoes on the retry. The client could alter it.
+
+- By default (`requestStateProtection: .ephemeral()`) the server seals the state with AES-256-GCM under a key held by the process, bound to the method, tool, arguments digest and audience, valid for 600 s. Tampered, expired or foreign state fails with -32602 "Invalid or expired requestState"; the reason is logged.
+- With several instances or across restarts, pass shared keys. Bind the state to the user with `principal`.
+- `requestStateProtection: nil` sends the state as written and trusts what clients return. Use it only when the state cannot affect authorization, data access or business logic.
+
+%include Examples/Snippets/Protocol/Authorization.swift security-request-state
+
+See [server.md](server.md#multi-round-trip-requests) for multi round-trip requests.
+
+## Utilities
+
+### Cancellation
+
+Either side may cancel a request it sent. Cancellation is advisory: the receiver stops if it can, and sends no response for a cancelled request.
+
+On the client, `cancelRequest(_:reason:)` fails the pending request with `CancellationError` at once, so a late response is ignored. How the server learns of it depends on the era and the transport:
+
+| Connection | What the client does |
+|---|---|
+| Handshake, any transport | Sends `notifications/cancelled` with `requestId` and `reason`. |
+| 2026-07-28 over `HTTPClientTransport` | Aborts the request's POST. No notification is sent. |
+| 2026-07-28 over stdio, in-memory or a custom transport | Sends `notifications/cancelled`. |
+
+On the server, `notifications/cancelled` cancels the handler's task. Over `StatelessHTTPServerTransport`, the transport does the same when the client closes an SSE reply: it injects `notifications/cancelled` for the request's internal id. A `notifications/cancelled` POSTed to that transport is honored when its `Authorization` header matches the request's ([Stateless HTTP server](#stateless-http-server)); the request's HTTP response then ends with 202 Accepted, or with the end of its SSE stream, and carries no JSON-RPC response. A handler stops when it reaches a cancellation point (`Task.sleep`, `Task.checkCancellation()`, a cancellable `await`). Once its request is cancelled, the server sends nothing for it, whether the handler throws or returns.
+
+To cancel, keep the request id: `startToolCall(name:arguments:meta:)` and `send(_:)` return a `RequestContext` that has it.
+
+%include Examples/Snippets/Protocol/Utilities.swift cancellation-server
+
+%include Examples/Snippets/Protocol/Utilities.swift cancellation-client
+
+%include Examples/Snippets/Protocol/Utilities.swift cancellation-cancel
+
+Details:
+
+- In a multi round-trip exchange, `cancelRequest` with the first request id cancels the current round.
+- Over stateless HTTP the transport cancels a handler only after its reply has become an SSE stream, which happens when the handler sends a notification for the request and the client accepts SSE. A reply still pending as a JSON body is not cancelled when the client goes away; the handler runs to completion and the response is discarded.
+- The server can cancel its own requests to the client (sampling, elicitation, roots) with `Server.cancelRequest(_:reason:)`, which sends `notifications/cancelled`. These requests exist only on handshake connections.
+- `RequestContext.value` throws `CancellationError` after a cancellation; `MCPError` is not used.
+
+### Ping
+
+`ping` exists only in the handshake era. 2026-07-28 removes it: a stateless `ping` request fails with -32601.
+
+`Client.ping()` works in both eras: on a stateless connection it sends `server/discover` instead, which every server answers.
+
+%include Examples/Snippets/Protocol/Utilities.swift ping
+
+The server answers `ping` with an empty result. `Server` has no method to ping the client, and the SDK has no keep-alive timer. `NetworkTransport` has its own heartbeat (`HeartbeatConfiguration`), which is not an MCP message.
+
+### Progress
+
+A requester asks for progress by putting a `progressToken` in the request's `_meta`. The handler reads it from its parameters and sends `notifications/progress` with the same token. `progress` should increase; `total` and `message` are optional.
+
+%include Examples/Snippets/Protocol/Utilities.swift progress-server
+
+The client registers a handler for `ProgressNotification` and sets the token with `Metadata(progressToken:)`. `ProgressToken.unique()` makes a UUID token.
+
+%include Examples/Snippets/Protocol/Utilities.swift progress-client
+
+The era does not change progress. At 2026-07-28 the token travels in `_meta` next to the protocol keys; the client keeps it when it adds them. Over `StatefulHTTPServerTransport` the notifications go to the request's SSE stream. Over `StatelessHTTPServerTransport` they turn the reply into an SSE stream when the request's `Accept` includes `text/event-stream`; otherwise they are dropped.
+
+### Error codes
+
+Every JSON-RPC error the SDK sends or receives is an `MCPError`. `code` is the JSON-RPC code; `data` is the `data` member. Errors thrown by a handler are sent to the peer; a non-`MCPError` becomes -32603 with its description.
+
+| Case | Code | `data` | Typical cause |
+|---|---|---|---|
+| `parseError(_:)` | -32700 | `{"detail"}` | Body is not JSON or not a JSON-RPC message. |
+| `invalidRequest(_:)` | -32600 | `{"detail"}` | Request before `initialize` (strict); second `initialize`; a request whose id is already in progress; server-to-client request at 2026-07-28; HTTP validation failures. |
+| `methodNotFound(_:)` | -32601 | `{"detail"}` | No handler; method removed at 2026-07-28; stateless-only method on a handshake connection; undeclared capability at 2026-07-28. |
+| `invalidParams(_:)` | -32602 | `{"detail"}` | Parameters do not decode; invalid stateless `_meta`; invalid or expired `requestState`; unknown, expired or foreign task id; cancelling a finished 2025-11-25 task. |
+| `internalError(_:)` | -32603 | `{"detail"}` | Handler threw a non-`MCPError`; local transport and HTTP failures; client disconnected. |
+| `resourceNotFound(uri:message:)` | -32602 | `{"uri"}` | No resource at the URI (SEP-2164). Decoded from -32602 or the old -32002 when `data.uri` is set. |
+| `headerMismatch(_:)` | -32020 | `{"detail"}` | `Mcp-Method`, `Mcp-Name`, `Mcp-Param-*` or `MCP-Protocol-Version` missing or different from the body. |
+| `missingRequiredClientCapabilities(_:message:)` | -32021 | `{"requiredCapabilities"}` | An input-required result needs a client capability the request did not declare; a tool that requires tasks, a task method or a listen stream naming tasks from a client without the tasks extension. |
+| `unsupportedProtocolVersion(supported:requested:)` | -32022 | `{"supported", "requested"}` | Version not served; stateless request to the stateful transport. |
+| `urlElicitationRequired(message:elicitations:)` | -32042 | `{"elicitations"}` | The user must complete URL elicitations first (2025-11-25 only). |
+| `serverError(code:message:data:)` | any code | as sent | Implementation-defined codes, -32000 and -32001 from a peer, -32021 with unreadable capabilities, or -32042 when its data cannot fit the typed case. |
+| `connectionClosed` | -32000 | none | Local only: the transport closed. |
+| `transportError(_:)` | -32001 | `{"error"}` | Local only: an I/O error. |
+
+The 2026-07-28 code policy reserves -32020 to -32099 for the specification and leaves -32000 to -32019 to implementations. Over stateless HTTP, the status code follows the error: 404 for -32601; 400 for -32600, -32602, -32020, -32021 and -32022; 200 for the rest. `HTTPClientTransport` reads the JSON-RPC body of such replies, so the caller gets the `MCPError`.
+
+Throw the specific case from a handler:
+
+%include Examples/Snippets/Protocol/Utilities.swift errors-server
+
+Match on the case in the caller:
+
+%include Examples/Snippets/Protocol/Utilities.swift errors-client
+
+[troubleshooting.md](troubleshooting.md) lists causes and fixes for the common errors.

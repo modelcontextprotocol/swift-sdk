@@ -11,6 +11,10 @@ import Foundation
 /// - Clients send `notifications/roots/list_changed` when roots change
 ///
 /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/client/roots
+///
+/// > Important: Roots is deprecated by the specification (SEP-2577) and can be removed in the first
+///   revision released on or after 2027-07-28. It works on every revision that has it. To migrate,
+///   pass directories or files in tool arguments, resource URIs or server configuration.
 public struct Root: Hashable, Codable, Sendable {
     /// The root URI (must use file:// scheme)
     public let uri: String
@@ -19,6 +23,7 @@ public struct Root: Hashable, Codable, Sendable {
     /// Optional metadata
     public var _meta: Metadata?
 
+    /// Creates a root.
     public init(
         uri: String,
         name: String? = nil,
@@ -54,16 +59,23 @@ public struct Root: Hashable, Codable, Sendable {
 
 /// To discover available roots, servers send a `roots/list` request to the client.
 /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/client/roots
+///
+/// > Important: Roots is deprecated by the specification (SEP-2577) and can be removed in the first
+///   revision released on or after 2027-07-28. It works on every revision that has it. To migrate,
+///   pass directories or files in tool arguments, resource URIs or server configuration.
 public enum ListRoots: Method {
     public static let name: String = "roots/list"
 
     public typealias Parameters = Empty
 
+    /// The result of `roots/list`.
     public struct Result: Hashable, Codable, Sendable {
+        /// The roots the client exposes.
         public let roots: [Root]
         /// Optional metadata about this result
         public var _meta: Metadata?
 
+        /// Creates a `roots/list` result.
         public init(
             roots: [Root],
             _meta: Metadata? = nil
@@ -93,6 +105,10 @@ public enum ListRoots: Method {
 /// When the list of roots changes, clients that declared the `roots` capability
 /// SHOULD send this notification to inform servers.
 /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/client/roots
+///
+/// > Important: Roots is deprecated by the specification (SEP-2577) and can be removed in the first
+///   revision released on or after 2027-07-28. It works on every revision that has it. To migrate,
+///   pass directories or files in tool arguments, resource URIs or server configuration.
 public struct RootsListChangedNotification: Notification {
     public static let name: String = "notifications/roots/list_changed"
 

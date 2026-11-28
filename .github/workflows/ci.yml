@@ -1,18 +1,21 @@
 name: CI
 
+# Every job is a line of scripts/ci/jobs, run through scripts/ci/run-jobs.sh, so a
+# job is added or changed in one place.
+
 on:
   push:
     branches: ["main", "rel/**"]
   pull_request:
     branches: ["main", "rel/**"]
 
+# Actions are pinned by commit; the comment names the release.
 permissions:
   contents: read
-  pull-requests: write
 
 jobs:
   test:
-    timeout-minutes: 10
+    timeout-minutes: 20
     strategy:
       matrix:
         include:
@@ -25,96 +28,160 @@ jobs:
           # Current leg: catches breakage from new Xcode and SDK releases.
           - os: macos-latest
             swift-version: Xcode default
-          - os: ubuntu-24.04
-            swift-version: 6.1.0
+          - os: ubuntu-latest
+            container: swift:6.1-rhel-ubi9
+            swift-version: "6.1 (RHEL UBI 9)"
+          - os: ubuntu-latest
+            container: swift:6.1-noble
+            swift-version: "6.1 (Ubuntu 24.04)"
 
     runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
     name: Test (${{ matrix.os }}, Swift ${{ matrix.swift-version }})
 
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Prepare Linux apt dependencies
-        if: matrix.os == 'ubuntu-24.04'
-        run: |
-          sudo -n apt-get update
-          sudo -n apt-get install -y --no-install-recommends libcurl4-openssl-dev
-
-      - name: Setup Swift on Linux
-        if: matrix.os == 'ubuntu-24.04'
-        uses: vapor/swiftly-action@v0.2
-        with:
-          toolchain: ${{ matrix.swift-version }}
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Select Xcode
         if: matrix.xcode
         run: sudo xcode-select -s /Applications/Xcode_${{ matrix.xcode }}.app
+      - name: Build, test, and run the hello example
+        run: scripts/ci/run-jobs.sh build-test
 
-      - name: Show Swift version
-        run: swift --version
-
-      - name: Build
-        run: swift build -v
-
-      - name: Run tests
-        run: swift test -v
-
-  conformance:
-    timeout-minutes: 10
+  # Every target built for the device SDK of a platform other than macOS, and
+  # the tests run on its simulator (scripts/ci/apple-platform.sh). One matrix
+  # entry per apple-* line of scripts/ci/jobs.
+  apple-platforms:
+    name: Apple platforms (${{ matrix.platform }})
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: iOS
+            job: apple-ios
     runs-on: macos-latest
-    name: MCP Conformance Tests
-
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Show Swift version
-        run: swift --version
-
-      - name: Build Swift executables
-        run: |
-          swift build --product mcp-everything-client
-          swift build --product mcp-everything-server
-
-      - name: Run client conformance tests
-        uses: modelcontextprotocol/conformance@v0.1.15
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Build for the device, test on the simulator
+        run: scripts/ci/run-jobs.sh ${{ matrix.job }}
+      - name: Upload the test results
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          mode: client
-          command: '.build/debug/mcp-everything-client'
-          suite: 'core'
-          expected-failures: './conformance-baseline.yml'
-          node-version: '22'
-
-      - name: Start server for testing
-        run: |
-          .build/debug/mcp-everything-server &
-          echo "SERVER_PID=$!" >> $GITHUB_ENV
-          sleep 3
-
-      - name: Run server conformance tests
-        uses: modelcontextprotocol/conformance@v0.1.15
-        with:
-          mode: server
-          url: 'http://localhost:3001/mcp'
-          suite: 'core'
-          expected-failures: './conformance-baseline.yml'
-          node-version: '22'
-
-      - name: Cleanup server
-        if: always()
-        run: |
-          if [ -n "$SERVER_PID" ]; then
-            kill $SERVER_PID 2>/dev/null || true
-          fi
+          name: apple-${{ matrix.platform }}-xcresult
+          path: .build/apple/${{ matrix.platform }}/Tests.xcresult
+          if-no-files-found: ignore
 
   documentation:
     name: Documentation
     runs-on: macos-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - name: Show Swift version
-        run: swift --version
-      - name: Build Documentation
-        run: swift package generate-documentation --target MCP --warnings-as-errors
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: DocC and weave check
+        run: scripts/ci/run-jobs.sh docs
+
+  # The public API against the newest 1.x release tag (VERSIONING.md).
+  api-breakage:
+    name: API breakage
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - name: Compare with the newest release
+        run: scripts/ci/run-jobs.sh api-breakage
+
+  # libFuzzer on the parsers and the HTTP server transports. Linux only: the
+  # Xcode toolchain has no libFuzzer.
+  fuzz:
+    name: Fuzz
+    runs-on: ubuntu-latest
+    container: swift:6.1-noble
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Run each target for a minute
+        run: scripts/ci/run-jobs.sh fuzz
+      - name: Upload crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fuzz-artifacts
+          path: .build/fuzz/artifacts/
+          if-no-files-found: ignore
+
+  # Every conformance leg and tier score, baseline-enforced, on macOS and on Linux
+  # (RHEL UBI 9 and Ubuntu 24.04). The baselines are shared.
+  conformance:
+    name: Conformance (${{ matrix.os }}${{ matrix.container && format(', {0}', matrix.container) || '' }})
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+          - os: ubuntu-latest
+            container: swift:6.1-rhel-ubi9
+          - os: ubuntu-latest
+            container: swift:6.1-noble
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        if: runner.os == 'macOS'
+        with:
+          node-version: "22"
+      - name: Run conformance
+        run: scripts/ci/run-jobs.sh --strict --timeout 20 'conformance-.*' 'tier-.*'
+      - name: Upload conformance results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: conformance-${{ matrix.os }}-${{ strategy.job-index }}
+          path: .build/conformance/
+          if-no-files-found: ignore
+
+  # The matrix must match interop/RESULTS.md on macOS and on Linux. On Linux,
+  # scripts/ci/lib.sh installs Go, uv and Node with scripts/ci/deps-linux.sh.
+  interop:
+    name: Interop (${{ matrix.os }})
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+          - os: ubuntu-latest
+            container: swift:6.1-rhel-ubi9
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        if: runner.os == 'macOS'
+        with:
+          go-version: "1.25"
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        if: runner.os == 'macOS'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        if: runner.os == 'macOS'
+        with:
+          node-version: "22"
+      - name: Run interop
+        run: scripts/ci/run-jobs.sh --strict interop
+      - name: Upload interop report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: interop-${{ matrix.os }}
+          path: |
+            .build/interop/report.md
+            .build/interop/results/
+            .build/interop/logs/
+          if-no-files-found: ignore
 
   static-linux-sdk-build:
     name: Linux Static SDK Build (${{ matrix.swift-version }} - ${{ matrix.os }})
@@ -128,11 +195,12 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Check out code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install static SDK and build
         env:
           BUILD_FLAGS: ""
         run: |
           which curl || (apt -q update && apt -yq install curl)
-          curl -s --retry 3 https://raw.githubusercontent.com/swiftlang/github-workflows/refs/heads/main/.github/workflows/scripts/install-and-build-with-sdk.sh | \
+          # Pinned commit of swiftlang/github-workflows (main on 2026-10-24).
+          curl -sf --retry 3 https://raw.githubusercontent.com/swiftlang/github-workflows/87329d126a6992483ba89aabefa1eaef1e5b0aad/.github/workflows/scripts/install-and-build-with-sdk.sh | \
           bash -s -- --static --flags="$BUILD_FLAGS" ${{ matrix.swift-version }}

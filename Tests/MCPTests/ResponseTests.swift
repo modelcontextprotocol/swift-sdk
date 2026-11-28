@@ -54,9 +54,8 @@ struct ResponseTests {
 
         if case .failure(let decodedError) = decoded.result {
             #expect(decodedError.code == -32700)
-            #expect(
-                decodedError.localizedDescription
-                    == "Parse error: Invalid JSON: Parse error: Invalid JSON")
+            #expect(decodedError == .parseError(nil))
+            #expect(decodedError.localizedDescription == "Parse error: Invalid JSON")
         } else {
             #expect(Bool(false), "Expected error result")
         }

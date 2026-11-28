@@ -1,43 +1,172 @@
-import class Foundation.JSONDecoder
-import class Foundation.JSONEncoder
+import Foundation
 
-/// An error indicating a type mismatch when decoding a pending request response.
+/// A peer response could not be decoded as the result type of a request.
+public struct ResponseDecodingError: LocalizedError, Sendable, CustomStringConvertible {
+    /// The result type the request expected.
+    public let expectedType: String
+    /// The result received from the peer.
+    public let rawResult: Value
+    /// The error raised while decoding the result.
+    public let underlyingError: any Swift.Error
+
+    /// Creates the error for a result that did not decode as `expectedType`.
+    public init(expectedType: String, rawResult: Value, underlyingError: any Swift.Error) {
+        self.expectedType = expectedType
+        self.rawResult = rawResult
+        self.underlyingError = underlyingError
+    }
+
+    /// The expected type and the decoding error, without the result.
+    public var description: String {
+        "Could not decode the result as \(expectedType): \(Self.summary(of: underlyingError))"
+    }
+
+    /// The same summary for `localizedDescription`.
+    public var errorDescription: String? { description }
+
+    /// A `DecodingError` as its coding path and debug description, such as
+    /// `content[0].text: Expected to decode String but found a number instead.`;
+    /// any other error as it prints.
+    private static func summary(of error: any Swift.Error) -> String {
+        guard let error = error as? DecodingError else { return "\(error)" }
+        let context: DecodingError.Context
+        switch error {
+        case .typeMismatch(_, let c), .valueNotFound(_, let c), .keyNotFound(_, let c), .dataCorrupted(let c):
+            context = c
+        @unknown default:
+            return "\(error)"
+        }
+        var path = ""
+        for key in context.codingPath {
+            if let index = key.intValue {
+                path += "[\(index)]"
+            } else {
+                path += path.isEmpty ? key.stringValue : ".\(key.stringValue)"
+            }
+        }
+        return path.isEmpty ? context.debugDescription : "\(path): \(context.debugDescription)"
+    }
+}
+
+/// Decodes a wire result and retains the raw value when decoding fails.
+func decodeResponseResult<T: Decodable>(_ value: Value, as type: T.Type = T.self) throws -> T {
+    do {
+        return try T(decoding: value)
+    } catch {
+        throw ResponseDecodingError(
+            expectedType: String(reflecting: type), rawResult: value, underlyingError: error)
+    }
+}
+
+/// A non-wire response had the wrong type.
 struct TypeMismatchError: Swift.Error {}
 
-/// A pending request with a continuation for the result.
+/// A pending request with a continuation for the result
 struct PendingRequest<T> {
     let continuation: CheckedContinuation<T, Swift.Error>
 }
 
+/// Holds the outcome of a request until its sender awaits it.
+///
+/// A slot can be registered synchronously, before the request is sent, so a
+/// response or a cancellation that arrives first is never lost. The first
+/// outcome wins; later ones are ignored.
+final class ResponseSlot<T: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var resolved = false
+    private var outcome: Result<T, Swift.Error>?
+    private var waiter: CheckedContinuation<T, Swift.Error>?
+
+    /// Resolves the slot, unless it already is.
+    /// - Returns: Whether this outcome is the one the sender gets.
+    @discardableResult
+    func resolve(_ result: Result<T, Swift.Error>) -> Bool {
+        lock.lock()
+        guard !resolved else {
+            lock.unlock()
+            return false
+        }
+        resolved = true
+        if let waiter {
+            self.waiter = nil
+            lock.unlock()
+            waiter.resume(with: result)
+        } else {
+            outcome = result
+            lock.unlock()
+        }
+        return true
+    }
+
+    /// Waits for the outcome. Call at most once.
+    func value() async throws -> T {
+        try await withCheckedThrowingContinuation { continuation in
+            lock.lock()
+            if let outcome {
+                self.outcome = nil
+                lock.unlock()
+                continuation.resume(with: outcome)
+            } else {
+                waiter = continuation
+                lock.unlock()
+            }
+        }
+    }
+}
+
 /// A type-erased pending request.
 struct AnyPendingRequest: Sendable {
-    private let _resume: @Sendable (Result<Any, Swift.Error>) -> Void
+    private let _resume: @Sendable (Result<Any, Swift.Error>) -> Bool
 
     init<T: Sendable & Decodable>(_ request: PendingRequest<T>) {
+        let continuation = request.continuation
+        self.init(T.self) {
+            continuation.resume(with: $0)
+            return true
+        }
+    }
+
+    init<T: Sendable & Decodable>(_ slot: ResponseSlot<T>) {
+        self.init(T.self) { slot.resolve($0) }
+    }
+
+    private init<T: Sendable & Decodable>(
+        _ type: T.Type, deliver: @escaping @Sendable (Result<T, Swift.Error>) -> Bool
+    ) {
         _resume = { result in
             switch result {
             case .success(let value):
-                if let typedValue = value as? T {
-                    request.continuation.resume(returning: typedValue)
-                } else if let value = value as? Value,
-                    let data = try? JSONEncoder().encode(value),
-                    let decoded = try? JSONDecoder().decode(T.self, from: data)
-                {
-                    request.continuation.resume(returning: decoded)
+                // A result decoded from the wire keeps `data:` URL strings;
+                // the typed decode turns those in `Value` fields into `.data`.
+                if let value = value as? Value {
+                    do {
+                        return deliver(.success(try decodeResponseResult(value, as: T.self)))
+                    } catch {
+                        return deliver(.failure(error))
+                    }
+                } else if let typedValue = value as? T {
+                    return deliver(.success(typedValue))
                 } else {
-                    request.continuation.resume(throwing: TypeMismatchError())
+                    return deliver(.failure(TypeMismatchError()))
                 }
             case .failure(let error):
-                request.continuation.resume(throwing: error)
+                return deliver(.failure(error))
             }
         }
     }
 
-    func resume(returning value: Any) {
+    /// Delivers a result.
+    /// - Returns: `false` when the sender already has an outcome, such as a
+    ///   cancellation, and this one is dropped.
+    @discardableResult
+    func resume(returning value: Any) -> Bool {
         _resume(.success(value))
     }
 
-    func resume(throwing error: Swift.Error) {
+    /// Delivers an error.
+    /// - Returns: `false` when the sender already has an outcome.
+    @discardableResult
+    func resume(throwing error: Swift.Error) -> Bool {
         _resume(.failure(error))
     }
 }

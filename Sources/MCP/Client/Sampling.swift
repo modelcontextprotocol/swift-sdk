@@ -5,10 +5,16 @@ import Foundation
 /// security and privacy.
 ///
 /// - SeeAlso: https://modelcontextprotocol.io/docs/concepts/sampling#how-sampling-works
+///
+/// > Important: Sampling is deprecated by the specification (SEP-2577) and can be removed in the
+///   first revision released on or after 2027-07-28. It works on every revision that has it. To
+///   migrate, call the API of an LLM provider from the server.
 public enum Sampling {
     /// A message in the conversation history.
     public struct Message: Hashable, Sendable {
         /// The message role
+        ///
+        /// Frozen: no case is added in 1.x (every revision has `user` and `assistant` only).
         public enum Role: String, Hashable, Codable, Sendable {
             /// A user message
             case user
@@ -51,6 +57,8 @@ public enum Sampling {
         }
 
         /// Content types for sampling messages
+        ///
+        /// Frozen: no case is added in 1.x (content is one block or an array of blocks).
         public enum Content: Hashable, Sendable {
             /// Single content block
             case single(ContentBlock)
@@ -58,6 +66,8 @@ public enum Sampling {
             case multiple([ContentBlock])
 
             /// Individual content blocks in messages
+            ///
+            /// No other case is added in 1.x: a kind from a later revision is ``unknown(type:_:)``.
             public enum ContentBlock: Hashable, Sendable {
                 /// Text content
                 case text(String)
@@ -69,6 +79,9 @@ public enum Sampling {
                 case toolUse(Sampling.ToolUseContent)
                 /// Tool result content
                 case toolResult(Sampling.ToolResultContent)
+                /// A block of a type the SDK does not know, from a later revision: its
+                /// `type` and the whole block as received. It is encoded as received.
+                case unknown(type: String, Value)
             }
 
             /// Returns true if this is a single content block
@@ -111,6 +124,7 @@ public enum Sampling {
             /// Suggested model name/family
             public let name: String?
 
+            /// Creates a model hint.
             public init(name: String? = nil) {
                 self.name = name
             }
@@ -125,6 +139,7 @@ public enum Sampling {
         /// Importance of advanced model capabilities (0-1 normalized)
         public let intelligencePriority: UnitInterval?
 
+        /// Creates model preferences.
         public init(
             hints: [Hint]? = nil,
             costPriority: UnitInterval? = nil,
@@ -139,12 +154,20 @@ public enum Sampling {
     }
 
     /// Context inclusion options for sampling requests
+    ///
+    /// Frozen: no case is added in 1.x (soft-deprecated at 2025-11-25, so it can only shrink).
+    ///
+    /// `thisServer` and `allServers` are deprecated by the specification
+    /// (SEP-2596). They are removed no later than sampling. Omit
+    /// `includeContext`, or use ``none``. They still decode and encode.
     public enum ContextInclusion: String, Hashable, Codable, Sendable {
         /// No additional context
         case none
         /// Include context from the requesting server
+        @available(*, deprecated, message: "Deprecated by the specification (SEP-2596): omit includeContext, or use .none")
         case thisServer
         /// Include context from all connected MCP servers
+        @available(*, deprecated, message: "Deprecated by the specification (SEP-2596): omit includeContext, or use .none")
         case allServers
     }
 
@@ -180,6 +203,7 @@ public enum Sampling {
         /// Optional metadata
         public var _meta: Metadata?
 
+        /// Creates tool use content.
         public init(id: String, name: String, input: [String: Value], _meta: Metadata? = nil) {
             self.id = id
             self.name = name
@@ -202,6 +226,8 @@ public enum Sampling {
         public var _meta: Metadata?
 
         /// Individual content blocks in tool results
+        ///
+        /// No other case is added in 1.x: a kind from a later revision is ``unknown(type:_:)``.
         public enum ContentBlock: Hashable, Sendable {
             /// Text content
             case text(String)
@@ -213,8 +239,12 @@ public enum Sampling {
             case resource(resource: Resource.Content, annotations: Resource.Annotations?, _meta: Metadata?)
             /// Resource link
             case resourceLink(uri: String, name: String, title: String?, description: String?, mimeType: String?, annotations: Resource.Annotations?)
+            /// A block of a type the SDK does not know, from a later revision: its
+            /// `type` and the whole block as received. It is encoded as received.
+            case unknown(type: String, Value)
         }
 
+        /// Creates tool result content.
         public init(
             toolUseId: String,
             content: [ContentBlock],
@@ -295,13 +325,15 @@ extension Sampling.Message.Content.ContentBlock: Codable {
                 isError: isError,
                 _meta: _meta))
         default:
-            throw DecodingError.dataCorruptedError(
-                forKey: .type, in: container,
-                debugDescription: "Unknown sampling message content block type")
+            self = .unknown(type: type, try UnknownBlock.decode(from: decoder))
         }
     }
 
     public func encode(to encoder: Encoder) throws {
+        if case .unknown(let type, let block) = self {
+            try UnknownBlock.encode(block, kind: type, to: encoder)
+            return
+        }
         var container = encoder.container(keyedBy: CodingKeys.self)
 
         switch self {
@@ -329,6 +361,8 @@ extension Sampling.Message.Content.ContentBlock: Codable {
             try container.encodeIfPresent(toolResult.structuredContent, forKey: .structuredContent)
             try container.encodeIfPresent(toolResult.isError, forKey: .isError)
             try container.encodeIfPresent(toolResult._meta, forKey: ._meta)
+        case .unknown:
+            return
         }
     }
 }
@@ -416,13 +450,15 @@ extension Sampling.ToolResultContent.ContentBlock: Codable {
                 uri: uri, name: name, title: title, description: description,
                 mimeType: mimeType, annotations: annotations)
         default:
-            throw DecodingError.dataCorruptedError(
-                forKey: .type, in: container,
-                debugDescription: "Unknown tool result content block type")
+            self = .unknown(type: type, try UnknownBlock.decode(from: decoder))
         }
     }
 
     public func encode(to encoder: Encoder) throws {
+        if case .unknown(let type, let block) = self {
+            try UnknownBlock.encode(block, kind: type, to: encoder)
+            return
+        }
         var container = encoder.container(keyedBy: CodingKeys.self)
 
         switch self {
@@ -450,6 +486,8 @@ extension Sampling.ToolResultContent.ContentBlock: Codable {
             try container.encodeIfPresent(description, forKey: .description)
             try container.encodeIfPresent(mimeType, forKey: .mimeType)
             try container.encodeIfPresent(annotations, forKey: .annotations)
+        case .unknown:
+            return
         }
     }
 }
@@ -458,26 +496,58 @@ extension Sampling.ToolResultContent.ContentBlock: Codable {
 
 /// To request sampling from a client, servers send a `sampling/createMessage` request.
 /// - SeeAlso: https://modelcontextprotocol.io/docs/concepts/sampling#how-sampling-works
+///
+/// > Important: Sampling is deprecated by the specification (SEP-2577) and can be removed in the
+///   first revision released on or after 2027-07-28. It works on every revision that has it. To
+///   migrate, call the API of an LLM provider from the server.
 public enum CreateSamplingMessage: Method {
     public static let name = "sampling/createMessage"
 
     /// Tool choice configuration for sampling
     public struct ToolChoice: Hashable, Codable, Sendable {
-        /// Tool choice mode
-        public enum Mode: String, Hashable, Codable, Sendable {
+        /// Tool choice mode.
+        ///
+        /// New modes can appear in a later revision, so a `switch` needs a `default`. A mode
+        /// the SDK does not know decodes as itself.
+        public struct Mode: RawRepresentable, Hashable, Codable, Sendable, CustomStringConvertible {
+            public let rawValue: String
+
+            public init(rawValue: String) {
+                self.rawValue = rawValue
+            }
+
+            public var description: String { rawValue }
+
             /// Automatically decide whether to use tools
-            case auto
+            public static let auto = Mode(rawValue: "auto")
             /// Require using at least one tool
-            case required
+            public static let required = Mode(rawValue: "required")
             /// Do not use any tools
-            case none
+            public static let none = Mode(rawValue: "none")
         }
 
         /// The tool choice mode. If omitted, defaults to `.auto`.
+        ///
+        /// The initializers and decoding store `.auto` for an omitted mode,
+        /// so this is never `nil`.
         public let mode: Mode?
 
-        public init(mode: Mode? = .auto) {
+        /// Creates a tool choice.
+        ///
+        /// A mode of `.auto` is omitted from the wire, where it is the default.
+        public init(mode: Mode = .auto) {
             self.mode = mode
+        }
+
+        /// Creates a tool choice with an optional mode. `nil` is the default
+        /// mode, `auto`.
+        ///
+        /// With an optional parameter, `.none` is `nil` and not ``Mode/none``,
+        /// so this initializer is deprecated.
+        @_disfavoredOverload
+        @available(*, deprecated, message: "Pass a Mode; nil is .auto")
+        public init(mode: Mode?) {
+            self.mode = mode ?? .auto
         }
 
         private enum CodingKeys: String, CodingKey {
@@ -497,6 +567,7 @@ public enum CreateSamplingMessage: Method {
         }
     }
 
+    /// The parameters of `sampling/createMessage`.
     public struct Parameters: Hashable, Codable, Sendable {
         /// The conversation history to send to the LLM
         public let messages: [Sampling.Message]
@@ -521,6 +592,7 @@ public enum CreateSamplingMessage: Method {
         /// Provider-specific metadata to pass to the LLM
         public let metadata: [String: Value]?
 
+        /// Creates `sampling/createMessage` parameters.
         public init(
             messages: [Sampling.Message],
             modelPreferences: Sampling.ModelPreferences? = nil,
@@ -548,6 +620,11 @@ public enum CreateSamplingMessage: Method {
         }
     }
 
+    /// The result of `sampling/createMessage`.
+    ///
+    /// When the request has tools, `content` can hold several blocks, such as
+    /// one ``Sampling/Message/Content/ContentBlock/toolUse(_:)`` for each tool
+    /// the model calls, with ``Sampling/StopReason/toolUse``.
     public struct Result: Hashable, Codable, Sendable {
         /// Name of the model used
         public let model: String
@@ -560,6 +637,7 @@ public enum CreateSamplingMessage: Method {
         /// Optional metadata about this result
         public var _meta: Metadata?
 
+        /// Creates a `sampling/createMessage` result.
         public init(
             model: String,
             stopReason: Sampling.StopReason? = nil,
@@ -596,5 +674,90 @@ public enum CreateSamplingMessage: Method {
             content = try container.decode(Sampling.Message.Content.self, forKey: .content)
             _meta = try container.decodeIfPresent(Metadata.self, forKey: ._meta)
         }
+    }
+}
+
+// MARK: - Tools in sampling (SEP-1577)
+
+extension CreateSamplingMessage.Parameters {
+    /// Whether the request uses tools: it has `tools` or `toolChoice`. Such a
+    /// request needs the client's `sampling.tools` capability.
+    var usesTools: Bool { tools != nil || toolChoice != nil }
+
+    /// Whether the request asks for context from MCP servers: an
+    /// `includeContext` other than `none`. Such a request needs the client's
+    /// `sampling.context` capability.
+    var usesContext: Bool {
+        guard let includeContext else { return false }
+        return includeContext != Sampling.ContextInclusion.none
+    }
+
+    /// The first violation of the message rules for tools, or `nil`.
+    ///
+    /// The rules of the specification:
+    /// - Tool uses are in assistant messages, tool results in user messages.
+    /// - A message with tool results holds only tool results.
+    /// - Each tool use in a message has a tool result in the next message,
+    ///   which is a user message.
+    /// - Each tool result answers a tool use in the message before it.
+    ///
+    /// Blocks of an unknown type are not counted: a later revision decides
+    /// where they may appear.
+    ///
+    /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/client/sampling#message-content-constraints
+    /// - SeeAlso: https://modelcontextprotocol.io/specification/2025-11-25/client/sampling#message-roles
+    func toolMessageProblem() -> String? {
+        for (index, message) in messages.enumerated() {
+            let blocks = message.content.asArray
+            var uses: [String] = []
+            var results: [String] = []
+            var others = 0
+            for block in blocks {
+                switch block {
+                case .toolUse(let use): uses.append(use.id)
+                case .toolResult(let result): results.append(result.toolUseId)
+                case .unknown: break
+                default: others += 1
+                }
+            }
+            if !uses.isEmpty, message.role != .assistant {
+                return "messages[\(index)] has tool uses, which belong in an assistant message"
+            }
+            if !results.isEmpty {
+                if message.role != .user {
+                    return "messages[\(index)] has tool results, which belong in a user message"
+                }
+                if others > 0 || !uses.isEmpty {
+                    return "messages[\(index)] has tool results and other content"
+                }
+                let answered = index > 0 ? Self.toolUseIDs(in: messages[index - 1]) : []
+                if let unmatched = results.first(where: { !answered.contains($0) }) {
+                    return "messages[\(index)] has a result for tool use \(unmatched), which is not in the message before it"
+                }
+            }
+            guard !uses.isEmpty else { continue }
+            guard index + 1 < messages.count else {
+                return "messages[\(index)] has tool uses, and no message with their results follows it"
+            }
+            let next = messages[index + 1]
+            let answers = Set(next.content.asArray.compactMap { block -> String? in
+                if case .toolResult(let result) = block { return result.toolUseId }
+                return nil
+            })
+            if next.role != .user || answers.isEmpty {
+                return "messages[\(index + 1)] must be a user message with the results of the tool uses in messages[\(index)]"
+            }
+            if let unanswered = uses.first(where: { !answers.contains($0) }) {
+                return "messages[\(index + 1)] has no result for tool use \(unanswered)"
+            }
+        }
+        return nil
+    }
+
+    private static func toolUseIDs(in message: Sampling.Message) -> Set<String> {
+        Set(message.content.asArray.compactMap { block -> String? in
+            if case .toolUse(let use) = block { return use.id }
+            return nil
+        })
     }
 }

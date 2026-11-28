@@ -6,6 +6,10 @@ enum OAuthGrantTypeValue {
     static let clientCredentials = "client_credentials"
     static let authorizationCode = "authorization_code"
     static let refreshToken = "refresh_token"
+    /// RFC 7523 §2.1.
+    static let jwtBearer = "urn:ietf:params:oauth:grant-type:jwt-bearer"
+    /// RFC 8693.
+    static let tokenExchange = "urn:ietf:params:oauth:grant-type:token-exchange"
 }
 
 // MARK: - OAuth Parameter Names
@@ -26,6 +30,12 @@ enum OAuthParameterName {
     static let clientAssertionType = "client_assertion_type"
     static let refreshToken = "refresh_token"
     static let state = "state"
+    static let issuer = "iss"
+    static let assertion = "assertion"
+    static let subjectToken = "subject_token"
+    static let subjectTokenType = "subject_token_type"
+    static let requestedTokenType = "requested_token_type"
+    static let audience = "audience"
 }
 
 // MARK: - OAuth Well-Known Paths
@@ -38,8 +48,15 @@ enum OAuthWellKnownPath {
 
 // MARK: - OAuth Token Type
 
+/// OAuth `error` values the client acts on.
+enum OAuthErrorCode {
+    /// RFC 9449 §8, §9: retry with the server's `DPoP-Nonce`.
+    static let useDPoPNonce = "use_dpop_nonce"
+}
+
 enum OAuthTokenType {
     static let bearer = "Bearer"
+    static let dpop = "DPoP"
 }
 
 // MARK: - OAuth Code Challenge Method
@@ -78,8 +95,10 @@ enum OAuthLoopbackHost {
     static let ipv4 = "127.0.0.1"
     static let ipv6 = "::1"
 
+    /// Whether `host` is a loopback host, as `URL.host` (`::1`) or
+    /// `URLComponents.host` (`[::1]`, brackets kept) returns it.
     static func isLoopback(_ host: String) -> Bool {
-        host == localhost || host == ipv4 || host == ipv6
+        host == localhost || host == ipv4 || host == ipv6 || host == "[\(ipv6)]"
     }
 }
 

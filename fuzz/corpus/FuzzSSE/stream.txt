@@ -1,0 +1,11 @@
+retry: 3000
+id: 1
+event: message
+data: {"jsonrpc":"2.0","id":1,"result":{}}
+
+: comment
+data: a
+data: b
+
+id: 2
+

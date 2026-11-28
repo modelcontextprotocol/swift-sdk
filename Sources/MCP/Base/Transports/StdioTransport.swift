@@ -56,8 +56,14 @@ import struct Foundation.Data
         private var isConnected = false
         private var readTask: Task<Void, Never>?
         private var disconnectTask: Task<Void, Never>?
-        private var activeSends = 0
+        /// The sends in progress, including those waiting for their turn. Tests wait on it.
+        private(set) var activeSends = 0
         private var sendsDrained: CheckedContinuation<Void, Never>?
+        /// Whether a send holds the output. A send can suspend mid-frame on `EAGAIN`, so
+        /// the others wait in `sendWaiters`, oldest first, and are handed the output in turn.
+        private var isSending = false
+        private var sendWaiters: [(id: UInt64, continuation: CheckedContinuation<Void, Swift.Error>)] = []
+        private var nextSendWaiterID: UInt64 = 0
         private let messageStream: AsyncThrowingStream<Data, Swift.Error>
         private let messageContinuation: AsyncThrowingStream<Data, Swift.Error>.Continuation
         private struct DescriptorState {
@@ -67,6 +73,9 @@ import struct Foundation.Data
         }
         private var inputState: DescriptorState?
         private var outputState: DescriptorState?
+        /// The bytes the read buffer's storage spans after the last read was parsed: the
+        /// unparsed remainder, plus any consumed prefix still held. Tests check it stays bounded.
+        private(set) var receiveBufferSpan = 0
 
         /// Creates a new stdio transport with the specified file descriptors
         ///
@@ -144,7 +153,8 @@ import struct Foundation.Data
                     throw MCPError.transportError(Errno(rawValue: CInt(errno)))
                 }
                 return DescriptorState(
-                    flags: flags, device: UInt64(status.st_dev), inode: UInt64(status.st_ino))
+                    flags: flags, device: UInt64(truncatingIfNeeded: status.st_dev),
+                    inode: UInt64(truncatingIfNeeded: status.st_ino))
             #else
                 // For platforms where non-blocking operations aren't supported
                 throw MCPError.internalError(
@@ -156,8 +166,8 @@ import struct Foundation.Data
             guard state.flags & O_NONBLOCK == 0 else { return }
             var status = stat()
             guard fstat(fileDescriptor.rawValue, &status) == 0,
-                UInt64(status.st_dev) == state.device,
-                UInt64(status.st_ino) == state.inode
+                UInt64(truncatingIfNeeded: status.st_dev) == state.device,
+                UInt64(truncatingIfNeeded: status.st_ino) == state.inode
             else { return }
             let currentFlags = fcntl(fileDescriptor.rawValue, F_GETFL)
             guard currentFlags >= 0 else { return }
@@ -200,6 +210,12 @@ import struct Foundation.Data
                             messageContinuation.yield(Data(messageData))
                         }
                     }
+                    // Slicing only moves startIndex, and the next append grows the same
+                    // storage, so drop the consumed prefix.
+                    if pendingData.startIndex != 0 {
+                        pendingData = pendingData.isEmpty ? Data() : Data(pendingData)
+                    }
+                    receiveBufferSpan = pendingData.endIndex
                 } catch let error where MCPError.isResourceTemporarilyUnavailable(error) {
                     try? await Task.sleep(for: .milliseconds(10))
                     continue
@@ -252,8 +268,11 @@ import struct Foundation.Data
         /// Batches should be encoded as a JSON array containing multiple request/notification objects
         /// according to the JSON-RPC 2.0 specification.
         ///
+        /// Concurrent sends write their messages one at a time, in the order they were called.
+        ///
         /// - Parameter message: The message data to send (without a trailing newline)
-        /// - Throws: Error if the message cannot be sent
+        /// - Throws: Error if the message cannot be sent, or `CancellationError` if the task is
+        ///   cancelled while the message waits for an earlier one
         public func send(_ message: Data) async throws {
             guard isConnected else {
                 throw MCPError.transportError(Errno(rawValue: ENOTCONN))
@@ -266,6 +285,8 @@ import struct Foundation.Data
                     sendsDrained = nil
                 }
             }
+            try await acquireOutput()
+            defer { releaseOutput() }
 
             // Add newline as delimiter
             var messageWithNewline = message
@@ -290,6 +311,40 @@ import struct Foundation.Data
                     throw MCPError.transportError(error)
                 }
             }
+        }
+
+        /// Waits until no other send holds the output, then takes it.
+        ///
+        /// - Throws: `CancellationError` if the task is cancelled while it waits.
+        private func acquireOutput() async throws {
+            guard isSending else {
+                isSending = true
+                return
+            }
+            let id = nextSendWaiterID
+            nextSendWaiterID += 1
+            try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { continuation in
+                    sendWaiters.append((id: id, continuation: continuation))
+                }
+            } onCancel: {
+                Task { await self.cancelSendWaiter(id) }
+            }
+        }
+
+        /// Hands the output to the oldest waiting send, or frees it.
+        private func releaseOutput() {
+            if sendWaiters.isEmpty {
+                isSending = false
+            } else {
+                sendWaiters.removeFirst().continuation.resume()
+            }
+        }
+
+        private func cancelSendWaiter(_ id: UInt64) {
+            // Not found: the send already has the output and writes its frame.
+            guard let index = sendWaiters.firstIndex(where: { $0.id == id }) else { return }
+            sendWaiters.remove(at: index).continuation.resume(throwing: CancellationError())
         }
 
         /// Receives messages from the transport.

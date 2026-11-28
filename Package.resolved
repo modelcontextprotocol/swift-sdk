@@ -1,13 +1,13 @@
 {
-  "originHash" : "047c7cc6f6984c11c472da926c13e58b62e291f66ecebbcd89b528f1a12cd00a",
+  "originHash" : "5309f43452e69553e7130806801788f550535e5a0b2ef991413cff34c3f0961a",
   "pins" : [
     {
-      "identity" : "eventsource",
+      "identity" : "swift-asn1",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/mattt/eventsource.git",
+      "location" : "https://github.com/apple/swift-asn1.git",
       "state" : {
-        "revision" : "e83f076811f32757305b8bf69ac92d05626ffdd7",
-        "version" : "1.1.0"
+        "revision" : "3b6410f7dee09eb33cdd26260c5fd47fda19b0e2",
+        "version" : "1.7.3"
       }
     },
     {
@@ -29,12 +29,21 @@
       }
     },
     {
+      "identity" : "swift-crypto",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-crypto.git",
+      "state" : {
+        "revision" : "da9d28d69ebe3894b18376c8f2395c2f37b8448f",
+        "version" : "4.5.2"
+      }
+    },
+    {
       "identity" : "swift-docc-plugin",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/swiftlang/swift-docc-plugin",
       "state" : {
-        "branch" : "main",
-        "revision" : "e977f65879f82b375a044c8837597f690c067da6"
+        "revision" : "e977f65879f82b375a044c8837597f690c067da6",
+        "version" : "1.4.6"
       }
     },
     {
@@ -71,6 +80,15 @@
       "state" : {
         "revision" : "c8a44d836fe7913603e246acab7c528c2e780168",
         "version" : "1.4.0"
+      }
+    },
+    {
+      "identity" : "yams",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/jpsim/Yams.git",
+      "state" : {
+        "revision" : "a27b21e0c81c5bf42049b897a62aaf387e80f279",
+        "version" : "6.2.2"
       }
     }
   ],

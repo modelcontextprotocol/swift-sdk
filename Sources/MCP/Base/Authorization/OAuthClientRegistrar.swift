@@ -31,9 +31,12 @@ struct OAuthClientRegistrar: Sendable {
     ///
     /// Returns `nil` if registration is not needed:
     /// - Credentials are already configured (not `.none`)
-    /// - CIMD is in use and the server supports it (pre-registered)
-    /// - No registration endpoint is available and no CIMD mismatch error
+    /// - The client ID is not empty and not a URL: a pre-registered public client
+    /// - CIMD is in use and the server supports it
+    /// - No registration endpoint is available and the client ID is a non-CIMD URL on a server without CIMD
     ///
+    /// Throws ``OAuthAuthorizationError/registrationInformationRequired`` when
+    /// the client ID is empty and the server has no registration endpoint.
     /// Throws if registration was attempted but failed (4xx, 5xx, or unexpected response).
     func register(
         configuration: OAuthConfiguration,
@@ -43,9 +46,10 @@ struct OAuthClientRegistrar: Sendable {
         response: OAuthClientRegistrationResponse,
         updatedAuthentication: OAuthConfiguration.TokenEndpointAuthentication
     )? {
-        guard case .none(let clientID) = configuration.authentication else {
+        guard case .none = configuration.authentication.method else {
             return nil
         }
+        let clientID = configuration.authentication.clientID
 
         let hasClientIDMetadataDocument = isHTTPSURLWithPath(clientID)
         let supportsClientIDMetadataDocument = asMetadata.clientIDMetadataDocumentSupported == true
@@ -61,13 +65,22 @@ struct OAuthClientRegistrar: Sendable {
             return nil
         }
 
+        // A plain client ID was issued by the authorization server in advance.
+        if !clientID.isEmpty, !clientIDLooksLikeURL(clientID) {
+            return nil
+        }
+
         guard let registrationEndpoint = asMetadata.registrationEndpoint else {
             if hasClientIDMetadataDocument && !supportsClientIDMetadataDocument {
                 throw OAuthAuthorizationError.cimdNotSupported(clientID: clientID)
             }
+            // No client ID, and no way to get one: do not send an empty client_id.
+            if clientID.isEmpty {
+                throw OAuthAuthorizationError.registrationInformationRequired
+            }
             return nil
         }
-        try urlValidator.validateAuthorizationServer(
+        try urlValidator.validateAuthorizationServerAndHost(
             registrationEndpoint, context: "Client registration endpoint")
 
         var request = URLRequest(url: registrationEndpoint)
@@ -77,17 +90,18 @@ struct OAuthClientRegistrar: Sendable {
 
         let grantTypes: [String]
         let responseTypes: [String]
-        switch configuration.grantType {
-        case .authorizationCode:
+        if configuration.grantType == .authorizationCode {
             grantTypes = [OAuthGrantTypeValue.authorizationCode, OAuthGrantTypeValue.refreshToken]
             responseTypes = [OAuthParameterName.code]
-        case .clientCredentials:
-            grantTypes = [OAuthGrantTypeValue.clientCredentials]
+        } else {
+            // The authorizer does not register for the jwt-bearer grant.
+            grantTypes = [configuration.grantType.rawValue]
             responseTypes = []
         }
 
         var registrationPayload: [String: Any] = [
             "client_name": configuration.clientName,
+            "application_type": configuration.registrationApplicationType.rawValue,
             "grant_types": grantTypes,
             "token_endpoint_auth_method": configuration.authentication.methodName,
         ]
@@ -104,7 +118,8 @@ struct OAuthClientRegistrar: Sendable {
 
         request.httpBody = httpBody
 
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await session.oauthData(
+            for: request, redirects: .none, validator: urlValidator)
         if let httpResponse = response as? HTTPURLResponse,
             (400..<500).contains(httpResponse.statusCode)
         {
@@ -141,22 +156,7 @@ struct OAuthClientRegistrar: Sendable {
         from registration: OAuthClientRegistrationResponse,
         current: OAuthConfiguration.TokenEndpointAuthentication
     ) -> OAuthConfiguration.TokenEndpointAuthentication {
-        switch current {
-        case .none:
-            return .none(clientID: registration.clientID)
-        case .clientSecretBasic(_, let currentSecret):
-            return .clientSecretBasic(
-                clientID: registration.clientID,
-                clientSecret: registration.clientSecret ?? currentSecret
-            )
-        case .clientSecretPost(_, let currentSecret):
-            return .clientSecretPost(
-                clientID: registration.clientID,
-                clientSecret: registration.clientSecret ?? currentSecret
-            )
-        case .privateKeyJWT(_, let factory):
-            return .privateKeyJWT(clientID: registration.clientID, assertionFactory: factory)
-        }
+        current.registered(clientID: registration.clientID, clientSecret: registration.clientSecret)
     }
 
     // MARK: - CIMD Helpers

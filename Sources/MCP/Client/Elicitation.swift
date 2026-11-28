@@ -8,7 +8,10 @@ public enum Elicitation {
     /// Schema describing the expected response content.
     public struct RequestSchema: Hashable, Codable, Sendable {
         /// Supported top-level types. Currently limited to objects.
+        ///
+        /// Frozen: no case is added in 1.x (the root of a requested schema is an object).
         public enum SchemaType: String, Hashable, Codable, Sendable {
+            /// A JSON object whose properties are the requested fields.
             case object
         }
 
@@ -23,6 +26,7 @@ public enum Elicitation {
         /// Top-level schema type. Defaults to `object`.
         public var type: SchemaType
 
+        /// Creates a requested schema.
         public init(
             title: String? = nil,
             description: String? = nil,
@@ -42,12 +46,23 @@ public enum Elicitation {
         }
     }
 
-    /// Elicitation mode indicating how user input is collected
-    public enum Mode: String, Hashable, Codable, Sendable {
+    /// Elicitation mode indicating how user input is collected.
+    ///
+    /// New modes can appear in a later revision, so a `switch` needs a `default`. A mode the
+    /// SDK does not know decodes as itself.
+    public struct Mode: RawRepresentable, Hashable, Codable, Sendable, CustomStringConvertible {
+        public let rawValue: String
+
+        public init(rawValue: String) {
+            self.rawValue = rawValue
+        }
+
+        public var description: String { rawValue }
+
         /// Form-based elicitation (client displays UI)
-        case form
+        public static let form = Mode(rawValue: "form")
         /// URL-based elicitation (client opens external URL)
-        case url
+        public static let url = Mode(rawValue: "url")
     }
 }
 
@@ -56,11 +71,15 @@ public enum Elicitation {
 public enum CreateElicitation: Method {
     public static let name = "elicitation/create"
 
+    /// No other case is added in 1.x: a kind from a later revision is ``unknown(mode:_:)``.
     public enum Parameters: Hashable, Sendable {
         /// Form-based elicitation parameters
         case form(FormParameters)
         /// URL-based elicitation parameters
         case url(URLParameters)
+        /// A mode the SDK does not know, from a later revision: the mode and the
+        /// whole `params` as received. It is encoded as received.
+        case unknown(mode: Elicitation.Mode, Value)
 
         /// Parameters for form-based elicitation
         public struct FormParameters: Hashable, Codable, Sendable {
@@ -73,6 +92,9 @@ public enum CreateElicitation: Method {
             /// Optional metadata
             public var _meta: Metadata?
 
+            /// Creates form elicitation parameters.
+            ///
+            /// A `nil` mode omits `mode` from the wire, which receivers read as `form`.
             public init(
                 message: String,
                 mode: Elicitation.Mode? = nil,
@@ -99,6 +121,7 @@ public enum CreateElicitation: Method {
             /// Optional metadata
             public var _meta: Metadata?
 
+            /// Creates URL elicitation parameters, with `mode` set to `url`.
             public init(
                 message: String,
                 url: String,
@@ -114,11 +137,17 @@ public enum CreateElicitation: Method {
         }
     }
 
+    /// The result of `elicitation/create`.
     public struct Result: Hashable, Codable, Sendable {
         /// Indicates how the user responded to the request.
+        ///
+        /// Frozen: no case is added in 1.x (unchanged since 2025-06-18).
         public enum Action: String, Hashable, Codable, Sendable {
+            /// The user accepted the request: for a form, with the requested content.
             case accept
+            /// The user explicitly declined the request.
             case decline
+            /// The user dismissed the request without choosing.
             case cancel
         }
 
@@ -129,6 +158,7 @@ public enum CreateElicitation: Method {
         /// Optional metadata about this result
         public var _meta: Metadata?
 
+        /// Creates an elicitation result.
         public init(
             action: Action,
             content: [String: Value]? = nil,
@@ -174,7 +204,9 @@ extension CreateElicitation.Parameters: Codable {
         let mode = try container.decodeIfPresent(Elicitation.Mode.self, forKey: .mode)
 
         // Discriminate based on mode
-        if mode == .url {
+        if let mode, mode != .url, mode != .form {
+            self = .unknown(mode: mode, try UnknownBlock.decode(from: decoder))
+        } else if mode == .url {
             // URL mode
             let message = try container.decode(String.self, forKey: .message)
             let url = try container.decode(String.self, forKey: .url)
@@ -200,6 +232,10 @@ extension CreateElicitation.Parameters: Codable {
     }
 
     public func encode(to encoder: Encoder) throws {
+        if case .unknown(let mode, let params) = self {
+            try UnknownBlock.encode(params, kind: mode.rawValue, key: "mode", to: encoder)
+            return
+        }
         var container = encoder.container(keyedBy: CodingKeys.self)
 
         switch self {
@@ -214,6 +250,8 @@ extension CreateElicitation.Parameters: Codable {
             try container.encode(params.url, forKey: .url)
             try container.encode(params.elicitationId, forKey: .elicitationId)
             try container.encodeIfPresent(params._meta, forKey: ._meta)
+        case .unknown:
+            return
         }
     }
 }
@@ -222,10 +260,12 @@ extension CreateElicitation.Parameters: Codable {
 public struct ElicitationCompleteNotification: Notification {
     public static let name = "notifications/elicitation/complete"
 
+    /// The parameters of `notifications/elicitation/complete`.
     public struct Parameters: Hashable, Codable, Sendable {
         /// The elicitation ID that was completed
         public var elicitationId: String
 
+        /// Creates the parameters for a completed elicitation.
         public init(elicitationId: String) {
             self.elicitationId = elicitationId
         }

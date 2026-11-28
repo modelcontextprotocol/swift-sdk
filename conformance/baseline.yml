@@ -1,0 +1,13 @@
+# Expected failures for the bare '--suite all' leg: every scenario shipped
+# with the pinned harness, each at the harness's default wire. This is the
+# only leg that reaches extension-tagged scenarios (tasks-*, the sep-2640-*
+# skills scenarios and the auth/ extensions).
+#
+# Generated; do not edit. Regenerate with:
+#   scripts/run-conformance.sh --mode both --update-baseline
+#
+# Entries are '<scenario>:<check-id>', or '<scenario>' for a scenario that
+# failed without producing a failing check. The harness fails a run on any
+# unlisted failure and on any listed entry that now passes.
+server: []
+client: []

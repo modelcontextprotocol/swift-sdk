@@ -2,23 +2,31 @@ import Foundation
 import RegexBuilder
 
 extension Data {
+    /// A `token` character of RFC 2045 §5.1: printable US-ASCII without
+    /// space and `tspecials`.
+    @inline(__always) private static var mediaTypeTokenCharacter: CharacterClass {
+        CharacterClass(.anyOf("!#$%&'*+-.^_`{|}~"), "a"..."z", "A"..."Z", "0"..."9")
+    }
+
     /// Regex pattern for data URLs
     @inline(__always) private static var dataURLRegex:
         Regex<(Substring, Substring, Substring?, Substring?, Substring)>
     {
         Regex {
             "data:"
+            // RFC 2397 §3: `[ type "/" subtype ]`, so prose such as
+            // `data: 3 rows, 2 columns` is not a data URL.
             Capture {
-                ZeroOrMore(.reluctant) {
-                    CharacterClass.anyOf(",;").inverted
+                Optionally {
+                    OneOrMore(mediaTypeTokenCharacter)
+                    "/"
+                    OneOrMore(mediaTypeTokenCharacter)
                 }
             }
             Optionally {
                 ";charset="
                 Capture {
-                    OneOrMore(.reluctant) {
-                        CharacterClass.anyOf(",;").inverted
-                    }
+                    OneOrMore(mediaTypeTokenCharacter)
                 }
             }
             Optionally {

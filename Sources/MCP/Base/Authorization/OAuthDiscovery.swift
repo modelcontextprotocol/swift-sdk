@@ -46,8 +46,11 @@ public protocol OAuthScopeSelecting {
 /// Selects scopes in priority order: challenge scope > `scopes_supported` > `nil`.
 /// Serializes scopes sorted alphabetically to produce deterministic `scope` parameters.
 public struct DefaultOAuthScopeSelector: OAuthScopeSelecting {
+    /// Creates the default scope selector.
     public init() {}
 
+    /// Returns the challenge scope when the challenge has one, otherwise
+    /// `scopes_supported`; `nil` when the chosen source has no scopes.
     public func selectScopes(challengeScope: String?, scopesSupported: [String]?) -> Set<String>? {
         if let challengeScope {
             let parsed = parseScopeString(challengeScope)
@@ -62,6 +65,7 @@ public struct DefaultOAuthScopeSelector: OAuthScopeSelecting {
         return nil
     }
 
+    /// Splits a scope string on whitespace.
     public func parseScopeString(_ scope: String) -> Set<String> {
         Set(
             scope
@@ -71,6 +75,7 @@ public struct DefaultOAuthScopeSelector: OAuthScopeSelecting {
         )
     }
 
+    /// Joins the scopes in sorted order with spaces; `nil` for an empty set.
     public func serialize(_ scopes: Set<String>) -> String? {
         guard !scopes.isEmpty else { return nil }
         return scopes.sorted().joined(separator: " ")
@@ -149,8 +154,13 @@ public protocol OAuthMetadataDiscovering: Sendable {
 /// - Canonicalises resource URIs by stripping query, fragment, and trailing slash.
 /// - Matches resources using scheme/host/port equality and path prefix rules.
 public struct DefaultOAuthMetadataDiscovery: OAuthMetadataDiscovering {
+    /// Creates the default metadata discovery.
     public init() {}
 
+    /// Returns `/.well-known/oauth-protected-resource` followed by the endpoint
+    /// path, then at the root (RFC 9728 §3.1).
+    ///
+    /// Returns no URLs when the endpoint is neither HTTPS nor loopback HTTP.
     public func protectedResourceMetadataURLs(for endpoint: URL) -> [URL] {
         guard var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false),
             let scheme = components.scheme?.lowercased(),
@@ -183,6 +193,15 @@ public struct DefaultOAuthMetadataDiscovery: OAuthMetadataDiscovering {
         return urls
     }
 
+    /// Returns the RFC 8414 and OpenID Connect Discovery 1.0 metadata URLs of
+    /// an issuer.
+    ///
+    /// For an issuer with a path, the order is
+    /// `/.well-known/oauth-authorization-server/<path>`,
+    /// `/.well-known/openid-configuration/<path>`, then
+    /// `/<path>/.well-known/openid-configuration`; for one without, the two
+    /// well-known paths at the root. Returns no URLs when the issuer is neither
+    /// HTTPS nor loopback HTTP.
     public func authorizationServerMetadataURLs(for issuer: URL) -> [URL] {
         guard var components = URLComponents(url: issuer, resolvingAgainstBaseURL: false),
             let scheme = components.scheme?.lowercased(),
@@ -235,6 +254,11 @@ public struct DefaultOAuthMetadataDiscovery: OAuthMetadataDiscovering {
         return urls
     }
 
+    /// Lowercases the scheme and host, removes the query, and drops a root
+    /// path of `/`.
+    ///
+    /// Throws ``OAuthAuthorizationError/invalidResourceURI(_:)`` for a fragment
+    /// or for a URL that is neither HTTPS nor loopback HTTP.
     public func canonicalResourceURI(from endpoint: URL) throws -> URL {
         guard var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false),
             let scheme = components.scheme?.lowercased(),
@@ -266,6 +290,7 @@ public struct DefaultOAuthMetadataDiscovery: OAuthMetadataDiscovering {
         return url
     }
 
+    /// Returns the endpoint's scheme, host and port, without a path.
     public func authorizationServerFallbackIssuer(from endpoint: URL) throws -> URL {
         guard var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false),
             let scheme = components.scheme?.lowercased(),
@@ -289,6 +314,11 @@ public struct DefaultOAuthMetadataDiscovery: OAuthMetadataDiscovering {
         return url
     }
 
+    /// Compares scheme, host and port (with the scheme's default port), then
+    /// requires the endpoint path to equal the resource path or lie under it.
+    ///
+    /// A trailing slash is ignored, and a resource without a path matches every
+    /// endpoint on its origin.
     public func protectedResourceMatches(resource: URL, endpoint: URL) -> Bool {
         guard let resourceComponents = URLComponents(
             url: resource,

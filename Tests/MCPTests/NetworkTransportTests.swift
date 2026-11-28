@@ -21,6 +21,10 @@ import Testing
         private var dataToReceive: [Data] = []
         private var sentData: [Data] = []
 
+        /// Send completions held until `completeHeldSends(error:)`, while `holdsSendCompletions`
+        private var holdsSendCompletions = false
+        private var heldSendCompletions: [@Sendable (NWError?) -> Void] = []
+
         /// The state update handler
         public var stateUpdateHandler: ((@Sendable (NWConnection.State) -> Void))? {
             get { lock.withLock { _stateUpdateHandler } }
@@ -50,13 +54,17 @@ import Testing
             isComplete: Bool,
             completion: NWConnection.SendCompletion
         ) {
-            let error = lock.withLock {
+            let (error, holds) = lock.withLock {
                 if let content = content { sentData.append(content) }
-                return mockError
+                return (mockError, holdsSendCompletions)
             }
 
             switch completion {
             case .contentProcessed(let handler):
+                if holds {
+                    lock.withLock { heldSendCompletions.append(handler) }
+                    return
+                }
                 handler(error as? NWError)
             default:
                 break
@@ -164,6 +172,25 @@ import Testing
         /// Clear sent data buffer
         func clearSentData() {
             lock.withLock { sentData.removeAll() }
+        }
+
+        /// Hold the completions of later sends until `completeHeldSends(error:)`
+        func holdSendCompletions() {
+            lock.withLock { holdsSendCompletions = true }
+        }
+
+        /// The number of send completions held
+        var heldSendCount: Int {
+            lock.withLock { heldSendCompletions.count }
+        }
+
+        /// Call the held send completions with `error`
+        func completeHeldSends(error: NWError?) {
+            let handlers = lock.withLock {
+                defer { heldSendCompletions.removeAll() }
+                return heldSendCompletions
+            }
+            for handler in handlers { handler(error) }
         }
     }
 
@@ -311,6 +338,74 @@ import Testing
             await transport.disconnect()
         }
 
+        @Test("A send whose completion reports an error throws it")
+        func testSendCompletionErrorThrows() async throws {
+            let mockConnection = MockNetworkConnection()
+            let transport = NetworkTransport(
+                mockConnection,
+                heartbeatConfig: .disabled,
+                reconnectionConfig: .disabled
+            )
+            try await transport.connect()
+
+            mockConnection.holdSendCompletions()
+            let sent = Task {
+                await outcome(within: .seconds(30)) {
+                    try await transport.send(Data(#"{"key":"value"}"#.utf8))
+                }
+            }
+            #expect(await eventually { mockConnection.heldSendCount == 1 })
+
+            let error = NWError.posix(.ECONNRESET)
+            mockConnection.completeHeldSends(error: error)
+
+            let result = await sent.value
+            #expect(!result.didTimeOut, "send never finished")
+            #expect(result.mcpError == .internalError("Send error: \(error)"))
+
+            await transport.disconnect()
+        }
+
+        @Test("A send pending when the transport is disconnected and released throws")
+        func testPendingSendAfterTransportReleased() async throws {
+            let mockConnection = MockNetworkConnection()
+            weak var weakTransport: NetworkTransport?
+            let sent: Task<Outcome<Void>, Never>
+
+            do {
+                let transport = NetworkTransport(
+                    mockConnection,
+                    heartbeatConfig: .disabled,
+                    reconnectionConfig: .disabled
+                )
+                weakTransport = transport
+                try await transport.connect()
+
+                mockConnection.holdSendCompletions()
+                sent = Task {
+                    await outcome(within: .seconds(30)) {
+                        try await transport.send(Data(#"{"key":"value"}"#.utf8))
+                    }
+                }
+                #expect(await eventually { mockConnection.heldSendCount == 1 })
+                await transport.disconnect()
+            }
+
+            // Cancelling a connection fails its pending sends with ECANCELED.
+            let error = NWError.posix(.ECANCELED)
+            mockConnection.completeHeldSends(error: error)
+
+            let result = await sent.value
+            #expect(!result.didTimeOut, "send never finished")
+            #expect(result.mcpError == .internalError("Send error: \(error)"))
+
+            let deadline = ContinuousClock.now + .seconds(30)
+            while weakTransport != nil && ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            #expect(weakTransport == nil, "Transport was not released")
+        }
+
         @Test("Receive Message")
         func testNetworkTransportReceiveMessage() async throws {
             let mockConnection = MockNetworkConnection()
@@ -358,11 +453,11 @@ import Testing
 
             try await transport.connect()
 
-            // Wait for initial connection setup
-            try await Task.sleep(for: .milliseconds(100))
-
-            // Wait for initial heartbeat delay (1 second) plus a small buffer
-            try await Task.sleep(for: .seconds(1.2))
+            // The first heartbeat goes out after a 1 second delay
+            let deadline = ContinuousClock.now + .seconds(30)
+            while mockConnection.getSentData().isEmpty && ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(5))
+            }
 
             // Check if heartbeat was sent
             let sentData = mockConnection.getSentData()
@@ -440,8 +535,7 @@ import Testing
                 for try await _ in await transport.receive() {}
             }
 
-            // Let the receive loop start, then fail the connection
-            try await Task.sleep(for: .milliseconds(100))
+            // Fail the connection while the receive loop runs
             mockConnection.simulateFailure(error: NWError.posix(POSIXErrorCode.ECONNRESET))
 
             // The stream should finish with an error rather than hang
@@ -593,6 +687,36 @@ import Testing
             await transport.disconnect()
         }
 
+        @Test("Receive buffer releases parsed messages")
+        func testReceiveBufferStaysBounded() async throws {
+            let mockConnection = MockNetworkConnection()
+            let transport = NetworkTransport(
+                mockConnection,
+                heartbeatConfig: .disabled
+            )
+
+            // Chunks end mid-message, so some reads leave a partial message buffered.
+            let messageCount = 5000
+            let bytes = Data(
+                (0..<messageCount).map { #"{"jsonrpc":"2.0","id":\#($0),"method":"ping"}"# + "\n" }
+                    .joined().utf8)
+            for start in stride(from: 0, to: bytes.count, by: 1000) {
+                mockConnection.queueDataForReceiving(
+                    Data(bytes[start..<min(start + 1000, bytes.count)]))
+            }
+
+            try await transport.connect()
+            let stream = await transport.receive()
+            var iterator = stream.makeAsyncIterator()
+            for _ in 0..<messageCount {
+                _ = try await iterator.next()
+            }
+
+            // Every message was parsed; before the fix the buffer spanned every byte received.
+            #expect(await transport.receiveBufferSpan <= 1000)
+            await transport.disconnect()
+        }
+
         @Test("Reconnection Backoff")
         func testReconnectionBackoff() async throws {
             let mockConnection = MockNetworkConnection()
@@ -646,14 +770,18 @@ import Testing
             try await transport.connect()
 
             // Wait for initial heartbeat
-            try await Task.sleep(for: .seconds(1.2))
+            let heartbeatDeadline = ContinuousClock.now + .seconds(30)
+            while mockConnection.getSentData().isEmpty && ContinuousClock.now < heartbeatDeadline {
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            #expect(mockConnection.getSentData().count >= 1)
 
             // Simulate failure during heartbeat
             mockConnection.simulateFailure(error: NWError.posix(POSIXErrorCode.ECONNRESET))
 
             // The transport should react to the failure by cancelling the
             // connection before it tries to reconnect
-            let deadline = ContinuousClock.now + .seconds(3)
+            let deadline = ContinuousClock.now + .seconds(30)
             while mockConnection.state != .cancelled && ContinuousClock.now < deadline {
                 try await Task.sleep(for: .milliseconds(50))
             }
@@ -679,7 +807,7 @@ import Testing
             try await transport.connect()
             mockConnection.simulateFailure()
 
-            let deadline = ContinuousClock.now + .seconds(3)
+            let deadline = ContinuousClock.now + .seconds(30)
             while mockConnection.state != .cancelled && ContinuousClock.now < deadline {
                 try await Task.sleep(for: .milliseconds(50))
             }
@@ -715,7 +843,10 @@ import Testing
             }
 
             // Wait for potential async cleanup
-            try await Task.sleep(for: .milliseconds(100))
+            let deadline = ContinuousClock.now + .seconds(30)
+            while weakConnection != nil && ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(5))
+            }
 
             // Verify connection is cleaned up
             #expect(weakConnection == nil, "Connection was not properly cleaned up")
