@@ -35,7 +35,7 @@ The hook runs only for `initialize`. Stateless requests do not reach it; pass a 
 
 With `Server.Configuration.strict` set (`.strict`), the server rejects requests other than `initialize` and `ping` that arrive before `initialize`, with -32600 "Server is not initialized", and ignores notifications other than `notifications/initialized`. The default is lenient. A second `initialize` on one connection fails with -32600 "Server is already initialized". Behind a `StatelessHTTPServerTransport`, which has no connection or session, every `initialize` is answered, the server keeps no client state, and `strict` does not apply to handshake requests. No session ties a later request to the `initialize` that passed the hook, so there the `statelessRequestHook` runs before every other handshake request, with no client info and empty capabilities; with an initialize hook and no stateless hook, those requests are refused with -32600.
 
-A server never answers a notification. A message it cannot read gets a parse error (-32700) with `"id": null`, and an empty batch gets -32600 with `"id": null`. In a batch, each invalid item gets its own -32600, and a response answers the server's request it names and gets no reply.
+A server never answers a notification. A message it cannot read gets a parse error (-32700) with `"id": null`, and an empty batch gets -32600 with `"id": null`. In a batch, each invalid item gets its own -32600, and a response answers the server's request it names and gets no reply. A request whose id is already in progress, from an earlier message or an earlier item of the same batch, gets -32600 and runs no handler; the request that has the id is not affected. An id is free again once its response is sent; a listen stream the server closes keeps its id until the `notifications/cancelled` that follows its result.
 
 ### Discovery and protocol modes
 
@@ -619,7 +619,7 @@ On the client, `cancelRequest(_:reason:)` fails the pending request with `Cancel
 | 2026-07-28 over `HTTPClientTransport` | Aborts the request's POST. No notification is sent. |
 | 2026-07-28 over stdio, in-memory or a custom transport | Sends `notifications/cancelled`. |
 
-On the server, `notifications/cancelled` cancels the handler's task. Over `StatelessHTTPServerTransport`, the transport does the same when the client closes an SSE reply: it injects `notifications/cancelled` for the request's internal id. A `notifications/cancelled` POSTed to that transport is honored when its `Authorization` header matches the request's ([Stateless HTTP server](#stateless-http-server)); the request's HTTP response then ends with 202 Accepted, or with the end of its SSE stream, and carries no JSON-RPC response. A handler stops when it reaches a cancellation point (`Task.sleep`, `Task.checkCancellation()`, a cancellable `await`). If it throws `CancellationError`, the server sends nothing; any other error is sent as a response.
+On the server, `notifications/cancelled` cancels the handler's task. Over `StatelessHTTPServerTransport`, the transport does the same when the client closes an SSE reply: it injects `notifications/cancelled` for the request's internal id. A `notifications/cancelled` POSTed to that transport is honored when its `Authorization` header matches the request's ([Stateless HTTP server](#stateless-http-server)); the request's HTTP response then ends with 202 Accepted, or with the end of its SSE stream, and carries no JSON-RPC response. A handler stops when it reaches a cancellation point (`Task.sleep`, `Task.checkCancellation()`, a cancellable `await`). Once its request is cancelled, the server sends nothing for it, whether the handler throws or returns.
 
 To cancel, keep the request id: `startToolCall(name:arguments:meta:)` and `send(_:)` return a `RequestContext` that has it.
 
@@ -665,7 +665,7 @@ Every JSON-RPC error the SDK sends or receives is an `MCPError`. `code` is the J
 | Case | Code | `data` | Typical cause |
 |---|---|---|---|
 | `parseError(_:)` | -32700 | `{"detail"}` | Body is not JSON or not a JSON-RPC message. |
-| `invalidRequest(_:)` | -32600 | `{"detail"}` | Request before `initialize` (strict); second `initialize`; server-to-client request at 2026-07-28; HTTP validation failures. |
+| `invalidRequest(_:)` | -32600 | `{"detail"}` | Request before `initialize` (strict); second `initialize`; a request whose id is already in progress; server-to-client request at 2026-07-28; HTTP validation failures. |
 | `methodNotFound(_:)` | -32601 | `{"detail"}` | No handler; method removed at 2026-07-28; stateless-only method on a handshake connection; undeclared capability at 2026-07-28. |
 | `invalidParams(_:)` | -32602 | `{"detail"}` | Parameters do not decode; invalid stateless `_meta`; invalid or expired `requestState`; unknown, expired or foreign task id; cancelling a finished 2025-11-25 task. |
 | `internalError(_:)` | -32603 | `{"detail"}` | Handler threw a non-`MCPError`; local transport and HTTP failures; client disconnected. |

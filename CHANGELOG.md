@@ -185,6 +185,12 @@ Behavior that can break working code ([docs/migration.md](docs/migration.md#beha
 - A response the client cannot decode (an error `code` that is a string, no `jsonrpc`) fails the
   request it names with `internalError("The server sent an invalid response")` instead of leaving
   it to wait for its timeout, and the warning logs a sanitized prefix, not the whole message.
+- `Server` answers a request whose `id` is already in flight with -32600 and runs no handler for
+  it, also for a batch item, including a second item of one batch with the same `id`. Before, the
+  duplicate replaced the first request's entry, so `notifications/cancelled` stopped the wrong
+  handler and the first could no longer be cancelled. The `id` is free again once its response is
+  sent. A handler that catches the cancellation and returns sends no response, and adds no reply
+  to its batch (#270).
 - Concurrent `StdioTransport.send(_:)` calls write their messages one at a time, in the order
   they were called. A send that waited for room in a full pipe let another send write into the
   middle of its message (#263).
