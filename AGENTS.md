@@ -87,8 +87,9 @@ implements them. The server-side methods (tools, resources, prompts, completion,
 - **Toolchains**: Swift 6.1 or later. CI builds with Swift 6.1 on Linux (RHEL UBI 9 and Ubuntu
   24.04), Xcode 16.3 (Swift 6.1) on `macos-15`, and the default Xcode on `macos-latest`, which
   also runs the tests on an iOS simulator. On macOS, use the toolchain bundled with Xcode.
-- **Platforms**: macOS 13+, iOS / Mac Catalyst / tvOS 16+, watchOS 9+, visionOS 1+, and Linux
-  (glibc and the static musl SDK). On Linux, install `libcurl4-openssl-dev`.
+- **Platforms**: macOS 15+, iOS / Mac Catalyst / tvOS 18+, watchOS 11+, visionOS 2+, and Linux
+  (glibc and the static musl SDK). On Linux, install `libcurl4-openssl-dev`. The minimums follow
+  [VERSIONING.md](VERSIONING.md#platforms); don't add `@available` checks for releases below them.
 - **Dependencies**: `swift-system`, `swift-log`, `swift-crypto`, `Yams` (skill frontmatter),
   `swift-nio` (the conformance server and the HTTP server example), and `swift-docc-plugin`.
 - **Tests**: [Swift Testing](https://developer.apple.com/documentation/testing) (`import Testing`).

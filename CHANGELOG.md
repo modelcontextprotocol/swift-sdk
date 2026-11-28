@@ -33,6 +33,9 @@ fixes merged to `main` after it (up to `234e412`), with before and after code:
 - `Version.supported` lists 2026-07-28; `Version.handshake` lists the `initialize` revisions
   ([details](docs/migration.md#clients-connect-at-2026-07-28)).
 - Swift 6.1 tools are required.
+- The minimum platforms are macOS 15, Mac Catalyst 18, iOS 18, tvOS 18, watchOS 11 and
+  visionOS 2 (were macOS 13, Mac Catalyst 16, iOS 16, tvOS 16, watchOS 9 and visionOS 1). For
+  older deployment targets, stay on 0.12 ([details](docs/migration.md#platforms)).
 
 Behavior that can break working code ([docs/migration.md](docs/migration.md#behavior-changes)):
 

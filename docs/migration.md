@@ -54,6 +54,7 @@ each change that breaks source code.
 | HTTP transports | New error bodies, status codes and streaming | See below |
 | `HTTPClientTransport` | Default per-host connection limit 64; POST streams resume per stream; SSE on Linux | Raise `httpMaximumConnectionsPerHost` in custom configurations |
 | Package | Requires Swift 6.1 tools; depends on swift-crypto and Yams, no longer on eventsource; swift-docc-plugin `from: "1.4.0"` instead of its `main` branch | Use Xcode 16.3 or later; resolve packages again |
+| Platforms | Minimums raised to macOS 15, Mac Catalyst 18, iOS 18, tvOS 18, watchOS 11, visionOS 2 | Raise your deployment targets, or stay on 0.12 to keep older ones |
 
 ## Breaking changes
 
@@ -458,6 +459,40 @@ the current token, and decide which challenge is a nonce retry.
 `OAuthAccessToken` has a new stored property, `keyThumbprint`, with a
 defaulted initializer parameter; tokens saved by the previous release decode
 with `nil`.
+
+### Platforms
+
+The minimum platforms are the releases of the macOS 15 year
+([VERSIONING.md](../VERSIONING.md#platforms)):
+
+| Platform | 0.12 | 1.0.0 |
+|---|---|---|
+| macOS | 13 | 15 |
+| Mac Catalyst | 16 | 18 |
+| iOS | 16 | 18 |
+| tvOS | 16 | 18 |
+| watchOS | 9 | 11 |
+| visionOS | 1 | 2 |
+
+A package or app that depends on `MCP` raises its own minimums (its
+deployment targets) to at least these; SwiftPM and Xcode refuse to build a
+target whose minimum is lower than that of a product it uses:
+
+```swift
+// Before
+platforms: [.macOS(.v13), .iOS(.v16)],
+// After
+platforms: [.macOS("15.0"), .iOS("18.0")],
+```
+
+The string form works with every manifest tools version; the `.v15` and `.v18`
+constants need `swift-tools-version: 6.0` or later.
+
+An app that still supports macOS 13 or 14, or the matching iOS, Mac Catalyst,
+tvOS, watchOS or visionOS releases, stays on 0.12:
+`.upToNextMinor(from: "0.12.1")`. The Linux requirements are unchanged.
+Nothing else changes with the minimums: the SDK uses no API that is new in
+these releases.
 
 ## Behavior changes
 
