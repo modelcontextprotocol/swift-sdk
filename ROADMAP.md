@@ -118,6 +118,7 @@ The SEPs marked Planned in [SEP coverage](#sep-coverage), and:
   the SDK implements in each extension's settings object, and do not enable an extension whose
   peer declares a `revision` the SDK does not know. Today the SDK neither sends nor checks it
   ([VERSIONING.md](VERSIONING.md#extensions)).
+
 The conformance harness exercises extensions only in the default leg, as scenarios that do not
 count toward a tier; their failing checks would be entries in
 [conformance/baseline.yml](conformance/baseline.yml).
