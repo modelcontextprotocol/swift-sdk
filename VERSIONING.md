@@ -22,7 +22,8 @@ Covered:
 
 - Every `public` declaration of the `MCP` module: names, signatures, protocol requirements,
   enum cases, and documented behavior.
-- Wire behavior for each negotiated revision: what the SDK sends and what it accepts.
+- Wire behavior for each negotiated revision: what the SDK sends and what it accepts. For
+  extensions, see [Extensions](#extensions).
 - Defaults: configuration defaults, default handlers, default validators.
 - Supported platforms, the Swift tools versions of the manifests, and the major versions of
   dependencies.
@@ -43,9 +44,10 @@ Held for a major:
 - Adding a case to a public enum ([Enums and open types](#enums-and-open-types)). The package is
   built without library evolution, so client `switch` statements are exhaustive and stop
   compiling.
-- Changing documented behavior so that working code stops working.
+- Changing documented behavior so that working code stops working. For a Beta extension, behavior
+  that depends on the wire follows it ([Extensions](#extensions)).
 - Changing wire behavior for a revision that already shipped: messages sent, validation applied,
-  error codes returned.
+  error codes returned. A Beta extension is the exception ([Extensions](#extensions)).
 - Changing a default: `Client.Configuration.protocolMode`, `Server.Configuration.protocolVersions`,
   `Server.init(requestStateProtection:)`, cache hints, validation pipelines.
 - Dropping a protocol revision from `Version.handshake`, `Version.stateless` or
@@ -62,6 +64,8 @@ Allowed in a minor:
 - Support for a new protocol revision that leaves the defaults unchanged.
 - Bug fixes that make the SDK match its documentation or the specification. When such a fix
   changes wire behavior that clients may rely on, it is called out in the release notes.
+- A wire change to a Beta extension that follows its specification, with release notes
+  ([Extensions](#extensions)).
 - Deprecations.
 
 Allowed in a patch: bug fixes that change no public API.
@@ -95,9 +99,9 @@ Every public enum is one of three kinds, and its documentation says which:
 
 | Kind | Types |
 |---|---|
-| Frozen | `ID`, `ProgressToken`, `Value`, `LogLevel`, `Prompt.Message.Role`, `Sampling.Message.Role`, `Resource.Annotations.Audience`, `CreateElicitation.Result.Action`, `Sampling.ContextInclusion`, `Elicitation.RequestSchema.SchemaType`, `Icon.Theme`, `CompletionReference`, `Sampling.Message.Content`, `OAuthConfiguration.ApplicationType`, `OAuthConfiguration.PrivateKeyJWTAssertionError`, `OAuthConfiguration.EnterpriseIdentityProvider.Endpoint`, `Client.ProtocolMode`, `HTTPResponse`, `AcceptHeaderValidator.Mode` |
-| `unknown` case | `Tool.Content`, `Prompt.Message.Content`, `Sampling.Message.Content.ContentBlock`, `Sampling.ToolResultContent.ContentBlock`, `InputRequest`, `InputResponse`, `CreateElicitation.Parameters`; `MCPError`, where `serverError(code:message:data:)` plays that role |
-| Open | `OAuthAuthorizationError` and its `Code`, `MCPError.Code`, `OAuthConfiguration.GrantType`, `OAuthConfiguration.TokenEndpointAuthentication`, `OAuthConfiguration.PrivateKeyJWTSigningAlgorithm`, `BearerTokenValidationResult`, `Elicitation.Mode`, `CreateSamplingMessage.ToolChoice.Mode`, `ResultType`, `CacheScope` |
+| Frozen | `ID`, `ProgressToken`, `Value`, `LogLevel`, `Prompt.Message.Role`, `Sampling.Message.Role`, `Resource.Annotations.Audience`, `CreateElicitation.Result.Action`, `Sampling.ContextInclusion`, `Elicitation.RequestSchema.SchemaType`, `Icon.Theme`, `CompletionReference`, `Sampling.Message.Content`, `OAuthConfiguration.ApplicationType`, `OAuthConfiguration.PrivateKeyJWTAssertionError`, `OAuthConfiguration.EnterpriseIdentityProvider.Endpoint`, `Client.ProtocolMode`, `HTTPResponse`, `AcceptHeaderValidator.Mode`, `ServerCard.FetchResult` |
+| `unknown` case | `Tool.Content`, `Prompt.Message.Content`, `Sampling.Message.Content.ContentBlock`, `Sampling.ToolResultContent.ContentBlock`, `InputRequest`, `InputResponse`, `CreateElicitation.Parameters`; `MCPError`, where `serverError(code:message:data:)` plays that role; `Skill.Resources`, where `unrecognized(_:)` plays that role |
+| Open | `OAuthAuthorizationError` and its `Code`, `MCPError.Code`, `OAuthConfiguration.GrantType`, `OAuthConfiguration.TokenEndpointAuthentication`, `OAuthConfiguration.PrivateKeyJWTSigningAlgorithm`, `BearerTokenValidationResult`, `Elicitation.Mode`, `CreateSamplingMessage.ToolChoice.Mode`, `ResultType`, `CacheScope`, `TaskStatus`, `TaskSupport`, `ServerCard.Remote.TransportType`, `ServerCard.Input.Format` |
 
 How a type is classified:
 
@@ -125,6 +129,55 @@ type.
 1.0.0 follows that rule: it serves 2026-07-28, adds it to `Version.supported`, and
 makes `ProtocolMode.automatic` the client default ([docs/migration.md](docs/migration.md)).
 
+## Extensions
+
+Extensions are opt-in: code that does not enable one is not affected by it. The Swift API of an
+extension is covered like the rest of the `MCP` module, with the exceptions below for a Beta
+extension. Its wire behavior depends on the extension's stage in the
+[extension lifecycle](https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/seps/3392-extension-lifecycle.md)
+(SEP-3392). The stage is the one the
+[extensions page](https://modelcontextprotocol.io/extensions/overview) lists: until every
+repository moves to the stage directories, a specification may still sit elsewhere (`ext-tasks`
+publishes `specification/2026-07-28/` and `specification/draft/` for a Beta extension).
+
+| Stage | Wire behavior |
+|---|---|
+| Stable | Covered like the core protocol: fixed for each protocol revision. |
+| Beta | Follows the extension's specification as the SDK implements it. A minor release may change it to follow a newer version of that specification, breaking changes included, and its release notes say what changed. |
+| Experimental | The SDK implements none. Taking one in needs a change to this policy. |
+| Promoted to Core in revision R | At R and later, core protocol behavior. At earlier revisions the extension's final revision applies, which no longer changes, so it is covered like Stable. |
+| Archived | The SDK keeps its API working, deprecated, until the next major release. |
+
+For a Beta extension, the Swift API keeps source compatibility: nothing is removed or renamed, and
+no enum case is added, in a minor release. Values its specification may grow are open types or
+enums with an `unknown` case ([Enums and open types](#enums-and-open-types)), so a new value needs
+no new case. What the API reads from or sends on the wire follows the wire: when a minor release
+follows a breaking change to the specification, the documented behavior that depends on it may
+change, and the release notes say how. An API that the change replaces is deprecated, not
+removed. It keeps working while the SDK can map the new wire form to it; otherwise it returns
+`nil` or an empty value, or throws, as its documentation then says, until the next major release
+removes it.
+
+SEP-3392 asks a Beta extension that makes a breaking change to add or increment a `revision`
+string in its settings object, so that a peer can refuse a revision it does not know. The SDK
+neither sends nor checks `revision`: two peers that enable a Beta extension from different
+revisions of its specification, for example two applications on different 1.x minor releases, are
+not detected, and may misread each other's data. Checking it is
+[planned](ROADMAP.md#planned).
+
+At 1.0.0, the extensions the SDK implements are at these stages:
+
+| Extension | Stage |
+|---|---|
+| MCP Apps (`io.modelcontextprotocol/ui`) | Stable |
+| OAuth Client Credentials and Enterprise-Managed Authorization (`ext-auth`) | Stable |
+| Tasks (`io.modelcontextprotocol/tasks`, SEP-2663) | Beta, to Core |
+| Skills (`io.modelcontextprotocol/skills`) | Beta |
+| Server Cards | Beta |
+
+The tasks of the 2025-11-25 revision (SEP-1686) are core protocol, not the Tasks extension. The
+release notes say when an extension changes stage.
+
 ## Support window for older revisions
 
 - Every revision in `Version.handshake` (2024-11-05 through 2025-11-25) stays supported for the
@@ -140,6 +193,8 @@ makes `ProtocolMode.automatic` the client default ([docs/migration.md](docs/migr
 - A public API on its way out is marked `@available(*, deprecated, message:)` with its
   replacement (for example `Version.latest`, replaced by `Version.latestHandshake`).
 - A deprecated API keeps working for at least one minor release and is removed only in a major.
+  A deprecated API of a Beta extension may stop working before then, when the peer no longer
+  sends what it reads ([Extensions](#extensions)).
 - Every removal and every breaking change between majors is described in
   [docs/migration.md](docs/migration.md), with before and after code, in the same change.
 

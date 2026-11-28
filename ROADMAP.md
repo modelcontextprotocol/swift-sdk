@@ -110,6 +110,14 @@ The SEPs marked Planned in [SEP coverage](#sep-coverage), and:
   `ui/notifications/*`, the view's `tools/call` with visibility enforced, sampling through the
   host, size and display modes, and app-provided tools. It needs a `WKWebView` transport (Apple
   platforms only) and, for web hosts, the sandbox proxy ([design/apps.md](design/apps.md)).
+- The Events extension (SEP-3415, `io.modelcontextprotocol/events`, Beta): `events/list`, and
+  poll, push and webhook delivery, on the server and the client. Tracked in
+  [#376](https://github.com/modelcontextprotocol/swift-sdk/issues/376). The goal is 1.0.0 if it
+  is ready in time, 1.1.0 otherwise.
+- The `revision` setting of Beta extensions (SEP-3392): send the revision of the specification
+  the SDK implements in each extension's settings object, and do not enable an extension whose
+  peer declares a `revision` the SDK does not know. Today the SDK neither sends nor checks it
+  ([VERSIONING.md](VERSIONING.md#extensions)).
 
 The conformance harness exercises extensions only in the default leg, as scenarios that do not
 count toward a tier; their failing checks would be entries in
@@ -119,8 +127,8 @@ Other known gaps are listed under "Open questions" in each design note.
 
 ## SEP coverage
 
-One row for each SEP in the [official SEP index](https://modelcontextprotocol.io/seps) (44 SEPs,
-read on 2026-10-28), for the SEPs that the specification changelogs cite but the index does not
+One row for each SEP in the [official SEP index](https://modelcontextprotocol.io/seps) (46 SEPs,
+read on 2026-11-28), for the SEPs that the specification changelogs cite but the index does not
 list (835, 837, 1932, 1933, 2352), and for the SEPs in the 2026-07-28 specification that neither
 lists (2350, 2351). Status values:
 
@@ -183,7 +191,9 @@ A change that implements a SEP updates its row.
 | 2596 | Feature lifecycle and deprecation policy | Process | Implemented | The policy needs no code; its Tier 1 SDK obligations are met as for SEP-2577. The `includeContext` values `thisServer` and `allServers` are `@available(*, deprecated)`. HTTP+SSE was never implemented. [Deprecated by the specification](docs/rough_edges.md#deprecated-by-the-specification) |
 | 2640 | Skills | Extensions | Implemented | [Skills](#skills) |
 | 2663 | Tasks extension | Extensions | Implemented | [Tasks](#tasks) |
+| 3392 | Extension lifecycle | Process | Partial | Extensions are opt-in, and [VERSIONING.md](VERSIONING.md#extensions) ties the wire promise of each to its stage. The SDK neither sends nor checks the `revision` setting, so it does not detect peers on different revisions of a Beta extension ([Planned](#planned)). |
 | 3398 | Release cycle updates (Accepted) | Process | Not applicable | Process. |
+| 3415 | Events | Extensions | Planned | [#376](https://github.com/modelcontextprotocol/swift-sdk/issues/376): the goal is 1.0.0 if it is ready in time, 1.1.0 otherwise ([Planned](#planned)) |
 
 ## Conformance
 
