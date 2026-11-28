@@ -558,6 +558,42 @@ struct ClientTests {
         await client.disconnect()
     }
 
+    @Test(
+        "Connect fails when the server answers initialize with an unsupported protocol version",
+        arguments: ["1999-01-01", Version.v2026_07_28])
+    func testConnectRejectsUnsupportedProtocolVersion(version: String) async throws {
+        let transport = MockTransport()
+        let client = Client(name: "TestClient", version: "1.0", configuration: .handshake)
+
+        let responder = Task {
+            try await transport.waitForSentMessages()
+            let data = try #require(await transport.sentData.first)
+            let request = try JSONDecoder().decode(Request<Initialize>.self, from: data)
+            try await transport.queue(
+                response: Initialize.response(
+                    id: request.id,
+                    result: .init(
+                        protocolVersion: version,
+                        capabilities: .init(),
+                        serverInfo: .init(name: "TestServer", version: "1.0")
+                    )
+                ))
+        }
+
+        await #expect(
+            throws: MCPError.internalError("Server's protocol version is not supported: \(version)")
+        ) {
+            try await client.connect(transport: transport)
+        }
+        try await responder.value
+
+        // Only the initialize request went out: no notifications/initialized.
+        #expect(await transport.sentData.count == 1)
+        #expect(await transport.isConnected == false)
+        #expect(await client.negotiatedProtocolVersion == nil)
+        #expect(await client.serverCapabilities == nil)
+    }
+
     @Test("Race condition between send error and response")
     func testSendErrorResponseRace() async throws {
         let transport = MockTransport()

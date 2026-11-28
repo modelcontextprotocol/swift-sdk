@@ -511,9 +511,7 @@ public actor Server {
                         if let batch = try? decoder.decode(Server.Batch.self, from: data) {
                             // Recorded before the task, as for a single request,
                             // so that a cancellation arriving first is kept.
-                            for case .request(let request) in batch.items {
-                                startingRequests[request.id] = false
-                            }
+                            let admitted = admittingRequests(of: batch)
                             // Answers to this server's requests (JSON-RPC 2.0
                             // §6) resume their callers now, not after the
                             // batch's requests are handled.
@@ -524,7 +522,7 @@ public actor Server {
                             // for the client's answer to a bridged input request.
                             Task {
                                 do {
-                                    try await self.handleBatch(batch, generation: generation)
+                                    try await self.handleBatch(admitted, generation: generation)
                                 } catch {
                                     await self.logger?.error(
                                         "Error processing batch", metadata: ["error": "\(error)"])
@@ -533,14 +531,25 @@ public actor Server {
                         } else if let response = try? decoder.decode(AnyResponse.self, from: data) {
                             await handleResponse(response)
                         } else if let request = try? decoder.decode(AnyRequest.self, from: data) {
+                            guard admit(request.id) else {
+                                do {
+                                    try await send(
+                                        AnyMethod.response(
+                                            id: request.id, error: .invalidRequest(Self.inProgress(request.id))))
+                                } catch {
+                                    await logger?.error(
+                                        "Failed to send error response",
+                                        metadata: ["id": "\(request.id)", "error": "\(error)"])
+                                }
+                                continue
+                            }
                             // Handle request in a separate task to avoid blocking the receive loop
-                            startingRequests[request.id] = false
                             let isListen = request.method == SubscriptionsListen.name
                             let handling = Task {
                                 _ = try? await self.handleRequest(
                                     request, sendResponse: true, generation: generation)
-                                if isListen { self.listenRequests[request.id] = nil }
                             }
+                            // Before the task runs; handleRequest removes it.
                             if isListen { listenRequests[request.id] = handling }
                         } else if case .invalid(_, let id, let reason) = try? decoder.decode(
                             JSONRPCMessageKind.self, from: data)
@@ -2185,17 +2194,25 @@ public actor Server {
     private func handleRequest(
         _ request: Request<AnyMethod>, sendResponse: Bool = true, generation: Int
     ) async throws -> Response<AnyMethod>? {
-        // Received on a connection that `stop()` ended, whose state is gone.
-        guard generation == connectionGeneration else { return nil }
+        // While the request is tracked, a request that reuses its id is
+        // refused (`admit(_:)`): in `startingRequests` until its handler task
+        // is registered, so that a cancellation arriving first is kept, then
+        // in `pendingRequestTasks`, and, for a listen stream the receive loop
+        // started, in `listenRequests`. Tracking stops before the response is
+        // sent: a client that has the response may reuse the id. After
+        // `stop()` the entries of `startingRequests` and `pendingRequestTasks`
+        // are gone, or belong to the next connection.
+        let isListenStream = sendResponse && request.method == SubscriptionsListen.name
+        // Each return before the handler task is registered calls this once.
+        func untrackStarting() {
+            if isListenStream { listenRequests[request.id] = nil }
+            if generation == connectionGeneration { startingRequests.removeValue(forKey: request.id) }
+        }
 
-        // Until the handler task is registered, a cancellation of this
-        // request is recorded in `startingRequests`. After `stop()` the
-        // entry is gone, or belongs to the next connection.
-        var registered = false
-        defer {
-            if !registered, generation == connectionGeneration {
-                startingRequests.removeValue(forKey: request.id)
-            }
+        // Received on a connection that `stop()` ended, whose state is gone.
+        guard generation == connectionGeneration else {
+            untrackStarting()
+            return nil
         }
 
         await logger?.trace(
@@ -2208,6 +2225,7 @@ public actor Server {
         // Replies with an error without running a handler; not once `stop()`
         // ended the connection.
         func reject(_ error: MCPError) async throws -> Response<AnyMethod>? {
+            untrackStarting()
             guard generation == connectionGeneration else { return nil }
             let response = AnyMethod.response(id: request.id, error: error)
             if sendResponse {
@@ -2224,6 +2242,9 @@ public actor Server {
             try StatelessRequests.checkProgressToken(request._meta)
         } catch let error as MCPError {
             return try await reject(error)
+        } catch {
+            untrackStarting()
+            throw error
         }
 
         switch era {
@@ -2307,7 +2328,10 @@ public actor Server {
         let httpContext = await (connection as? any HTTPContextProviding)?
             .httpRequestContext(for: request.id)
         // `stop()` may have run meanwhile, and a new connection may have started.
-        guard generation == connectionGeneration else { return nil }
+        guard generation == connectionGeneration else {
+            untrackStarting()
+            return nil
+        }
         var dispatchContext: HandlerContext
         switch era {
         case .handshake where isSessionless:
@@ -2461,19 +2485,24 @@ public actor Server {
 
         // Store the handler task for potential cancellation
         pendingRequestTasks[request.id] = handlerTask
-        registered = true
         if startingRequests.removeValue(forKey: request.id) == true {
             // `notifications/cancelled` arrived before the task was registered.
             handlerTask.cancel()
         }
 
-        // Ensure cleanup happens regardless of success or failure. After
-        // `stop()` the entry is gone, or belongs to the next connection.
-        defer {
-            if generation == connectionGeneration {
+        // Stops tracking the request, once, before its response is sent or
+        // when it returns. After `notifications/cancelled` the task's entry
+        // may belong to a request that reused the id.
+        var isTracked = true
+        func release() {
+            guard isTracked else { return }
+            isTracked = false
+            if isListenStream { listenRequests[request.id] = nil }
+            if generation == connectionGeneration, pendingRequestTasks[request.id] == handlerTask {
                 pendingRequestTasks.removeValue(forKey: request.id)
             }
         }
+        defer { release() }
 
         do {
             let response = try await handlerTask.value
@@ -2488,12 +2517,22 @@ public actor Server {
             }
             // `stop()` ended the connection while the handler ran.
             guard generation == connectionGeneration else { return nil }
+            // The handler returned although it was cancelled: the receiver of
+            // `notifications/cancelled` SHOULD NOT send a response for the
+            // cancelled request (2025-11-25 basic/utilities/cancellation).
+            if handlerTask.isCancelled { return nil }
 
             if sendResponse {
+                // The teardown of a stream the server closed names the id: it
+                // stays in flight until then, and a cancellation that arrives
+                // meanwhile still skips the teardown.
+                var tearsDown = false
+                if request.method == SubscriptionsListen.name, case .success = response.result {
+                    tearsDown = true
+                }
+                if !tearsDown { release() }
                 try await send(response)
-                if request.method == SubscriptionsListen.name, case .success = response.result,
-                    !handlerTask.isCancelled
-                {
+                if tearsDown, !handlerTask.isCancelled {
                     await sendListenTeardown(request.id)
                 }
                 return nil
@@ -2510,6 +2549,7 @@ public actor Server {
             let response = AnyMethod.response(id: request.id, error: mcpError)
 
             if sendResponse {
+                release()
                 try await send(response)
                 return nil
             }
@@ -2883,6 +2923,42 @@ public actor Server {
         self.clientCapabilities = clientCapabilities
         self.protocolVersion = protocolVersion
         self.isInitialized = true
+    }
+
+    /// Records a request received on the connection in `startingRequests`,
+    /// before its task starts, so that a cancellation arriving first is kept.
+    /// Returns `false`, recording nothing, for a request whose id is in
+    /// flight, not answered yet: it is answered with -32600, and the entries
+    /// of the request that has the id, which its cancellation and cleanup
+    /// use, are kept.
+    ///
+    /// - SeeAlso: https://modelcontextprotocol.io/specification/2026-07-28/basic#requests
+    private func admit(_ id: ID) -> Bool {
+        // The request ID MUST NOT match the ID of any other request the
+        // sender has issued and not yet received a response for (2026-07-28
+        // basic, Requests). 2025-11-25 forbids any reuse within the session;
+        // only the reuse of an id in flight is refused, under either revision.
+        guard startingRequests[id] == nil, pendingRequestTasks[id] == nil, listenRequests[id] == nil else {
+            return false
+        }
+        startingRequests[id] = false
+        return true
+    }
+
+    /// `batch` with its requests admitted in order (``admit(_:)``): a request
+    /// whose id is in flight, or taken by an earlier request of the batch,
+    /// becomes an invalid item, answered with -32600 in the batch's reply.
+    private func admittingRequests(of batch: Batch) -> Batch {
+        Batch(
+            items: batch.items.map { item in
+                guard case .request(let request) = item, !admit(request.id) else { return item }
+                return .invalid(id: request.id, reason: Self.inProgress(request.id))
+            })
+    }
+
+    /// The reason of the -32600 for a request whose id is in flight.
+    private static func inProgress(_ id: ID) -> String {
+        "A request with id \(id) is already in progress"
     }
 
     /// Cancels the handler of the request `id` and stops tracking it. A

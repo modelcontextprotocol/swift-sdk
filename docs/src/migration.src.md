@@ -42,6 +42,7 @@ each change that breaks source code.
 | Handlers | Undecodable parameters fail with -32602, not -32603 | Update tests that check the code |
 | Client handlers | Run outside the receive loop; at most 4 server-to-client requests at once; a server `ping` is answered | Remove `Task` wrappers that worked around the old loop, if you like |
 | `Client` connection | Pending requests fail with `connectionClosed` when the transport ends its stream; `connect(transport:)` on a connected client disconnects the previous transport | Handle `connectionClosed` where requests waited forever |
+| `Client` handshake | `connect(transport:)` throws `internalError` when the server answers `initialize` with a version that is not in `Version.handshake` | Update the server, or handle the error |
 | `.stateless(version)` | No retry with another version | Use `.automatic` for negotiation |
 | Sampling with tools | The client refuses tools without `sampling.tools`, and tool messages that break the rules, with -32602; `requestSampling` refuses them before it sends | Declare `sampling.tools` when the sampling handler takes tools |
 | `.none(clientID:)` | A plain client ID is pre-registered: no dynamic registration | Pass `""` to register |
@@ -51,6 +52,7 @@ each change that breaks source code.
 | HTTP transports | New error bodies, status codes and streaming | See below |
 | `HTTPClientTransport` | Default per-host connection limit 64; POST streams resume per stream; SSE on Linux | Raise `httpMaximumConnectionsPerHost` in custom configurations |
 | Package | Requires Swift 6.1 tools; depends on swift-crypto and Yams, no longer on eventsource; swift-docc-plugin `from: "1.4.0"` instead of its `main` branch | Use Xcode 16.3 or later; resolve packages again |
+| Platforms | Minimums raised to macOS 15, Mac Catalyst 18, iOS 18, tvOS 18, watchOS 11, visionOS 2 | Raise your deployment targets, or stay on 0.12 to keep older ones |
 
 ## Breaking changes
 
@@ -358,6 +360,40 @@ the current token, and decide which challenge is a nonce retry.
 defaulted initializer parameter; tokens saved by the previous release decode
 with `nil`.
 
+### Platforms
+
+The minimum platforms are the releases of the macOS 15 year
+([VERSIONING.md](../VERSIONING.md#platforms)):
+
+| Platform | 0.12 | 1.0.0 |
+|---|---|---|
+| macOS | 13 | 15 |
+| Mac Catalyst | 16 | 18 |
+| iOS | 16 | 18 |
+| tvOS | 16 | 18 |
+| watchOS | 9 | 11 |
+| visionOS | 1 | 2 |
+
+A package or app that depends on `MCP` raises its own minimums (its
+deployment targets) to at least these; SwiftPM and Xcode refuse to build a
+target whose minimum is lower than that of a product it uses:
+
+```swift
+// Before
+platforms: [.macOS(.v13), .iOS(.v16)],
+// After
+platforms: [.macOS("15.0"), .iOS("18.0")],
+```
+
+The string form works with every manifest tools version; the `.v15` and `.v18`
+constants need `swift-tools-version: 6.0` or later.
+
+An app that still supports macOS 13 or 14, or the matching iOS, Mac Catalyst,
+tvOS, watchOS or visionOS releases, stays on 0.12:
+`.upToNextMinor(from: "0.12.1")`. The Linux requirements are unchanged.
+Nothing else changes with the minimums: the SDK uses no API that is new in
+these releases.
+
 ## Behavior changes
 
 ### Saved configurations
@@ -477,6 +513,11 @@ and `Data.parseDataURL(_:)` refuse it.
   transport first; its pending requests fail with
   `internalError("Client disconnected")`. The previous release replaced the
   transport and left the old message loop running.
+- When the server answers `initialize` with a protocol version that is not in
+  `Version.handshake`, `connect(transport:)` disconnects and throws
+  `internalError("Server's protocol version is not supported: <version>")`. The
+  client does not send `notifications/initialized`. The previous release used
+  the server's version.
 - Cancelling the task that awaits `RequestContext.value` cancels the request.
 - A request is registered before `send(_:)` returns. `cancelRequest(_:reason:)`
   right after `send` always ends the request; a request cancelled before it

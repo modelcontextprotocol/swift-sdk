@@ -80,6 +80,145 @@ struct StdioTransportTests {
         #expect(fcntl(output.rawValue, F_GETFL) & O_NONBLOCK == 0)
     }
 
+    /// A frame larger than a pipe's buffer (64 KiB on Linux and macOS), padded with the
+    /// `index`th letter.
+    private static func largeFrame(_ index: Int) -> Data {
+        let letter = Character(UnicodeScalar(UInt8(ascii: "a") + UInt8(index)))
+        let padding = String(repeating: letter, count: 512 * 1024)
+        return Data(#"{"index":\#(index),"padding":"\#(padding)"}"#.utf8)
+    }
+
+    private struct Frame: Decodable {
+        let index: Int
+        let padding: String
+    }
+
+    /// Reads `reader` until it has `count` bytes or reaches end of file, off the cooperative pool.
+    private static func read(_ reader: FileDescriptor, upTo count: Int = .max) async throws -> Data {
+        try await offThreadPool {
+            var received = Data()
+            var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+            while received.count < count {
+                let read = try buffer.withUnsafeMutableBufferPointer { pointer in
+                    try reader.read(into: UnsafeMutableRawBufferPointer(pointer))
+                }
+                if read == 0 { break }
+                received.append(contentsOf: buffer[..<read])
+            }
+            return received
+        }
+    }
+
+    @Test("Concurrent backpressured sends write whole frames in call order")
+    func testConcurrentSendsDoNotInterleave() async throws {
+        let (input, writer) = try FileDescriptor.pipe()
+        let (reader, output) = try FileDescriptor.pipe()
+        defer {
+            try? input.close()
+            try? writer.close()
+            try? reader.close()
+        }
+        let transport = StdioTransport(input: input, output: output, logger: nil)
+        try await transport.connect()
+
+        // Nothing reads yet, so the first send fills the pipe and suspends mid-frame, and
+        // each later one starts while it is.
+        let frames = (0..<3).map(Self.largeFrame)
+        var sends: [Task<Void, Swift.Error>] = []
+        for frame in frames {
+            sends.append(Task { try await transport.send(frame) })
+            let count = sends.count
+            #expect(await eventually { await transport.activeSends == count })
+        }
+
+        let received = Task { try await Self.read(reader) }
+        let sent = await outcome(within: .seconds(30)) { [sends] in
+            for send in sends { try await send.value }
+        }
+        #expect(!sent.didTimeOut)
+        #expect(sent.error == nil)
+        await transport.disconnect()
+        // The reader returns at end of file.
+        try output.close()
+
+        let lines = try await received.value.split(
+            separator: UInt8(ascii: "\n"), omittingEmptySubsequences: false)
+        #expect(lines.count == frames.count + 1)
+        #expect(lines.last?.isEmpty == true)
+        for (index, frame) in frames.enumerated() where index < lines.count {
+            #expect(lines[index] == frame, "Frame \(index) arrived torn or out of order")
+            let decoded = try? JSONDecoder().decode(Frame.self, from: Data(lines[index]))
+            #expect(decoded?.index == index)
+        }
+    }
+
+    @Test("A send cancelled while it waits for its turn throws, and later sends still go out")
+    func testCancelledWaitingSend() async throws {
+        let (input, writer) = try FileDescriptor.pipe()
+        let (reader, output) = try FileDescriptor.pipe()
+        defer {
+            try? input.close()
+            try? writer.close()
+            try? reader.close()
+            try? output.close()
+        }
+        let transport = StdioTransport(input: input, output: output, logger: nil)
+        try await transport.connect()
+
+        let first = Task { try await transport.send(Self.largeFrame(0)) }
+        #expect(await eventually { await transport.activeSends == 1 })
+        let cancelled = Task { try await transport.send(Self.largeFrame(1)) }
+        #expect(await eventually { await transport.activeSends == 2 })
+        // The first send still holds the output, so this one is released by cancellation.
+        cancelled.cancel()
+        let result = await outcome(within: .seconds(30)) { try await cancelled.value }
+        #expect(result.error is CancellationError)
+
+        let last = Data(#"{"index":2}"#.utf8)
+        let third = Task { try await transport.send(last) }
+        let expected = Self.largeFrame(0) + Data("\n".utf8) + last + Data("\n".utf8)
+        let received = try await Self.read(reader, upTo: expected.count)
+        try await first.value
+        try await third.value
+        #expect(received == expected)
+        await transport.disconnect()
+    }
+
+    @Test("Disconnect releases sends waiting for their turn")
+    func testDisconnectReleasesWaitingSends() async throws {
+        let (input, writer) = try FileDescriptor.pipe()
+        let (reader, output) = try FileDescriptor.pipe()
+        defer {
+            try? input.close()
+            try? writer.close()
+            try? reader.close()
+            try? output.close()
+        }
+        let transport = StdioTransport(input: input, output: output, logger: nil)
+        try await transport.connect()
+
+        var sends: [Task<Void, Swift.Error>] = []
+        for index in 0..<3 {
+            sends.append(Task { try await transport.send(Self.largeFrame(index)) })
+            let count = sends.count
+            #expect(await eventually { await transport.activeSends == count })
+        }
+
+        let disconnected = await outcome(within: .seconds(30)) { await transport.disconnect() }
+        #expect(!disconnected.didTimeOut)
+        // Nothing reads, so no frame finishes: the first send stops mid-frame and the
+        // others never start writing.
+        for (index, send) in sends.enumerated() {
+            let result = await outcome(within: .seconds(30)) { try await send.value }
+            guard case .transportError(let underlying) = result.mcpError else {
+                Issue.record("Expected send \(index) to fail with a transport error, got \(result)")
+                continue
+            }
+            #expect(underlying as? Errno == Errno(rawValue: ENOTCONN), "Send \(index)")
+        }
+        #expect(await transport.activeSends == 0)
+    }
+
     @Test("Disconnect preserves an already nonblocking descriptor")
     func testDisconnectPreservesNonblockingMode() async throws {
         let (input, writer) = try FileDescriptor.pipe()

@@ -13,7 +13,7 @@ let mcp: Target.Dependency = .product(name: "MCP", package: "mcp-swift-sdk")
 
 let package = Package(
     name: "mcp-fuzz",
-    platforms: [.macOS("13.0")],
+    platforms: [.macOS("15.0")],
     // The name keeps the identity independent of the checkout directory.
     dependencies: [.package(name: "mcp-swift-sdk", path: "..")],
     targets: [

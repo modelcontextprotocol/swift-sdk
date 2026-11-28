@@ -33,6 +33,9 @@ fixes merged to `main` after it (up to `234e412`), with before and after code:
 - `Version.supported` lists 2026-07-28; `Version.handshake` lists the `initialize` revisions
   ([details](docs/migration.md#clients-connect-at-2026-07-28)).
 - Swift 6.1 tools are required.
+- The minimum platforms are macOS 15, Mac Catalyst 18, iOS 18, tvOS 18, watchOS 11 and
+  visionOS 2 (were macOS 13, Mac Catalyst 16, iOS 16, tvOS 16, watchOS 9 and visionOS 1). For
+  older deployment targets, stay on 0.12 ([details](docs/migration.md#platforms)).
 
 Behavior that can break working code ([docs/migration.md](docs/migration.md#behavior-changes)):
 
@@ -59,6 +62,9 @@ Behavior that can break working code ([docs/migration.md](docs/migration.md#beha
   (`authorizationServerIssuerMismatch`) instead of being used.
 - `HTTPClientTransport.connect()` after `disconnect()` throws `internalError`: create a new
   transport to reconnect.
+- `Client.connect(transport:)` disconnects and throws `internalError` when the server answers
+  `initialize` with a version that is not in `Version.handshake`. The client used that version
+  before.
 
 ### Features
 
@@ -156,6 +162,10 @@ Behavior that can break working code ([docs/migration.md](docs/migration.md#beha
   Bearer challenge, as for no credentials, instead of 400 without one; a malformed Bearer header
   and `.malformedRequest` get 400 with `WWW-Authenticate: Bearer error="invalid_request"` and
   `resource_metadata` (RFC 6750 §3.1).
+- `OriginValidator.localhost()` and `localhost(port: 80)` accept a loopback `Host` or `http://`
+  `Origin` without a port, which means the scheme's default port, 80 for `http` (RFC 9110
+  §4.2.1); before, both refused it with 421 or 403. `localhost(port:)` with another port still
+  refuses a value without a port, and every port refuses `https://localhost`.
 - A `subscriptions/listen` stream the server ends (`closeSubscriptions()`, `stop()`) is followed,
   after its result, by `notifications/cancelled` for the listen request on stdio and other
   message-stream transports, as cancellation.mdx requires; `stop()` sends both before it
@@ -178,6 +188,15 @@ Behavior that can break working code ([docs/migration.md](docs/migration.md#beha
 - `Data.isDataURL(string:)` and `Data.parseDataURL(_:)` accept only an empty or `type/subtype`
   media type made of RFC 2045 tokens (RFC 2397 §3), so text such as `data: 3 rows, 2 columns`
   decodes as `Value.string`, not `.data`.
+- `Server` answers a request whose `id` is already in flight with -32600 and runs no handler for
+  it, also for a batch item, including a second item of one batch with the same `id`. Before, the
+  duplicate replaced the first request's entry, so `notifications/cancelled` stopped the wrong
+  handler and the first could no longer be cancelled. The `id` is free again once its response is
+  sent. A handler that catches the cancellation and returns sends no response, and adds no reply
+  to its batch (#270).
+- Concurrent `StdioTransport.send(_:)` calls write their messages one at a time, in the order
+  they were called. A send that waited for room in a full pipe let another send write into the
+  middle of its message (#263).
 - From `main` after 0.12.1: `Data.parseDataURL(_:)` reads `;base64` from the header only and
   decodes any percent-escaped byte (#309, #310); `client_secret_basic` percent-encodes the client
   credentials (RFC 6749 §2.3.1, #300); PKCE verifier characters are uniformly distributed (#303);

@@ -64,4 +64,29 @@ struct OriginValidatorTests {
             validator.validate(request(host: "localhost:8080", origin: "http://localhost:9090"), context: context)?
                 .statusCode == 403)
     }
+
+    @Test("Port 80 localhost validator also accepts no port")
+    func testPort80ValidatorAcceptsNoPort() {
+        let validator = OriginValidator.localhost(port: 80)
+        for host in ["localhost", "127.0.0.1", "[::1]", "localhost:80"] {
+            #expect(validator.validate(request(host: host), context: context) == nil, "\(host)")
+        }
+        for origin in ["http://localhost", "http://127.0.0.1", "http://[::1]", "http://localhost:80"] {
+            #expect(
+                validator.validate(request(host: "localhost:80", origin: origin), context: context) == nil,
+                "\(origin)"
+            )
+        }
+        // other ports, other hosts and https (whose default is 443) are still refused
+        for host in ["localhost:8080", "localhost.evil.example", "evil.example"] {
+            #expect(validator.validate(request(host: host), context: context)?.statusCode == 421, "\(host)")
+        }
+        for origin in ["http://localhost:8080", "https://localhost", "http://evil.example", "null"] {
+            #expect(
+                validator.validate(request(host: "localhost:80", origin: origin), context: context)?
+                    .statusCode == 403,
+                "\(origin)"
+            )
+        }
+    }
 }
