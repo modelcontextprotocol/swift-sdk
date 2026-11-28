@@ -50,7 +50,7 @@ each change that breaks source code.
 | `.none(clientID:)` | A plain client ID is pre-registered: no dynamic registration | Pass `""` to register |
 | `StatelessHTTPServerTransport` with an `initializeHook` | Handshake requests other than `initialize` are refused with -32600 unless a `statelessRequestHook` is set | Set a `statelessRequestHook` |
 | Terminated stateful HTTP session | After a session ends and validation passes, requests without a session ID receive 400 instead of 404; requests with any session ID receive 404 | Route a new sessionless `initialize` to a new transport and `Server` |
-| `data:` URL strings | Arrive as sent instead of rewritten as base64 `data:` URLs | Nothing |
+| `data:` URL strings | Arrive as sent instead of rewritten as base64 `data:` URLs; prose such as `data: 3 rows, 2 columns` is no longer a `data:` URL | Nothing |
 | HTTP transports | New error bodies, status codes and streaming | See below |
 | `HTTPClientTransport` | Default per-host connection limit 64; POST streams resume per stream; SSE on Linux | Raise `httpMaximumConnectionsPerHost` in custom configurations |
 | Package | Requires Swift 6.1 tools; depends on swift-crypto and Yams, no longer on eventsource; swift-docc-plugin `from: "1.4.0"` instead of its `main` branch | Use Xcode 16.3 or later; resolve packages again |
@@ -569,12 +569,19 @@ or a shorter `discoveryTimeout`.
 
 The SDK no longer rewrites a `data:` URL string when it passes a message
 through `Value`: the client and server message decoders, batches,
-type-erased requests and responses, handler results, `_meta` accessors and
-error data keep the string as written. A text block, a URI or an icon `src`
-such as `data:,hi` arrives as sent; the previous release delivered
-`data:text/plain;base64,aGk=`. A `Value` field the application decodes, such
-as a tool argument or `structuredContent`, still holds `.data(mimeType:_:)`
-for such a string, which encodes as a base64 `data:` URL.
+type-erased requests and responses, handler results and `_meta` accessors
+keep the string as written. Error data that a server sends also keeps it,
+but a decoded `MCPError` holds `.data(mimeType:_:)` in its `data`. A text
+block, a URI or an icon `src` such as `data:,hi` arrives as sent; the
+previous release delivered `data:text/plain;base64,aGk=`. A `Value` field the
+application decodes, such as a tool argument or `structuredContent`, still
+holds `.data(mimeType:_:)` for such a string, which encodes as a base64
+`data:` URL.
+
+A string is a `data:` URL only when its media type is empty or
+`type/subtype` with RFC 2045 tokens, as RFC 2397 requires. Text such as
+`data: 3 rows, 2 columns` now stays `.string`, and `Data.isDataURL(string:)`
+and `Data.parseDataURL(_:)` refuse it.
 
 ### Handlers
 

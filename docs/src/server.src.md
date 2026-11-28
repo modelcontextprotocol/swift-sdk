@@ -78,6 +78,16 @@ A tool is a function the client's model can call. A server lists its tools in a 
 
 There is one handler per method. A server with several tools switches on `params.name`. `params.arguments` is a `[String: Value]?`; read it with `stringValue`, `intValue`, `doubleValue`, `numberValue` (an integer or a double, as `Double`), `boolValue`, `arrayValue` and `objectValue`.
 
+A string argument that is a whole `data:` URL, such as `data:image/png;base64,iVBORw0K...`, arrives as `.data(mimeType:_:)`, not as `.string`. Its `stringValue` is `nil`. Read the MIME type and the bytes with `dataValue`. Both are what the client sent, and the SDK does not check that the bytes match the MIME type. Check the content and the size before you store, serve or decode them.
+
+The rules for a `data:` URL (RFC 2397):
+
+- It starts with `data:` in lowercase.
+- Before the first `,`, it has an optional media type `type/subtype`, then an optional `;charset=`, then an optional `;base64`. The type, the subtype and the charset have no spaces, so prose such as `data: 3 rows, 2 columns` stays `.string`.
+- The payload after that `,` decodes: valid base64, or text where every `%` starts a `%XX` escape.
+
+Other strings stay `.string`. The MIME type is `text/plain` for an empty media type. `;charset=` stays in the MIME type only for a `text/` or empty media type. To get a `data:` URL again, call `Data.dataURLEncoded(mimeType:)`. It returns the base64 form, not always the spelling the client sent: `data:,hi` becomes `data:text/plain;base64,aGk=`.
+
 %include Examples/Snippets/Server/Tools.swift tools-call
 
 ### Tool result content
@@ -98,7 +108,7 @@ The factories with a `metadata:` label, such as `.text(_:metadata:)`, are deprec
 
 ### Structured content
 
-A tool with an `outputSchema` returns its data in `structuredContent`. `CallTool.Result(content:structuredContent:isError:_meta:)` takes any `Codable` value and throws if it cannot be encoded. Send the same data as text too, for clients that read only `content`.
+A tool with an `outputSchema` returns its data in `structuredContent`. `CallTool.Result(content:structuredContent:isError:_meta:)` takes any `Codable` value and throws if it cannot be encoded. It converts the value with `Value(_:)`, so a string field that is a whole `data:` URL is sent in base64 form: `data:,hi` becomes `data:text/plain;base64,aGk=`. A `Value` that you pass is kept as is. Send the same data as text too, for clients that read only `content`.
 
 %include Examples/Snippets/Server/Tools.swift tools-structured
 
@@ -243,6 +253,8 @@ The pieces:
 | `InputResponse` | Read with `.elicitation`, `.sampling` or `.roots` |
 | `requestState` | A string the handler writes and reads as plaintext. The SDK seals it on the way out. |
 | `resultType` | `.inputRequired` on such results, `.complete` otherwise |
+
+A `data:` URL string in an answer arrives as `.data`, as in [tool arguments](#calling-tools): in the `content` of an elicitation, for example text that a user typed into a form, and in the `input` of a sampling tool use. The same applies to the results of `requestElicitation` and `requestSampling`.
 
 A result may carry `requestState` without input requests. The client then retries with the state and no responses, which lets a long operation continue in steps.
 

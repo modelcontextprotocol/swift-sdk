@@ -185,6 +185,9 @@ Behavior that can break working code ([docs/migration.md](docs/migration.md#beha
 - A response the client cannot decode (an error `code` that is a string, no `jsonrpc`) fails the
   request it names with `internalError("The server sent an invalid response")` instead of leaving
   it to wait for its timeout, and the warning logs a sanitized prefix, not the whole message.
+- `Data.isDataURL(string:)` and `Data.parseDataURL(_:)` accept only an empty or `type/subtype`
+  media type made of RFC 2045 tokens (RFC 2397 §3), so text such as `data: 3 rows, 2 columns`
+  decodes as `Value.string`, not `.data`.
 - `Server` answers a request whose `id` is already in flight with -32600 and runs no handler for
   it, also for a batch item, including a second item of one batch with the same `id`. Before, the
   duplicate replaced the first request's entry, so `notifications/cancelled` stopped the wrong
